@@ -1,0 +1,41 @@
+"Games"
+{
+	"left4dead2" 
+	{
+		"MemPatches"
+		{
+			"ProcessConnectionlessPacket_BypassSteam"
+			{
+				"signature"		"CBaseServer::ProcessConnectionlessPacket"
+
+				"linux"
+				{
+					"offset"	"67Dh"
+
+					"verify"	"\x0F\x84\x3E\x05\x00\x00"
+					"patch"		"\x90\x90\x90\x90\x90\x90"
+				}
+
+				"windows"
+				{
+					"offset"	"EF2h"
+
+					"verify"	"\x74\x25"
+					"patch"		"\x90\x90"
+				}
+			}
+		}
+
+		"Signatures"
+		{
+			/* CBaseServer::ProcessConnectionlessPacket(CBaseServer *, netadr_s *) */
+			"CBaseServer::ProcessConnectionlessPacket"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN11CBaseServer27ProcessConnectionlessPacketEP11netpacket_s"
+				"windows"	"\x55\x8B\xEC\x81\xEC\x58\x0A\x00\x00\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x8B\x45\x08"
+				/* 55 8B EC 81 EC 58 0A 00 00 A1 ? ? ? ? 33 C5 89 45 FC 8B 45 08 */
+			}
+		}
+	}
+}

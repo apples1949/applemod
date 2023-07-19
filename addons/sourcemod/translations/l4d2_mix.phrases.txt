@@ -1,0 +1,220 @@
+"Phrases"
+{
+	"cant_join_no_pick"
+	{
+		"en"		"{orange}<Mix>{default} You can not join a team without being picked."
+		"chi"		"{orange}<Mix>{default} 你未被选择，无法加入队伍。"
+		"zho"		"{orange}<Mix>{default} 你未被選擇，無法加入隊伍。"
+	}
+
+	"admin_stop"
+	{
+		"en"		"{orange}<Mix>{default} Stopped by admin {olive}%N{default}."
+		"chi"		"{orange}<Mix> {default}管理员 {olive}%N 中止了Mix{default}。"
+		"zho"		"{orange}<Mix> {default}管理員 {olive}%N 中止了Mix{default}。"
+	}
+
+	"no_start_stop"
+	{
+		"en"		"{orange}<Mix>{default} Not currently started."
+		"chi"		"{orange}<Mix> {default} 当前未启用。"
+		"zho"		"{orange}<Mix> {default} 當前未啟用。"
+	}
+
+	"Spec_Start"
+	{
+		"en"		"{orange}<Mix>{default} Spectator can't start a mix."
+		"chi"		"{orange}<Mix> {default} 旁观者无法启用。"
+		"zho"		"{orange}<Mix> {default} 旁觀者無法啟用。"
+	}
+
+	"start_start"
+	{
+		"en"		"{orange}<Mix>{default} Already started."
+		"chi"		"{orange}<Mix> {default} 当前已启用。"
+		"zho"		"{orange}<Mix> {default} 當前已啟用。"
+	}
+
+	"not_allow_round_live"
+	{
+		"en"		"{orange}<Mix>{default} Not allowed on live round."
+		"chi"		"{orange}<Mix> {default} 回合开始后禁用。"
+		"zho"		"{orange}<Mix> {default} 回合開始後禁用。"
+	}
+
+	"admin_start"
+	{
+		"en"		"{orange}<Mix>{default} Started by admin {olive}%N{default}."
+		"chi"		"{orange}<Mix> {default}管理员 {olive}%N 强制启用了Mix{default}。"
+		"zho"		"{orange}<Mix> {default}管理員 {olive}%N 強制啟用了Mix{default}。"
+	}
+
+	"pvote_to_start"
+	{
+		"en"		"{orange}<Mix> {olive}%N{default} has voted to start a Mix (admin type !stopmix to abort)."
+		"chi"		"{orange}<Mix> {olive}%N{default} 投票启用Mix（管理员输入!stopmix以中止）。"
+		"zho"		"{orange}<Mix> {olive}%N{default} 投票啟用Mix（管理員輸入!stopmix以中止）。"
+	}
+
+	"pvote_to_start_rd"
+	{
+		"en"		"{orange}<Mix> {olive}%N{default} has voted to start a random Mix (admin type !stopmix to abort)."
+		"chi"		"{orange}<Mix> {olive}%N{default} 投票启用Mix队伍随机分配（管理员输入!stopmix以中止）。"
+		"zho"		"{orange}<Mix> {olive}%N{default} 投票啟用Mix隊伍隨機分配（管理員!stopmix以中止）。"
+	}
+
+	"already_vote"
+	{
+		"en"		"{orange}<Mix> {default} There is a vote in progress, you can't start a Mix."
+		"chi"		"{orange}<Mix> {default} 有投票正在进行，暂时无法启用Mix"
+		"zho"		"{orange}<Mix> {default} 有投票正在進行，暫時無法啟用Mix"
+	}
+
+	"Vote_Pass_Tittle"
+	{
+		"en"		"Starting a Mix..."
+		"chi"		"正在启用Mix……"
+		"zho"		"正在啟用Mix……"
+	}
+
+	"Time_Mix_Random"
+	{
+		"en"		"{orange}<Mix> {default} Mixing teams randomly..."
+		"chi"		"{orange}<Mix> {default} 正在随机分配队伍……"
+		"zho"		"{orange}<Mix> {default} 正在隨機分配隊伍……"
+	}
+
+	"Down_Mix_Random"
+	{
+		"en"		"{orange}<Mix> {default} Teams mixing finish..."
+		"chi"		"{orange}<Mix> {default} 队伍随机分配完毕。"
+		"zho"		"{orange}<Mix> {default} 隊伍隨機分配完畢。"
+	}
+
+
+	"start_condition_1v1"
+	{
+		"en"		"{orange}<Mix> {default} This is 1v1 mode! You dump ass! "
+		"chi"		"{orange}<Mix> {default} 你脑子瓦特了？这特么是1v1！"
+		"zho"		"{orange}<Mix> {default} 你癡線了嗎？這特麼是1v1！"
+	}
+
+	"start_condition"
+	{
+		"en"		"{orange}<Mix> {default} Only %d players join teams to start a mix."
+		"chi"		"{orange}<Mix> {default} 只有%d名玩家加入队伍后才能启用Mix。"
+		"zho"		"{orange}<Mix> {default} 只有%d名玩家加入隊伍後才能啟用Mix。"
+	}
+
+	"tittle_1st_cap"
+	{
+		"en"		"Mix - Pick first captain"
+		"chi"		"Mix - 投票选择第一名队长"
+		"zho"		"Mix - 投票選擇第一名隊長"
+	}
+
+	"tittle_2nd_cap"
+	{
+		"en"		"Mix - Pick second captain"
+		"chi"		"Mix - 投票选择第二名队长"
+		"zho"		"Mix - 投票選擇第二名隊長"
+	}
+
+	"tittle_pteammate"
+	{
+		"en"		"Mix - Pick team member(s)(A-BB-AA-B)"
+		"chi"		"Mix - 选择你的队员（A-BB-AA-B）"
+		"zho"		"Mix - 選擇你的隊員（A-BB-AA-B）"
+	}
+
+	"wrong_team_stop"
+	{
+		"en"		"{orange}<Mix> {default}Captain {olive}%N {default}found in the wrong team, aborting..."
+		"chi"		"{orange}<Mix> {default}队长 {olive}%N {default}加入了错误的队伍，插件中止..."
+		"zho"		"{orange}<Mix> {default}隊長 {olive}%N {default}加入了錯誤的隊伍，插件中止..."
+	}
+
+	"teams_picked"
+	{
+		"en"		"{orange}<Mix> {default} Teams are picked."
+		"chi"		"{orange}<Mix> {default} 队伍选择完毕。"
+		"zho"		"{orange}<Mix> {default} 隊伍選擇完畢。"
+	}
+
+	"not_found_stop"
+	{
+		"en"		"{orange}<Mix> {default} The team member who was picked was not found, aborting..."
+		"chi"		"{orange}<Mix> {default} 未找到被选择的队员，插件中止……"
+		"zho"		"{orange}<Mix> {default} 未找到被選擇的隊員，插件中止……"
+	}
+
+	"1stcap_novote_stop"
+	{
+		"en"		"{orange}<Mix> {default} Failed to find first captain with at least 1 vote from spectators, aborting..."
+		"chi"		"{orange}<Mix> {default} 无人投票导致第一名队长投票失败，插件中止……"
+		"zho"		"{orange}<Mix> {default} 無人投票導致第一名隊長投票失敗，插件中止……"
+	}
+
+	"2ndcap_novote_stop"
+	{
+		"en"		"{orange}<Mix> {default} Failed to find second captain with at least 1 vote from spectators, aborting..."
+		"chi"		"{orange}<Mix> {default} 无人投票导致第二名队长投票失败，插件中止……"
+		"zho"		"{orange}<Mix> {default} 無人投票導致第二名隊長投票失敗，插件中止……"
+	}
+
+	"no_pick_stop"
+	{
+		"en"		"{orange}<Mix> {default} No more spectators to choose from, aborting..."
+		"chi"		"{orange}<Mix> {default} 玩家中途退出导致无人可选择，插件中止……"
+		"zho"		"{orange}<Mix> {default} 玩家中途退出導致無人可選擇，插件中止……"
+	}
+
+	"no_cap_stop"
+	{
+		"en"		"{orange}<Mix> {default} Failed to find the captain, aborting..."
+		"chi"		"{orange}<Mix> {default} 队长中途退出导致失败，插件中止……"
+		"zho"		"{orange}<Mix> {default} 隊長途中退出導致失敗，插件中止……"
+	}
+
+	"1stcap_confirm"
+	{
+		"en"		"{orange}<Mix>{default} First captain is {olive}%N{default}. ({orange}%d {default}votes)"
+		"chi"		"{orange}<Mix> {default} 第一名队长是 {olive}%N{default}，({orange}%d {default}票)"
+		"zho"		"{orange}<Mix> {default} 第一名隊長是 {olive}%N{default}，({orange}%d {default}票)"
+	}
+
+	"2ndcap_confirm"
+	{
+		"en"		"{orange}<Mix>{default} First captain is {olive}%N{default}. ({orange}%d {default}votes)"
+		"chi"		"{orange}<Mix> {default} 第二名队长是 {olive}%N{default}，({orange}%d {default}票)"
+		"zho"		"{orange}<Mix> {default} 第二名隊長是 {olive}%N{default}，({orange}%d {default}票)"
+	}
+
+	"1stcap_pteammate"
+	{
+		"en"		"{orange}<Mix> {olive}%N {default}was picked (survivors)."
+		"chi"		"{orange}<Mix> {olive}%N {default}被选择 (生还方)。"
+		"zho"		"{orange}<Mix> {olive}%N {default}被選擇 (生還方)。"
+	}
+
+	"2ndcap_pteammate"
+	{
+		"en"		"{orange}<Mix> {olive}%N {default}was picked (infected)."
+		"chi"		"{orange}<Mix> {olive}%N {default}被选择 (特感方)。"
+		"zho"		"{orange}<Mix> {olive}%N {default}被選擇 (特感方)。"
+	}
+
+	"pleft_stop"
+	{
+		"en"		"{orange}<Mix> {default}Player {olive}%N {default}has left the game, aborting..."
+		"chi"		"{orange}<Mix> {default}玩家 {olive}%N {default}离开了游戏，插件中止……"
+		"zho"		"{orange}<Mix> {default}玩家 {olive}%N {default}離開了遊戲，插件中止……"
+	}
+
+	"Vote_Tittle"
+	{
+		"en"		"Start a Mix?"
+		"chi"		"启用Mix选人？"
+		"zho"		"啟用Mix選人？"
+	}
+}

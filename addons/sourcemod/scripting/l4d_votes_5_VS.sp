@@ -476,7 +476,7 @@ public Action Command_VoteHp(int client, int args)
 			CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起了一个投票: {blue}全体回血{default}, 只有游戏中的玩家才能参与投票",client);
 			for(int i = 1; i <= MaxClients; i++)
 			{
-				if (iTeam == 1){}
+				if (iTeam == 1){continue;}
 				else {ClientVoteMenu[i] = true;}
 			}
 			
@@ -490,9 +490,16 @@ public Action Command_VoteHp(int client, int args)
 			AddMenuItem(g_hVoteMenu, VOTE_NO, "不同意");
 		
 			SetMenuExitButton(g_hVoteMenu, false);
-			VoteMenuToAll(g_hVoteMenu, 20);
+			DisplayVoteMenuToNotSpec(g_hVoteMenu, 20);
 			
-			EmitSoundToAll("ui/beep_synthtone01.wav");
+			for (int i=1; i<=MaxClients; i++)
+			{
+				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
+				{
+					if(iTeam == 1){continue;}
+						else{EmitSoundToClient(i,"ui/beep_synthtone01.wav");}
+				}
+			}
 		}
 		else
 		{
@@ -568,7 +575,7 @@ public Action Command_VoteAlltalk2(int client, int args)
 			g_voteType = view_as<voteType>(alltalk2);
 			char SteamId[35];
 			GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-			LogMessage("%N(%s) 发起了一个投票: 关闭全体语音!!",  client, SteamId);//紀錄在log文件
+			LogMessage("%N(%s) 发起了一个投票: 关闭全体语音!",  client, SteamId);//紀錄在log文件
 			g_hVoteMenu = CreateMenu(Handler_VoteCallback, MENU_ACTIONS_ALL);
 			SetMenuTitle(g_hVoteMenu, "是否关闭全体语音吗?");
 			AddMenuItem(g_hVoteMenu, VOTE_YES, "是");
@@ -607,23 +614,30 @@ public Action Command_VoteRestartmap(int client, int args)
 			CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起了一个投票: {blue}重置当前地图 {default}, 只有游戏中的玩家才能参与投票",client);
 			for(int i = 1; i <= MaxClients; i++)
 			{
-				if (iTeam == 1){}
+				if (iTeam == 1){continue;}
 				else {ClientVoteMenu[i] = true;}
 			}
 			
 			g_voteType = view_as<voteType>(restartmap);
 			char SteamId[35];
 			GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-			LogMessage("%N(%s) 发起了一个投票: 重置当前地图!!",  client, SteamId);//紀錄在log文件
+			LogMessage("%N(%s) 发起了一个投票: 重置当前地图!",  client, SteamId);//紀錄在log文件
 			g_hVoteMenu = CreateMenu(Handler_VoteCallback, MENU_ACTIONS_ALL);
 			SetMenuTitle(g_hVoteMenu, "是否重置当前地图吗?");
 			AddMenuItem(g_hVoteMenu, VOTE_YES, "是");
 			AddMenuItem(g_hVoteMenu, VOTE_NO, "否");
 		
 			SetMenuExitButton(g_hVoteMenu, false);
-			VoteMenuToAll(g_hVoteMenu, 20);
+			DisplayVoteMenuToNotSpec(g_hVoteMenu, 20);
 			
-			EmitSoundToAll("ui/beep_synthtone01.wav");
+			for (int i=1; i<=MaxClients; i++)
+			{
+				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
+				{
+					if(iTeam == 1){continue;}
+						else{EmitSoundToClient(i,"ui/beep_synthtone01.wav");}
+				}
+			}
 		}
 		else
 		{
@@ -740,7 +754,7 @@ public void DisplayVoteKickMenu(int client)
 		GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
 		LogMessage("%N(%s) 发起投票: 踢出 %s(%s)",  client, SteamId, kickplayer_name, kickplayer_SteamId);//紀錄在log文件
 		int iTeam = GetClientTeam(client);
-		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: 踢出 {blue}%s{default} , 只有投票发起者的阵营才能参与投票", client, kickplayer_name);
+		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}踢出 %s {default}, 只有投票发起者的阵营才能参与投票", client, kickplayer_name);
 		
 		for(int i=1; i <= MaxClients; i++) 
 			if (IsClientConnected(i) && IsClientInGame(i) && GetClientTeam(i) == iTeam)
@@ -753,9 +767,11 @@ public void DisplayVoteKickMenu(int client)
 		AddMenuItem(g_hVoteMenu, VOTE_YES, "是");
 		AddMenuItem(g_hVoteMenu, VOTE_NO, "否");
 		SetMenuExitButton(g_hVoteMenu, false);
-		VoteMenuToAll(g_hVoteMenu, 20);
+		DisplayVoteMenuToTeam(g_hVoteMenu, 20 , iTeam);
 		
-		EmitSoundToAll("ui/beep_synthtone01.wav");
+		for (int i=1; i<=MaxClients; i++)
+			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) == iTeam)
+				EmitSoundToClient(i,"ui/beep_synthtone01.wav");
 	}
 	else
 	{
@@ -882,7 +898,7 @@ public void DisplayVoteMapsMenu(int client)
 		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}更换地图%s{default}, 只有游戏中的玩家才能参与投票", client, votesmapsname);
 		for(int i = 1; i <= MaxClients; i++)
 		{
-			if (iTeam == 1){}
+			if (iTeam == 1){continue;}
 			else {ClientVoteMenu[i] = true;}
 		}
 		
@@ -893,9 +909,16 @@ public void DisplayVoteMapsMenu(int client)
 		AddMenuItem(g_hVoteMenu, VOTE_YES, "是");
 		AddMenuItem(g_hVoteMenu, VOTE_NO, "否");
 		SetMenuExitButton(g_hVoteMenu, false);
-		VoteMenuToAll(g_hVoteMenu, 20);
+		DisplayVoteMenuToNotSpec(g_hVoteMenu, 20);
 		
-		EmitSoundToAll("ui/beep_synthtone01.wav");
+		for (int i=1; i<=MaxClients; i++)
+		{
+			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
+			{
+				if(iTeam == 1){continue;}
+					else{EmitSoundToClient(i,"ui/beep_synthtone01.wav");}
+			}
+		}
 	}
 	else
 	{
@@ -978,7 +1001,7 @@ public void DisplayVoteforcespectateMenu(int client)
 	{
 		char SteamId[35];
 		GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-		LogMessage("%N(%s) starts a vote: forcespectate player %s", client, SteamId, forcespectateplayername);//紀錄在log文件
+		LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观", client, SteamId, forcespectateplayername);//紀錄在log文件
 		
 		int iTeam = GetClientTeam(client);
 		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}强制玩家%s旁观{default}, 只有投票发起者的阵营才能参与投票", client, forcespectateplayername);
@@ -1023,6 +1046,25 @@ stock bool DisplayVoteMenuToTeam(Handle hMenu,int iTime, int iTeam)
     
     return VoteMenu(hMenu, iPlayers, iTotal, iTime, 0);
 }    
+
+stock bool DisplayVoteMenuToNotSpec(Handle hMenu,int iTime)
+{
+    int iTotal = 0;
+    int[] iPlayers = new int[MaxClients];
+    
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientConnected(i) || !IsClientInGame(i) || IsFakeClient(i) || GetClientTeam(i) == 1)
+        {
+            continue;
+        }
+        
+        iPlayers[iTotal++] = i;
+    }
+    
+    return VoteMenu(hMenu, iPlayers, iTotal, iTime, 0);
+}    
+
 public int Handler_VoteCallback(Menu menu, MenuAction action, int param1, int param2)
 {
 	//==========================

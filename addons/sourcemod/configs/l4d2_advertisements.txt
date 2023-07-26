@@ -38,7 +38,7 @@
 	"8"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]死亡中心第一关不小心拿了枪可以输入{GREEN}!drop{TEAM}扔武器哦"
+		"text"	"{GREEN}[公告]死亡中心和暴风骤雨第一关不小心拿了枪可以输入{GREEN}!drop{TEAM}扔武器哦"
 	}
 	"9"
 	{

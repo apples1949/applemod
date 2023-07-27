@@ -437,7 +437,7 @@ stock void CSetupProfile()
 	}
 }
 
-public Action CEvent_MapStart(Event event, const char[] name, bool dontBroadcast)
+stock void CEvent_MapStart(Event event, const char[] name, bool dontBroadcast)
 {
 	CSetupProfile();
 	

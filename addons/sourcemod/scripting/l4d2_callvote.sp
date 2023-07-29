@@ -8,7 +8,7 @@ int g_Changealltalk, g_Changechapter, g_Changedifficulty, g_Changemission, g_Cha
 
 public void OnPluginStart()
 {
-	Changealltalk		= CreateConVar("l4d2_enabled_change_alltalk", "0", "启用全局通话投票? 0=禁用, 1=启用.");
+	Changealltalk		= CreateConVar("l4d2_enabled_change_alltalk", "1", "启用全局通话投票? 0=禁用, 1=启用.");
 	Changechapter		= CreateConVar("l4d2_enabled_change_chapter", "0", "启用投票更换章节? 0=禁用, 1=启用.");
 	Changedifficulty	= CreateConVar("l4d2_enabled_change_difficulty", "0", "启用投票更换难度? 0=禁用, 1=启用.");
 	Changemission		= CreateConVar("l4d2_enabled_change_mission", "0", "启用投票开始新图? 0=禁用, 1=启用.");
@@ -65,7 +65,7 @@ public Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if(strcmp(Msg, "kick", false) == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用,请使用指令!votes投票,也可以考虑暂时将你想踢的玩家强制旁观哦.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -89,7 +89,7 @@ public Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if(strcmp(Msg, "restartgame", false) == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -97,7 +97,7 @@ public Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if(strcmp(Msg, "changemission", false) == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -105,7 +105,7 @@ public Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if(strcmp(Msg, "changechapter", false) == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -113,7 +113,7 @@ public Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if(strcmp(Msg, "changedifficulty", false) == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.请使用指令!votes投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}

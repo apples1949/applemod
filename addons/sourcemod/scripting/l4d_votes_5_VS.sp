@@ -366,7 +366,7 @@ public Action Command_Votes(int client, int args)
 			DrawPanelItem(menu, "强制开始游戏");
 		}
 		DrawPanelText(menu, " \n");
-		DrawPanelText(menu, "0. 退出");
+		DrawPanelItem(menu, "退出");
 		SendPanelToClient(menu, client, Votes_Menu, MENU_TIME);
 		return Plugin_Handled;
 	}
@@ -491,6 +491,11 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 					FakeClientCommand(client,"votesforcestartgame");
 				}
 			}
+			case 10:
+			{
+				ClientVoteMenu[client] = false;
+				if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
+			}
 		}
 	}
 	else if ( action == MenuAction_Cancel)
@@ -500,8 +505,8 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 	}
 	else if(action == MenuAction_End)
 	{
-		delete menu;
 		if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
+		delete menu;
 	}
 	return 0;
 }

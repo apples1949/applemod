@@ -44,7 +44,8 @@ void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue
 
 Action Cmd_RestartServer(int client, int args)
 {
-	LogToFilePlus("手动重启服务器...");
+	LogMessage("手动重启服务器...");
+	PrintToServer("手动重启服务器...");
 	RestartServer();
 	return Plugin_Handled;
 }
@@ -64,7 +65,8 @@ void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 			sv_hibernate_when_empty.IntValue = 0;
 			sb_all_bot_game.IntValue = 1;
 			CreateTimer(g_fDelayTime, RestServer_Timer);
-			LogToFilePlus("服务器已没有真实玩家, %.1f 秒后重启服务器", g_fDelayTime);
+			LogMessage("服务器已没有真实玩家, %.1f 秒后重启服务器", g_fDelayTime);
+			PrintToServer("服务器已没有真实玩家, %.1f 秒后重启服务器", g_fDelayTime);
 		}
 	}
 }
@@ -73,10 +75,15 @@ Action RestServer_Timer(Handle timer)
 {
 	if (!HaveRealPlayer())
 	{
-		LogToFilePlus("自动重启服务器...");
+		LogMessage("自动重启服务器...");
+		PrintToServer("自动重启服务器...");
 		RestartServer();
 	}
-	else LogToFilePlus("服务器重启失败, 还有真实玩家");
+	else 
+	{
+		LogMessage("服务器重启失败, 还有真实玩家");
+		PrintToServer("服务器重启失败, 还有真实玩家");
+	}
 	return Plugin_Continue;
 }
 
@@ -125,16 +132,4 @@ int GetAcceleratorId()
 	}
 
 	return -1;
-}
-
-void LogToFilePlus(const char[] sMsg, any ...)
-{
-	static char sDate[32], sLogPath[PLATFORM_MAX_PATH];
-	static char sBuffer[256];
-
-	FormatTime(sDate, sizeof(sDate), "%Y%m%d");
-	BuildPath(Path_SM, sLogPath, sizeof(sLogPath), "logs/%s_logging.log", sDate);
-	VFormat(sBuffer, sizeof(sBuffer), sMsg, 2);
-
-	LogToFileEx(sLogPath, "%s", sBuffer);
 }

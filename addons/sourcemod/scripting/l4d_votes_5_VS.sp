@@ -56,6 +56,8 @@ bool g_bEnable, VotensHpE_D, VotensAlltalkE_D, VotensAlltalk2E_D, VotensRestartm
 	VotensMapE_D, VotensMap2E_D, g_bVotensKickED, g_bVotensForceSpectateED, VotensForceStartGameE_D;
 char g_sKickImmueAccesslvl[16];
 int fsgclient;
+int g_iShowTips;
+ConVar g_hShowTips;
 
 enum voteType
 {
@@ -134,6 +136,7 @@ public void OnPluginStart()
 	VotensForceStartGameED = CreateConVar("l4d_VotesForceStartGame", "1", "如果为1，则开启投票强制开启readyup", FCVAR_NOTIFY);
 	g_hCvarPlayerLimit = CreateConVar("sm_vote_player_limit", "2", "当有多少玩家才能启动插件", FCVAR_NOTIFY);
 	g_hKickImmueAccess = CreateConVar("l4d_VotesKick_immue_access_flag", "z", "有这些标识的玩家不会被投票踢出以及强制旁观(无内容=所有人, -1:没有人)", FCVAR_NOTIFY);
+	g_hShowTips	= CreateConVar("l4d2_suicide_start_tips",	"5", "设置开局提示投票插件的延迟显示时间/秒. 0=禁用.");
 	
 	HookEvent("round_start", event_Round_Start);
 
@@ -151,6 +154,7 @@ public void OnPluginStart()
 	VotensForceStartGameED.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarPlayerLimit.AddChangeHook(ConVarChanged_Cvars);
 	g_hKickImmueAccess.AddChangeHook(ConVarChanged_Cvars);
+	g_hShowTips.AddChangeHook(ConVarChanged_Cvars);
 
 	AutoExecConfig(true, "l4d_votes_5_VS");
 }
@@ -175,6 +179,7 @@ void GetCvars()
 	VotensForceStartGameE_D = VotensForceStartGameED.BoolValue;
 	g_bEnable = VotensED.BoolValue;
 	g_hKickImmueAccess.GetString(g_sKickImmueAccesslvl,sizeof(g_sKickImmueAccesslvl));
+	g_iShowTips = g_hShowTips.IntValue;
 }
 bool g_ReadyUpAvailable;
 public void OnAllPluginsLoaded()
@@ -191,6 +196,20 @@ public void OnLibraryAdded(const char[] name)
 {
 	if (StrEqual(name, "readyup")) g_ReadyUpAvailable = true;
 }
+
+//玩家连接成功.
+public void OnClientPostAdminCheck(int client)
+{
+	if (!IsFakeClient(client) && g_iShowTips > 0)
+		CreateTimer(float(g_iShowTips), IsShowTipsTimer, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action IsShowTipsTimer(Handle timer, any client)
+{
+	CPrintToChat(client, "[{olive}VOTE{default}]游戏自带投票已禁用! 你可以使用指令!votes进行以下投票:\n开关全体语音 重置地图 开始新图 强制踢出玩家或强制玩家旁观\n对了,如果有新手不会F1开始游戏,你也可以投票强制开始游戏哦!");
+	return Plugin_Stop;
+}
+
 public Action CommandRestartMap(int client, int args)
 {	
 	if(!isMapRestartPending)
@@ -527,7 +546,7 @@ public Action Command_VoteHp(int client, int args)
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) != 1)
 				{
-					FakeClientCommand(i,"sm_hide");
+					if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 					ClientVoteMenu[i] = true;
 				}
 			}
@@ -587,7 +606,7 @@ public Action Command_Votesforcestartgame(int client, int args)
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) != 1)
 				{
-					FakeClientCommand(i,"sm_hide");
+					if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 					ClientVoteMenu[i] = true;
 				}
 			}
@@ -642,7 +661,7 @@ public Action Command_VoteAlltalk(int client, int args)
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
 				{
-					FakeClientCommand(i,"sm_hide");
+					if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 					ClientVoteMenu[i] = true;
 				}
 			}
@@ -691,7 +710,7 @@ public Action Command_VoteAlltalk2(int client, int args)
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) != 1)
 				{
-					FakeClientCommand(i,"sm_hide");
+					if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 					ClientVoteMenu[i] = true;
 				}
 			}
@@ -739,7 +758,7 @@ public Action Command_VoteRestartmap(int client, int args)
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) != 1)
 				{
-					FakeClientCommand(i,"sm_hide");
+					if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 					ClientVoteMenu[i] = true;
 				}
 			}
@@ -883,7 +902,7 @@ public void DisplayVoteKickMenu(int client)
 		for(int i=1; i <= MaxClients; i++) 
 			if (IsClientConnected(i) && IsClientInGame(i) && GetClientTeam(i) == iTeam)
 			{
-				FakeClientCommand(i,"sm_hide");
+				if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 				ClientVoteMenu[i] = true;
 			}
 		
@@ -1026,7 +1045,7 @@ public void DisplayVoteMapsMenu(int client)
 		{
 			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i)&&GetClientTeam(i) != 1)
 			{
-				FakeClientCommand(i,"sm_hide");	
+				if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 				ClientVoteMenu[i] = true;
 			}
 		}
@@ -1138,7 +1157,7 @@ public void DisplayVoteforcespectateMenu(int client)
 			if (IsClientConnected(i) && IsClientInGame(i) && GetClientTeam(i) == iTeam)
 			{
 				ClientVoteMenu[i] = true;
-				FakeClientCommand(i,"sm_hide");
+				if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_hide");
 			}
 		}
 		g_voteType = view_as<voteType>(forcespectate);
@@ -1258,7 +1277,7 @@ public int Handler_VoteCallback(Menu menu, MenuAction action, int param1, int pa
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
 				{
-					FakeClientCommand(i,"sm_show");
+					if(g_ReadyUpAvailable)FakeClientCommand(i,"sm_show");
 				}
 			}
 		}
@@ -1274,7 +1293,7 @@ public int Handler_VoteCallback(Menu menu, MenuAction action, int param1, int pa
 			{
 				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
 				{
-					FakeClientCommand(i,"sm_show");
+					if(g_ReadyUpAvailable)FakeClientCommand(i,"sm_show");
 				}
 			}
 		}
@@ -1398,24 +1417,12 @@ bool TestVoteDelay(int client)
  		if (delay > 60)
  		{
  			CPrintToChat(client, "[{olive}VOTE{default}]你必须等待{red}%i{default}秒后再发起投票!", delay % 60);
-			for (int i=1; i<=MaxClients; i++)
-			{
-				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
-				{
-					FakeClientCommand(i,"sm_show");
-				}
-			}
+			if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
  		}
  		else
  		{
  			CPrintToChat(client, "[{olive}VOTE{default}]你必须等待{red}%i{default}秒后再发起投票!", delay);
-			for (int i=1; i<=MaxClients; i++)
-			{
-				if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
-				{
-					FakeClientCommand(i,"sm_show");
-				}
-			}
+			if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
  		}
  		return false;
  	}
@@ -1424,13 +1431,7 @@ bool TestVoteDelay(int client)
  	if (delay > 0)
  	{
  		CPrintToChat(client, "[{olive}VOTE{default}]你必须等待{red}%i{default}秒后再发起投票!", delay);
-		for (int i=1; i<=MaxClients; i++)
-		{
-			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
-			{
-				FakeClientCommand(i,"sm_show");
-			}
-		}
+		if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
  		return false;
  	}
 	return true;
@@ -1441,13 +1442,7 @@ bool CanStartVotes(int client)
  	if(g_hVoteMenu  != INVALID_HANDLE || IsVoteInProgress())
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]已经有了一个投票正在进行中");
-		for (int i=1; i<=MaxClients; i++)
-		{
-			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
-			{
-				FakeClientCommand(i,"sm_show");
-			}
-		}
+		if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
 		return false;
 	}
 	int iNumPlayers;
@@ -1463,13 +1458,7 @@ bool CanStartVotes(int client)
 	if (iNumPlayers < g_iCvarPlayerLimit)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]无法发起投票。需要{red}%d{default}个玩家", g_iCvarPlayerLimit);
-		for (int i=1; i<=MaxClients; i++)
-		{
-			if(IsClientConnected(i)&&IsClientInGame(i)&&!IsFakeClient(i))
-			{
-				FakeClientCommand(i,"sm_show");
-			}
-		}
+		if(g_ReadyUpAvailable)FakeClientCommand(client,"sm_show");
 		return false;
 	}
 	return true;

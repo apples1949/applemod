@@ -127,7 +127,7 @@ public void OnPluginStart()
 	VotensAlltalk2ED = CreateConVar("l4d_Votensalltalk2ED", "1", "如果为1，则开启全体语音投票选项", FCVAR_NOTIFY);
 	VotensRestartmapED = CreateConVar("l4d_VotensrestartmapED", "1", "如果为1，则开启重置当前地图选项", FCVAR_NOTIFY);
 	VotensMapED = CreateConVar("l4d_VotensmapED", "1", "如果为1，则开启投票更换官图选项", FCVAR_NOTIFY);
-	VotensMap2ED = CreateConVar("l4d_Votensmap2ED", "1", "如果为1，则开启投票更换三方图选项", FCVAR_NOTIFY);
+	VotensMap2ED = CreateConVar("l4d_Votensmap2ED", "0", "如果为1，则开启投票更换三方图选项", FCVAR_NOTIFY);
 	VotensED = CreateConVar("l4d_Votens", "1", "如果为0，则关闭此插件，反之开启", FCVAR_NOTIFY);
 	VotensKickED = CreateConVar("l4d_VotesKickED", "1", "如果为1，则开启投票踢出玩家选项", FCVAR_NOTIFY);
 	VotensForceSpectateED = CreateConVar("l4d_VotesForceSpectateED", "1", "如果为1，则开启投票强制玩家旁观选项", FCVAR_NOTIFY);

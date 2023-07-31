@@ -124,7 +124,7 @@ void IsRegSuicide(int client)
 			case 2:
 				IsPlayerSuicide(client, client, GetTrueName(client), "生还者");
 			case 3:
-				IsForceSuicide(client, client, GetTrueName(client), "感染者");//执行玩家死亡代码.
+				PrintToChat(client, "\x04[提示]\x05该指令仅限生还者使用.");
 			case 4:
 				IsPlayerSuicide(client, client, GetTrueName(client), "生还者");
 		}

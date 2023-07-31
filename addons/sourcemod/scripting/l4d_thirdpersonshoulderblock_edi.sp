@@ -73,7 +73,7 @@ public void QueryClientConVarCallback(QueryCookie cookie, int client, ConVarQuer
 		{
 			ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
 			CPrintToChat(client, "[{green}!{default}]命令 {olive}c_thirdpersonshoulder{default} 是无效或者被保护的.");
-			CPrintToChatAll("[{green}!{default}] %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称!",client);
+			CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称!",client);
 		}
 		/* If the ConVar was found on the client, but is not set to either "false" or "0",
 		 * kick the client as well, as he might be using thirdpersonshoulder.
@@ -82,7 +82,7 @@ public void QueryClientConVarCallback(QueryCookie cookie, int client, ConVarQuer
 		{
 			ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
 			CPrintToChat(client, "[{green}!{default}]服务器不允许开启第三人称， 为了正常游玩，请在控制台输入 {olive}c_thirdpersonshoulder 0{default}.");
-			CPrintToChatAll("[{green}!{default}] %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称!",client);
+			CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称!",client);
 		}
 	}
 }

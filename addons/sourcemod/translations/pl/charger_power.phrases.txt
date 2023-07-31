@@ -1,0 +1,11 @@
+﻿"Phrases"
+{
+	"Information"
+	{
+		"pl"	"Wskazówka"
+	}
+	"Move objects"
+	{
+		"pl"	"Możesz przesuwać obiekty uderzając w nie podczas szarży"
+	}
+}

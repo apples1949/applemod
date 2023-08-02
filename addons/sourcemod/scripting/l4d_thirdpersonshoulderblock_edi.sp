@@ -8,11 +8,12 @@
 #define L4D_TEAM_SPECTATOR 1
 
 ConVar cvar_enabled;
+ConVar cvar_action;
 
 public Plugin myinfo =
 {
 	name        = "Thirdpersonshoulder Block",
-	author      = "Don",
+	author      = "Don apples1949 edi",
 	description = "Kicks clients who enable the thirdpersonshoulder mode on L4D1/2 to prevent them from looking around corners, through walls etc.",
 	version     = PLUGIN_VERSION,
 	url         = "http://forums.alliedmods.net/showthread.php?t=159582"
@@ -39,7 +40,8 @@ public void OnPluginStart()
 {
 	CreateConVar("l4d_tpsblock_version", PLUGIN_VERSION, "Version of the Thirdpersonshoulder Block plugin", FCVAR_NOTIFY | FCVAR_DONTRECORD);
 
-	cvar_enabled = CreateConVar("l4d_tpsblock_enabled", "1", "Enable Thirdpersonshoulder Block", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_enabled = CreateConVar("l4d_tpsblock_enabled", "1", "是否启用插件?", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_action = CreateConVar("l4d_tpsblock_action", "1", "如何处理启用第三人称的玩家? 1 - 移动到旁观, 0 - 踢出服务器", _, true, 0.0, true, 1.0);
 	CreateTimer(GetRandomFloat(2.5, 3.5), CheckClients, _, TIMER_REPEAT);
 }
 
@@ -71,18 +73,28 @@ public void QueryClientConVarCallback(QueryCookie cookie, int client, ConVarQuer
 		if (result != ConVarQuery_Okay)
 
 		{
-			ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
-			CPrintToChat(client, "[{green}!{default}]命令 {olive}c_thirdpersonshoulder{default} 是无效或者被保护的.");
-			CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称!",client);
+			if (cvar_action.IntValue == 0) {
+				KickClient(client, "服务器不允许开启第三人称!请在控制台输入 c_thirdpersonshoulder 0 再进入游戏!");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器自动踢出!服务器不允许开启第三人称!",client);
+			} else {
+				ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
+				CPrintToChat(client, "[{green}!{default}]命令 {olive}c_thirdpersonshoulder{default} 是无效或者被保护的.");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称!",client);
+			}
 		}
 		/* If the ConVar was found on the client, but is not set to either "false" or "0",
 		 * kick the client as well, as he might be using thirdpersonshoulder.
 		 */
 		else if (!StrEqual(cvarValue, "false") && !StrEqual(cvarValue, "0"))
 		{
-			ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
-			CPrintToChat(client, "[{green}!{default}]服务器不允许开启第三人称， 为了正常游玩，请在控制台输入 {olive}c_thirdpersonshoulder 0{default}.");
-			CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称!",client);
+			if (cvar_action.IntValue == 0) {
+				KickClient(client, "服务器不允许开启第三人称!请在控制台输入 c_thirdpersonshoulder 0 再进入游戏!");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称进入被服务器自动踢出!服务器不允许开启第三人称!",client);
+			} else {
+				ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
+				CPrintToChat(client, "[{green}!{default}]服务器不允许开启第三人称， 为了正常游玩，请在控制台输入 {olive}c_thirdpersonshoulder 0{default}.");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称!",client);
+			}
 		}
 	}
 }

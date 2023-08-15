@@ -17,6 +17,17 @@
 		{
 			"name" "1v1 ZoneMod"
 		}
+		"zonemod4k"
+		{
+			"name" "Zonemod 2.8.5 非匹配4控"
+		}
+	}
+	"WitchParty Configs"
+	{
+		"witchparty"
+		{
+			"name" "WitchParty 3.0"
+		}
 	}
 	"NextMod Configs"
 	{

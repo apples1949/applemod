@@ -29,17 +29,17 @@
 	"[AFK] Inactivity detected! 3"
 	{
 		"#format"		"{1:d}"
-		"en"	"[AFK] Inactivity detected! Join any team to play.\n Otherwise you'll be kicked from server in {1} seconds."
-		"zho"	"[AFK] 偵測旁觀閒置! 輸入!join加入遊戲\n 否則你將於 {1} 秒後踢出伺服器."
-		"chi"	"[AFK] 检测到旁观闲置! 输入!join加入游戏\n 否则你将于 {1} 秒后踢出服务器."
-		"hu"	"[AFK] Inaktivitás észlelve! Csatlakozz bármelyik csapathoz.\n (!join) Ellenkező esetben {1} másodperc múlva kirúgunk a szerverről."
+		"en"	"[AFK] Detected that you can join the game now! Press M to join the game or you will be kicked off the server in {1} seconds. Don't be a dick!"
+		"zho"	"[AFK] 檢測到目前可以加入對局! 按 M 加入遊戲\n 否則妳將于 {1} 秒後踢出服務器. 別占著茅坑不拉屎!"
+		"chi"	"[AFK] 检测到目前可以加入对局! 按 M 加入游戏\n 否则你将于 {1} 秒后踢出服务器. 别占着茅坑不拉屎!"
+		"hu"	"[AFK] Észleltem, hogy most már csatlakozhatsz a játékhoz! Nyomd meg az M gombot a játékhoz való csatlakozáshoz, különben {1} másodperc múlva kirúgunk a szerverről. Ne légy pöcs!"
 	}
 	"[AFK] Inactivity detected! 4"
 	{
-		"en"	"[AFK] Inactivity detected! Join any team to play.\n Otherwise you'll be kicked from server."
-		"zho"	"[AFK] 偵測旁觀閒置! 按 M 加入遊戲\n 一旦有人離開安全區域你將踢出伺服器."
-		"chi"	"[AFK] 检测到旁观闲置! 按 M 加入游戏\n 一旦有人离开安全区域你将踢出服务器."
-		"hu"	"[AFK] Inaktivitás észlelve! Csatlakozz bármelyik csapathoz, hogy játszhass.\n (!join) Ellenkező esetben kirúgunk a szerverről."
+		"en"	"[AFK] Detected that you are currently available to join the game! Press M to join the game\n Once someone leaves the safe zone you will be kicked off the server. Don't be a dick!"
+		"zho"	"[AFK] 檢測到目前可以加入對局! 按 M 加入遊戲\n 壹旦有人離開安全區域妳將踢出服務器. 別占著茅坑不拉屎!"
+		"chi"	"[AFK] 检测到目前可以加入对局! 按 M 加入游戏\n 一旦有人离开安全区域你将踢出服务器. 别占着茅坑不拉屎!"
+		"hu"	"[AFK] Érzékeltük, hogy jelenleg elérhető vagy a játékhoz való csatlakozáshoz! Nyomd meg az M-et a játékhoz való csatlakozáshoz\n Ha valaki elhagyja a biztonságos zónát, ki leszel rúgva a szerverről. Ne légy szarházi!"
 	}
 	"have been kicked from server due to inactivity"
 	{

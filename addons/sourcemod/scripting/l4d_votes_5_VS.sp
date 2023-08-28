@@ -384,20 +384,17 @@ public Action Command_Votes(int client, int args)
 		{
 			DrawPanelItem(menu, "强制删除游戏大厅");
 		}
-		if (g_ReadyUpAvailable)
+		if (VotensForceStartGameE_D == false)
 		{
-			if (VotensForceStartGameE_D == false)
-			{
-				DrawPanelItem(menu, "强制开始游戏(禁用中)");
-			}
-			else if (g_ReadyUpAvailable)
-			{
-				DrawPanelItem(menu, "强制开始游戏");
-			}
-			else
-			{
-				DrawPanelText(menu, " \n");
-			}
+			DrawPanelItem(menu, "强制开始游戏(禁用中)");
+		}
+		else if (g_ReadyUpAvailable)
+		{
+			DrawPanelItem(menu, "强制开始游戏");
+		}
+		else
+		{
+			DrawPanelText(menu, " \n");
 		}
 		DrawPanelText(menu, " \n");
 		DrawPanelItem(menu, "退出");

@@ -19,7 +19,7 @@
 		}
 		"zonemod4k"
 		{
-			"name" "Zonemod 2.8.5 非匹配4控"
+			"name" "Zonemod 2.8.6 非匹配4控"
 		}
 	}
 	"WitchParty Configs"

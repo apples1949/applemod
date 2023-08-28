@@ -220,7 +220,7 @@ public Action Lerps_Cmd(int client, int args)
 	int survivorCount = 0;
 	int infectedCount = 0;
 	if (ArrLerpsValue.Size > 0) {
-		ReplyToCommand(client, "[!] Lerp setting list:");
+		CPrintToChat(client, "{blue}[{default}!{blue}] {green}玩家Lerp设置列表:");
 		for(int rclient=1; rclient <= MaxClients; rclient++)
 		{
 			if(IsClientInGame(rclient) && !IsFakeClient(rclient))
@@ -231,7 +231,7 @@ public Action Lerps_Cmd(int client, int args)
 		}
 		float fLerpValue;
 		char sSteamID[STEAMID_SIZE];
-		if (survivorCount == 1 || infectedCount == 1) CPrintToChat(client, "{blue}{green}______________________________");
+		CPrintToChat(client, "{blue}{green}______________________________");
 		/*
 		for (int i = 1; i <= MaxClients; i++) {
 			if (IsClientInGame(i) && !IsFakeClient(i)) {
@@ -256,7 +256,7 @@ public Action Lerps_Cmd(int client, int args)
 				}
 			}
 		}
-		
+		if (survivorCount == 1 || infectedCount == 1) CPrintToChat(client, "{blue}{green}______________________________");
 		for(int rclient=1; rclient <= MaxClients; rclient++)
 		{
 			if(IsClientInGame(rclient) && !IsFakeClient(rclient) && GetClientTeam(rclient) == 3)
@@ -269,11 +269,11 @@ public Action Lerps_Cmd(int client, int args)
 				}
 			}
 		}
-		if (survivorCount == 1 || infectedCount == 1) CPrintToChat(client, "{blue}{green}______________________________");
+		CPrintToChat(client, "{blue}{green}______________________________");
 	}
 	
 	if (isEmpty) {
-		ReplyToCommand(client, "There is nothing here!");
+		CPrintToChat(client, "{blue}[{default}!{blue}] {green}未记录到玩家Lerp设置!");
 	}
 	return Plugin_Handled;
 }
@@ -321,9 +321,9 @@ void ProcessPlayerLerp(int client, bool load = false, bool team = false)
 				}
 			}
 			
-			CPrintToChatAllEx(client, "{default}<{olive}Lerp{default}> {teamcolor}%N {default}was moved to spectators for lerp {teamcolor}%.01f", client, newLerpTime * 1000);
+			CPrintToChatAllEx(client, "{default}<{olive}Lerp{default}> {teamcolor}%N {default}因Lerp值为 {teamcolor}%.01f {default}而被移动到旁观!", client, newLerpTime * 1000);
 			ChangeClientTeam(client, L4D_TEAM_SPECTATE);
-			CPrintToChatEx(client, client, "{default}<{olive}Lerp{default}> Illegal lerp value (min: {teamcolor}%.01f{default}, max: {teamcolor}%.01f{default})", cVarMinLerp.FloatValue * 1000, cVarMaxLerp.FloatValue * 1000);
+			CPrintToChatEx(client, client, "{default}<{olive}Lerp{default}> 非法Lerp值 (最小: {teamcolor}%.01f{default}, 最大: {teamcolor}%.01f{default})控制台输入'cl_interp 0'以修改lerp值!", cVarMinLerp.FloatValue * 1000, cVarMaxLerp.FloatValue * 1000);
 		}
 		
 		// nothing else to do
@@ -358,9 +358,9 @@ void ProcessPlayerLerp(int client, bool load = false, bool team = false)
 		CPrintToChatAllEx(client, "{default}<{olive}Lerp{default}> {teamcolor}%N {default}@ {teamcolor}%.01f {default}<== {green}%.01f {default}[%s%d{default}/%d {olive}changes]", client, newLerpTime * 1000, currentLerpTime * 1000, ((count > max) ? "{teamcolor} ": ""), count, max);
 	
 		if (cVarLerpChangeSpec.BoolValue && (count > max)) {
-			CPrintToChatAllEx(client, "{default}<{olive}Lerp{default}> {teamcolor}%N {default}was moved to spectators (illegal lerp change)!", client);
+			CPrintToChatAllEx(client, "{default}<{olive}Lerp{default}> {teamcolor}%N {default}被移动到旁观 (更改非法Lerp值)!", client);
 			ChangeClientTeam(client, L4D_TEAM_SPECTATE);
-			CPrintToChatEx(client, client, "{default}<{olive}Lerp{default}> Illegal change of Lerp midgame! Change it back to {teamcolor}%.01f", currentLerpTime * 1000);
+			CPrintToChatEx(client, client, "{default}<{olive}Lerp{default}> 你在游戏中更改非法Lerp值! 请改到 {teamcolor}%.01f {default}及以下!", currentLerpTime * 1000);
 			// no lerp update
 			return;
 		}

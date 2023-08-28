@@ -380,10 +380,6 @@ public Action Command_Votes(int client, int args)
 		{
 			DrawPanelItem(menu, "强制删除游戏大厅(禁用中)");
 		}
-		else if(IsHaveUnreseverlobby() == false)
-		{
-			DrawPanelItem(menu, "强制删除游戏大厅(无动态大厅)");
-		}
 		else
 		{
 			DrawPanelItem(menu, "强制游戏删除大厅");
@@ -517,12 +513,7 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 					FakeClientCommand(client, "sm_votes");
 					CPrintToChat(client, "[{olive}VOTE{default}]强制删除游戏大厅已禁用");
 				}
-				else if(IsHaveUnreseverlobby() == false)
-				{
-					FakeClientCommand(client, "sm_votes");
-					CPrintToChat(client, "[{olive}VOTE{default}]无动态大厅插件");
-				}
-				else if (g_bVotenForceDelLobby == true)
+				else
 				{
 					FakeClientCommand(client, "votesforcedellobby");
 				}
@@ -695,7 +686,7 @@ public Action Command_Votesforcedellobby(int client, int args)
 				}
 			}
 
-			g_voteType = view_as<voteType>(alltalk);
+			g_voteType = view_as<voteType>(forcedellobby);
 			char SteamId[35];
 			GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
 			LogMessage("%N(%s) 发起了一个投票: 删除匹配大厅!", client, SteamId);	//紀錄在log文件
@@ -1673,7 +1664,7 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 		case (view_as<voteType>(forcedellobby)):
 		{
-			ServerCommand("sm_unreserve");
+			L4D_LobbyUnreserve();
 			LogMessage("删除匹配大厅通过");
 		}
 		case (view_as<voteType>(forcestartgame)):
@@ -1776,12 +1767,6 @@ bool IsClientIdle(int client)
 		}
 	}
 	return false;
-}
-
-bool IsHaveUnreseverlobby()
-{
-	if(FindConVar("l4d_unreserve_version") == null)return false;
-	else return true;
 }
 
 void openreadyuphud(int client)

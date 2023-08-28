@@ -382,7 +382,7 @@ public Action Command_Votes(int client, int args)
 		}
 		else
 		{
-			DrawPanelItem(menu, "强制游戏删除大厅");
+			DrawPanelItem(menu, "强制删除游戏大厅");
 		}
 		if (g_ReadyUpAvailable)
 		{

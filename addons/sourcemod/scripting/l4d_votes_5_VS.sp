@@ -49,7 +49,7 @@ int	   g_iCount;
 char   g_sMapinfo[MAX_CAMPAIGN_LIMIT][MAX_NAME_LENGTH];
 char   g_sMapname[MAX_CAMPAIGN_LIMIT][MAX_NAME_LENGTH];
 float  g_fLimit;
-bool   g_bEnable, VotensHpE_D, VotensAlltalkE_D, VotensAlltalk2E_D, VotensRestartmapE_D,
+bool   g_bEnable, VotensHpE_D, VotensAlltalkE_D, VotensRestartmapE_D,
 	VotensMapE_D, VotensMap2E_D, g_bVotensKickED, g_bVotensForceSpectateED, g_bVotenForceDelLobby, VotensForceStartGameE_D;
 char   g_sKickImmueAccesslvl[16];
 int	   fsgclient;
@@ -347,7 +347,7 @@ public Action Command_Votes(int client, int args)
 		}
 		if (VotensMap2E_D == false)
 		{
-			DrawPanelItem(menu, "投票更换三方图 (禁用中)");
+			DrawPanelItem(menu, "投票更换三方图(禁用中)");
 		}
 		else
 		{
@@ -385,6 +385,7 @@ public Action Command_Votes(int client, int args)
 		{
 			DrawPanelItem(menu, "强制开始游戏");
 		}
+
 		else
 		{
 			DrawPanelText(menu, " \n");
@@ -756,7 +757,7 @@ public Action Command_VoteAlltalk(int client, int args)
 public Action Command_VoteAlltalk2(int client, int args)
 {
 	if (g_bEnable == true
-		&& VotensAlltalk2E_D == true)
+		&& VotensAlltalkE_D == true)
 	{
 		if (!TestVoteDelay(client))
 		{
@@ -796,7 +797,7 @@ public Action Command_VoteAlltalk2(int client, int args)
 
 		return Plugin_Handled;
 	}
-	else if (g_bEnable == false || VotensAlltalk2E_D == false)
+	else if (g_bEnable == false || VotensAlltalkE_D == false)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]投票被禁止");
 	}

@@ -51,16 +51,13 @@ char   g_sMapname[MAX_CAMPAIGN_LIMIT][MAX_NAME_LENGTH];
 float  g_fLimit;
 bool   g_bEnable, VotensHpE_D, VotensAlltalkE_D, VotensAlltalk2E_D, VotensRestartmapE_D,
 	VotensMapE_D, VotensMap2E_D, g_bVotensKickED, g_bVotensForceSpectateED, g_bVotenForceDelLobby, VotensForceStartGameE_D;
-char g_sKickImmueAccesslvl[16];
-int	 fsgclient;
-ConVar hSV_Alltalk;
-int iSV_Alltalk;
+char   g_sKickImmueAccesslvl[16];
+int	   fsgclient;
 ConVar VotenForceDelLobby;
 ConVar hforcespectate_penalty;
-int iforcespectate_penalty;
+int	   iforcespectate_penalty;
 ConVar hvotedelay_time;
-int ivotedelay_time;
-
+int	   ivotedelay_time;
 
 enum voteType
 {
@@ -143,8 +140,6 @@ public void OnPluginStart()
 	hforcespectate_penalty = CreateConVar("l4d_forcespectate_penalty", "10", "强制旁观多久才能重新加入队伍", FCVAR_NOTIFY);
 	hvotedelay_time		   = CreateConVar("l4d_votedelay_time", "30", "多长时间才能发起新投票", FCVAR_NOTIFY);
 
-	hSV_Alltalk = FindConVar("sv_alltalk");
-
 	HookEvent("round_start", event_Round_Start);
 
 	GetCvars();
@@ -163,7 +158,6 @@ public void OnPluginStart()
 	g_hKickImmueAccess.AddChangeHook(ConVarChanged_Cvars);
 	hforcespectate_penalty.AddChangeHook(ConVarChanged_Cvars);
 	hvotedelay_time.AddChangeHook(ConVarChanged_Cvars);
-	hSV_Alltalk.AddChangeHook(ConVarChanged_Cvars);
 
 	AutoExecConfig(true, "l4d_votes_5_VS");
 }
@@ -187,10 +181,9 @@ void GetCvars()
 	g_bVotenForceDelLobby	 = VotenForceDelLobby.BoolValue;
 	VotensForceStartGameE_D	 = VotensForceStartGameED.BoolValue;
 	g_bEnable				 = VotensED.BoolValue;
-	iSV_Alltalk = hSV_Alltalk.IntValue;
 	g_hKickImmueAccess.GetString(g_sKickImmueAccesslvl, sizeof(g_sKickImmueAccesslvl));
-	iforcespectate_penalty	 = hforcespectate_penalty.IntValue;
-	ivotedelay_time			 = hvotedelay_time.IntValue;
+	iforcespectate_penalty = hforcespectate_penalty.IntValue;
+	ivotedelay_time		   = hvotedelay_time.IntValue;
 }
 bool g_ReadyUpAvailable;
 
@@ -384,7 +377,7 @@ public Action Command_Votes(int client, int args)
 		{
 			DrawPanelItem(menu, "强制删除游戏大厅");
 		}
-		if (VotensForceStartGameE_D == false)
+		if (!VotensForceStartGameE_D || !CheckReadyUpMode())
 		{
 			DrawPanelItem(menu, "强制开始游戏(禁用中)");
 		}
@@ -434,7 +427,7 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 					FakeClientCommand(client, "sm_votes");
 					CPrintToChat(client, "[{olive}VOTE{default}]调整全体语音已禁用");
 				}
-				else if(iSV_Alltalk ==0)
+				else if (FindConVar("sv_alltalk").IntValue == 0)
 				{
 					FakeClientCommand(client, "votesalltalk");
 				}
@@ -1452,7 +1445,7 @@ public void CheatCommandEx(int client)
 	FakeClientCommand(client, "sm_fs");
 	SetUserFlagBits(client, bits);
 	// SetCommandFlags("sm_fm", flags);
-}	// https://github.com/umlka/l4d2/blob/main/l4d2_points_system/l4d2_points_system.sp#L3153
+}	 // https://github.com/umlka/l4d2/blob/main/l4d2_points_system/l4d2_points_system.sp#L3153
 
 //================================
 void CheckVotes()
@@ -1672,7 +1665,9 @@ public Action COLD_DOWN(Handle timer, any client)
 				CheatCommandEx(fsgclient);
 				LogMessage("强制开始游戏通过");
 			}
-			else{CPrintToChatAll("[{olive}VOTE{default}]对局已开始!无需强制启动游戏!");}
+			else {
+				CPrintToChatAll("[{olive}VOTE{default}]对局已开始!无需强制启动游戏!");
+			}
 		}
 	}
 
@@ -1774,4 +1769,15 @@ void openreadyuphud(int client)
 void closereadyuphud(int client)
 {
 	if (g_ReadyUpAvailable) FakeClientCommand(client, "sm_hide");
+}
+
+bool CheckReadyUpMode()
+{
+	if (FindConVar("l4d_ready_enabled").IntValue == 1)
+	{
+		return true;
+	}
+	else {
+		return false;
+	}
 }

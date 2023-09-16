@@ -127,7 +127,23 @@ public void InfectedMenuHandler_Other(Handle topmenu_Other, TopMenuAction action
 
 public Action Command_BomServer(int client, int args)
 {
-	if(bCheckClientAccess(client))
+	if (client == 0)
+	{
+		switch (g_iEmptySwitch)
+		{
+			case 1:
+			{
+				IsDetermineSystemType(L4D_GetServerOS(), "服务器没人了");	 //判断系统类型:0=windows,1=linux.
+			}
+			case 2:
+			{
+				g_hGamemode.SetString(g_sEmptyMode);
+				// ForceChangeLevel(g_sEmptyCode, "自动更换为指定的地图.");
+				ServerCommand("map %s", g_sEmptyCode);
+			}
+		}
+	}
+	else if (bCheckClientAccess(client))
 		IsFriedSuitMenu(client, false);
 	else
 		PrintToChat(client, "\x04[提示]\x05你无权使用此指令.");

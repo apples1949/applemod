@@ -41,8 +41,8 @@ public void OnPluginStart()
 	g_hEmptySwitch 	= CreateConVar("l4d2_empty_Switch",	"2", "服务器无人后执行什么功能? 0=禁用, 1=炸服, 2=切换为指定地图.", CVAR_FLAGS);
 	g_hEmptyCode 	= CreateConVar("l4d2_empty_code",	"c1m1_hotel", "服务器无人后设置什么地图(填入建图代码).", CVAR_FLAGS);
 	g_hEmptyMode 	= CreateConVar("l4d2_empty_mode",	"versus", "服务器无人后设置什么模式(填入模式代码.", CVAR_FLAGS);
-	g_hEmptyCrash 	= CreateConVar("l4d2_empty_crash",	"1", "允许什么系统的服务器崩溃? 1=linux, 2=windows, 3=两者.", CVAR_FLAGS);
-	g_hEmptyType 	= CreateConVar("l4d2_empty_type",	"1", "允许什么类型的服务器崩溃? 1=专用服务器, 2=本地服务器, 3=两者.", CVAR_FLAGS);
+	g_hEmptyCrash 	= CreateConVar("l4d2_empty_crash",	"3", "允许什么系统的服务器崩溃? 1=linux, 2=windows, 3=两者.", CVAR_FLAGS);
+	g_hEmptyType 	= CreateConVar("l4d2_empty_type",	"3", "允许什么类型的服务器崩溃? 1=专用服务器, 2=本地服务器, 3=两者.", CVAR_FLAGS);
 	g_hEmptyCommand = CreateConVar("l4d2_empty_Command","10", "设置玩家使用!Bom指令手动炸服的倒计时时间/秒. 0=禁用.", CVAR_FLAGS);
 	
 	g_hEmptyLog.AddChangeHook(EmptyConVarChanged);
@@ -138,8 +138,7 @@ public Action Command_BomServer(int client, int args)
 			case 2:
 			{
 				g_hGamemode.SetString(g_sEmptyMode);
-				// ForceChangeLevel(g_sEmptyCode, "自动更换为指定的地图.");
-				ServerCommand("map %s", g_sEmptyCode);
+				ForceChangeLevel(g_sEmptyCode, "自动更换为指定的地图.");
 			}
 		}
 	}

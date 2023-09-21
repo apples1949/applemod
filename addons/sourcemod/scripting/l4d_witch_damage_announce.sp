@@ -170,7 +170,7 @@ public WitchDeath_Event(Handle:event, const String:name[], bool:dontBroadcast)
 	//Check if Tank Killed the Witch.
 	if (IsValidClient(killer) && GetClientTeam(killer) == 3 && IsTank(killer))
 	{
-		CPrintToChatAll("{default}[{green}!{default}] {red}Tank {default}({olive}%N{default}) killed the {red}Witch", killer);
+		CPrintToChatAll("{default}[{green}!{default}] {red}Tank {default}({olive}%N{default}) 杀死了 {red}Witch", killer);
 		bWitchSpawned = false;
 		ClearDamage();
 		return;
@@ -225,14 +225,14 @@ CalculateWitch()
 
 PrintWitchRemainingHealth()
 {
-	CPrintToChatAll("{default}[{green}!{default}] {blue}Witch {default}had {olive}%d {default}health remaining", RoundToFloor(g_fWitchHealth) - DamageWitchTotal);
+	CPrintToChatAll("{default}[{green}!{default}] {blue}Witch {default}还剩下 {olive}%d {default}点血", RoundToFloor(g_fWitchHealth) - DamageWitchTotal);
 }
 
 PrintWitchDamage()
 {
 	if (!bWitchSpawned)
 	{
-		CPrintToChatAll("{default}[{green}!{default}] {blue}Damage {default}dealt to {blue}Witch:");
+		CPrintToChatAll("{default}[{green}!{default}] 对{blue}女巫{default}产生的{blue}伤害");
 	}
 
 	new client;

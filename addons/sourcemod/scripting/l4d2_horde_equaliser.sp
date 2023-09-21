@@ -50,8 +50,8 @@ public void OnPluginStart()
 {
 	InitGameData();
 	
-	hCvarNoEventHordeDuringTanks = CreateConVar("l4d2_heq_no_tank_horde", "0", "Put infinite hordes on a 'hold up' during Tank fights");
-	hCvarHordeCheckpointAnnounce = CreateConVar("l4d2_heq_checkpoint_sound", "1", "Play the incoming mob sound at checkpoints (each 1/4 of total commons killed off) to simulate L4D1 behaviour");
+	hCvarNoEventHordeDuringTanks = CreateConVar("l4d2_heq_no_tank_horde", "0", "有坦克时停止刷新尸潮");
+	hCvarHordeCheckpointAnnounce = CreateConVar("l4d2_heq_checkpoint_sound", "1", "在检测点播放尸潮声音(每清理1/4的尸潮),以模拟求生1");
 
 	HookEvent("round_start", RoundStartEvent, EventHookMode_PostNoCopy);
 }
@@ -114,7 +114,7 @@ public void OnEntityCreated(int entity, const char[] classname)
 		// Our job here is done
 		if (commonTotal >= commonLimit) {
 			if (!announcedEventEnd){
-				CPrintToChatAll("<{olive}Horde{default}> {red}No {default}common remaining!");
+				CPrintToChatAll("<{olive}Horde{default}> {olive}尸潮事件 {default}结束，开始冲锋!");
 				announcedEventEnd = true;
 			}
 			return;
@@ -130,7 +130,7 @@ public void OnEntityCreated(int entity, const char[] classname)
 			
 			int remaining = commonLimit - commonTotal;
 			if (remaining != 0) {
-				CPrintToChatAll("<{olive}Horde{default}> {red}%i {default}common remaining..", remaining);
+				CPrintToChatAll("<{olive}Horde{default}> 还剩 {olive}%i{default} 个..", remaining);
 			}
 			
 			checkpointAnnounced[lastCheckpoint] = true;
@@ -168,7 +168,7 @@ public Action L4D_OnSpawnMob(int &amount)
 	// If it's a "finite" infinite horde...
 	if (IsInfiniteHordeActive()) {
 		if (!announcedInChat) {
-			CPrintToChatAll("<{olive}Horde{default}> A {blue}finite event{default} of {olive}%i{default} commons has started! Rush or wait it out, the choice is yours!", commonLimit);
+			CPrintToChatAll("<{olive}Horde{default}> {blue}有限尸潮事件{default} 已经开始, 将刷出 {olive}%i{default} 个僵尸! 冲或者守，决定在于你们!", commonLimit);
 			announcedInChat = true;
 		}
 		

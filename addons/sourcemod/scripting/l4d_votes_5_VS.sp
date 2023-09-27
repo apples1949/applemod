@@ -1310,6 +1310,7 @@ public int Handler_VoteCallback(Menu menu, MenuAction action, int param1, int pa
 	{
 		if (param1 > 0 && param1 <= MaxClients && IsClientConnected(param1) && IsClientInGame(param1) && !IsFakeClient(param1))
 		{
+			Voten += 1;
 			CPrintToChatAll("[{olive}VOTE{default}] %N {blue}放弃了该投票{default}.", param1);
 		}
 	}

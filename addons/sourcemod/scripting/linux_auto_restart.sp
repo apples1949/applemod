@@ -46,6 +46,7 @@ public void OnPluginStart()
 	g_hConVarHibernate.AddChangeHook(ConVarChanged_Hibernate);
 
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);	
+	RegAdminCmd("sm_restart", Cmd_RestartServer, ADMFLAG_ROOT);
 }
 
 public void OnPluginEnd()
@@ -53,6 +54,17 @@ public void OnPluginEnd()
 	delete COLD_DOWN_Timer;
 }
 
+Action Cmd_RestartServer(int client, int args)
+{
+	LogMessage("强制重启服务器指令确认");
+	PrintToServer("强制重启服务器指令确认");
+
+	g_bNoOneInServer = true;
+
+	delete COLD_DOWN_Timer;
+	COLD_DOWN_Timer = CreateTimer(10.0, restaerserver);
+	return Plugin_Handled;
+}
 void ConVarChanged_Hibernate(ConVar hCvar, const char[] sOldVal, const char[] sNewVal)
 {
 	g_hConVarHibernate.SetBool(false);
@@ -122,8 +134,21 @@ Action COLD_DOWN(Handle timer, any client)
 		return Plugin_Continue;
 	}
 	
-	LogMessage("Last one player left the server, Restart server now");
-	PrintToServer("Last one player left the server, Restart server now");
+	LogMessage("最后一位玩家已离开服务器,现在重启服务器");
+	PrintToServer("最后一位玩家已离开服务器,现在重启服务器");
+
+	UnloadAccelerator();
+
+	CreateTimer(0.1, Timer_RestartServer);
+
+	COLD_DOWN_Timer = null;
+	return Plugin_Continue;
+}
+
+Action restaerserver(Handle timer, any client)
+{	
+	LogMessage("强制重启服务器执行");
+	PrintToServer("强制重启服务器执行");
 
 	UnloadAccelerator();
 
@@ -171,6 +196,8 @@ void UnloadAccelerator()
 		
 		// unload it
 		ServerCommand("sm exts unload %s 0", sAcceleratorExtNum);
+		LogMessage("卸载崩溃扩展成功");
+		PrintToServer("卸载崩溃扩展成功");
 		ServerExecute();
 	}
 	

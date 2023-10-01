@@ -3,13 +3,6 @@
 	"left4dead2"
 	{
 		"Offsets"
-		{
-			"CBaseEntity::m_vecAbsOrigin"
-			{
-				"windows" "716"
-				"linux" "736"
-			}
-			
 		{	
 			"Infected::m_vecNeighbors"
 			{
@@ -31,8 +24,6 @@
 			
 			"MyNextBotPointer"
 			{
-				"windows" "81"
-				"linux" "82"
 				"windows" "71"
 				"linux" "72"
 			}

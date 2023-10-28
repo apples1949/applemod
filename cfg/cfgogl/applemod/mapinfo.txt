@@ -59,7 +59,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"150.000000"
 		"end_dist"			"200.000000"
-		"horde_limit"		"140"
+		"horde_limit"		"210"
 		"tank_ban_flow"
 		{
 			"Event escalators"
@@ -144,7 +144,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"200.000000"
 		"end_dist"			"150.000000"
-		"horde_limit"		"175"
+		"horde_limit"		"245"
 		"tank_ban_flow"
 		{
 			"One way drop"
@@ -372,7 +372,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"0.000000"
 		"end_dist"			"250.000000"
-		"horde_limit"		"140"
+		"horde_limit"		"210"
 		"tank_ban_flow"
 		{
 			"CEDA trailer"

@@ -78,8 +78,10 @@ public void QueryClientConVarCallback(QueryCookie cookie, int client, ConVarQuer
 				CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器自动踢出!服务器不允许开启第三人称!",client);
 			} else {
 				ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
-				CPrintToChat(client, "[{green}!{default}]命令 {olive}c_thirdpersonshoulder{default} 是无效或者被保护的.");
-				CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称!",client);
+				CPrintToChat(client, "[{green}!{default}]命令 {olive}c_thirdpersonshoulder{default} 是无效或者被保护的. 请你在控制台输入 c_thirdpersonshoulder 0 再加入游戏!");
+				PrintHintText(client, "命令 c_thirdpersonshoulder 是无效或者被保护的. 请你在控制台输入 c_thirdpersonshoulder 0 再加入游戏!");
+				PrintCenterText(client, "命令 {olive}c_thirdpersonshoulder 是无效或者被保护的. 请你在控制台输入 c_thirdpersonshoulder 0 再加入游戏!");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 试图开启第三人称被服务器强制旁观!服务器不允许开启第三人称! 请ta在控制台输入 c_thirdpersonshoulder 0 再加入游戏!",client);
 			}
 		}
 		/* If the ConVar was found on the client, but is not set to either "false" or "0",
@@ -92,8 +94,10 @@ public void QueryClientConVarCallback(QueryCookie cookie, int client, ConVarQuer
 				CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称进入被服务器自动踢出!服务器不允许开启第三人称!",client);
 			} else {
 				ChangeClientTeam(client, L4D_TEAM_SPECTATOR);
-				CPrintToChat(client, "[{green}!{default}]服务器不允许开启第三人称， 为了正常游玩，请在控制台输入 {olive}c_thirdpersonshoulder 0{default}.");
-				CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称!",client);
+				CPrintToChat(client, "[{green}!{default}]服务器不允许开启第三人称， 为了正常游玩，请你在控制台输入 {olive}c_thirdpersonshoulder 0 {default}再加入游戏.");
+				PrintHintText(client, "服务器不允许开启第三人称， 为了正常游玩，请你在控制台输入 c_thirdpersonshoulder 0 再加入游戏.");
+				PrintCenterText(client, "服务器不允许开启第三人称， 为了正常游玩，请你在控制台输入 c_thirdpersonshoulder 0 再加入游戏.");
+				CPrintToChatAll("[{green}!{default}]{orange} %N 因处于开启第三人称的状态下进入服务器而被强制旁观!服务器不允许开启第三人称! 请ta在控制台输入 c_thirdpersonshoulder 0 再加入游戏!",client);
 			}
 		}
 	}

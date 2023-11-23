@@ -1,0 +1,68 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"en"		"[{green}!{default}]"
+		"chi"		"[{green}!{default}]"
+	}
+	"Cvar_Invalid"
+	{
+		"en"		"The server does not allow {olive}third-person{default}. To play without restrictions, please join {olive}c_thirdpersonshoulder 0{default} in the console before entering the game!"
+		"chi"		"服务器不允许{olive}第三人称{default}, 为了正常游玩, 请在控制台输入 {olive}c_thirdpersonshoulder 0{default}再加入游戏!"
+	}
+	"Cvar_Invalid_kick"
+	{
+		"en"		"The server does not allow third-person. To play without restrictions, please join c_thirdpersonshoulder 0 in the console and then join the server"
+		"chi"		"服务器不允许第三人称, 为了正常游玩,请在控制台输入 c_thirdpersonshoulder 0 再加入服务器"
+	}
+	"Cvar_Invalid_Unkick"
+	{
+		"en"		"The server does not allow third-person. To play without restrictions, please join c_thirdpersonshoulder 0 in the console and then join the game"
+		"chi"		"服务器不允许第三人称, 为了正常游玩,请在控制台输入 c_thirdpersonshoulder 0 再加入游戏!"
+	}
+	"Cvar_Kick_AllChat"
+	{
+		"en"		"{orange} %N {default}was auto kicked out of the server for entering as a {olive}third-person{default}! The server does not allow {olive}third-person{default}!"
+		"chi"		"{orange} %N {default}因{olive}第三人称{default}进入服务器被自动踢出!服务器不允许{olive}第三人称{default}!"
+	}
+	"Cvar_Unkick_AllChat"
+	{
+		"en"		"{orange} %N {default}is forced to watch the game because he joined the server as a {olive}third-person{default}! The server does not allow {olive}third-person{default}! Please tell him join {olive}c_thirdpersonshoulder 0{default} in the console and then join the game!"
+		"chi"		"{orange} %N {default}因{olive}第三人称{default}进入服务器而被强制旁观!服务器不允许第三人称! 请ta在控制台输入 {olive}c_thirdpersonshoulder 0{default} 再加入游戏!"
+	}
+	"Cvar_Invalid_Allchat"
+	{
+		"en"		"{orange} %N {default}tried to join the game in {olive}third-person{default} and was forced to watch! The server does not allow {olive}third-person{default}! Please tell him join {olive}c_thirdpersonshoulder 0{default} in the console and join the game again!"
+		"chi"		"{orange} %N {default}试图{olive}第三人称{default}进入游戏被强制旁观! 服务器不允许{olive}第三人称{default}! 请ta在控制台输入 {olive}c_thirdpersonshoulder 0 {default}再加入游戏!"
+	}
+	"Cvar_Invalid_kick_Limit"
+	{
+		"en"		"You have been kicked from the server for repeatedly entering the game as a third person. To play normally, please join c_thirdpersonshoulder 0 in the console and join the server again"
+		"chi"		"你因第三人称反复加入游戏被服务器强制踢出, 为了正常游玩,请在控制台输入 c_thirdpersonshoulder 0 再加入服务器"
+	}
+	"Cvar_Kick_AllChat_Limit"
+	{
+		"en"		"{orange} %N {default}was kicked out of the server for repeatedly entering the game in a {olive}third-person{default} perspective! The server does not allow {olive}third-person{default}!"
+		"chi"		"{orange} %N 因{olive}第三人称{default}的情况下反复加入游戏被服务器强制踢出!服务器不允许{olive}第三人称{default}!"
+	}
+	"Cvar_Invalid_Limit"
+	{
+		"en"		"The server does not allow {olive}third-person{default} view. To play without restrictions, please join {olive}c_thirdpersonshoulder 0{default} in the console before entering the game! If you join the game in {olive}third-person{default} view for %d times, you will be auto kicked out!"
+		"chi"		"服务器不允许{olive}第三人称{default}, 为了正常游玩, 请在控制台输入 {olive}c_thirdpersonshoulder 0{default}再加入游戏!若再强行第三人称进入游戏 %d 次, 则将自动踢出!"
+	}
+	"Cvar_Invalid_Unkick_Limit"
+	{
+		"en"		"The server does not allow third-person view. To play without restrictions, please join c_thirdpersonshoulder 0 in the console before entering the game! If you join the game in third-person view for %d times, you will be auto kicked out"
+		"chi"		"服务器不允许第三人称, 为了正常游玩,请在控制台输入 c_thirdpersonshoulder 0 再加入游戏!若再强行第三人称进入游戏 %d 次, 则将自动踢出!"
+	}
+	"Cvar_Unkick_AllChat_Limit"
+	{
+		"en"		"If him joins the game in third-person forcibly %d times, they will be auto kicked!"
+		"chi"		"如果ta再强行第三人称进入游戏 %d 次, 则将自动踢出!"
+	}
+	"Cvar_Unkick_Limit"
+	{
+		"en"		"If you joins the game in third-person forcibly %d times, they will be auto kicked!"
+		"chi"		"若再第三人称进入游戏 %d 次, 则将自动踢出!"
+	}
+}

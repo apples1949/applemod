@@ -44,10 +44,10 @@
 	"have been kicked from server due to inactivity"
 	{
 		"#format"		"{1:s}"
-		"en"	"[AFK] {lightgreen}{1} have been kicked from server due to inactivity."
-		"zho"	"[AFK] {lightgreen}{1} 旁觀閒置太久被踢出伺服器."
-		"chi"	"[AFK] {lightgreen}{1} 因旁观闲置太久而被踢出服务器."
-		"hu"	"[AFK] {lightgreen}{1} Inaktivitás miatt kirúgtak a szerverről."
+		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than 15 seconds."
+		"zho"	"[AFK] {lightgreen}{1} 旁觀閒置太久被踢出."
+		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过15秒而被踢出."
+		"hu"	"[AFK] {lightgreen}{1} Kirúgtak a szerverről, mert több mint 15 másodpercig nem csatlakozott a játékhoz."
 	}	
 	"afkForceSpectate"
 	{
@@ -55,5 +55,18 @@
 		"zho"	"[AFK] 你已被轉換到 {lightgreen}旁觀者"
 		"chi"	"[AFK] 你已被移动到 {lightgreen}旁观"
 	}	
+	"[AFK] Inactivity detected! 5"
+	{
+		"#format"		"{1:s}"
+		"en"	"[AFK] {lightgreen}{1} is moved to the sidelines for no response at the corresponding time!"
+		"zho"	"[AFK] {lightgreen}{1} 在相對應的時間無反應而被移動到旁觀!"
+		"chi"	"[AFK] {lightgreen}{1} 在相对应的时间无反应而被移动到旁观!"
+	}
+	"kickplayer"
+	{
+		"en" 	"[AFK] You have been kicked for spectating and not joining the game for more than 15 seconds!"
+		"zho"	"[AFK] 你因旁觀不補位超過15秒而被踢出!"
+		"chi"	"[AFK] 你因旁观不补位超过15秒而被踢出!"
+	}
 }
 

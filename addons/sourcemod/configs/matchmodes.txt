@@ -6,6 +6,10 @@
 		{
 			"name" "ZoneMod 2.8.7"
 		}
+		"zonemod4k"
+		{
+			"name" "Zonemod 2.8.7 4控"
+		}
 		"zoneretro"
 		{
 			"name" "ZoneMod Retro 2.8.7"

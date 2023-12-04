@@ -1,0 +1,73 @@
+﻿"Phrases"
+{
+	"Usage"
+	{
+		"en"		"{olive}<FakeLag>{orange}Usage: {default}!fakelag <target> <millseconds>"
+	}
+	"Usage_Myfl"
+	{
+		"en"		"{olive}<FakeLag>{orange}Usage: {default}!myfakelag <millseconds>"
+	}
+	"No_Target"
+	{
+		"en"		"{olive}<FakeLag>{default}Unable to find target "
+	}
+	"Not_Ingame"
+	{
+		"en"		"{olive}<FakeLag>{default}Player {orange}%N {default}is not in game yet."
+	}
+	"Fake_Client"
+	{
+		"en"		"{olive}<FakeLag>{default}Player {orange}%N {default}is a fake client and can't be lagged."
+	}
+	"Set_Fakelag"
+	{
+		"#format"	"{1:d},{2:N},{3:N}"
+		"en"		"{olive}<FakeLag>{default}Admin({olive}{2}{default}) set fake lag of {orange}{1}ms {default}on player {teamcolor}{3}"
+	}
+	"Set_MyFakelag"
+	{
+		"#format"	"{1:d},{2:N}"
+		"en"		"{olive}<FakeLag>{default}Player({teamcolor}{2}{default}) set fake lag of {orange}{1}ms {default}for himself"
+	}
+	"InValid_Fakelag"
+	{
+		"en"		"{olive}<FakeLag>{default}The Fake lag you type is invalid, the value should set between {orange}%d {default}and {orange}%d"
+	}
+	"vote_to_start"
+	{
+		"en"		"{olive}<FakeLag> {teamcolor}%N {default}initiate a vote for equalizing pings."
+	}
+	"not_enough_player"
+	{
+		"en"		"{olive}<FakeLag>{default}Need {orange}%d {default}players in teams to start the vote."
+	}
+	"Vote_Tittle"
+	{
+		"en"		"Equalize pings ?"
+	}
+	"already_vote"
+	{
+		"en"		"{olive}<FakeLag>{default}Can't start. There's a vote processing."
+	}
+	"Vote_Pass_Tittle"
+	{
+		"en"		"Equalizing pings"
+	}
+	"eping_notice_player"
+	{
+		"en"		"{olive}<FakeLag>{default}System set fake lag of {orange}%dms {default}on you for equalizing."
+	}
+	"equalize_finish"
+	{
+		"en"		"{olive}<FakeLag>{default}Equalizing finishes. The total difference in variation is {orange}%dms {default}. "
+	}
+	"show_ping"
+	{
+		"en"		"{teamcolor}%N: {default}%.1fms"
+	}
+	"show_ping_fl"
+	{
+		"en"		"{teamcolor}%N: {default}%.1fms ( %.1fms + {orange}%.1fms {default})"
+	}
+}

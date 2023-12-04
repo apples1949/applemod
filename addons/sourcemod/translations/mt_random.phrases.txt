@@ -1,0 +1,7 @@
+"Phrases"
+{
+	"VOTE_DISPLAY_MSG"
+	{
+		"en"			"Start command mix randomly"
+	}
+}

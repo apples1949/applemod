@@ -1,0 +1,72 @@
+// English by StarterX4
+// Traditional Chinese by HarryPotter
+// Simplified Chinese by HarryPotter
+
+"Phrases"
+{
+	"You're spectating. Join any team to play."
+	{
+		"en"	"You're spectating. Join any team to play."
+		"zho"	"按 M 加入遊戲..."
+		"chi"	"按 M 加入游戏..."
+		"hu"	"Néző vagy. Csatlakozz bármelyik csapathoz, hogy játszhass. !join"
+	}	
+	"[AFK] Inactivity detected! 1"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Inactivity detected! You'll be moved to spectators in {1} seconds!"
+		"zho"	"[AFK] 偵測閒置! 你將於 {1} 秒後強制旁觀."
+		"chi"	"[AFK] 检测到闲置! 你将在 {1} 秒后强制旁观."
+		"hu"	"[AFK] Inaktivitás észlelve! {1} másodperc múlva átkerülsz a nézők közé!"
+	}
+	"[AFK] Inactivity detected! 2"
+	{
+		"en"	"[AFK] Inactivity detected! You'll be moved to spectators as soon as your teammates leave the safe area."
+		"zho"	"[AFK] 偵測閒置! 一旦有人離開安全區域你將強制旁觀."
+		"chi"	"[AFK] 检测到闲置! 一旦有人离开安全区域你将强制旁观."
+		"hu"	"[AFK] Inaktivitás észlelve! Amint csapattársaid elhagyják a biztonságos területet, a nézők közé kerülsz."
+	}
+	"[AFK] Inactivity detected! 3"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Detected that you can join the game now! Press M to join the game or you will be kicked off the server in {1} seconds. Don't be a dick!"
+		"zho"	"[AFK] 檢測到目前可以加入對局! 按 M 加入遊戲\n 否則妳將于 {1} 秒後踢出服務器. 別占著茅坑不拉屎!"
+		"chi"	"[AFK] 检测到目前可以加入对局! 按 M 加入游戏\n 否则你将于 {1} 秒后踢出服务器. 别占着茅坑不拉屎!"
+		"hu"	"[AFK] Észleltem, hogy most már csatlakozhatsz a játékhoz! Nyomd meg az M gombot a játékhoz való csatlakozáshoz, különben {1} másodperc múlva kirúgunk a szerverről. Ne légy pöcs!"
+	}
+	"[AFK] Inactivity detected! 4"
+	{
+		"en"	"[AFK] Detected that you are currently available to join the game! Press M to join the game\n Once someone leaves the safe zone you will be kicked off the server. Don't be a dick!"
+		"zho"	"[AFK] 檢測到目前可以加入對局! 按 M 加入遊戲\n 壹旦有人離開安全區域妳將踢出服務器. 別占著茅坑不拉屎!"
+		"chi"	"[AFK] 检测到目前可以加入对局! 按 M 加入游戏\n 一旦有人离开安全区域你将踢出服务器. 别占着茅坑不拉屎!"
+		"hu"	"[AFK] Érzékeltük, hogy jelenleg elérhető vagy a játékhoz való csatlakozáshoz! Nyomd meg az M-et a játékhoz való csatlakozáshoz\n Ha valaki elhagyja a biztonságos zónát, ki leszel rúgva a szerverről. Ne légy szarházi!"
+	}
+	"have been kicked from server due to inactivity"
+	{
+		"#format"		"{1:s}"
+		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than 15 seconds."
+		"zho"	"[AFK] {lightgreen}{1} 旁觀閒置太久被踢出."
+		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过15秒而被踢出."
+		"hu"	"[AFK] {lightgreen}{1} Kirúgtak a szerverről, mert több mint 15 másodpercig nem csatlakozott a játékhoz."
+	}	
+	"afkForceSpectate"
+	{
+		"en"	"[AFK] You has been switched to {lightgreen}Spectators"
+		"zho"	"[AFK] 你已被轉換到 {lightgreen}旁觀者"
+		"chi"	"[AFK] 你已被移动到 {lightgreen}旁观"
+	}	
+	"[AFK] Inactivity detected! 5"
+	{
+		"#format"		"{1:s}"
+		"en"	"[AFK] {lightgreen}{1} is moved to the sidelines for no response at the corresponding time!"
+		"zho"	"[AFK] {lightgreen}{1} 在相對應的時間無反應而被移動到旁觀!"
+		"chi"	"[AFK] {lightgreen}{1} 在相对应的时间无反应而被移动到旁观!"
+	}
+	"kickplayer"
+	{
+		"en" 	"[AFK] You have been kicked for spectating and not joining the game for more than 15 seconds!"
+		"zho"	"[AFK] 你因旁觀不補位超過15秒而被踢出!"
+		"chi"	"[AFK] 你因旁观不补位超过15秒而被踢出!"
+	}
+}
+

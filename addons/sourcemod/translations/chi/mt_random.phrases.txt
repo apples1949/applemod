@@ -1,0 +1,7 @@
+"Phrases"
+{
+	"VOTE_DISPLAY_MSG"
+	{
+		"chi"			"开始进行mix（随机分队）"
+	}
+}

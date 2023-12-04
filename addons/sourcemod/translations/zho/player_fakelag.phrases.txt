@@ -1,0 +1,73 @@
+﻿"Phrases"
+{
+	"Usage"
+	{
+		"zho"		"{olive}<FakeLag>{orange}用法：{default}!fakelag <玩家名> <延遲增值>"
+	}
+	"Usage_Myfl"
+	{
+		"zho"		"{olive}<FakeLag>{orange}用法：{default}!myfakelag <延遲增值>"
+	}
+	"No_Target"
+	{
+		"zho"		"{olive}<FakeLag>{default}未找到目標玩家"
+	}
+	"Not_Ingame"
+	{
+		"zho"		"{olive}<FakeLag>{default}玩家 {orange}%N {default}未加入遊戲。"
+	}
+	"Fake_Client"
+	{
+		"zho"		"{olive}<FakeLag>{default}玩家 {orange}%N {default}不是真實用戶，無法為其增加延遲。"
+	}
+	"Set_Fakelag"
+	{
+		"#format"	"{1:d},{2:N},{3:N}"
+		"zho"		"{olive}<FakeLag>{default}管理员({olive}{2}{default}) 為 {teamcolor}{3} {default}增加 {orange}{1}ms {default}延遲"
+	}
+	"Set_MyFakelag"
+	{
+		"#format"	"{1:d},{2:N}"
+		"zho"		"{olive}<FakeLag>{default}玩家({teamcolor}{2}{default}) 為自己增加 {orange}{1}ms {default}延遲"
+	}
+	"InValid_Fakelag"
+	{
+		"zho"		"{olive}<FakeLag>{default}fakelag設定值超出限定範圍（合理值：{orange}%d {default}- {orange}%d{default}）"
+	}
+	"vote_to_start"
+	{
+		"zho"		"{olive}<FakeLag> {teamcolor}%N {default}發起一個投票（平衡雙方ping值）。"
+	}
+	"not_enough_player"
+	{
+		"zho"		"{olive}<FakeLag> {default}需 {orange}%d {default}名玩家加入隊伍才能發起投票"
+	}
+	"Vote_Tittle"
+	{
+		"zho"		"是否平衡雙方ping值？"
+	}
+	"already_vote"
+	{
+		"zho"		"{olive}<FakeLag>{default}暫無法發起投票，因有投票正在進行"
+	}
+	"Vote_Pass_Tittle"
+	{
+		"zho"		"正在平衡雙方ping值"
+	}
+	"eping_notice_player"
+	{
+		"zho"		"{olive}<FakeLag>{default}系統自動為你設置 {orange}%dms {default}的延遲"
+	}
+	"equalize_finish"
+	{
+		"zho"		"{olive}<FakeLag>{default}平衡pings值完畢，變動的總差值為 {orange}%dms {default}。"
+	}
+	"show_ping"
+	{
+		"zho"		"{teamcolor}%N: {default}%.1fms"
+	}
+	"show_ping_fl"
+	{
+		"zho"		"{teamcolor}%N: {default}%.1fms ( %.1fms + {orange}%.1fms {default})"
+	}
+}

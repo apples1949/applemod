@@ -1,0 +1,11 @@
+"Phrases"
+{
+	"Information"
+	{
+		"chi"	"Hint"
+	}
+	"Move objects"
+	{
+		"chi"	"你可以撞铁来移动铁!"
+	}
+}

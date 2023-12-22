@@ -7,3 +7,5 @@
 所有对抗配置取消了lerp限制  
 
 服务器中文名插件默认关闭 想修改请在sharedplugins.cfg中去除// 并在*\addons\sourcemod\configs\hostname里面的hostname.txt 改为你想要的服务器名 只能一行！不建议太长! 保存格式需要为UTF-8！
+
+别问我怎么用来启动。B站又不是没有教程。自己去找。  

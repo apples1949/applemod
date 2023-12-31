@@ -6,18 +6,12 @@
 #define PLUGIN_NAME				"L4D 1/2 Remove Lobby Reservation"
 #define PLUGIN_AUTHOR			"Downtown1, Anime4000, sorallll, HatsuneImagine"
 #define PLUGIN_DESCRIPTION		"Removes lobby reservation when server is full"
-#define PLUGIN_VERSION			"2.0.7"
+#define PLUGIN_VERSION			"2.0.8"
 #define PLUGIN_URL				"http://forums.alliedmods.net/showthread.php?t=87759"
 
-ConVar
-	g_cvUnreserve,
-	g_cvSvAllowLobbyCo;
-
-bool
-	g_bUnreserve;
-
-char
-	g_sReservation[20];
+ConVar cv_unreserveMode, cv_unreserveTrigger;
+int unreserveMode, unreserveTrigger;
+char reservationID[20];
 
 public Plugin myinfo = {
 	name = PLUGIN_NAME,
@@ -28,12 +22,13 @@ public Plugin myinfo = {
 };
 
 public void OnPluginStart() {
-	CreateConVar("l4d_unreserve_version", PLUGIN_VERSION, "Version of the Lobby Unreserve plugin.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	g_cvUnreserve = CreateConVar("l4d_unreserve_full", "1", "Automatically unreserve server after a full lobby joins", FCVAR_SPONLY|FCVAR_NOTIFY);
-	g_cvSvAllowLobbyCo = FindConVar("sv_allow_lobby_connect_only");
 	SetConVarInt(FindConVar("sv_reservation_timeout"), 10);
+	CreateConVar("l4d_unreserve_version", PLUGIN_VERSION, "Version of the Lobby Unreserve plugin.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	cv_unreserveMode = CreateConVar("l4d_unreserve_mode", "1", "Unreserve Mode.\n0 = Disabled.\n1 = Automatically unreserve when full, and automatically restores the lobby reservation when there is a vacancy.\n2 = Automatically unreserve when full, and no longer automatically restores the lobby reservation.", FCVAR_SPONLY|FCVAR_NOTIFY);
+	cv_unreserveTrigger = CreateConVar("l4d_unreserve_trigger", "0", "Unreserve Trigger. When player number reaches the following number, the server unreserves.\n0 = Versus and Scavenge are 8, other gamemodes are 4.\n>0 = Any user-defined num greater than zero.", FCVAR_SPONLY|FCVAR_NOTIFY);
 
-	g_cvUnreserve.AddChangeHook(CvarChanged);
+	cv_unreserveMode.AddChangeHook(CvarChanged);
+	cv_unreserveTrigger.AddChangeHook(CvarChanged);
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
 	RegAdminCmd("sm_unreserve", cmdUnreserve, ADMFLAG_BAN, "sm_unreserve - manually force removes the lobby reservation");
 	RegAdminCmd("sm_reserve", cmdReserve, ADMFLAG_BAN, "sm_reserve - manually restores the lobby reservation");
@@ -47,33 +42,8 @@ public void OnConfigsExecuted() {
 	GetCvars();
 
 	if (IsServerLobbyFull(-1)) {
-		unreserve();
+		Unreserve();
 	}
-}
-
-Action cmdUnreserve(int client, int args) {
-	unreserve();
-	ReplyToCommand(client, "[UL] Lobby reservation has been removed.");
-	return Plugin_Handled;
-}
-
-Action cmdReserve(int client, int args) {
-	reserve();
-	ReplyToCommand(client, "[UL] Lobby reservation has been restored.");
-	return Plugin_Handled;
-}
-
-Action Timer_Heartbeat(Handle timer) {
-	if (IsServerLobbyFull(-1)) {
-		reserve();
-		CreateTimer(5.0, Timer_Unreserve);
-	}
-	return Plugin_Continue;
-}
-
-Action Timer_Unreserve(Handle timer) {
-	unreserve();
-	return Plugin_Continue;
 }
 
 void CvarChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
@@ -81,12 +51,41 @@ void CvarChanged(ConVar convar, const char[] oldValue, const char[] newValue) {
 }
 
 void GetCvars() {
-	g_bUnreserve = g_cvUnreserve.BoolValue;
-	g_cvSvAllowLobbyCo = FindConVar("sv_allow_lobby_connect_only");
+	unreserveMode = GetConVarInt(cv_unreserveMode);
+	unreserveTrigger = GetConVarInt(cv_unreserveTrigger);
+}
+
+Action cmdUnreserve(int client, int args) {
+	Unreserve();
+	ReplyToCommand(client, "[UL] Lobby reservation has been removed.");
+	return Plugin_Handled;
+}
+
+Action cmdReserve(int client, int args) {
+	Reserve();
+	ReplyToCommand(client, "[UL] Lobby reservation has been restored.");
+	return Plugin_Handled;
+}
+
+Action Timer_Heartbeat(Handle timer) {
+	if (unreserveMode == 0 || unreserveMode == 2)
+		return Plugin_Continue;
+
+	if (IsServerLobbyFull(-1)) {
+		Reserve();
+		CreateTimer(5.0, Timer_Unreserve);
+	}
+
+	return Plugin_Continue;
+}
+
+Action Timer_Unreserve(Handle timer) {
+	Unreserve();
+	return Plugin_Continue;
 }
 
 public void OnClientConnected(int client) {
-	if (!g_bUnreserve)
+	if (unreserveMode == 0)
 		return;
 
 	if (IsFakeClient(client))
@@ -95,11 +94,14 @@ public void OnClientConnected(int client) {
 	if (!IsServerLobbyFull(-1))
 		return;
 
-	unreserve();
+	Unreserve();
 }
 
 //OnClientDisconnect will fired when changing map, issued by gH0sTy at http://docs.sourcemod.net/api/index.php?fastload=show&id=390&
 void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
+	if (unreserveMode == 0 || unreserveMode == 2)
+		return;
+
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (!client)
 		return;
@@ -111,11 +113,11 @@ void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) 
 		return;
 
 	if (IsServerEmpty(client)) {
-		clearSavedLobbyId();
+		ClearSavedLobbyId();
 		return;
 	}
 
-	reserve();
+	Reserve();
 }
 
 bool IsServerEmpty(int client) {
@@ -123,8 +125,15 @@ bool IsServerEmpty(int client) {
 }
 
 bool IsServerLobbyFull(int client) {
-	// int slots = LoadFromAddress(L4D_GetPointer(POINTER_SERVER) + view_as<Address>(L4D_GetServerOS() ? 380 : 384), NumberType_Int32);
-	int slots = L4D_IsVersusMode() || L4D2_IsScavengeMode() ? 8 : 4;
+	int slots;
+
+	if (unreserveTrigger < 0)
+		slots = LoadFromAddress(L4D_GetPointer(POINTER_SERVER) + view_as<Address>(L4D_GetServerOS() ? 380 : 384), NumberType_Int32);
+	else if (unreserveTrigger == 0)
+		slots = L4D_IsVersusMode() || L4D2_IsScavengeMode() ? 8 : 4;
+	else
+		slots = unreserveTrigger;
+
 	return GetConnectedPlayer(client) >= slots;
 }
 
@@ -137,26 +146,27 @@ int GetConnectedPlayer(int client) {
 	return count;
 }
 
-void unreserve() {
+void Unreserve() {
 	if (L4D_LobbyIsReserved())
-		L4D_GetLobbyReservation(g_sReservation, sizeof g_sReservation);
+		L4D_GetLobbyReservation(reservationID, sizeof reservationID);
 
 	L4D_LobbyUnreserve();
 	SetAllowLobby(0);
 }
 
-void reserve() {
-	if (!L4D_LobbyIsReserved() && g_sReservation[0])
-		L4D_SetLobbyReservation(g_sReservation);
+void Reserve() {
+	if (!L4D_LobbyIsReserved() && reservationID[0])
+		L4D_SetLobbyReservation(reservationID);
 
 	// SetAllowLobby(1);
 	ServerCommand("heartbeat");
 }
 
-void clearSavedLobbyId() {
-	g_sReservation = "";
+void ClearSavedLobbyId() {
+	reservationID = "";
+	SetAllowLobby(1);
 }
 
 void SetAllowLobby(int value) {
-	g_cvSvAllowLobbyCo.IntValue = value;
+	SetConVarInt(FindConVar("sv_allow_lobby_connect_only"), value);
 }

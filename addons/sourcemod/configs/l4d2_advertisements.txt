@@ -28,7 +28,7 @@
 	"6"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}想要插件包或者想了解怎么改出你想要的对抗配置？来看看这个:github.com/apples1949/applemod"
+		"text"	"{GREEN}[公告]{TEAM}服务器插件包来自:github.com/apples1949/applemod"
 	}
 	"7"
 	{

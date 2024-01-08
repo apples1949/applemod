@@ -3,7 +3,7 @@
 	"1"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}欢迎加入玩家联机群,QQ群号:{GREEN}620707089"
+		"text"	"{GREEN}[公告]{TEAM}欢迎加入玩家联机群,QQ群号:{GREEN}1053742431"
 	}
 	"2"
 	{
@@ -18,34 +18,29 @@
 	"4"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}如果一直没法匹配来人请!chmatch重启配置或者选择其他配置。第一个进服的玩家进服前请将你steam的下载区域改成上海。否则可能没人来玩呢。"
+		"text"	"{GREEN}[公告]{TEAM}新手请观看VT CHINA再游玩对抗 否则别怪队友对你不友好"
 	}
 	"5"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}新手请观看VT CHINA再游玩对抗 否则别怪队友对你不友好"
+		"text"	"{GREEN}[公告]{TEAM}想要插件包或者想了解怎么改出你想要的对抗配置？来看看这个:github.com/apples1949/applemod"
 	}
 	"6"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}服务器插件包来自:github.com/apples1949/applemod"
+		"text"	"{GREEN}[公告]{TEAM}AI特感已经加强过了。但生还加强特感没法玩。所以建议生还齐了再出门开始游戏。人没齐生还玩家出门被AI特感控了那活该。那么喜欢跑图能不能去玩单机？"
 	}
 	"7"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]{TEAM}AI特感已经加强过了。但生还加强特感没法玩。所以建议生还齐了再出门开始游戏。人没齐生还玩家出门被AI特感控了那活该。那么喜欢跑图能不能去玩单机？"
+		"text"	"{GREEN}[公告]死亡中心和暴风骤雨第一关不小心拿了枪可以输入{GREEN}!drop{TEAM}扔武器哦"
 	}
 	"8"
 	{
 		"type"	"S"
-		"text"	"{GREEN}[公告]死亡中心和暴风骤雨第一关不小心拿了枪可以输入{GREEN}!drop{TEAM}扔武器哦"
-	}
-	"9"
-	{
-		"type"	"S"
 		"text"	"{GREEN}[公告]新手不会玩克可以看左侧菜单栏按数字键给你的队友玩哦"
 	}
-	"10"
+	"9"
 	{
 		"type"	"S"
 		"text"	"{GREEN}[公告]队友很括噪？输入!hear可以屏蔽队友语音哦 或者你也可以选择!mute来选择投票禁言禁音队友哦 旁观想听到特感队伍声音？也可以试试!hear哦"

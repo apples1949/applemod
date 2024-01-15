@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 本人修改的zm对抗插件包  
 
 <<<<<<< HEAD
@@ -116,15 +115,3 @@ This project is **Actively Developed**.
 **NOTE:** If your work is being used and I forgot to credit you, my sincere apologies.  
 I've done my best to include everyone on the list, simply create an issue and name the plugin/extension you've made/contributed to and I'll make sure to credit you properly.
 >>>>>>> 6865b5b3bd46fde31334caf022614fa318ff5064
-=======
-我自己的药改包配置！说不定win可以开（心虚）  
-
-这个插件包含有本人大部分的私人设置！如服务器名、在匹配环境使用！ 需要进行修改才能使用。  
-虽然不太可能，但只是用来打内战的请使用这个：https://github.com/apples1949/applemod/tree/zonemodedi  
-
-需要注意的是 我服务器的 闲置检测插件、第三人称检测插件和AI特感传送插件由于个人原因不能发这里 所以请注意第三人称插件需要恢复成zm自带的插件 对抗默认禁第三人称 理论上不用第三人称检测也没关系  
-
-参考了很多前辈的配置 在此真心感谢！  
-
-另外，承认用了别人的东西很难吗？
->>>>>>> 3df977d09e6559897997f2762018f476fb2b6ba3

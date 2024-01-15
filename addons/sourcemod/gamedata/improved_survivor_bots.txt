@@ -1,0 +1,506 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Addresses"
+		{
+			"CDirector"
+			{
+				"linux"
+				{
+					"signature"	"TheDirector"
+				}
+
+				"windows"
+				{
+					"signature"	"TheDirector"
+					"read"	"12"
+				}
+				
+				"read" 	"0"
+			}
+		}
+
+		"Offsets"
+		{
+			// Vtable indices
+			"Action<Actor>::OnStart"
+			{
+				"linux"		"44"
+				"windows"	"43"
+			}
+
+			"Action<Actor>::Update"
+			{
+				"linux"		"45"
+				"windows"	"44"
+			}
+
+			"Action<Actor>::OnEnd"
+			{
+				"linux"		"46"
+				"windows"	"45"
+			}
+
+			"Action<Actor>::OnSuspend"
+			{
+				"linux"		"47"
+				"windows"	"46"
+			}
+
+			"Action<Actor>::InitialContainedAction"
+			{
+				"linux"		"49"
+				"windows"	"48"
+			}
+
+			"Action<Actor>::OnIgnite"
+			{
+				"linux"		"61"
+				"windows"	"60"
+			}
+
+			"Action<Actor>::OnInjured"
+			{
+				"linux"		"62"
+				"windows"	"61"
+			}
+
+			"Action<Actor>::OnEnteredSpit"
+			{
+				"linux"		"76"
+				"windows"	"75"
+			}
+
+			"Action<Actor>::OnCommandApproach"
+			{
+				"linux"		"80"
+				"windows"	"80"
+			}
+
+			"SurvivorUseObject::ShouldGiveUp"
+			{
+				"linux"		"89"
+				"windows" 	"88"
+			}
+
+			"SurvivorUseObject::OnStartUse"
+			{
+				"linux"		"90"
+				"windows"	"89"
+			}
+
+			"CBaseCombatCharacter::GetClass"
+			{
+				"linux"		"337"
+				"windows"	"336"
+			}
+
+			"CBaseCombatCharacter::IsIT"
+			{
+				"linux"		"340"
+				"windows"	"339"
+			}
+
+			"CCSPlayer::GetHealthBuffer"
+			{
+				"linux"		"505"
+				"windows"	"504"
+			}
+
+			"IBody::GetSolidMask"
+			{
+				"linux"		"76"
+				"windows"	"75"
+			}
+
+			"ILocomotion::ClimbUpToLedge"
+			{
+				"linux"		"47"
+				"windows"	"46"
+			}
+
+			"ILocomotion::IsRunning"
+			{
+				"linux"		"57"
+				"windows"	"56"
+			}
+
+			"IIntention::OnInjured"
+			{
+				"linux"		"17"
+				"windows"	"16"
+			}
+
+			"IIntention::Reset"
+			{
+				"linux"		"41"
+				"windows"	"40"
+			}
+
+			"CBasePlayer::OnNavAreaChanged"
+			{
+				"linux"		"335"
+				"windows"	"334"
+			}
+
+			// Offsets
+			"SurvivorBot::m_teamSituation"
+			{
+				"linux"		"35692"
+				"windows"	"35720"
+			}
+
+			"SurvivorBot::m_timeSinceLastSwitchedWeaponTimer"
+			{
+				"linux"		"109460"
+				"windows"	"109488"
+			}
+
+			"CBaseCombatCharacter::m_lastKnownArea"
+			{
+				"linux"		"6676"
+				"windows"	"6676"
+			}
+
+			"Witch::m_hHarasser"
+			{
+				"linux"		"7592"
+				"windows"	"7596"
+			}
+
+			"NextBotPlayer<CTerrorPlayer>::m_inputButtons"
+			{
+				"linux"		"16988"
+				"windows"	"17012"
+			}
+
+			"NextBotPlayer<CTerrorPlayer>::m_fireButtonTimer"
+			{
+				"linux"		"16996"
+				"windows"	"17020"
+			}
+
+			"NextBotPlayer<CTerrorPlayer>::m_crouchButtonTimer"
+			{
+				"linux"		"17104"
+				"windows"	"17128"
+			}
+
+			"NextBotPlayer<CTerrorPlayer>::m_meleeButtonTimer"
+			{
+				"linux"		"17016"
+				"windows"	"17032"
+			}
+
+			"NextBotPlayer<CTerrorPlayer>::m_nextBotPointer"
+			{
+				"linux"		"16424"
+				"windows"	"16448"
+			}
+
+			"SurvivorTeamSituation::m_me"
+			{
+				"linux"		"4"
+				"windows"	"4"
+			}
+
+			"SurvivorTeamSituation::m_friendInTrouble"
+			{
+				"linux"		"8"
+				"windows"	"8"
+			}
+
+			"SurvivorTeamSituation::m_humanFriendInTrouble"
+			{
+				"linux"		"16"
+				"windows"	"16"
+			}
+
+			"SurvivorTeamSituation::m_humanLeader"
+			{
+				"linux"		"48"
+				"windows"	"48"
+			}
+
+			"SurvivorTeamSituation::m_tonguedFriend"
+			{
+				"linux"		"55040"
+				"windows"	"55040"
+			}
+
+			"SurvivorTeamSituation::m_pouncedFriend"
+			{
+				"linux"		"55044"
+				"windows"	"55044"
+			}
+
+			"SurvivorTeamSituation::m_pummeledFriend"
+			{
+				"linux"		"55048"
+				"windows"	"55048"
+			}
+
+			"SurvivorTeamSituation::m_jockeyedFriend"
+			{
+				"linux"		"55052"
+				"windows"	"55052"
+			}
+
+			"CDirector::m_iTankCount"
+			{
+				"linux"		"256"
+				"windows"	"256"
+			}
+
+			"CNavArea::m_center"
+			{
+				"linux"		"44"
+				"windows"	"44"
+			}
+
+			"CNavArea::m_attributeFlags"
+			{
+				"linux"		"84"
+				"windows"	"84"
+			}
+		}
+
+		"Signatures"
+		{
+			"PathFollower::Update"
+			{
+				"library"	"server"
+				"linux"		"@_ZN12PathFollower6UpdateEP8INextBot"
+				// xref to string "PathFollower::Update"
+				"windows"	"\x55\x8B\xEC\x83\xEC\x70\xA1\x2A\x2A\x2A\x2A\x53\x56\x33"
+				// 55 8B EC 83 EC 70 A1 ? ? ? ? 53 56 33
+			}
+
+			"PathFollower::Climbing"
+			{
+				"library"	"server"
+				"linux"		"@_ZN12PathFollower8ClimbingEP8INextBotPKN4Path7SegmentERK6VectorS8_f"
+				// xref to string "PathFollower::Climbing"
+				"windows"	"\x53\x8B\xDC\x83\xEC\x08\x83\xE4\xF0\x83\xC4\x04\x55\x8B\x6B\x04\x89\x6C\x24\x04\x8B\xEC\x81\xEC\x2A\x2A\x00\x00\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x8B\x43\x10\x89"
+				// 53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 81 EC ? ? 00 00 A1 ? ? ? ? 33 C5 89 45 FC 8B 43 10 89
+			}
+
+			"NextBotTraversableTraceFilter::ShouldHitEntity"
+			{
+				"library"	"server"
+				"linux"		"@_ZN29NextBotTraversableTraceFilter15ShouldHitEntityEP13IHandleEntityi"
+				// xref to string "HulkZombie.StartLedgeClimb", second function and look for:
+				// movss	xmm1, ds:flt_105C3580
+				// movss	xmm0, [ebp+var_1C]
+				// comiss	xmm1, xmm0
+				// mov		[ebp+var_48], offset off_106C6090
+				"windows"	"\x55\x8B\xEC\x8B\x45\x0C\x53\x8B\x5D\x08\x57\x50\x53\x8B\xF9\xE8\x2A\x2A\xE1\xFF"
+				// 55 8B EC 8B 45 0C 53 8B 5D 08 57 50 53 8B F9 E8 ? ? E1 FF
+			}
+
+			"SurvivorBot::UpdateTeamSituation"
+			{
+				"library"	"server"
+				"linux"		"@_ZN11SurvivorBot19UpdateTeamSituationEv"
+				// xref to string "SurvivorBot::Update" and look for:
+				// call		sub_10381700
+				// add		esp, 4
+				// cmp		byte ptr [esi+16B90h], 0
+				"windows"	"\x55\x8B\xEC\x53\x8B\x5D\x08\x8B\x03\x8B\x10\x57\x8B\xCB\xFF\xD2"
+				// 55 8B EC 53 8B 5D 08 8B 03 8B 10 57 8B CB FF D2
+			}
+
+			"SurvivorBot::SaveFriendsInImmediateTrouble"
+			{
+				"library"	"server"
+				"linux"		"@_ZN11SurvivorBot29SaveFriendsInImmediateTroubleEP6ActionIS_E"
+				// xref to string "%3.2f: %s: SaveFriendsInImmediateTrouble: Not available at the moment\n"
+				"windows"	"\x55\x8B\xEC\x81\xEC\x28\x01\x00\x00\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x53\x56\x8B\x75\x08"
+				// 55 8B EC 81 EC 28 01 00 00 A1 ? ? ? ? 33 C5 89 45 FC 53 56 8B 75 08
+			}
+
+			"SurvivorBot::GetEscortRange"
+			{
+				"library"	"server"
+				"linux"		"@_ZN11SurvivorBot14GetEscortRangeEv"
+				// xref to string "SurvivorBotHasRegroupedWithTeam", sixth call above string
+				"windows"	"\xE8\x2B\xEF\xF4\xFF"
+				// E8 2B EF F4 FF
+			}
+
+			"SurvivorBot::IsReachable_Player"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK11SurvivorBot11IsReachableEP13CTerrorPlayer"
+				// xref to string "SurvivorBotMoveToSavePouncedFriend", 4th call above string
+				// call		sub_1038DC70
+				// test		al, al
+				// jz		loc_1038E6F5
+				"windows"	"\x55\x8B\xEC\x83\xEC\x10\x56\x8B\x75\x08\x57\x8B\xF9\x89\x7D\xFC\x85\xF6\x0F\x84"
+				// 55 8B EC 83 EC 10 56 8B 75 08 57 8B F9 89 7D FC 85 F6 0F 84
+			}
+
+			"SurvivorBot::ScavengeNearbyItems"
+			{
+				"library"	"server"
+				"linux"		"@_ZN11SurvivorBot19ScavengeNearbyItemsEP6ActionIS_E"
+				// xref to string "Scavenging something", second function
+				"windows"	"\x55\x8B\xEC\x83\xEC\x08\x57\x8B\xF9\xE8"
+				// 55 8B EC 83 EC 08 57 8B F9 E8
+			}
+
+			"SurvivorBotPathCost::operator()"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK19SurvivorBotPathCostclEP8CNavAreaS1_PK10CNavLadderPK13CFuncElevatorf"
+				// xref to string "Call brian! Reachability neighbor cache screwed! from: %d (cached neighbor %d) to: %d (cached neighbor %d)\n"
+				"windows"	"\x53\x8B\xDC\x83\xEC\x08\x83\xE4\xF0\x83\xC4\x04\x55\x8B\x6B\x04\x89\x6C\x24\x04\x8B\xEC\x83\xEC\x38\x56\x8B\xF1\x8B\x4E\x08"
+				// 53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 83 EC 38 56 8B F1 8B 4E 08
+			}
+
+			"NavAreaTravelDistance<ShortestPathCost>"
+			{
+				"library"	"server"
+				"linux"		"@_Z21NavAreaTravelDistanceI16ShortestPathCostEfP8CNavAreaS2_RT_f"
+				// xref to string "Travel distance is %3.2f\n", fourth call from top
+				"windows"	"\x53\x8B\xDC\x83\xEC\x08\x83\xE4\xF0\x83\xC4\x04\x55\x8B\x6B\x04\x89\x6C\x24\x04\x8B\xEC\x8B\x43\x08\x83\xEC\x2C"
+				// 53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 8B 43 08 83 EC 2C
+			}
+
+			"SurvivorIntention::IsImmediatelyDangerousTo"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK17SurvivorIntention24IsImmediatelyDangerousToEPK13CTerrorPlayerP20CBaseCombatCharacter"
+				// xref to string "%3.2f: %s giving up, object is UNREACHABLE\n" and look for:
+				// call		sub_103953A0
+				// test		al, al
+				// jnz		loc_1039D487
+				"windows"	"\x55\x8B\xEC\x56\x8B\x75\x0C\x57\x8B\xF9\x85\xF6\x0F\x84\xCF\x00\x00\x00"
+				// 55 8B EC 56 8B 75 0C 57 8B F9 85 F6 0F 84 CF 00 00 00
+			}
+
+			"CTerrorPlayer::GetTimeSinceAttackedByEnemy"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK13CTerrorPlayer27GetTimeSinceAttackedByEnemyEv"
+				// call		sub_102FE520
+				// fld		ds:dword_105CE910
+				// fcomip	st, st(1)
+				// xref to string "SurvivorBotGiveUpHealingFriendWhoSomeoneElseIsHealing", tenth call from top:
+				"windows"	"\x55\x8B\xEC\x51\xF3\x0F\x10\x81\x94\x31\x00\x00\x0F\x2F\x05\x2A\x2A\x2A\x2A\x56\x8D\xB1\x90\x31\x00\x00"
+				// 55 8B EC 51 F3 0F 10 81 94 31 00 00 0F 2F 05 ? ? ? ? 56 8D B1 90 31 00 00
+			}
+
+			"CTerrorPlayer::StopRevivingSomeone"
+			{
+				"library"	"server"
+				"linux"		"@_ZN13CTerrorPlayer19StopRevivingSomeoneEb"
+				// xref to string "revive_end"
+				"windows"	"\x55\x8B\xEC\xD9\xEE\x83\xEC\x30\x53\x56\x57\x51\xD9\x1C\x24"
+				// 55 8B EC D9 EE 83 EC 30 53 56 57 51 D9 1C 24
+			}
+
+			"SurvivorUseObject::ShouldGiveUp"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK17SurvivorUseObject12ShouldGiveUpEP11SurvivorBot"
+				// dump vtable of SurvivorUseObject class
+				// index is 88
+				"windows"	"\x55\x8B\xEC\x53\x8B\x5D\x08\x56\x57\x8B\xF9\x8B\xCB"
+				// 55 8B EC 53 8B 5D 08 56 57 8B F9 8B CB
+			}
+
+			"SurvivorUseObject::OnStartUse"
+			{
+				"library"	"server"
+				"linux"		"@_ZN17SurvivorUseObject10OnStartUseEP11SurvivorBot"
+				// xref to string "%3.2f: %s giving up, object is UNREACHABLE\n", second function and dump vtable
+				// index is 89
+				"windows"	"\x55\x8B\xEC\x51\x56\x57\x8D\x79\x38\x8B\xCF\xE8\x2A\x2A\xE6\xFF"
+				// 55 8B EC 51 56 57 8D 79 38 8B CF E8 ? ? E6 FF
+			}
+
+			"SurvivorAttack::EquipBestWeapon"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK14SurvivorAttack15EquipBestWeaponEP11SurvivorBot"
+				// i've had vtable dumped, that's how i found it
+				"windows"	"\x55\x8B\xEC\x83\xEC\x10\x56\x8B\x75\x08\x89\x4D\xF0"
+				// 55 8B EC 83 EC 10 56 8B 75 08 89 4D F0
+			}
+
+			"SurvivorAttack::SelectTarget"
+			{
+				"library"	"server"
+				"linux"		"@_ZN14SurvivorAttack12SelectTargetEP11SurvivorBot"
+				// xref to string "SurvivorAttack::FireWeapon", ninth call from top
+				"windows"	"\x55\x8B\xEC\x83\xEC\x1C\x53\x56\x8B\x75\x08\x8B\x06"
+				// 55 8B EC 83 EC 1C 53 56 8B 75 08 8B 06
+			}
+
+			"CInferno::IsTouching_VVV"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK8CInferno10IsTouchingERK6VectorS2_PS0_"
+				// xref to string "Inferno.Fire.Ignite", second function
+				// look for second call from top
+				"windows"	"\x55\x8B\xEC\x83\xEC\x20\x83\xB9\x2A\x2A\x00\x00"
+				// 55 8B EC 83 EC 20 83 B9 ? ? 00 00
+			}
+
+			// SurvivorLiberateBesiegedFriend::Update
+			"IsBeingHeroic condition"
+			{
+				"library"	"server"
+				"linux"		"\x0F\x84\x2A\x2A\xFF\xFF\x80\x7D\xC8\x00\x0F\x85"
+				// 0F 84 ? ? FF FF 80 7D C8 00 0F 85
+
+				// xref to string "Want to shoot the smoker holding my friend!", 8th call above string
+				"windows"	"\xE8\x2A\x2A\xF4\xFF\x84\xC0\x74\x65\x80\x7D\xFF\x00"
+				// E8 ? ? F4 FF 84 C0 74 65 80 7D FF 00
+			}
+
+			// TODO: Replace with detour on linux
+			// SurvivorAttack::FireWeapon
+			"FireWeapon HasPlayerControlledZombies condition"
+			{
+				"library"	"server"
+				"linux"		"\xE8\x2A\x2A\x2A\xFF\x84\xC0\x74\x36\x8B\x83\x2A\x2A\x00\x00\x8B"
+				// E8 ? ? ? FF 84 C0 74 36 8B 83 ? ? 00 00 8B
+
+				// xref to string "SurvivorAttack::FireWeapon", 7th call from top
+				// call		sub_102D51F0
+				// test		al, al
+				// jz		short loc_103AEF9C
+				"windows"	"\xE8\x2A\x2A\xF2\xFF\x84\xC0\x74\x0F\x8B\xCF"
+				// E8 ? ? F2 FF 84 C0 74 0F 8B CF
+			}
+
+			// TODO: Replace with detour on linux
+			// SurvivorIntention::OnSound
+			"OnSound HasPlayerControlledZombies condition"
+			{
+				"library"	"server"
+				"linux"		"\xE8\x2A\x2A\x2A\xFF\x84\xC0\x74\x4E\x8B\x03"
+				// E8 ? ? ? FF 84 C0 74 4E 8B 03
+
+				// xref to string "sb_far_hearing_range", second call from top:
+				// call		sub_102D51F0
+				// test		al, al
+				// jnz		loc_1039C939
+				"windows"	"\x0F\x85\x58\x01\x00\x00\x8B\xCF\xE8\x08\x6C\xCB\xFF\x83"
+				// 0F 85 58 01 00 00 8B CF E8 ? ? CB FF 83
+			}
+
+			"TheDirector"
+			{
+				"library"	"server"
+				"linux"		"@TheDirector"
+				// xref to string "game_sounds_music.txt", first function
+				"windows"	"\x55\x8B\xEC\x83\xEC\x1C\x56\x57\x8B\xF9\x8B\x0D\x2A\x2A\x2A\x2A\xE8\x2A\x2A\xFD\xFF\x84"
+				// 55 8B EC 83 EC 1C 56 57 8B F9 8B 0D ? ? ? ? E8 ? ? FD FF 84
+			}
+		}
+	}
+}

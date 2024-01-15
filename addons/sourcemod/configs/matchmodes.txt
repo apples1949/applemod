@@ -8,7 +8,7 @@
 		}
 		"zonemod4k"
 		{
-			"name" "Zonemod 2.8.7 4控"
+			"name" "Zonemod 2.8.8 4控"
 		}
 		"zoneretro"
 		{

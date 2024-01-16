@@ -42,7 +42,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"250.000000"
 		"end_dist"			"200.000000"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 		"tank_ban_flow"
 		{
 			"One way drop"
@@ -59,7 +59,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"150.000000"
 		"end_dist"			"200.000000"
-		"horde_limit"		"210"
+		"horde_limit"		"150"
 		"tank_ban_flow"
 		{
 			"Event escalators"
@@ -114,7 +114,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"0.000000"
 		"end_dist"			"150.000000"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 		"tank_ban_flow"
 		{
 			"Alley choke to up top"
@@ -144,7 +144,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"200.000000"
 		"end_dist"			"150.000000"
-		"horde_limit"		"245"
+		"horde_limit"		"240"
 		"tank_ban_flow"
 		{
 			"One way drop"
@@ -175,7 +175,7 @@
 		"start_extra_dist"	"150.000000"
 		"end_dist"			"250.000000"
 		"max_distance"		"500"
-		"horde_limit"		"140"
+		"horde_limit"		"150"
 		"witch_ban_flow"
 		{
 			"Event 2nd stage"
@@ -372,7 +372,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"0.000000"
 		"end_dist"			"250.000000"
-		"horde_limit"		"210"
+		"horde_limit"		"180"
 		"tank_ban_flow"
 		{
 			"CEDA trailer"
@@ -460,7 +460,7 @@
 		"start_extra_dist"	"0.000000"
 		"end_dist"			"50.000000"
 		"max_distance"		"700"
-		"horde_limit"		"175"
+		"horde_limit"		"150"
 		"tank_ban_flow"
 		{
 			"Sewer Drop"
@@ -705,7 +705,7 @@
 		"start_extra_dist"	"307.155029"
 		"end_point"			"1309.379883 -5479.276367 -26.821182"
 		"end_dist"			"324.451355"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 		"tank_ban_flow"
 		{
 			"Start of event"
@@ -820,7 +820,7 @@
 		"end_point"			"7754.335938 -11443.834961 440.031250"
 		"end_dist"			"264.020966"
 		"max_distance"		"500"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 		"tank_ban_flow"
 		{
 			"Saferoom tank"
@@ -843,7 +843,7 @@
 		"end_point"			"10398.775391 -310.353424 2.031253"
 		"end_dist"			"316.505157"
 		"max_distance"		"400"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 	}
 	"c12m5_cornfield"
 	{
@@ -889,7 +889,7 @@
 		"start_extra_dist"	"604.901245"
 		"end_point"			"470.932892 8823.397461 -368.968750"
 		"end_dist"			"324.996063"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 		"tank_ban_flow"
 		{
 			"Event"
@@ -976,7 +976,7 @@
 		"start_extra_dist"	"604.716553"
 		"end_point"			"-9823.082031 -8162.369141 -220.767731"
 		"end_dist"			"487.969635"
-		"horde_limit"		"175"
+		"horde_limit"		"180"
 	}
 	"c5m3_darkcemetery"
 	{
@@ -1047,7 +1047,7 @@
 		"start_extra_dist"	"285.327118"
 		"end_point"			"-4824.578125 -7661.144043 566.031250"
 		"end_dist"			"393.489532"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 		"tank_ban_flow"
 		{
 			"Event"
@@ -1269,7 +1269,7 @@
 		"end_point"			"9135.749023 5400.031250 -109.017723"
 		"end_dist"			"225.499374"
 		"max_distance"		"700"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 		"tank_ban_flow"
 		{
 			"1"
@@ -1449,7 +1449,7 @@
 		"start_extra_dist"	"354.287750"
 		"end_point"			"-2980.672607 -7486.620605 -191.968750"
 		"end_dist"			"267.900513"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 	}
 	"hf03_themansion"
 	{
@@ -1752,7 +1752,7 @@
 		"end_point"			"-1100.709839 -8383.968750 -242.025330"
 		"end_dist"			"236.288925"
 		"max_distance"		"600"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 	}
 	"maria_cristina"
 	{
@@ -1762,7 +1762,7 @@
 		"end_point"			"-8628.766602 -7242.274902 576.063660"
 		"end_dist"			"278.292633"
 		"max_distance"		"600"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 	}
 	"mnac"
 	{
@@ -2045,7 +2045,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"350.000000"
 		"end_dist"			"50.000000"
-		"horde_limit"		"105"
+		"horde_limit"		"90"
 	}
 	"l4d2_diescraper3_mid_361"
 	{
@@ -2054,7 +2054,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"200.000000"
 		"end_dist"			"50.000000"
-		"horde_limit"		"105"
+		"horde_limit"		"60"
 	}
 	"l4d2_diescraper4_top_361"
 	{
@@ -2147,7 +2147,7 @@
 		"start_extra_dist"	"125.000000"
 		"end_dist"			"75.000000"
 		"max_distance"		"600"
-		"horde_limit"		"70"
+		"horde_limit"		"60"
 		"tank_ban_flow"
 		{
 			"1"
@@ -2165,7 +2165,7 @@
 		"start_extra_dist"	"350.000000"
 		"end_dist"			"50.000000"
 		"max_distance"		"500"
-		"horde_limit"		"70"
+		"horde_limit"		"60"
 		"tank_ban_flow"
 		{
 			"1"
@@ -2307,7 +2307,7 @@
 	}
 	"l4d2_ff04_plant"
 	{
-		"horde_limit"		"225"
+		"horde_limit"		"200"
 		"tank_ban_flow"
 		{
 			"1"
@@ -2370,7 +2370,7 @@
 		"start_dist"		"100.000000"
 		"start_extra_dist"	"0.000000"
 		"end_dist"			"300.000000"
-		"horde_limit"		"140"
+		"horde_limit"		"120"
 	}
 	"dkr_m3_tunneloflove"
 	{
@@ -2379,7 +2379,7 @@
 		"start_dist"		"100.000000"
 		"start_extra_dist"	"300.000000"
 		"end_dist"			"200.000000"
-		"horde_limit"		"280"
+		"horde_limit"		"240"
 	}
 	"dkr_m4_ferris"
 	{
@@ -2388,7 +2388,7 @@
 		"start_dist"		"100.000000"
 		"start_extra_dist"	"300.000000"
 		"end_dist"			"500.000000"
-		"horde_limit"		"175"
+		"horde_limit"		"150"
 	}
 	"dkr_m5_stadium"
 	{
@@ -2579,11 +2579,11 @@
 			"early"
 			{
 				"min" "0"
-				"max" "38"
+				"max" "33"
 			}
 			"late"
 			{
-				"min" "66"
+				"min" "70"
 				"max" "100"
 			}
 		}

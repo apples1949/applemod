@@ -4,6 +4,9 @@
 	{
 		"zonemod"
 		{
+<<<<<<< HEAD
+			"name" "ZoneMod 2.8.9 混野匹配"
+=======
 			"name" "ZoneMod 2.8.9"
 		}
 		"zonemod4k"
@@ -21,11 +24,19 @@
 		"zm2v2"
 		{
 			"name" "2v2 ZoneMod"
+>>>>>>> zonemodedi
 		}
 		"zm1v1"
 		{
 			"name" "1v1 ZoneMod"
 		}
+<<<<<<< HEAD
+		"zonemod4k"
+		{
+			"name" "Zonemod 2.8.9 非匹配4控"
+		}
+=======
+>>>>>>> zonemodedi
 	}
 	"NeoMod Configs"
 	{
@@ -111,6 +122,8 @@
 	}
 	"Hunters Configs"
 	{
+<<<<<<< HEAD
+=======
 		"zonehunters"
 		{
 			"name" "ZoneHunters 2.8.9"
@@ -123,6 +136,7 @@
 		{
 			"name" "2v2 ZoneHunters"
 		}
+>>>>>>> zonemodedi
 		"zh1v1"
 		{
 			"name" "1v1 ZoneHunters"

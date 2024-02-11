@@ -1,1 +1,0 @@
-// The following maps will be treated as finale maps in Coop mode. Example: c1m1_hotel. Do not delete this line!

@@ -135,7 +135,7 @@ stock GiveWitchBonus()
     new iBonus = GetConVarInt(g_hCvarBonus);
     if(GetConVarBool(g_hCvarPrint) == true)
 	{
-        PrintToChatAll("\x01Killing the witch has awarded: \x05%d \x01points!", iBonus);
+        PrintToChatAll("\x01击杀 Witch 奖励: \x05%d \x01分!", iBonus);
     }
     PBONUS_AddRoundBonus(iBonus, true);
 }

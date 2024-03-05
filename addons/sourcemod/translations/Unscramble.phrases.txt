@@ -1,0 +1,15 @@
+"Phrases"
+{
+	"Voting is not enabled until unscramble is completed"
+	{
+		"en"		"Voting is not enabled until unscramble is completed"
+		"zho"		"隊伍載入完畢之前不准投票"
+		"chi"		"全部玩家加载完毕前不允许投票"
+	}
+	"Unscramble completed"
+	{
+		"en"		"Unscramble program is over! Now you can switch teams normally!"
+		"zho"		"Unscramble 程序結束! 現在妳可以正常切換隊伍了!"
+		"chi"		"Unscramble 程序结束! 现在你可以正常切换队伍了!"
+	}
+}

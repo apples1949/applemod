@@ -288,7 +288,7 @@ void DisplayGameTime(int gamer, int receiver, int type_message, int preferOverri
 {
 	if (preferOverride == -1)
 		preferOverride = iPrefer;
-	if (timeStatsRecorded[gamer] / 3600 <= iKickTime || timeProfilePlayed[gamer] / 60 <= iKickTime)
+	if ((timeStatsRecorded[gamer] / 3600 <= iKickTime && timeStatsRecorded[gamer]!=0) || (timeProfilePlayed[gamer] / 60 <= iKickTime && timeProfilePlayed[gamer] !=0))
 	{
 		KickClient(gamer, "%t", "KickPlayer", iKickTime);
 	}

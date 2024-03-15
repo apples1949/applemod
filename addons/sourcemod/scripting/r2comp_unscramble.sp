@@ -31,7 +31,6 @@
 
 #include <sourcemod>
 #include <sdktools>
-#include <multicolors>
 #undef REQUIRE_PLUGIN
 #include <l4d_lib>
 
@@ -52,7 +51,7 @@ static	Handle:g_hTrine, Handle:g_fwdOnUnscrambleEnd, /*bool:g_bCvarUnlocker,*/ b
 public Plugin myinfo =
 {
 	name = "[L4D & L4D2] Unscramble (R2CompMod Standalone)",
-	author = "raziEiL [disawar1]",
+	author = "raziEiL [disawar1], HarryPotter",
 	description = "Puts players on the right team after map/campaign change and provides API.",
 	version = PLUGIN_VERSION,
 	url = "http://steamcommunity.com/id/raziEiL"
@@ -85,11 +84,7 @@ public OnPluginStart()
 	cVar = CreateConVar("rotoblin_unscramble_notify", "1", "0=Off, 1=Prints a notification to chat when unscramble is completed (lets spectators know when they can join a team).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_bCvarNotify = GetConVarBool(cVar);
 	HookConVarChange(cVar, OnCvarChange_Notify);
-/*
-	cVar = CreateConVar("rotoblin_choosemenu_unlocker", "1", "0=Off, 1=Allows spectator/infected players to join the survivor team even if the survivor bot is dead (through M button).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_bCvarUnlocker = GetConVarBool(cVar);
-	HookConVarChange(cVar, OnCvarChange_Unlocker);
-*/
+
 	cVar = CreateConVar("rotoblin_unscramble_novotes", "1", "0=Off, 1=Prevents calling votes until unscramble completes.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_bCvarNoVotes = GetConVarBool(cVar);
 	HookConVarChange(cVar, OnCvarChange_NoVotes);
@@ -106,9 +101,6 @@ public OnPluginStart()
 	g_bCvarEnabled = GetConVarBool(cVar);
 	UM_OnPluginEnabled();
 	HookConVarChange(cVar, OnCvarChange_Enabled);
-
-	//AutoExecConfig(true, "r2comp_unscramble");
-	//AddCommandListener(US_cmdh_JoinTeam, "jointeam");
 
 	RegAdminCmd("sm_keepteams", Command_KeepTeams, ADMFLAG_ROOT, "Force to store players team data.");
 	RegAdminCmd("sm_unscramble_start", Command_UnscrambleStart, ADMFLAG_ROOT, "Force to puts players on the right team.");
@@ -161,6 +153,8 @@ UM_OnPluginDisabled()
 
 	UnhookEvent("round_end", US_ev_RoundEnd, EventHookMode_PostNoCopy);
 	UnhookEvent("vote_passed", US_ev_VotePassed);
+
+	RegServerCmd("changelevel", ServerCmd_changelevel);
 }
 
 public Action:Command_KeepTeams(client, args)
@@ -184,7 +178,6 @@ public Action:Command_UnscrambleAbort(client, args)
 public Action:US_cmdh_Vote(client, const String:command[], argc)
 {
 	if (g_bTeamLock){
-
 		if (GetClientTeam(client) != 1)
 			PrintToChat(client, "%s %t", MAIN_TAG, "Voting is not enabled until unscramble is completed");
 		return Plugin_Handled;
@@ -192,62 +185,17 @@ public Action:US_cmdh_Vote(client, const String:command[], argc)
 
 	return Plugin_Continue;
 }
-/*
-public Action:US_cmdh_JoinTeam(client, const String:command[], argc)
+
+Action ServerCmd_changelevel(int args)
 {
-	if (g_bTeamLock && !g_bJoinTeamUsed[client]){
-
-		#if UNSCRABBLE_LOG
-			LogToFile(g_sLogPatch, "%N use '%s' cmd, but blocked!", client, command);
-		#endif
-
-		return Plugin_Handled;
-	}
-
-	if (g_bCvarUnlocker){
-
-		decl String:sAgr[32];
-		GetCmdArg(1, sAgr, 32);
-		//only chooseteam menu!
-		if (StrEqual(sAgr, "survivor", false) && GetClientTeam(client) != 2){
-			#if UNSCRABBLE_LOG
-				LogToFile(g_sLogPatch, "%N use '%s' cmd, args '%s'", client, command, sAgr);
-			#endif
-
-			for (new i = 1; i <= MaxClients; i++){
-				if (IsSurvivor(i) && IsFakeClient(i) && IsPlayerAlive(i))
-					return Plugin_Continue;
-			}
-
-			decl String:sSurvivor[16];
-			new bool:bAnyBot;
-
-			for (new i = 1; i <= MaxClients; i++){
-				if (!IsSurvivor(i) || IsPlayerAlive(i) || !IsFakeClient(i)) continue;
-
-				bAnyBot = true;
-
-				if (!GetCharacterName(i, SZF(sSurvivor)))
-					return Plugin_Continue;
-
-				break;
-			}
-
-			if (!bAnyBot) return Plugin_Continue;
-
-			CheatCommandEx(client, "sb_takecontrol", sSurvivor);
-
-			#if UNSCRABBLE_LOG
-				LogToFile(g_sLogPatch, "[chooseteam] %N trying to join survivor (%s) (%s)", client, sSurvivor, GetClientTeam(client) == 2 ? "Okay" : "Fail");
-			#endif
-
-			return Plugin_Handled;
-		}
+	if(args > 0)
+	{
+		US_KeepTeams();
 	}
 
 	return Plugin_Continue;
 }
-*/
+
 public US_ev_VotePassed(Handle:event, const String:sName[], bool:DontBroadCast)
 {
 	decl String:sDetals[128];
@@ -286,10 +234,6 @@ public Action OnLogAction(Handle source, Identity ident,int client, int target, 
  *		Forwards
  * ---------------------------
 */
-public L4DReady_OnRoundIsLive()
-{
-	US_ForceToUnlockTeams();
-}
 // ---- ;
 
 public OnMapStart()
@@ -607,30 +551,25 @@ public void OnCvarChange_Enabled(ConVar cVar, const char[] sOldVal, const char[]
 
 public void OnCvarChange_Notify(ConVar cVar, const char[] sOldVal, const char[] sNewVal)
 {
-	if (!StrEqual(sOldVal, sNewVal))
-		g_bCvarNotify = GetConVarBool(cVar);
+	g_bCvarNotify = GetConVarBool(cVar);
 }
 /*
 public void OnCvarChange_Unlocker(ConVar cVar, const char[] sOldVal, const char[] sNewVal)
 {
-	if (!StrEqual(sOldVal, sNewVal))
-		g_bCvarUnlocker = GetConVarBool(cVar);
+	g_bCvarUnlocker = GetConVarBool(cVar);
 }
 */
 public void OnCvarChange_NoVotes(ConVar cVar, const char[] sOldVal, const char[] sNewVal)
 {
-	if (!StrEqual(sOldVal, sNewVal))
-		g_bCvarNoVotes = GetConVarBool(cVar);
+	g_bCvarNoVotes = GetConVarBool(cVar);
 }
 
 public void OnCvarChange_Attempts(ConVar cVar, const char[] sOldVal, const char[] sNewVal)
 {
-	if (!StrEqual(sOldVal, sNewVal))
-		g_iCvarAttempts = GetConVarInt(cVar);
+	g_iCvarAttempts = GetConVarInt(cVar);
 }
 
 public void OnCvarChange_Time(ConVar cVar, const char[] sOldVal, const char[] sNewVal)
 {
-	if (!StrEqual(sOldVal, sNewVal))
-		g_fCvarTime = GetConVarFloat(cVar);
+	g_fCvarTime = GetConVarFloat(cVar);
 }

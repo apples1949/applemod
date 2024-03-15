@@ -37,7 +37,7 @@ public Action kickloading(int client, int args)
 		if(!IsClientInGame(i) && !IsClientInKickQueue(i))
 		{
 			kicked = true;
-			ShowActivity2(client, "[SM]", "踢出连接中的玩家 %N", i);
+			//ShowActivity2(client, "[SM]", "踢出连接中的玩家 %N", i);
 			LogAction(client, i, "管理员 \"%L\" 踢出加载中的玩家 \"%L\"", client, i);
 			KickClient(i, "Admin kicked connecting players", i);
 			
@@ -113,7 +113,7 @@ public Action TimerKick(Handle timer, DataPack pack)
 	if(!IsClientInGame(client) && !IsClientInKickQueue(client))
 	{
 		LogAction(0, client, "玩家 %N 因连接时长大于 %0.0f 秒而自动踢出!", client, kickloadstuckers_duration.FloatValue);
-		ShowActivity(0, "玩家 %N 因连接时长大于 %0.0f 秒而自动踢出!", client, kickloadstuckers_duration.FloatValue);
+		//ShowActivity(0, "玩家 %N 因连接时长大于 %0.0f 秒而自动踢出!", client, kickloadstuckers_duration.FloatValue);
 		KickClient(client, "你因连接时长大于 %0.0f 秒而自动踢出!", kickloadstuckers_duration.FloatValue);
 	}
 

@@ -36,4 +36,10 @@
 		"en"		"Couldnt Fetch {2} GameTime of {1}"
 		"chi"		"{lightgreen}[提示]{default}无法获取{1}的{2}游玩时长"
 	}
+	"KickPlayer"
+	{
+		"#format"	"{1:d}"
+		"en"		"You have been kicked out of the game for playing less than {1} hour/n Please familiarize yourself with the game before playing with other players"
+		"chi"		"你因游戏时长不超过 {1} 小时而被自动踢出.请先熟悉游戏操作再和其他玩家游玩哦"
+	}
 }

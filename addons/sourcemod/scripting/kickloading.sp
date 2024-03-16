@@ -16,7 +16,7 @@ public void OnPluginStart()
 	LoadTranslations("common.phrases");
 
 	RegAdminCmd("sm_kickloading", kickloading, ADMFLAG_KICK, "Kick all players who are connecting into server but are not yet in game.");
-	kickloadstuckers_duration = CreateConVar("kickloadstuckers_duration", "90.0", "Kick player after this many second if they still connecting to server", _, true, 60.0);
+	kickloadstuckers_duration = CreateConVar("kickloadstuckers_duration", "45.0", "Kick player after this many second if they still connecting to server", _, true, 60.0);
 }
 
 

@@ -288,15 +288,17 @@ void DisplayGameTime(int gamer, int receiver, int type_message, int preferOverri
 {
 	if (preferOverride == -1)
 		preferOverride = iPrefer;
-	if ((timeStatsRecorded[gamer] / 3600 <= iKickTime && timeStatsRecorded[gamer]!=0) || (timeProfilePlayed[gamer] / 60 <= iKickTime && timeProfilePlayed[gamer] !=0))
+	if (iKickTime != 0)
 	{
-		KickClient(gamer, "%t", "KickPlayer", iKickTime);
-		LogMessage("The Player %s kick by low gametime",gamer);
+		if ((timeStatsRecorded[gamer] / 3600 <= iKickTime && timeStatsRecorded[gamer]!=0) || (timeProfilePlayed[gamer] / 60 <= iKickTime && timeProfilePlayed[gamer] !=0))
+		{
+			KickClient(gamer, "%t", "KickPlayer", iKickTime);
+			LogMessage("the player game is %d or %d.", timeStatsRecorded[gamer] / 3600, timeProfilePlayed[gamer] / 60);
+		}
 	}
-	if (!(preferOverride & QUERY_PROFILE) && timeStatsRecorded[gamer] > 0)
+	else if (!(preferOverride & QUERY_PROFILE) && timeStatsRecorded[gamer] > 0)
 		Announce(receiver, type_message, "%t", "GameTime", gamer, timeStatsRecorded[gamer] / 3600, timeStatsRecorded[gamer] / 60 % 60, "AchievementStats");
-
-	if (!(preferOverride & QUERY_STATS) && timeProfilePlayed[gamer] > 0)
+	else if (!(preferOverride & QUERY_STATS) && timeProfilePlayed[gamer] > 0)
 		Announce(receiver, type_message, "%t", "GameTime", gamer, timeProfilePlayed[gamer] / 60, timeProfilePlayed[gamer] % 60, "Profile");
 }
 

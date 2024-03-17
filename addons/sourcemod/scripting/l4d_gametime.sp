@@ -1,4 +1,4 @@
-#define PLUGIN_VERSION	   "2.0.2.1"
+#define PLUGIN_VERSION	   "2.0.2.2"
 #define PLUGIN_PREFIX	   "l4d_"
 #define PLUGIN_NAME		   "gametime"
 #define PLUGIN_NAME_FULL   "[L4D & L4D2] GameTime Announcer <fork>(apples1949 Edible)"
@@ -105,7 +105,7 @@ public void OnPluginStart()
 	cFailure  = CreateConVar(PLUGIN_NAME... "_failure", "8", "查询失败操作 1=转到控制台 2=公开聊天 4=擦除旧数据 8=重试一次(如果发送失败)", FCVAR_NOTIFY);
 	cAccess	  = CreateConVar(PLUGIN_NAME... "_access", "", "admin 标志访问 sm_gametime 命令并接收查询结果,\na=保留空位, 无内容=所有人，更多信息请参见 /configs/admin_levels.cfg", FCVAR_NOTIFY);
 	cPrefer	  = CreateConVar(PLUGIN_NAME... "_prefer", "2", "首选哪种查询, 如果只查询过一次, 就不再公布, 1=steam玩家主页 2=玩家成就页面 0=每次都显示", FCVAR_NOTIFY);
-	cKickTime = CreateConVar(PLUGIN_NAME... "_kick", "10", "玩家游戏时长不超过多少时踢出?(单位:小时)", FCVAR_NOTIFY);
+	cKickTime = CreateConVar(PLUGIN_NAME... "_kick", "10", "玩家游戏时长不超过多少时踢出? 0=关(单位:小时)", FCVAR_NOTIFY);
 
 	AutoExecConfig(true, PLUGIN_PREFIX... PLUGIN_NAME);
 
@@ -288,17 +288,19 @@ void DisplayGameTime(int gamer, int receiver, int type_message, int preferOverri
 {
 	if (preferOverride == -1)
 		preferOverride = iPrefer;
-	if (iKickTime != 0)
+	if (iKickTime > 0)
 	{
 		if ((timeStatsRecorded[gamer] / 3600 <= iKickTime && timeStatsRecorded[gamer]!=0) || (timeProfilePlayed[gamer] / 60 <= iKickTime && timeProfilePlayed[gamer] !=0))
 		{
 			KickClient(gamer, "%t", "KickPlayer", iKickTime);
 			LogMessage("the player game is %d or %d.", timeStatsRecorded[gamer] / 3600, timeProfilePlayed[gamer] / 60);
+			return;
 		}
+		return;
 	}
-	else if (!(preferOverride & QUERY_PROFILE) && timeStatsRecorded[gamer] > 0)
+	if (!(preferOverride & QUERY_PROFILE) && timeStatsRecorded[gamer] > 0)
 		Announce(receiver, type_message, "%t", "GameTime", gamer, timeStatsRecorded[gamer] / 3600, timeStatsRecorded[gamer] / 60 % 60, "AchievementStats");
-	else if (!(preferOverride & QUERY_STATS) && timeProfilePlayed[gamer] > 0)
+	if (!(preferOverride & QUERY_STATS) && timeProfilePlayed[gamer] > 0)
 		Announce(receiver, type_message, "%t", "GameTime", gamer, timeProfilePlayed[gamer] / 60, timeProfilePlayed[gamer] % 60, "Profile");
 }
 

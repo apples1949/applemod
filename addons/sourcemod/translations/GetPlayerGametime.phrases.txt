@@ -1,0 +1,44 @@
+"Phrases"
+{
+    "PlayerConnect"
+    {
+        "#format"   "{1:N}"
+        "en"        "{green}[{blue}!{green}]{default}Player{blue} {1} {default} is connected and is getting the player's actual gametime."
+        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} {default}已连接,正在获取玩家的实际游戏时长."
+    }
+    "kickplayer"
+    {
+        "en"        "You were auto kicked because the gametime did not comply with server rules!"
+        "chi"       "你因游戏时长不符合服务器规则而被自动踢出!"
+    }
+    "forcespecplayer"
+    {
+        "#format"   "{1:N}"
+        "en"        "{green}[{blue}!{green}]{default}Player {1} was forced to move to the spectator position due to gametime not complying with server rules!"
+        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} 因游戏时长不符合服务器规则而被强制移动到旁观!"
+    }
+    "announcegametimemode1"
+    {
+        "#format"   "{1:N},{2:d},{3:d}"
+        "en"        "{green}[{blue}!{green}]{default}The actual gametime of player{blue} {1} is{blue} {2}{default} hours{blue} {3}{default} minutes."
+        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1}的真实游戏时长是{blue} {2}{default} 小时{blue} {3}{default} 分钟."
+    }
+    "announcegametimemode2"
+    {
+        "#format"   "{1:N},{2:.2f}"
+        "en"        "{green}[{blue}!{green}]{default}The actual gametime of player{blue} {1} is{blue} {2}{default} hours."
+        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} {default}的真实游戏时长是{blue} {2} {default}小时"
+    }
+    "RequestingPlayerGametime"
+    {
+        "#format"   "{1:N}"
+        "en"        "{green}[{blue}!{green}]{default}Requesting player{blue} %N {default}'s actual game time."
+        "chi"       "{green}[{blue}!{green}]{default}正在请求玩家{blue} %N {default}的真实游戏时长"
+    }
+    "FailureGetPlayerGametime"
+    {
+        "#format"   "{1:N}"
+        "en"        "{green}[{blue}!{green}]{default}Failed to request real game hours for player{blue} %N {default}."
+        "chi"       "{green}[{blue}!{green}]{default}请求玩家{blue} %N {default}的真实游戏时长失败"
+    }
+}

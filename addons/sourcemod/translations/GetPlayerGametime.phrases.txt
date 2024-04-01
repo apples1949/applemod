@@ -7,7 +7,8 @@
     }
     "kickplayerUnqualified"
     {
-        "en"        "You were auto kicked because the gametime did not comply with server rules!"
+        "#format"   "{1:d},{2:d}"
+        "en"        "You were auto kicked because the gametime did not comply with server rules({1} h - {2} h)!"
     }
     "forcespecplayerUnqualified"
     {
@@ -36,8 +37,8 @@
     }
     "RequestingPlayerGametime"
     {
-        "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}Requesting player{blue} {1} {default}'s actual game time."
+        "#format"   "{1:N},{2:d},{3:d}"
+        "en"        "{green}[{blue}!{green}]{default}Requesting player{blue} {1} {default}'s actual game time.Request count: {2}/{3}"
     }
     "FailureGetPlayerGametime"
     {
@@ -55,7 +56,7 @@
     }
     "forcespecplayerRequesting"
     {
-        "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}The server is temporarily moving player{blue} {1} {default}to spec. Please wait until get the real playtime before joining the game."
+        "#format"   "{1:N},{2:d},{3:d}"
+        "en"        "{green}[{blue}!{green}]{default}The server is temporarily moving player{blue} {1} {default}to spec. Please wait until Request the real playtime before joining the game.Request count: {2}/{3}"
     }
 }

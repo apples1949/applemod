@@ -7,7 +7,8 @@
     }
     "kickplayerUnqualified"
     {
-        "chi"       "你因游戏时长不符合服务器规则而被自动踢出!"
+        "#format"   "{1:d},{2:d}"
+        "chi"       "你因游戏时长不符合服务器规则({1} 小时 - {2}小时)而被自动踢出!"
     }
     "forcespecplayerUnqualified"
     {
@@ -36,8 +37,8 @@
     }
     "RequestingPlayerGametime"
     {
-        "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}正在请求玩家{blue} {1} {default}的真实游戏时长"
+        "#format"   "{1:N},{2:d},{3:d}"
+        "chi"       "{green}[{blue}!{green}]{default}正在请求玩家{blue} {1} {default}的真实游戏时长,请求次数{2}/{3}"
     }
     "FailureGetPlayerGametime"
     {
@@ -55,7 +56,7 @@
     }
     "forcespecplayerRequesting"
     {
-        "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}因正在获取玩家{blue} {1} {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局."
+        "#format"   "{1:N},{2:d},{3:d}"
+        "chi"       "{green}[{blue}!{green}]{default}因正在获取玩家{blue} {1} {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数{2}/{3}"
     }
 }

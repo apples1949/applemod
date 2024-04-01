@@ -12,7 +12,7 @@ public Plugin myinfo =
 	name		= "simble get player real gametime",
 	author		= "apples1949 , 豆瓣酱な",
 	description = "",
-	version		= "1.0",
+	version		= "1.1",
 	url			= "https://github.com/apples1949",
 };
 
@@ -102,7 +102,7 @@ public void OnPluginStart()
 	}
 }
 
-public void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	GetCvars();
 	for (int i = 1; i <= MaxClients; i++)
@@ -137,34 +137,26 @@ public void OnClientPostAdminCheck(int client)
 
 		if (!GetPlayerGameTime(client))
 		{
-#if DEBUG
-			PrintToChat(client, "玩家成功链接");
-#endif
 			// CPrintToChatAll("{green}[{blue}!{green}]{default}玩家{blue} %N {default}已连接,正在获取玩家的实际游戏时长.", client);
 			CPrintToChatAll("%t", "PlayerConnect", client);
+			LimitPlayer(client);
 			CreateTimer(1.0, MoreGetPlayerGameTime, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 		}
 		else
 		{
-			if (CheckPlayerGametime(client) && b_LimitPlayer)
-			{
-				LimitPlayer(client);
-			}
 			AnnouncePlayerTime(client);
+			LimitPlayer(client);
 		}
 	}
 }
 
-public Action MoreGetPlayerGameTime(Handle timer, any client)
+Action MoreGetPlayerGameTime(Handle timer, any client)
 {
-#if DEBUG
-	PrintToChat(client, "延时成功");
-#endif
 	if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
 	{
-#if DEBUG
-		PrintToChat(client, "循环获取次数%d/%d", i_Count[client], i_CheckPlayerGameCount);
-#endif
+		#if DEBUG
+		PrintToChatAll("%N Need More Get PlayerGametime%d/%d", client, i_Count[client], i_CheckPlayerGameCount);
+		#endif
 		i_Count[client] += 1;
 		if (i_Count[client] >= i_CheckPlayerGameCount)
 		{
@@ -182,6 +174,7 @@ public Action MoreGetPlayerGameTime(Handle timer, any client)
 			else
 			{
 				AnnouncePlayerTime(client);
+				LimitPlayer(client);
 			}
 		}
 		return Plugin_Continue;
@@ -189,7 +182,7 @@ public Action MoreGetPlayerGameTime(Handle timer, any client)
 	return Plugin_Stop;
 }
 
-public Action cmdplayertime(int client, int args)
+Action cmdplayertime(int client, int args)
 {
 	if (b_SPLMode)
 	{
@@ -247,7 +240,7 @@ public Action cmdplayertime(int client, int args)
 	return Plugin_Handled;
 }
 
-public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
+void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
 	if (!b_Enable) return;
 	int client	= GetClientOfUserId(event.GetInt("userid"));
@@ -260,44 +253,53 @@ public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 	}
 }
 
-public bool GetPlayerGameTime(int client)
+bool GetPlayerGameTime(int client)
 {
 	SteamWorks_RequestStats(client, 550);
-#if DEBUG
-	PrintToChat(client, "玩家查询");
-#endif
-	return SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
+	bool b_gametime = SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
+	#if DEBUG
+	PrintToChatAll("Get %N Real GameTime bool:%d gametime is:%d", client,b_gametime,i_PlayerTime[client]);
+	#endif
+	return b_gametime;
 }
 
-public bool IsValidClient(int client)
+bool IsValidClient(int client)
 {
 	return client > 0 && client <= MaxClients && IsClientInGame(client);
 }
 
-public bool CheckPlayerGametime(int client)
+bool CheckPlayerGametime(int client)
 {
 	if (i_PlayerTime[client] >= i_LimitPlayerMinGametime && i_PlayerTime[client] <= i_LimitPlayerMaxGametime)
 	{
+		#if DEBUG
+		PrintToChatAll("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+		#endif
 		return true;
 	}
+	#if DEBUG
+	PrintToChatAll("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+	#endif
 	return false;
 }
 
-public void LimitPlayer(int client)
+void LimitPlayer(int client)
 {
-	if (!b_Enable || !b_LimitPlayer) return;
-	if (b_LPLateload && CheckPluginLate) return;
+	if ((!b_Enable || !b_LimitPlayer) && b_LPLateload && CheckPluginLate) return;
 	if ((i_PlayerTime[client] == -1 && i_Count[client] < i_CheckPlayerGameCount) && b_LPWRequesting)
 	{
-		if (CheckPluginLate) return;
 		ChangeClientTeam(client, 1);
-		// CPrintToChatAll("{green}[{blue}!{green}]{default}因正在获取玩家{blue} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局",client);
-		CPrintToChatAll("%t", "forcespecplayerRequesting", client);
+		// CPrintToChatAll("{green}[{blue}!{green}]{default}因正在获取玩家{blue} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
+		CPrintToChatAll("%t", "forcespecplayerRequesting", client,i_Count[client], i_CheckPlayerGameCount);
 	}
-	else if ((i_PlayerTime[client] == -2 && i_Count[client] >= i_CheckPlayerGameCount))
+	else if ((i_PlayerTime[client] == -1 && i_Count[client] < i_CheckPlayerGameCount) && !b_LPWRequesting)
 	{
-		if (i_LPMWFailureGet == 0) return;
-		else if (i_LPMWFailureGet == 1)
+		// CPrintToChatAll("{green}[{blue}!{green}]{default}正在获取玩家{blue} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
+		CPrintToChatAll("%t", "RequestingPlayerGametime", client, client,i_Count[client], i_CheckPlayerGameCount);
+	}
+	else if ((i_PlayerTime[client] == -2 && i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0))
+	{
+		if (i_LPMWFailureGet == 1)
 		{
 			// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
 			KickClient(client, "%t", "kickplayerFailureGet");
@@ -309,12 +311,17 @@ public void LimitPlayer(int client)
 			CPrintToChatAll("%t", "forcespecplayerFailureGet", "client");
 		}
 	}
-	if (CheckPlayerGametime(client))
+	else if ((i_PlayerTime[client] == -2 && i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet == 0))
+	{
+		// CPrintToChatAll("{green}[{blue}!{green}]{default}获取玩家{blue} %N {default}的游戏时长失败", client);
+		CPrintToChatAll("%t", "FailureGetPlayerGametime", client);
+	}
+	else if (CheckPlayerGametime(client))
 	{
 		if (i_LimitPlayerMode == 1)
 		{
-			// KickClient(client, "你因游戏时长不符合服务器规则而被自动踢出!");
-			KickClient(client, "%t", "kickplayerUnqualified");
+			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
+			KickClient(client, "%t", "kickplayerUnqualified",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
 		}
 		else
 		{
@@ -325,11 +332,8 @@ public void LimitPlayer(int client)
 	}
 }
 
-public void AnnouncePlayerTime(int client)
+void AnnouncePlayerTime(int client)
 {
-#if DEBUG
-	PrintToChat(client, "执行指令成功");
-#endif
 	if (!b_Enable) return;
 	if (i_PlayerTime[client] > 0)
 	{
@@ -352,6 +356,9 @@ public void AnnouncePlayerTime(int client)
 			// FomatEX(g_playertime, sizeof(g_playertime), "{blue} %.2f {default}小时", gametime / 3600);
 			FormatEx(g_playertime, sizeof(g_playertime), "%t", "announcegametimemode2", gametime / 3600);
 		}
+		#if DEBUG
+		PrintToChatAll("%N %d %dh%dm %.2fh", client, i_PlayerTime[client], i_PlayerTime[client] / 3600, i_PlayerTime[client] / 60 % 60, gametime / 3600);
+		#endif
 		CPrintToChatAll("%t", "announcegametime", client, g_playertime, g_lerp);
 	}
 	else if ((i_PlayerTime[client] == -1 && i_Count[client] < i_CheckPlayerGameCount))
@@ -366,7 +373,7 @@ public void AnnouncePlayerTime(int client)
 	}
 }
 
-public void lateload()
+void lateload()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -374,7 +381,7 @@ public void lateload()
 	}
 }
 // https://github.com/TouchMe-Inc/l4d2_player_info/blob/main/addons/sourcemod/scripting/player_info.sp#L146
-public float GetPlayerLerp(int iClient)
+float GetPlayerLerp(int iClient)
 {
 	char  buffer[32];
 	float fLerpRatio, fLerpAmount, fUpdateRate;

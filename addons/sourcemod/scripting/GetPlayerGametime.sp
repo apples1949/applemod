@@ -31,6 +31,7 @@ bool   b_LPWRequesting;
 bool   b_LPLateload;
 int	   i_LPMWFailureGet;
 bool   b_SPLMode;
+bool   b_IfNeedLogKickMsg;
 ConVar c_ShowGametimeMode;
 ConVar c_CheckPlayerGameCount;
 ConVar c_LimitPlayer;
@@ -43,6 +44,9 @@ ConVar c_LPWRequesting;
 ConVar c_LPLateload;
 ConVar c_LPMWFailureGet;
 ConVar c_SPLMode;
+ConVar c_IfNeedLogKickMsg;
+
+char   chatFile[128];
 
 ConVar
 	g_cvMinUpdateRate  = null,
@@ -58,19 +62,19 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart()
 {
-	LoadTranslations("GetPlayerGametime.phrases");
-	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "Enable plugin?,0=disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																																		   //这个都看不懂建议别玩插件捏
-	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "What type of game duration is displayed to players? 1=hour and minute  2=Hours rounded to two decimal places", FCVAR_NOTIFY, true, 1.0, true, 2.0);															   //向玩家显示什么类型的游戏时长? 1=小时分钟 2=小时带两位小数
-	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "If for any possible reason it fails to get the player's real gametime, how many times should it be repeated to get the player's game time? 0=Disabled", FCVAR_NOTIFY, true, 0.0);							   //如果因可能的各种原因导致获取玩家的真实游戏时长失败,那么重复多少次获取玩家游戏时长? 0=禁用
-	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "If the player's real gametime is being acquired repeatedly. Does it move the player to spec? 0=disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																	   //如果正在反复获取玩家的真实游戏时长的情况下。是否将玩家移动到旁观？0=禁用
-	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "How to deal with players if repeatedly getting player real playtime fails?0=disable, 1=kick 2=move to spec", FCVAR_NOTIFY, true, 0.0, true, 2.0);																   //如果反复获取玩家真实游戏时长失败，如何处理玩家？0=禁用，1=踢出 2=移动到旁观
-	c_LPLateload			 = CreateConVar("LPLateload", "1", "If LimitPlayer=1 and the plugin is not activated properly, does it cancel the behavior of various plugins that restrict the player due to real playertime?0=disable 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);	   //如果LimitPlayer=1且插件未正常启动的情况下，是否取消各种因真实游戏时长而限制玩家的插件行为？0=禁用
-	c_LimitPlayer			 = CreateConVar("LimitPlayer", "1", "Are players who meet the gametime criteria prohibited from entering the server or entering the game? 0=disable 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);														   //是否禁止符合时长条件的玩家进入服务器或进入对局? 0=禁用 1=启用
+	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "Enable plugin?,0:disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																																		   //这个都看不懂建议别玩插件捏
+	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "What type of game duration is displayed to players? 1:hour and minute  2=Hours rounded to two decimal places", FCVAR_NOTIFY, true, 1.0, true, 2.0);															   //向玩家显示什么类型的游戏时长? 1:小时分钟 2=小时带两位小数
+	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "If for any possible reason it fails to get the player's real gametime, how many times should it be repeated to get the player's game time? 0:Disabled", FCVAR_NOTIFY, true, 0.0);							   //如果因可能的各种原因导致获取玩家的真实游戏时长失败,那么重复多少次获取玩家游戏时长? 0:禁用
+	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "If the player's real gametime is being acquired repeatedly. Does it move the player to spec? 0:disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																	   //如果正在反复获取玩家的真实游戏时长的情况下。是否将玩家移动到旁观？0:禁用
+	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "How to deal with players if repeatedly getting player real playtime fails?0:disable, 1:kick 2=move to spec", FCVAR_NOTIFY, true, 0.0, true, 2.0);																   //如果反复获取玩家真实游戏时长失败，如何处理玩家？0:禁用，1:踢出 2=移动到旁观
+	c_LPLateload			 = CreateConVar("LPLateload", "1", "If LimitPlayer=1 and the plugin is not activated properly, does it cancel the behavior of various plugins that restrict the player due to real playertime?0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);	   //如果LimitPlayer=1且插件未正常启动的情况下，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用
+	c_LimitPlayer			 = CreateConVar("LimitPlayer", "1", "Are players who meet the gametime criteria prohibited from entering the server or entering the game? 0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);														   //是否禁止符合时长条件的玩家进入服务器或进入对局? 0:禁用 1:启用
 	c_LimitPlayerMinGametime = CreateConVar("LimitPlayerMinGametime", "1", "How long is the minimum prohibition for gametime players to enter the server or enter the game", FCVAR_NOTIFY, true, 1.0);																				   //最低禁止多少秒的玩家进入服务器或进入对局(小时乘3600)
 	c_LimitPlayerMaxGametime = CreateConVar("LimitPlayerMaxGametime", "36000", "How long is the maximum prohibition for gametime players to enter the server or enter the game", FCVAR_NOTIFY, true, 1.0);
-	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "If LimitPlayer is not 0, how will eligible players be processed? 1=kick out, 2=move to spec", FCVAR_NOTIFY, true, 1.0, true, 2.0);		 //如果LimitPlayer不为0,则如何处理符合时长区间的玩家? 1=踢出,2=移动到旁观
-	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "Show Player Lerp with gametime? 0=disable 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否显示玩家的lerp值，0=禁用，1=启用
-	c_SPLMode				 = CreateConVar("SPLMode", "1", "Whether to display player real playtime and Lerp information by player team 0=Output in player order.", FCVAR_NOTIFY, true, 0.0, true, 1.0);	 //是否按照玩家阵营显示玩家真实玩家时长及Lerp信息 0=按照玩家顺序输出
+	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "If LimitPlayer is not 0, how will eligible players be processed? 1:kick out, 2=move to spec", FCVAR_NOTIFY, true, 1.0, true, 2.0);		 //如果LimitPlayer不为0,则如何处理符合时长区间的玩家? 1:踢出,2=移动到旁观
+	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "Show Player Lerp with gametime? 0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否显示玩家的lerp值，0:禁用，1:启用
+	c_SPLMode				 = CreateConVar("SPLMode", "1", "Whether to display player real playtime and Lerp information by player team 0:Output in player order.", FCVAR_NOTIFY, true, 0.0, true, 1.0);	 //是否按照玩家阵营显示玩家真实玩家时长及Lerp信息 0:按照玩家顺序输出
+	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "Need Log Kick Auto Kick Player Message? 0:disable", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
 	g_cvMaxUpdateRate		 = FindConVar("sv_maxupdaterate");
@@ -90,12 +94,28 @@ public void OnPluginStart()
 	c_LimitPlayerMode.AddChangeHook(ConVarChanged);
 	c_ShowPlayerLerp.AddChangeHook(ConVarChanged);
 	c_SPLMode.AddChangeHook(ConVarChanged);
+	c_IfNeedLogKickMsg.AddChangeHook(ConVarChanged);
 
 	HookEvent("player_team", Event_PlayerTeam);
 
 	RegConsoleCmd("sm_playertime", cmdplayertime);
 
 	AutoExecConfig(true, "GetPlayerGametime");
+
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, PLATFORM_MAX_PATH, "translations/GetPlayerGametime.phrases.txt");
+	bool hasTranslations = FileExists(path);
+	if (hasTranslations)
+		LoadTranslations("GetPlayerGametime.phrases");
+	else
+		LogError("Not translations file GetPlayerGametime.phrases.txt found yet!");
+
+	if (GetExtensionFileStatus("SteamWorks.ext") != 1)
+	{
+		LogError("SteamWorks isn't installed or failed to load. Grenade Trails will be disabled. Please install SteamWorks. (https://forums.alliedmods.net/showthread.php?t=229556)");
+		return;
+	}
+
 	if (CheckPluginLate)
 	{
 		lateload();
@@ -125,6 +145,7 @@ void GetCvars()
 	i_LimitPlayerMode		 = c_LimitPlayerMode.IntValue;
 	b_ShowPlayerLerp		 = c_ShowPlayerLerp.BoolValue;
 	b_SPLMode				 = c_SPLMode.BoolValue;
+	b_IfNeedLogKickMsg		 = c_IfNeedLogKickMsg.BoolValue;
 }
 
 public void OnClientPostAdminCheck(int client)
@@ -191,7 +212,7 @@ Action cmdplayertime(int client, int args)
 		int spectatorCount = 0;
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientInGame(i) && !IsFakeClient(i))
+			if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
 			{
 				if (GetClientTeam(i) == 2) survivorCount = 1;
 				if (GetClientTeam(i) == 3) infectedCount = 1;
@@ -201,7 +222,7 @@ Action cmdplayertime(int client, int args)
 		if (survivorCount == 1) CPrintToChatAll("{blue}-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientConnected(i) && !IsFakeClient(i) && GetClientTeam(i) == 2)
+			if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client) && GetClientTeam(i) == 2)
 			{
 				AnnouncePlayerTime(i);
 			}
@@ -210,7 +231,7 @@ Action cmdplayertime(int client, int args)
 		if (infectedCount == 1) CPrintToChatAll("{red}-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientConnected(i) && !IsFakeClient(i) && GetClientTeam(i) == 3)
+			if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client) && GetClientTeam(i) == 3)
 			{
 				AnnouncePlayerTime(i);
 			}
@@ -219,7 +240,7 @@ Action cmdplayertime(int client, int args)
 		if (spectatorCount == 1) PrintToChatAll("-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientConnected(i) && !IsFakeClient(i) && GetClientTeam(i) == 1)
+			if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client) && GetClientTeam(i) == 1)
 			{
 				AnnouncePlayerTime(i);
 			}
@@ -230,7 +251,7 @@ Action cmdplayertime(int client, int args)
 	{
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientConnected(i) && !IsFakeClient(i))
+			if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
 			{
 				AnnouncePlayerTime(i);
 			}
@@ -258,7 +279,7 @@ bool GetPlayerGameTime(int client)
 	SteamWorks_RequestStats(client, 550);
 	bool b_gametime = SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
 	#if DEBUG
-	PrintToChatAll("Get %N Real GameTime bool:%d gametime is:%d", client,b_gametime,i_PlayerTime[client]);
+	PrintToChatAll("Get %N Real GameTime bool:%d gametime is:%d", client, b_gametime, i_PlayerTime[client]);
 	#endif
 	return b_gametime;
 }
@@ -290,12 +311,12 @@ void LimitPlayer(int client)
 	{
 		ChangeClientTeam(client, 1);
 		// CPrintToChatAll("{green}[{blue}!{green}]{default}因正在获取玩家{blue} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
-		CPrintToChatAll("%t", "forcespecplayerRequesting", client,i_Count[client], i_CheckPlayerGameCount);
+		CPrintToChatAll("%t", "forcespecplayerRequesting", client, i_Count[client], i_CheckPlayerGameCount);
 	}
 	else if ((i_PlayerTime[client] == -1 && i_Count[client] < i_CheckPlayerGameCount) && !b_LPWRequesting)
 	{
 		// CPrintToChatAll("{green}[{blue}!{green}]{default}正在获取玩家{blue} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
-		CPrintToChatAll("%t", "RequestingPlayerGametime", client, client,i_Count[client], i_CheckPlayerGameCount);
+		CPrintToChatAll("%t", "RequestingPlayerGametime", client, client, i_Count[client], i_CheckPlayerGameCount);
 	}
 	else if ((i_PlayerTime[client] == -2 && i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0))
 	{
@@ -303,6 +324,7 @@ void LimitPlayer(int client)
 		{
 			// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
 			KickClient(client, "%t", "kickplayerFailureGet");
+			LogKickPlayer(client, 1);
 		}
 		else if (i_LPMWFailureGet == 2)
 		{
@@ -321,7 +343,8 @@ void LimitPlayer(int client)
 		if (i_LimitPlayerMode == 1)
 		{
 			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
-			KickClient(client, "%t", "kickplayerUnqualified",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
+			KickClient(client, "%t", "kickplayerUnqualified", i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime);
+			LogKickPlayer(client, 2);
 		}
 		else
 		{
@@ -419,4 +442,36 @@ float max(float a, float b)
 float clamp(float inc, float low, float high)
 {
 	return (inc > high) ? high : ((inc < low) ? low : inc);
+}
+
+void LogKickPlayer(int client, int Mode)
+{
+	if (b_IfNeedLogKickMsg)
+	{
+		char Msg[256], Time[32];
+		IsCreateLogFile();
+		FormatTime(Time, sizeof(Time), "%Y-%m-%d %H:%M:%S", -1);
+		char KickMsg[220];
+		if (Mode == 1) Format(KickMsg, sizeof(KickMsg), "%N were auto kicked because failed to get playtime!", client);
+		else Format(KickMsg, sizeof(KickMsg), "%N were auto kicked because the gametime did not comply with rules(%.2f h - %.2f h)!", client, i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime);
+		Format(Msg, sizeof(Msg), "[%s] %s", Time, KickMsg);
+		IsSaveMessage(Msg);
+	}
+}
+
+//创建日志文件.
+void IsCreateLogFile()
+{
+	char Date[32], logFile[128];
+	FormatTime(Date, sizeof(Date), "%y%m%d", -1);
+	Format(logFile, sizeof(logFile), "/logs/GetPlayerGameTime%s.log", Date);
+	BuildPath(Path_SM, chatFile, PLATFORM_MAX_PATH, logFile);
+}
+
+//把日志内容写入文本里.
+void IsSaveMessage(const char[] Message)
+{
+	File fileHandle = OpenFile(chatFile, "a"); /* Append */
+	fileHandle.WriteLine(Message);
+	delete fileHandle;
 }

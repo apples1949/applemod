@@ -3,7 +3,7 @@
     "PlayerConnect"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} {default}已连接,正在获取玩家的实际游戏时长."
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}已连接,正在获取玩家的实际游戏时长."
     }
     "kickplayerUnqualified"
     {
@@ -13,37 +13,37 @@
     "forcespecplayerUnqualified"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} 因游戏时长不符合服务器规则而被强制移动到旁观!"
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} 因游戏时长不符合服务器规则而被强制移动到旁观!"
     }
     "announcegametime"
     {
         "#format"   "{1:N},{2:s},{3:s}"
-        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1}{default}的真实游戏时长是{2}{3}"
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1}{default}的真实游戏时长是{2}{3}"
     }
     "announcegametimemode1"
     {
         "#format"   "{1:d},{2:d}"
-        "chi"       "{blue} {1}{default} 小时{blue} {2}{default} 分钟."
+        "chi"       "{olive} {1}{default} 小时{olive} {2}{default} 分钟."
     }
     "announcegametimemode2"
     {
         "#format"   "{1:.2f}"
-        "chi"       "{blue} {1} {default}小时"
+        "chi"       "{olive} {1} {default}小时"
     }
     "showlerp"
     {
         "#format"   "{1:.1f}"
-        "chi"       " Lerp为 {blue}{1}{default} ."
+        "chi"       " Lerp为 {olive}{1}{default} ."
     }
     "RequestingPlayerGametime"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "chi"       "{green}[{blue}!{green}]{default}正在请求玩家{blue} {1} {default}的真实游戏时长,请求次数{2}/{3}"
+        "chi"       "{green}[{olive}!{green}]{default}正在请求玩家{olive} {1} {default}的真实游戏时长,请求次数{2}/{3}"
     }
     "FailureGetPlayerGametime"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}请求玩家{blue} {1} {default}的真实游戏时长失败"
+        "chi"       "{green}[{olive}!{green}]{default}请求玩家{olive} {1} {default}的真实游戏时长失败"
     }
     "kickplayerFailureGet"
     {
@@ -52,11 +52,11 @@
     "forcespecplayerFailureGet"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{blue}!{green}]{default}玩家{blue} {1} {default}因获取真实游戏时长失败而被强制移动到旁观!"
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}因获取真实游戏时长失败而被强制移动到旁观!"
     }
     "forcespecplayerRequesting"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "chi"       "{green}[{blue}!{green}]{default}因正在获取玩家{blue} {1} {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数{2}/{3}"
+        "chi"       "{green}[{olive}!{green}]{default}因正在获取玩家{olive} {1} {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数{2}/{3}"
     }
 }

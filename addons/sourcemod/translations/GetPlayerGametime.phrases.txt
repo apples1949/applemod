@@ -3,7 +3,7 @@
     "PlayerConnect"
     {
         "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}Player{blue} {1} {default} is connected and is getting the player's actual gametime."
+        "en"        "{green}[{olive}!{green}]{default}Player{olive} {1} {default} is connected and is getting the player's actual gametime."
     }
     "kickplayerUnqualified"
     {
@@ -13,37 +13,37 @@
     "forcespecplayerUnqualified"
     {
         "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}Player{blue} {1} was forced to move to the spectator position due to gametime not complying with server rules!"
+        "en"        "{green}[{olive}!{green}]{default}Player{olive} {1} was forced to move to the spectator position due to gametime not complying with server rules!"
     }
     "announcegametime"
     {
         "#format"   "{1:N},{2:s},{3:s}"
-        "en"        "{green}[{blue}!{green}]{default}The actual gametime of player{blue} {1}{default} is{2}{3}"
+        "en"        "{green}[{olive}!{green}]{default}The actual gametime of player{olive} {1}{default} is{2}{3}"
     }
     "announcegametimemode1"
     {
         "#format"   "{1:d},{2:d}"
-        "en"        "{blue} {1}{default} hours{blue} {2}{default} minutes."
+        "en"        "{olive} {1}{default} hours{olive} {2}{default} minutes."
     }
     "announcegametimemode2"
     {
         "#format"   "{1:.2f}"
-        "en"        "{blue} {1}{default} hours."
+        "en"        "{olive} {1}{default} hours."
     }
     "showlerp"
     {
         "#format"   "{1:.1f}"
-        "en"        " Lerp is {blue}{1}{default} ."
+        "en"        " Lerp is {olive}{1}{default} ."
     }
     "RequestingPlayerGametime"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "en"        "{green}[{blue}!{green}]{default}Requesting player{blue} {1} {default}'s actual game time.Request count: {2}/{3}"
+        "en"        "{green}[{olive}!{green}]{default}Requesting player{olive} {1} {default}'s actual game time.Request count: {2}/{3}"
     }
     "FailureGetPlayerGametime"
     {
         "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}Failed to request real game hours for player{blue} {1} {default}."
+        "en"        "{green}[{olive}!{green}]{default}Failed to request real game hours for player{olive} {1} {default}."
     }
     "kickplayerFailureGet"
     {
@@ -52,11 +52,11 @@
     "forcespecplayerFailureGet"
     {
         "#format"   "{1:N}"
-        "en"        "{green}[{blue}!{green}]{default}Player{blue} {1} {default}was forced to move to spec due to a failure to get real playtime!"
+        "en"        "{green}[{olive}!{green}]{default}Player{olive} {1} {default}was forced to move to spec due to a failure to get real playtime!"
     }
     "forcespecplayerRequesting"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "en"        "{green}[{blue}!{green}]{default}The server is temporarily moving player{blue} {1} {default}to spec. Please wait until Request the real playtime before joining the game.Request count: {2}/{3}"
+        "en"        "{green}[{olive}!{green}]{default}The server is temporarily moving player{olive} {1} {default}to spec. Please wait until Request the real playtime before joining the game.Request count: {2}/{3}"
     }
 }

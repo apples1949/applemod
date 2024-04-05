@@ -682,7 +682,8 @@ public 		native get();
 };
 
 // mark as extension autoload
-public Extension __ext_rip = {
+public Extension __ext_rip =
+{
 	name	 = "REST in Pawn",
 	file	 = "rip.ext",
 	autoload = 1,

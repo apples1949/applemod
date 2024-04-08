@@ -7,8 +7,8 @@
     }
     "kickplayerUnqualified"
     {
-        "#format"   "{1:d},{2:d}"
-        "chi"       "你因游戏时长不符合服务器规则({1} 小时 - {2}小时)而被自动踢出!"
+        "#format"   "{1:.2f},{2:.2f}"
+        "chi"       "你因真实游戏时长不符合服务器规则({1} 小时 - {2}小时)而被自动踢出"
     }
     "forcespecplayerUnqualified"
     {
@@ -47,7 +47,7 @@
     }
     "kickplayerFailureGet"
     {
-        "chi"       "你因服务器获取真实游戏时长失败而被自动踢出!"
+        "chi"       "你因服务器获取真实游戏时长失败而被自动踢出"
     }
     "forcespecplayerFailureGet"
     {

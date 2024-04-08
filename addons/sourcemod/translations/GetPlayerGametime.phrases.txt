@@ -7,8 +7,8 @@
     }
     "kickplayerUnqualified"
     {
-        "#format"   "{1:d},{2:d}"
-        "en"        "You were auto kicked because the gametime did not comply with server rules({1} h - {2} h)!"
+        "#format"   "{1:.2f},{2:.2f}"
+        "en"        "You were auto kicked because the real gametime did not comply with server rules({1} h - {2} h)"
     }
     "forcespecplayerUnqualified"
     {
@@ -47,7 +47,7 @@
     }
     "kickplayerFailureGet"
     {
-        "en"        "You were auto kicked because the server failed to get real playtime!"
+        "en"        "You were auto kicked because the server failed to get real playtime"
     }
     "forcespecplayerFailureGet"
     {

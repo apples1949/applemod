@@ -366,8 +366,10 @@ void LimitPlayer(int client)
 	{
 		if (i_LimitPlayerMode == 1)
 		{
+			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
+			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
 			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
-			KickClient(client, "%t", "kickplayerUnqualified", i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime);
+			KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
 			LogKickPlayer(client, 2);
 		}
 		else

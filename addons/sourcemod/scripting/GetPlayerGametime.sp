@@ -11,7 +11,7 @@ public Plugin myinfo =
 	name		= "get player real gametime",
 	author		= "apples1949 , 豆瓣酱な",
 	description = "",
-	version		= "1.4",
+	version		= "1.4.1",
 	url			= "https://github.com/apples1949",
 };
 
@@ -62,8 +62,6 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart()
 {
-	// LoadTranslations("GetPlayerGametime.phrases");
-
 	char path[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, path, PLATFORM_MAX_PATH, "translations/GetPlayerGametime.phrases.txt");
 	hasTranslations = FileExists(path);
@@ -161,9 +159,9 @@ public void OnClientPostAdminCheck(int client)
 		if (!GetPlayerGameTime(client))
 		{
 			i_PlayerTime[client] = -1;
-#if DEBUG
+			#if DEBUG
 			colors_print_to_chat_all("failure get player %N gametime", client);
-#endif
+			#endif
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N {default}已连接,正在获取玩家的实际游戏时长.", client);
 			// colors_print_to_chat_all("%t", "PlayerConnect", client);
 			LimitPlayer(client);
@@ -171,9 +169,9 @@ public void OnClientPostAdminCheck(int client)
 		}
 		else
 		{
-#if DEBUG
+			#if DEBUG
 			colors_print_to_chat_all("get player %N gametime success", client);
-#endif
+			#endif
 			AnnouncePlayerTime(client);
 			LimitPlayer(client);
 		}
@@ -184,9 +182,9 @@ Action MoreGetPlayerGameTime(Handle timer, any client)
 {
 	if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
 	{
-#if DEBUG
+		#if DEBUG
 		colors_print_to_chat_all("%N Need More Get PlayerGametime%d/%d", client, i_Count[client], i_CheckPlayerGameCount);
-#endif
+		#endif
 		i_Count[client] += 1;
 		if (i_Count[client] >= i_CheckPlayerGameCount)
 		{
@@ -215,9 +213,9 @@ Action MoreGetPlayerGameTime(Handle timer, any client)
 
 Action cmdplayertime(int client, int args)
 {
-#if DEBUG
+	#if DEBUG
 	colors_print_to_chat_all("Command executed successfully");
-#endif
+	#endif
 	if (b_SPLMode)
 	{
 		int survivorCount  = 0;
@@ -291,9 +289,9 @@ bool GetPlayerGameTime(int client)
 {
 	SteamWorks_RequestStats(client, 550);
 	bool b_gametime = SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
-#if DEBUG
-	colors_print_to_chat_all("Get %N(%d/%d) Real GameTime bool:%d gametime is:%d", client, client, GetClientOfUserId(client), b_gametime, i_PlayerTime[client]);
-#endif
+	#if DEBUG
+	colors_print_to_chat_all("Get %N Real GameTime bool:%d gametime is:%d", client, b_gametime, i_PlayerTime[client]);
+	#endif
 	return b_gametime;
 }
 
@@ -304,7 +302,10 @@ bool IsValidClient(int client)
 
 bool CheckPlayerGametime(int client)
 {
-	if (i_PlayerTime[client] >= i_LimitPlayerMinGametime && i_PlayerTime[client] <= i_LimitPlayerMaxGametime)
+	#if DEBUG
+	PrintToChatAll("Check Player %N Gametime",client);
+	#endif
+	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime)
 	{
 #if DEBUG
 		colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
@@ -317,53 +318,18 @@ bool CheckPlayerGametime(int client)
 	return false;
 }
 
-void LimitPlayer(int client)
+/*
+void CheckPlayerGametime(int client)
 {
-	if (!b_Enable || !b_LimitPlayer) return;
-	if (i_PlayerTime[client] == -1)
+	#if DEBUG
+	PrintToChatAll("Check Player %N Gametime",client);
+	#endif
+	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime && (i_LimitPlayerMode != 0))
 	{
-		if (i_Count[client] < i_CheckPlayerGameCount)
-		{
-			if (!b_LPWRequesting) return;
-			ChangeClientTeam(client, 1);
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}因正在获取玩家{olive} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
-			colors_print_to_chat_all("%t", "forcespecplayerRequesting", client, i_Count[client], i_CheckPlayerGameCount);
-		}
-		else
-		{
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}正在获取玩家{olive} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
-			colors_print_to_chat_all("%t", "RequestingPlayerGametime", client, i_Count[client] + 1, i_CheckPlayerGameCount);
-		}
-		return;
-	}
-	if (i_PlayerTime[client] == -2)
-	{
-		if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0) && !(b_LPLateload && CheckPluginLate))
-		{
-			if (i_LPMWFailureGet == 1)
-			{
-				// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
-				KickClient(client, "%t", "kickplayerFailureGet");
-				LogKickPlayer(client, 1);
-			}
-			else if (i_LPMWFailureGet == 2)
-			{
-				ChangeClientTeam(client, 1);
-				// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因获取真实游戏时长失败而被强制移动到旁观!", client);
-				colors_print_to_chat_all("%t", "forcespecplayerFailureGet", "client");
-			}
-			return;
-		}
-		else if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet == 0))
-		{
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}获取玩家{olive} %N {default}的游戏时长失败", client);
-			colors_print_to_chat_all("%t", "FailureGetPlayerGametime", client);
-			return;
-		}
-		return;
-	}
-	if (CheckPlayerGametime(client) && (i_LimitPlayerMode != 0) && !(b_LPLateload && CheckPluginLate))
-	{
+		if(b_LPLateload && CheckPluginLate)return;
+		#if DEBUG
+		colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+		#endif
 		if (i_LimitPlayerMode == 1)
 		{
 			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
@@ -378,7 +344,82 @@ void LimitPlayer(int client)
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
 			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", "client");
 		}
-		return;
+	}
+	#if DEBUG
+	colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+	#endif
+}
+*/
+void LimitPlayer(int client)
+{
+	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
+	#if DEBUG
+	PrintToChatAll("%N i_PlayerTime=%d",client,i_PlayerTime[client]);
+	#endif
+	if (i_PlayerTime[client] == -1 )
+	{
+		if (i_Count[client] < i_CheckPlayerGameCount)
+		{
+			if (!b_LPWRequesting || (b_LPLateload && CheckPluginLate)) return;
+			ChangeClientTeam(client, 1);
+			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}因正在获取玩家{olive} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
+			colors_print_to_chat_all("%t", "forcespecplayerRequesting", client, i_Count[client], i_CheckPlayerGameCount);
+		}
+		else
+		{
+			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}正在获取玩家{olive} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
+			colors_print_to_chat_all("%t", "RequestingPlayerGametime", client, i_Count[client] + 1, i_CheckPlayerGameCount);
+		}
+	}
+	else if (i_PlayerTime[client] == -2)
+	{
+		if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0))
+		{
+			if(b_LPLateload && CheckPluginLate)return;
+			if (i_LPMWFailureGet == 1)
+			{
+				// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
+				KickClient(client, "%t", "kickplayerFailureGet");
+				LogKickPlayer(client, 1);
+			}
+			else if (i_LPMWFailureGet == 2)
+			{
+				ChangeClientTeam(client, 1);
+				// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因获取真实游戏时长失败而被强制移动到旁观!", client);
+				colors_print_to_chat_all("%t", "forcespecplayerFailureGet", "client");
+			}
+		}
+		else if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet == 0))
+		{
+			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}获取玩家{olive} %N {default}的游戏时长失败", client);
+			colors_print_to_chat_all("%t", "FailureGetPlayerGametime", client);
+		}
+	}
+	else if (CheckPlayerGametime(client) && (i_LimitPlayerMode != 0))
+	{
+		#if DEBUG
+		PrintToChatAll("Check b_LPLateload && CheckPluginLate: %d&&%d",b_LPLateload,CheckPluginLate);
+		#endif
+		if(b_LPLateload && CheckPluginLate)return;
+		#if DEBUG
+		PrintToChatAll("LimitPlayerMode is %d",i_LimitPlayerMode);
+		#endif
+		if (i_LimitPlayerMode == 1)
+		{
+			PrintToChatAll("try to kick %N",client);
+			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
+			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
+			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
+			KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
+			LogKickPlayer(client, 2);
+		}
+		else
+		{
+			PrintToChatAll("try to chance %N team",client);
+			ChangeClientTeam(client, 1);
+			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
+			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", "client");
+		}
 	}
 }
 

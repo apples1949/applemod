@@ -4,6 +4,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
+#include <readyup>
 
 #define SCORE_DELAY_EMPTY_SERVER 3.0
 #define ZOMBIECLASS_SMOKER		 1
@@ -185,21 +186,17 @@ void GetCvars()
 	iforcespectate_penalty = hforcespectate_penalty.IntValue;
 	ivotedelay_time		   = hvotedelay_time.IntValue;
 }
-bool g_ReadyUpAvailable;
 
-public void OnAllPluginsLoaded()
+bool g_enb;
+
+public void OnRoundIsLive()
 {
-	g_ReadyUpAvailable = LibraryExists("readyup");
+	g_enb = false;
 }
 
-public void OnLibraryRemoved(const char[] name)
+public void OnReadyUpInitiate()
 {
-	if (strcmp(name, "readyup") == 0) g_ReadyUpAvailable = false;
-}
-
-public void OnLibraryAdded(const char[] name)
-{
-	if (StrEqual(name, "readyup")) g_ReadyUpAvailable = true;
+	g_enb = true;
 }
 
 public Action CommandRestartMap(int client, int args)
@@ -378,18 +375,13 @@ public Action Command_Votes(int client, int args)
 		{
 			DrawPanelItem(menu, "强制删除游戏大厅");
 		}
-		if (!VotensForceStartGameE_D || !CheckReadyUpMode())
+		if (!VotensForceStartGameE_D || !g_enb)
 		{
 			DrawPanelItem(menu, "强制开始游戏(禁用中)");
 		}
-		else if (g_ReadyUpAvailable)
-		{
-			DrawPanelItem(menu, "强制开始游戏");
-		}
-
 		else
 		{
-			DrawPanelText(menu, " \n");
+			DrawPanelItem(menu, "强制开始游戏");
 		}
 		DrawPanelText(menu, " \n");
 		DrawPanelItem(menu, "退出");
@@ -605,7 +597,7 @@ public Action Command_Votesforcestartgame(int client, int args)
 		{
 			return Plugin_Handled;
 		}
-		if (g_ReadyUpAvailable == false)
+		if (!g_enb)
 		{
 			PrintToChatAll("[{olive}VOTE{default}]游戏已开始!");
 			return Plugin_Handled;
@@ -1662,7 +1654,7 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 		case (view_as<voteType>(forcestartgame)):
 		{
-			if (g_ReadyUpAvailable)
+			if (!g_enb)
 			{
 				CPrintToChatAll("[{olive}VOTE{default}]注意是给投票发起玩家临时提升权限来强制开始游戏!但他不一定是管理员哦.");
 				CheatCommandEx(fsgclient);
@@ -1766,21 +1758,10 @@ bool IsClientIdle(int client)
 
 void openreadyuphud(int client)
 {
-	if (g_ReadyUpAvailable) FakeClientCommand(client, "sm_show");
+	if (g_enb) FakeClientCommand(client, "sm_show");
 }
 
 void closereadyuphud(int client)
 {
-	if (g_ReadyUpAvailable) FakeClientCommand(client, "sm_hide");
-}
-
-bool CheckReadyUpMode()
-{
-	if (FindConVar("l4d_ready_enabled").IntValue == 1)
-	{
-		return true;
-	}
-	else {
-		return false;
-	}
+	if (g_enb) FakeClientCommand(client, "sm_hide");
 }

@@ -44,7 +44,8 @@ public Plugin myinfo =
 
 }
 
-public void OnPluginStart()
+public void
+	OnPluginStart()
 {
 	Apex[0] = CreateConVar("tank_block_claw", "1", "阻止坦克同时出拳和扔石头 0-不阻止 1-阻止");
 	Apex[1] = CreateConVar("tank_block_jump", "0", "阻止坦克同时跳跃和扔石块 0-不阻止 1-阻止");
@@ -243,20 +244,25 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
-	if (!IsTank(client))
-		return;
+	if (!IsTank(client)) return;
 
 	Reset(client);
-	if(Apex[2].IntValue > 0)
-	{
-		SetEntProp(client, Prop_Data, "m_iHealth", Apex[2].IntValue);
-		SetEntProp(client, Prop_Data, "m_iMaxHealth", Apex[2].IntValue);
-	}
+	if (Apex[2].IntValue > 0) CreateTimer(0.1, SetTankHealth, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 	CPrintToChat(client, "%sE 键 -> 低手抛石(砸屋檐下)", TAG);
 	CPrintToChat(client, "%s右键 -> 单手抛石(万能姿势)", TAG);
 	CPrintToChat(client, "%sR 键 -> 双手抛石(过高墙)", TAG);
 	CPrintToChat(client, "%s指令{lightgreen}!bhop{darkred}开启自动连跳(扣%d血量)", TAG, Apex[3].IntValue);
 	CPrintToChat(client, "%s指令{lightgreen}!trac{darkred}开启跟踪石头(扣%d血量)", TAG, Apex[4].IntValue);
+}
+
+Action SetTankHealth(Handle timer, any client)
+{
+	if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
+	{
+		SetEntProp(client, Prop_Data, "m_iHealth", Apex[2].IntValue);
+		SetEntProp(client, Prop_Data, "m_iMaxHealth", Apex[2].IntValue);
+	}
+	return Plugin_Continue;
 }
 void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {

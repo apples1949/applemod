@@ -16,7 +16,7 @@ char TAG_WEAPON_NAME[][][] =
 	{"木狙"			,"weapon_hunting_rifle"},
 	{"awp"			,"weapon_sniper_awp"},
 	{"鸟狙"			,"weapon_sniper_scout"},
-	{"无限油的电锯"				,"weapon_chainsaw"}
+	{"可以捡子弹的电锯"				,"weapon_chainsaw"}
 };
 
 public Plugin myinfo =

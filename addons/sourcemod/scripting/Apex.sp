@@ -53,8 +53,8 @@ public void
 	Apex[3] = CreateConVar("tank_bohp_hp", "4000", "开启坦克连跳时扣血量.0为禁用");
 	Apex[4] = CreateConVar("tank_trac_hp", "3000", "开启石头追踪时扣血量.0为禁用");
 	Apex[5] = CreateConVar("tank_bohp_mode", "1", "坦克bohp模式 0-禁用 1-自动连跳.");
-	Apex[6] = CreateConVar("tank_bohp_set", "1.5", "设置坦克bohp成功的横向速度增益相乘的值.");
-	Apex[7] = CreateConVar("tank_bohp_lim", "300.0", "设置坦克bohp横向速度增益最大值.");
+	Apex[6] = CreateConVar("tank_bohp_set", "150", "设置坦克bohp成功的横向速度增益相乘的值.");
+	Apex[7] = CreateConVar("tank_bohp_lim", "500.0", "设置坦克bohp横向速度增益最大值.");
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);

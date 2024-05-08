@@ -100,8 +100,7 @@ public int givewpn(Menu menu, MenuAction action, int client, int param2)
 
 void clearcvar(Event event, const char[] name, bool dontBroadcast)
 {
-	for (int i = 1; i <= MaxClients; i++)
-		if (IsClientInGame(i)) Reset(i);
+	for (int i = 1; i <= MaxClients; i++) Reset(i);
 }
 void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 {

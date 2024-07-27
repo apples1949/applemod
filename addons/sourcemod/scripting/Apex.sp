@@ -49,9 +49,9 @@ public void
 {
 	Apex[0] = CreateConVar("tank_block_claw", "1", "阻止坦克同时出拳和扔石头 0-不阻止 1-阻止");
 	Apex[1] = CreateConVar("tank_block_jump", "0", "阻止坦克同时跳跃和扔石块 0-不阻止 1-阻止");
-	Apex[2] = CreateConVar("tank_hp", "8000", "坦克多少血量? 0=禁用");
-	Apex[3] = CreateConVar("tank_bohp_hp", "4000", "开启坦克连跳时扣血量.0为禁用");
-	Apex[4] = CreateConVar("tank_trac_hp", "3000", "开启石头追踪时扣血量.0为禁用");
+	Apex[2] = CreateConVar("tank_hp", "0", "坦克多少血量? 0=禁用");
+	Apex[3] = CreateConVar("tank_bohp_hp", "2000", "开启坦克连跳时扣血量.0为禁用");
+	Apex[4] = CreateConVar("tank_trac_hp", "1000", "开启石头追踪时扣血量.0为禁用");
 	Apex[5] = CreateConVar("tank_bohp_mode", "1", "坦克bohp模式 0-禁用 1-自动连跳.");
 	Apex[6] = CreateConVar("tank_bohp_set", "150", "设置坦克bohp成功的横向速度增益相乘的值.");
 	Apex[7] = CreateConVar("tank_bohp_lim", "500.0", "设置坦克bohp横向速度增益最大值.");

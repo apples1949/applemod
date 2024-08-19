@@ -1,35 +1,46 @@
 "Phrases"
 {
-	"Tag_Selecion"
+	"TagRage"
 	{
-		"en"		"{red}<{default}Tank 选择系统{red}>{default}"
+		"en"		"{red}<{default}Tank Rage{red}>"
 	}
-	"Tag_Rage"
+	"Refilled"
 	{
-		"en"		"{red}<{default}Tank 控制权{red}>{default}"
+		"en"		"{default}({green}%N{default}'s) {olive}Rage Meter {red}Refilled"
 	}
-	"YouBecomeTank"
+	"RefilledBot"
 	{
-		"en"		"{green}You{default} 将会成为 {red}Tank{default}!"
+		"en"		"{olive}Rage Meter {red}Refilled"
 	}
-	"BecomeTank"
+
+    "TagSelection"
 	{
-		"en"		"{olive}%s{default} 将会成为 {red}Tank{default}!"
+		"en"		"{red}<{default}Tank Selection{red}>"
 	}
-	"UnableGiveTank"
+    "YouBecomeTank"
 	{
-		"en"		"[{olive}SM{default}] %s 不是感染者. 无法给予Tank"
+		"en"		"{green}You {default}will become the {red}Tank{default}!"
 	}
-	"Hit_RageMeterRefilled"
+   "BecomeTank"
 	{
-		"en"		"第一次控制权结束，第二次控制权开始"
+		"en"		"{olive}%N {default}will become the {red}Tank!"
 	}
-	"YouRageMeterRefilled"
+
+    "TagControl"
 	{
-		"en"		"{olive}第一次控制权结束， {red}第二次控制权开始{default}"
+		"en"		"{green}[{olive}Tank Control{green}]"
 	}
-	"RageMeterRefilled"
+   "InvalidTarget"
 	{
-		"en"		"({green}%N{default}) {olive}第一次控制权结束， {red}第二次控制权开始"
+		"en"		"{default}Invalid Target. Unable to give tank"
+	}
+   "NoInfected"
+	{
+		"en"		"{olive}%N {default}is not on the infected team. Unable to give tank"
+	}
+
+    "HintText"
+	{
+		"en"		"Rage Meter Refilled"
 	}
 }

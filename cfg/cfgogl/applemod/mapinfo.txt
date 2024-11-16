@@ -1,5 +1,11 @@
 "MapInfo"
 {
+//=============== set map level infomations, include
+//=============== saferoom range (start & end)
+//=============== limit of pills and zombies event
+//=============== ban tank distance
+//=======================================================================
+//=============== Dead Center (C1) 死亡中心
 	"c1m1_hotel"
 	{
 		"start_point"		"427.606232 5739.467773 2926.982178"

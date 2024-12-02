@@ -1473,12 +1473,12 @@ void GetHUD1_Text(char[] output, int size)
 	}
 	if (g_bhybridScoringAvailable)
 	{
-		int maxBouns = SMPlus_GetHealthBonus() + SMPlus_GetDamageBonus() + SMPlus_GetPillsBonus();
-		int healthBonusPercent = SMPlus_GetHealthBonus() / SMPlus_GetMaxHealthBonus() * 100;
-		int damageBonusPercent = SMPlus_GetDamageBonus() / SMPlus_GetMaxDamageBonus() * 100;
-		int pillsBonus = SMPlus_GetPillsBonus();
-		int pillsBpnusPercent = SMPlus_GetPillsBonus() / SMPlus_GetMaxPillsBonus() * 100;
-		FormatEx(output, size, "%s\n奖励分：%d[实血分：%d%%|倒地分：%d%%|药分：%d/%d%%]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
+		float maxBouns = float(SMPlus_GetHealthBonus()) + float(SMPlus_GetDamageBonus()) + float(SMPlus_GetPillsBonus());
+		float healthBonusPercent = float(SMPlus_GetHealthBonus()) / SMPlus_GetMaxHealthBonus() * 100;
+		float damageBonusPercent = float(SMPlus_GetDamageBonus()) / SMPlus_GetMaxDamageBonus() * 100;
+		float pillsBonus = float(SMPlus_GetPillsBonus());
+		float pillsBpnusPercent = float(SMPlus_GetPillsBonus()) / float(SMPlus_GetMaxPillsBonus()) * 100;
+		FormatEx(output, size, "%s\n奖励分：%.0f[实血分：%.0f%%|倒地分：%.0f%%|药分：%f/%.0f%%]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
 	}
 	//PrintToConsoleAll("tank: %d witch: %d", IsStaticTank, IsStaticTank);
 }

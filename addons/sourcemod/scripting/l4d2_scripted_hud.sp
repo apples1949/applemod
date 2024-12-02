@@ -56,6 +56,7 @@ public Plugin myinfo =
 //#define REQUIRE_PLUGIN
 #undef REQUIRE_PLUGIN
 #include <witch_and_tankifier>
+#include <l4d2_hybrid_scoremod>
 
 // ====================================================================================================
 // Pragmas
@@ -290,6 +291,7 @@ static bool   g_bData_HUD2_Text;
 static bool   g_bData_HUD3_Text;
 static bool   g_bData_HUD4_Text;
 bool g_bWitchAndTankSystemAvailable = false;
+bool g_bhybridScoringAvailable = false;
 
 // ====================================================================================================
 // int - Plugin Variables
@@ -672,10 +674,12 @@ public void OnAllPluginsLoaded(){
 public void OnLibraryAdded(const char[] name)
 {
     if ( StrEqual(name, "witch_and_tankifier") ) { g_bWitchAndTankSystemAvailable = true; }
+    if ( StrEqual(name, "l4d2_hybrid_scoremod") ) { g_bhybridScoringAvailable = true; }
 }
 public void OnLibraryRemoved(const char[] name)
 {
     if ( StrEqual(name, "witch_and_tankifier") ) { g_bWitchAndTankSystemAvailable = true; }
+    if ( StrEqual(name, "l4d2_hybrid_scoremod") ) { g_bhybridScoringAvailable = true; }
 }
 //玩家连接
 public void OnClientConnected(int client)
@@ -1422,15 +1426,15 @@ void GetHUD1_Text(char[] output, int size)
 
 void GetHUD1_Text(char[] output, int size)
 {
-	int IsStaticTank = 0, IsStaticWitch = 0;
+	bool IsStaticTank,IsStaticWitch;
 	ConVar cv;
 	if(g_bWitchAndTankSystemAvailable){
 		cv = FindConVar("sm_tank_can_spawn");
 		if(cv.IntValue){
 			if(IsStaticTankMap()){
-				IsStaticTank = 2;
+				IsStaticTank = false;
 			}else{
-				IsStaticTank = 1;
+				IsStaticTank = true;
 			}
 	        
 	    }
@@ -1438,14 +1442,13 @@ void GetHUD1_Text(char[] output, int size)
 		if(cv.IntValue){
 			if(IsStaticWitchMap())
 			{
-				IsStaticWitch = 2;
+				IsStaticWitch = false;
 			}else
 			{
-				IsStaticWitch = 1;
+				IsStaticWitch = true;
 			}	    
 		}
 	}	
-	
 	FormatEx(output, size, "\0");
 	int boss_proximity = RoundToNearest(GetBossProximity() * 100.0);
 	int g_fWitchPercent, g_fTankPercent;
@@ -1453,22 +1456,29 @@ void GetHUD1_Text(char[] output, int size)
 	g_fWitchPercent = RoundToNearest(GetWitchFlow(0) * 100.0);
 	//int max_dist = GetConVarInt(FindConVar("inf_SpawnDistanceMin"));
 	FormatEx(output, size, "进度: [ %d%% ]", boss_proximity);
-	if(IsStaticTank == 1 || (!g_bWitchAndTankSystemAvailable && g_fTankPercent))
+	if(IsStaticTank || (!g_bWitchAndTankSystemAvailable && g_fTankPercent))
 	{
-		
 		FormatEx(output, size, "%s    坦克: [ %d%% ]", output, g_fTankPercent);
-	}else if(IsStaticTank == 2)
+	}else if(!IsStaticTank)
 	{
 		FormatEx(output, size, "%s    坦克: [ 固定 ]", output);
 	}
-	if(IsStaticWitch == 1 || (!g_bWitchAndTankSystemAvailable && g_fWitchPercent))
+	if(IsStaticWitch || (!g_bWitchAndTankSystemAvailable && g_fWitchPercent))
 	{
-		
 		FormatEx(output, size, "%s    女巫: [ %d%% ]", output, g_fWitchPercent);
 	}
-	else if(IsStaticWitch == 2)
+	else if(!IsStaticWitch)
 	{
 		FormatEx(output, size, "%s    女巫: [ 固定 ]", output);
+	}
+	if (g_bhybridScoringAvailable)
+	{
+		int maxBouns = SMPlus_GetHealthBonus() + SMPlus_GetDamageBonus() + SMPlus_GetPillsBonus();
+		int healthBonusPercent = SMPlus_GetHealthBonus() / SMPlus_GetMaxHealthBonus() * 100;
+		int damageBonusPercent = SMPlus_GetDamageBonus() / SMPlus_GetMaxDamageBonus() * 100;
+		int pillsBonus = SMPlus_GetPillsBonus();
+		int pillsBpnusPercent = SMPlus_GetPillsBonus() / SMPlus_GetMaxPillsBonus() * 100;
+		FormatEx(output, size, "%s\n奖励分：%d[实血分：%d%%|倒地分：%d%%|药分：%d/%d%%]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
 	}
 	//PrintToConsoleAll("tank: %d witch: %d", IsStaticTank, IsStaticTank);
 }

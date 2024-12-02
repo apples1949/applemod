@@ -1478,7 +1478,7 @@ void GetHUD1_Text(char[] output, int size)
 		float damageBonusPercent = float(SMPlus_GetDamageBonus()) / SMPlus_GetMaxDamageBonus() * 100;
 		float pillsBonus = float(SMPlus_GetPillsBonus());
 		float pillsBpnusPercent = float(SMPlus_GetPillsBonus()) / float(SMPlus_GetMaxPillsBonus()) * 100;
-		FormatEx(output, size, "%s\n奖励分：%.0f[实血分：%.0f%%|倒地分：%.0f%%|药分：%f/%.0f%%]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
+		FormatEx(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 倒地分: %.0f%% | 药分：%.0f / %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
 	}
 	//PrintToConsoleAll("tank: %d witch: %d", IsStaticTank, IsStaticTank);
 }

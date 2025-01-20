@@ -3,6 +3,3 @@ rules:
   - base: applemod
     upstream: SirPlease:master    # change `wei` to the owner of upstream repo
     mergeMethod: merge
-  - base: master
-    upstream: SirPlease:master    # change `wei` to the owner of upstream repo
-    mergeMethod: merge

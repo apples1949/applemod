@@ -9,9 +9,9 @@
 public Plugin myinfo =
 {
 	name		= "get player real gametime",
-	author		= "apples1949 , 豆瓣酱な",
+	author		= "apples1949 , 豆瓣酱な , deepseek",
 	description = "",
-	version		= "1.4.1",
+	version		= "1.4.2",
 	url			= "https://github.com/apples1949",
 };
 
@@ -340,9 +340,9 @@ void CheckPlayerGametime(int client)
 		}
 		else
 		{
-			ChangeClientTeam(client, 1);
+			ChangeClientToSpec(client);
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
-			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", "client");
+			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", client);
 		}
 	}
 	#if DEBUG
@@ -352,6 +352,7 @@ void CheckPlayerGametime(int client)
 */
 void LimitPlayer(int client)
 {
+	if (!IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
 	#if DEBUG
 	PrintToChatAll("%N i_PlayerTime=%d",client,i_PlayerTime[client]);
@@ -361,7 +362,7 @@ void LimitPlayer(int client)
 		if (i_Count[client] < i_CheckPlayerGameCount)
 		{
 			if (!b_LPWRequesting || (b_LPLateload && CheckPluginLate)) return;
-			ChangeClientTeam(client, 1);
+			ChangeClientToSpec(client);
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}因正在获取玩家{olive} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
 			colors_print_to_chat_all("%t", "forcespecplayerRequesting", client, i_Count[client], i_CheckPlayerGameCount);
 		}
@@ -384,9 +385,9 @@ void LimitPlayer(int client)
 			}
 			else if (i_LPMWFailureGet == 2)
 			{
-				ChangeClientTeam(client, 1);
+				ChangeClientToSpec(client);
 				// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因获取真实游戏时长失败而被强制移动到旁观!", client);
-				colors_print_to_chat_all("%t", "forcespecplayerFailureGet", "client");
+				colors_print_to_chat_all("%t", "forcespecplayerFailureGet", client);
 			}
 		}
 		else if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet == 0))
@@ -416,9 +417,9 @@ void LimitPlayer(int client)
 		else
 		{
 			PrintToChatAll("try to chance %N team",client);
-			ChangeClientTeam(client, 1);
+			ChangeClientToSpec(client);
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
-			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", "client");
+			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", client);
 		}
 	}
 }
@@ -561,6 +562,13 @@ void IsSaveMessage(const char[] Message)
 	fileHandle.WriteLine(Message);
 	delete fileHandle;
 }
+
+void ChangeClientToSpec(int client)
+{
+    if(GetClientTeam(client)==1&&GetBotOfIdlePlayer(client))L4D_TakeOverBot(client);
+    ChangeClientTeam(client, 1);
+}
+
 // by litter fory:https://forums.alliedmods.net/member.php?u=311461
 void colors_replace(char[] str, int max_len)
 {

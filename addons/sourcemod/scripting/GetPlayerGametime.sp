@@ -352,7 +352,7 @@ void CheckPlayerGametime(int client)
 */
 void LimitPlayer(int client)
 {
-	if (!IsValidClient(client)) return;
+	if (IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
 	#if DEBUG
 	PrintToChatAll("%N i_PlayerTime=%d",client,i_PlayerTime[client]);

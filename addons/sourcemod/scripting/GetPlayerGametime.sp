@@ -3,6 +3,7 @@
 
 #include <sourcemod>
 #include <SteamWorks>
+#include <left4dhooks>
 
 #define DEBUG 0
 
@@ -159,9 +160,9 @@ public void OnClientPostAdminCheck(int client)
 		if (!GetPlayerGameTime(client))
 		{
 			i_PlayerTime[client] = -1;
-			#if DEBUG
+#if DEBUG
 			colors_print_to_chat_all("failure get player %N gametime", client);
-			#endif
+#endif
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N {default}已连接,正在获取玩家的实际游戏时长.", client);
 			// colors_print_to_chat_all("%t", "PlayerConnect", client);
 			LimitPlayer(client);
@@ -169,9 +170,9 @@ public void OnClientPostAdminCheck(int client)
 		}
 		else
 		{
-			#if DEBUG
+#if DEBUG
 			colors_print_to_chat_all("get player %N gametime success", client);
-			#endif
+#endif
 			AnnouncePlayerTime(client);
 			LimitPlayer(client);
 		}
@@ -182,9 +183,9 @@ Action MoreGetPlayerGameTime(Handle timer, any client)
 {
 	if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
 	{
-		#if DEBUG
+#if DEBUG
 		colors_print_to_chat_all("%N Need More Get PlayerGametime%d/%d", client, i_Count[client], i_CheckPlayerGameCount);
-		#endif
+#endif
 		i_Count[client] += 1;
 		if (i_Count[client] >= i_CheckPlayerGameCount)
 		{
@@ -213,9 +214,9 @@ Action MoreGetPlayerGameTime(Handle timer, any client)
 
 Action cmdplayertime(int client, int args)
 {
-	#if DEBUG
+#if DEBUG
 	colors_print_to_chat_all("Command executed successfully");
-	#endif
+#endif
 	if (b_SPLMode)
 	{
 		int survivorCount  = 0;
@@ -274,12 +275,12 @@ Action cmdplayertime(int client, int args)
 
 void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
-	if (!b_Enable && b_LimitPlayer) return;
+	if (!b_Enable || !b_LimitPlayer) return;
 	int client	= GetClientOfUserId(event.GetInt("userid"));
 	int oldteam = event.GetInt("oldteam");
 	int iTeam	= event.GetInt("team");
 
-	if (IsValidClient(client) || !IsFakeClient(client) && (oldteam == 1 || iTeam == 1))
+	if (IsValidClient(client) && !IsFakeClient(client) && (oldteam == 1 || iTeam == 1))
 	{
 		LimitPlayer(client);
 	}
@@ -289,9 +290,9 @@ bool GetPlayerGameTime(int client)
 {
 	SteamWorks_RequestStats(client, 550);
 	bool b_gametime = SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
-	#if DEBUG
+#if DEBUG
 	colors_print_to_chat_all("Get %N Real GameTime bool:%d gametime is:%d", client, b_gametime, i_PlayerTime[client]);
-	#endif
+#endif
 	return b_gametime;
 }
 
@@ -302,9 +303,9 @@ bool IsValidClient(int client)
 
 bool CheckPlayerGametime(int client)
 {
-	#if DEBUG
-	PrintToChatAll("Check Player %N Gametime",client);
-	#endif
+#if DEBUG
+	PrintToChatAll("Check Player %N Gametime", client);
+#endif
 	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime)
 	{
 #if DEBUG
@@ -354,10 +355,10 @@ void LimitPlayer(int client)
 {
 	if (!IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
-	#if DEBUG
-	PrintToChatAll("%N i_PlayerTime=%d",client,i_PlayerTime[client]);
-	#endif
-	if (i_PlayerTime[client] == -1 )
+#if DEBUG
+	PrintToChatAll("%N i_PlayerTime=%d", client, i_PlayerTime[client]);
+#endif
+	if (i_PlayerTime[client] == -1)
 	{
 		if (i_Count[client] < i_CheckPlayerGameCount)
 		{
@@ -376,7 +377,7 @@ void LimitPlayer(int client)
 	{
 		if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0))
 		{
-			if(b_LPLateload && CheckPluginLate)return;
+			if (b_LPLateload && CheckPluginLate) return;
 			if (i_LPMWFailureGet == 1)
 			{
 				// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
@@ -398,16 +399,16 @@ void LimitPlayer(int client)
 	}
 	else if (CheckPlayerGametime(client) && (i_LimitPlayerMode != 0))
 	{
-		#if DEBUG
-		PrintToChatAll("Check b_LPLateload && CheckPluginLate: %d&&%d",b_LPLateload,CheckPluginLate);
-		#endif
-		if(b_LPLateload && CheckPluginLate)return;
-		#if DEBUG
-		PrintToChatAll("LimitPlayerMode is %d",i_LimitPlayerMode);
-		#endif
+#if DEBUG
+		PrintToChatAll("Check b_LPLateload && CheckPluginLate: %d&&%d", b_LPLateload, CheckPluginLate);
+#endif
+		if (b_LPLateload && CheckPluginLate) return;
+#if DEBUG
+		PrintToChatAll("LimitPlayerMode is %d", i_LimitPlayerMode);
+#endif
 		if (i_LimitPlayerMode == 1)
 		{
-			PrintToChatAll("try to kick %N",client);
+			PrintToChatAll("try to kick %N", client);
 			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
 			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
 			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
@@ -416,7 +417,7 @@ void LimitPlayer(int client)
 		}
 		else
 		{
-			PrintToChatAll("try to chance %N team",client);
+			PrintToChatAll("try to chance %N team", client);
 			ChangeClientToSpec(client);
 			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
 			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", client);
@@ -563,10 +564,26 @@ void IsSaveMessage(const char[] Message)
 	delete fileHandle;
 }
 
+//thank sorallll
 void ChangeClientToSpec(int client)
 {
-    if(GetClientTeam(client)==1&&GetBotOfIdlePlayer(client))L4D_TakeOverBot(client);
-    ChangeClientTeam(client, 1);
+	if (GetClientTeam(client) == 1 && GetBotOfIdlePlayer(client)) L4D_TakeOverBot(client);
+	ChangeClientTeam(client, 1);
+}
+
+int GetBotOfIdlePlayer(int client) {
+	for (int i = 1; i <= MaxClients; i++) {
+		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2 && GetIdlePlayerOfBot(i) == client)
+			return i;
+	}
+	return 0;
+}
+
+int GetIdlePlayerOfBot(int client) {
+	if (!HasEntProp(client, Prop_Send, "m_humanSpectatorUserID"))
+		return 0;
+
+	return GetClientOfUserId(GetEntProp(client, Prop_Send, "m_humanSpectatorUserID"));
 }
 
 // by litter fory:https://forums.alliedmods.net/member.php?u=311461

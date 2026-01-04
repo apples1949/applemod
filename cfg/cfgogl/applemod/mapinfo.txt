@@ -153,7 +153,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"200.000000"
 		"end_dist"			"150.000000"
-		"horde_limit"		"240"
+		"horde_limit"		"480"//真有人把僵尸打完再走改多些
 		"tank_ban_flow"
 		{
 			"One way drop"

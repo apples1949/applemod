@@ -3,7 +3,7 @@
 
 #define DEBUG_ALL				   0
 
-#define PLUGIN_VERSION			   "2.4.6"
+#define PLUGIN_VERSION			   "2.4.7"
 
 // Using these macros, you can disable unnecessary modules,
 // and they will not be included in the plugin at compile time,

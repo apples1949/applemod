@@ -35,7 +35,7 @@ public Plugin myinfo =
 	name = "1v1 EQ",
 	author = "Blade + Confogl Team, Tabun, Visor",
 	description = "A plugin designed to support 1v1.",
-	version = "0.2.2",
+	version = "0.2.3",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -76,14 +76,14 @@ void Event_PlayerHurt(Event hEvent, const char[] sEventName, bool bDontBroadcast
 	// [1v1] Player (Hunter) had 250 health remaining!
 	// [1v1] AI (Hunter) had 250 health remaining!
 	
-	char sName[MAX_NAME_LENGTH];
-	if (IsFakeClient(iAttacker)) {
-		Format(sName, sizeof(sName), "%t", "AI");
-	} else {
+	if (IsFakeClient(iAttacker))
+		CPrintToChatAll("%t %t%t", "Tag", "AI", "HealthRemaining", "", L4D2_InfectedNames[iZclass], iRemainingHealth);
+	else
+	{
+		char sName[MAX_NAME_LENGTH];
 		GetClientName(iAttacker, sName, sizeof(sName));
+		CPrintToChatAll("%t %t", "Tag", "HealthRemaining", sName, L4D2_InfectedNames[iZclass], iRemainingHealth);
 	}
-	
-	CPrintToChatAll("%t %t", "Tag", "HealthRemaining", sName, L4D2_InfectedNames[iZclass], iRemainingHealth);
 	
 	RequestFrame(NextFrame_PlayerHurt, iAttackerId);
 	

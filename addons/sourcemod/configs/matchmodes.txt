@@ -11,7 +11,7 @@
 	{
 		"zonemodedi"
 		{
-			"name" "ZoneMod 2.9e 混野匹配"
+			"name" "ZoneMod 2.9.1 混野匹配"
 		}
 		"zm1v1"
 		{

@@ -11,7 +11,8 @@
 	{
 		"zonemodedi"
 		{
-			"name" "ZoneMod 2.9.1 混野匹配"
+			"name" "ZoneMod 2.9.1a 混野匹配"
+
 		}
 		"zm1v1"
 		{
@@ -19,7 +20,7 @@
 		}
 		"zonemod4k"
 		{
-			"name" "Zonemod 2.9e 非匹配4控"
+			"name" "Zonemod 2.9.1a 非匹配4控"
 		}
 	}
 	"NextMod Configs"

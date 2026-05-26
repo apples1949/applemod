@@ -642,7 +642,7 @@ public Action Command_Votesforcestartgame(int client, int args)
 
 		return Plugin_Handled;
 	}
-	else if (g_bEnable == false || VotensHpE_D == false)
+	else if (g_bEnable == false || VotensForceStartGameE_D == false)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]投票被禁止");
 	}
@@ -691,7 +691,7 @@ public Action Command_Votesforcedellobby(int client, int args)
 
 		return Plugin_Handled;
 	}
-	else if (g_bEnable == false || VotensAlltalkE_D == false)
+	else if (g_bEnable == false || g_bVotenForceDelLobby == false)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]投票被禁止");
 	}
@@ -1160,7 +1160,7 @@ void CreateVoteforcespectateMenu(int client)
 	{
 		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == team)
 		{
-			Format(playerid, sizeof(playerid), "%d", i);
+			Format(playerid, sizeof(playerid), "%d", GetClientUserId(i));
 			if (GetClientName(i, name, sizeof(name)))
 			{
 				AddMenuItem(menu, playerid, name);
@@ -1179,7 +1179,6 @@ public int Menu_Votesforcespectate(Menu menu, MenuAction action, int param1, int
 		char info[32], name[32];
 		GetMenuItem(menu, param2, info, sizeof(info), _, name, sizeof(name));
 		forcespectateid			= StringToInt(info);
-		forcespectateid			= GetClientUserId(forcespectateid);
 		forcespectateplayername = name;
 
 		DisplayVoteforcespectateMenu(param1);
@@ -1656,9 +1655,17 @@ public Action COLD_DOWN(Handle timer, any client)
 		{
 			if (!g_enb)
 			{
-				CPrintToChatAll("[{olive}VOTE{default}]注意是给投票发起玩家临时提升权限来强制开始游戏!但他不一定是管理员哦.");
-				CheatCommandEx(fsgclient);
-				LogMessage("强制开始游戏通过");
+					if (fsgclient <= 0 || !IsClientInGame(fsgclient))
+					{
+						CPrintToChatAll("[{olive}VOTE{default}]发起投票的玩家已断开连接，无法强制开始游戏!");
+						LogMessage("强制开始游戏失败: 发起玩家已断开连接");
+					}
+					else
+					{
+						CPrintToChatAll("[{olive}VOTE{default}]注意是给投票发起玩家临时提升权限来强制开始游戏!但他不一定是管理员哦.");
+						CheatCommandEx(fsgclient);
+						LogMessage("强制开始游戏通过");
+					}
 			}
 			else {
 				CPrintToChatAll("[{olive}VOTE{default}]对局已开始!无需强制启动游戏!");
@@ -1720,6 +1727,9 @@ void ParseCampaigns()
 
 bool HasAccess(int client, char[] g_sAcclvl)
 {
+	if (client <= 0 || !IsClientInGame(client))
+		return false;
+
 	// no permissions set
 	if (strlen(g_sAcclvl) == 0)
 		return true;
@@ -1758,10 +1768,10 @@ bool IsClientIdle(int client)
 
 void openreadyuphud(int client)
 {
-	if (g_enb) FakeClientCommand(client, "sm_show");
+	if (g_enb && client > 0 && IsClientInGame(client)) FakeClientCommand(client, "sm_show");
 }
 
 void closereadyuphud(int client)
 {
-	if (g_enb) FakeClientCommand(client, "sm_hide");
+	if (g_enb && client > 0 && IsClientInGame(client)) FakeClientCommand(client, "sm_hide");
 }

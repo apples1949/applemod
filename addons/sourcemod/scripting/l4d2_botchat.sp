@@ -1500,7 +1500,7 @@ public Action: OnTakeDamageByWitch(victim, &attacker, &inflictor, &Float:damage,
 
 static bool:IsValidPlayer(client)
 {
-	if (0 < client <= MaxClients)
+	if (0 < client <= MaxClients && IsClientConnected(client) && IsClientInGame(client))
 		return true;
 	return false;
 }

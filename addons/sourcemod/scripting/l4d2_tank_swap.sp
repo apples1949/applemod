@@ -341,13 +341,16 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 	else if (choice == 99)  // "Anyone but me"
 	{
 		choice = GetRandomEligibleTank();
-		if (GetClientHealth(choice) > 1 && !IsPlayerGhost(choice))
+		if (IsClientInGame(choice))
 		{
-			L4D_ReplaceWithBot(choice);
-		}
-		if (IsPlayerGhost(choice))
-		{
-			ForcePlayerSuicide(choice);
+			if (GetClientHealth(choice) > 1 && !IsPlayerGhost(choice))
+			{
+				L4D_ReplaceWithBot(choice);
+			}
+			if (IsPlayerGhost(choice))
+			{
+				ForcePlayerSuicide(choice);
+			}
 		}
 		L4D_ReplaceTank(primaryTankPlayer, choice);
 		
@@ -356,16 +359,19 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 	}
 	else    // choice is a specific player id
 	{
-		if (GetClientHealth(choice) > 1 && !IsPlayerGhost(choice))
+		if (IsClientInGame(choice))
 		{
-			L4D_ReplaceWithBot(choice);
-		}
-		if (IsPlayerGhost(choice))
-		{
-			ForcePlayerSuicide(choice);
+			if (GetClientHealth(choice) > 1 && !IsPlayerGhost(choice))
+			{
+				L4D_ReplaceWithBot(choice);
+			}
+			if (IsPlayerGhost(choice))
+			{
+				ForcePlayerSuicide(choice);
+			}
 		}
 		L4D_ReplaceTank(primaryTankPlayer, choice);
-		
+
 		//FakeClientCommand(primaryTankPlayer, "sm_tankhud");
 		CPrintToChatAll("%t", "Surrend", choice);
 	}

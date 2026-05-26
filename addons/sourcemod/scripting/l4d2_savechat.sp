@@ -1,6 +1,6 @@
 /*
  ----------------------------------------------------------------
- Plugin      : SaveChat 
+ Plugin      : SaveChat
  Author      : citkabuto
  Game        : Any Source game
  Description : Will record all player messages to a file
@@ -9,14 +9,14 @@
  ================================================================
  23/Feb/10  1.2.1    - Fixed bug with player team id
  15/Feb/10  1.2.0    - Now records team name when using cvar
-                            sm_record_detail 
- 01/Feb/10  1.1.1    - Fixed bug to prevent errors when using 
+                            sm_record_detail
+ 01/Feb/10  1.1.1    - Fixed bug to prevent errors when using
                        HLSW (client index 0 is invalid)
  31/Jan/10  1.1.0    - Fixed date format on filename
                        Added ability to record player info
                        when connecting using cvar:
                             sm_record_detail (0=none,1=all:def:1)
- 28/Jan/10  1.0.0    - Initial Version 
+ 28/Jan/10  1.0.0    - Initial Version
  ----------------------------------------------------------------
 */
 
@@ -34,7 +34,7 @@ static char chatFile[128];
 Handle fileHandle = null;
 ConVar sc_record_detail = null;
 
-public Plugin myinfo = 
+public Plugin myinfo =
 {
 	name = "SaveChat",
 	author = "citkabuto",
@@ -52,9 +52,9 @@ public void OnPluginStart()
 	CreateConVar("sm_savechat_version", PLUGIN_VERSION, "记录STEAM32位ID插件的版本.", FCVAR_DONTRECORD|FCVAR_REPLICATED);
 
 	sc_record_detail = CreateConVar("sc_record_detail", "1", "记录玩家的STEAM32位ID和IP地址?  0=禁用, 1=启用.", FCVAR_NOTIFY);
-	
+
 	AutoExecConfig(true, "l4d2_savechat");
-	
+
 	/* Say commands */
 	RegConsoleCmd("say", Command_Say);
 	RegConsoleCmd("say_team", Command_SayTeam);
@@ -91,7 +91,7 @@ public void OnClientPostAdminCheck(int client)
 	if(GetConVarInt(sc_record_detail) != 1)
 		return;
 
-	if(IsFakeClient(client)) 
+	if(IsFakeClient(client))
 		return;
 
 	char msg[2048];
@@ -99,7 +99,7 @@ public void OnClientPostAdminCheck(int client)
 	char country[3];
 	char steamID[128];
 	char playerIP[50];
-	
+
 	GetClientAuthId(client, AuthId_Steam2, steamID, sizeof(steamID));
 
 	/* Get 2 digit country code for current player */
@@ -122,7 +122,7 @@ public void OnClientPostAdminCheck(int client)
 }
 
 /*
- * Extract all relevant information and format 
+ * Extract all relevant information and format
  */
 public void LogChat(int client, int args, bool teamchat)
 {
@@ -142,7 +142,7 @@ public void LogChat(int client, int args, bool teamchat)
 		Format(country, sizeof(country), "  ");
 		Format(teamName, sizeof(teamName), "");
 	}
-	else
+	else if (IsClientInGame(client))
 	{
 		/* Get 2 digit country code for current player */
 		if(GetClientIP(client, playerIP, sizeof(playerIP), true) == false)
@@ -157,6 +157,11 @@ public void LogChat(int client, int args, bool teamchat)
 			}
 		}
 		GetTeamName(GetClientTeam(client), teamName, sizeof(teamName));
+	}
+	else
+	{
+		Format(country, sizeof(country), "  ");
+		Format(teamName, sizeof(teamName), "");
 	}
 	FormatTime(time, sizeof(time), "%H:%M:%S", -1);
 
@@ -207,4 +212,3 @@ public void SaveMessage(const char[] message)
 	WriteFileLine(fileHandle, message);
 	CloseHandle(fileHandle);
 }
-

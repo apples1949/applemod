@@ -43,7 +43,7 @@ public Plugin myinfo =
 	name = "Infected Warp",
 	author = "Confogl Team, CanadaRox, A1m`",
 	description = "Allows infected to warp to survivors",
-	version = "2.4.1",
+	version = "2.4.2",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 

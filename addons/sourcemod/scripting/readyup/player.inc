@@ -98,8 +98,16 @@ void SetClientFrozen(int client, bool freeze)
 
 bool IsPlayer(int client)
 {
+<<<<<<< HEAD
 	return IsClientInGame(client) && IsClientConnected(client)
 		&& (GetClientTeam(client) == L4D2Team_Survivor || GetClientTeam(client) == L4D2Team_Infected);
+=======
+	if (!IsClientInGame(client))
+		return false;
+
+	int team = GetClientTeam(client);
+	return (team == L4D2Team_Survivor || team == L4D2Team_Infected);
+>>>>>>> 40d88aea5b6e30e1401c1202db006fa8524c2aba
 }
 
 void ReturnPlayerToSaferoom(int client, bool flagsSet = true)

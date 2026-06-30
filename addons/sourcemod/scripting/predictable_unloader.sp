@@ -77,8 +77,31 @@ public void OnPluginStart()
 	aReservedPlugins = CreateArray(PLATFORM_MAX_PATH);
 }
 
-Action UnloadPlugins(int args) 
+// Reference: https://github.com/fbef0102/Sourcemod-Plugins/blob/main/linux_auto_restart
+// When the server is empty, use the engine "crash" command to trigger a restart
+// (Linux srcds_run wrapper will bring it back automatically).
+// When players are present (or connecting), proceed with the normal plugin unload flow.
+bool HasPlayers()
 {
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		// IsClientConnected catches both fully in-game players AND players still connecting
+		if (IsClientConnected(i) && !IsFakeClient(i))
+			return true;
+	}
+	return false;
+}
+
+Action UnloadPlugins(int args)
+{
+	// No real players (and no one connecting) → crash the server so it restarts fresh
+	if (!HasPlayers())
+	{
+		ServerCommand("sm_crash");
+		CreateTimer(15.0, DelayedCrash);
+		return Plugin_Handled;
+	}
+
 	char stockpluginname[64];
 	Handle pluginIterator = GetPluginIterator();
 	Handle currentPlugin;
@@ -89,7 +112,7 @@ Action UnloadPlugins(int args)
 		GetPluginFilename(currentPlugin, stockpluginname, sizeof(stockpluginname));
 
 		// We're not pushing this plugin itself into the array as we'll unload it on a timer at the end.
-		if (!StrEqual(sPlugin, stockpluginname)) 
+		if (!StrEqual(sPlugin, stockpluginname))
 		  PushArrayString(aReservedPlugins, stockpluginname);
 	}
 
@@ -123,6 +146,15 @@ Action RefreshPlugins(Handle timer)
 Action UnloadSelf(Handle timer)
 {
 	ServerCommand("sm plugins unload %s", sPlugin);
+
+	return Plugin_Stop;
+}
+
+// Fallback: if sm_crash didn't take the server down, use the engine "crash" command after 15 seconds.
+Action DelayedCrash(Handle timer)
+{
+	SetCommandFlags("crash", GetCommandFlags("crash") &~ FCVAR_CHEAT);
+	ServerCommand("crash");
 
 	return Plugin_Stop;
 }

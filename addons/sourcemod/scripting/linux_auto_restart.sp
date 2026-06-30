@@ -2,32 +2,25 @@
 #pragma newdecls required
 #include <sourcemod>
 #include <regex>
+#define PLUGIN_VERSION			"3.4-2026/6/26"
+#define DEBUG 0
 
 public Plugin myinfo =
 {
-	name = "L4D auto restart",
-	author = "Harry Potter",
+	name = "[L4D1/L4D2/Any] auto restart",
+	author = "Harry Potter, HatsuneImagin",
 	description = "make server restart (Force crash) when the last player disconnects from the server",
-	version = "2.6",
+	version = PLUGIN_VERSION,
 	url	= "https://steamcommunity.com/profiles/76561198026784913"
 };
 
+bool g_bGameL4D;
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	EngineVersion test = GetEngineVersion();
-
-	if( test == Engine_Left4Dead )
+	if(test == Engine_Left4Dead || test == Engine_Left4Dead2)
 	{
-		
-	}
-	else if( test == Engine_Left4Dead2 )
-	{
-		
-	}
-	else
-	{
-		strcopy(error, err_max, "Plugin only supports Left 4 Dead 1 & 2.");
-		return APLRes_SilentFailure;
+		g_bGameL4D = true;
 	}
 
 	return APLRes_Success;
@@ -38,15 +31,31 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 ConVar g_hConVarHibernate;
 Handle COLD_DOWN_Timer;
 
-bool g_bNoOneInServer;
+bool 
+	g_bNoOneInServer, 
+	g_bFirstMap, 
+	g_bCmdMap,
+	g_bAnyoneConnectedBefore;
+
+char
+	g_sPath[256];
 
 public void OnPluginStart()
 {
-	g_hConVarHibernate = FindConVar("sv_hibernate_when_empty");
-	g_hConVarHibernate.AddChangeHook(ConVarChanged_Hibernate);
+	if(g_bGameL4D)
+	{
+		g_hConVarHibernate = FindConVar("sv_hibernate_when_empty");
+		g_hConVarHibernate.AddChangeHook(ConVarChanged_Hibernate);
+	}
 
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);	
-	RegAdminCmd("sm_restart", Cmd_RestartServer, ADMFLAG_ROOT);
+
+	RegAdminCmd("sm_crash", Cmd_RestartServer, ADMFLAG_ROOT, "sm_crash - manually force the server to crash");
+
+	g_bFirstMap = true;
+	AddCommandListener(ServerCmd_map, "map");
+
+	BuildPath(Path_SM, g_sPath, sizeof(g_sPath), "logs/linux_auto_restart.log");
 }
 
 public void OnPluginEnd()
@@ -54,17 +63,6 @@ public void OnPluginEnd()
 	delete COLD_DOWN_Timer;
 }
 
-Action Cmd_RestartServer(int client, int args)
-{
-	LogMessage("强制重启服务器指令确认");
-	PrintToServer("强制重启服务器指令确认");
-
-	g_bNoOneInServer = true;
-
-	delete COLD_DOWN_Timer;
-	COLD_DOWN_Timer = CreateTimer(10.0, restaerserver);
-	return Plugin_Handled;
-}
 void ConVarChanged_Hibernate(ConVar hCvar, const char[] sOldVal, const char[] sNewVal)
 {
 	g_hConVarHibernate.SetBool(false);
@@ -72,17 +70,9 @@ void ConVarChanged_Hibernate(ConVar hCvar, const char[] sOldVal, const char[] sN
 
 public void OnMapStart()
 {	
-	if(g_bNoOneInServer)
-	{
-		g_bNoOneInServer = false;
-		if(CheckPlayerInGame(0) == false) //沒有玩家在伺服器中
-		{
-			g_bNoOneInServer = true;
-
-			delete COLD_DOWN_Timer;
-			COLD_DOWN_Timer = CreateTimer(20.0, COLD_DOWN);
-		}
-	}
+    #if DEBUG
+		LogMessage("OnMapStart()");
+    #endif
 }
 
 public void OnMapEnd()
@@ -92,85 +82,181 @@ public void OnMapEnd()
 
 public void OnConfigsExecuted()
 {
-	g_hConVarHibernate.SetBool(false);
-	if(g_bNoOneInServer)
-	{
-		g_bNoOneInServer = false;
-		if(CheckPlayerInGame(0) == false) //沒有玩家在伺服器中
-		{
-			g_bNoOneInServer = true;
+	#if DEBUG
+		LogMessage("OnConfigsExecuted");
+	#endif 
 
-			delete COLD_DOWN_Timer;
-			COLD_DOWN_Timer = CreateTimer(20.0, COLD_DOWN);
+	if(g_bNoOneInServer || (!g_bFirstMap && g_bAnyoneConnectedBefore) || g_bCmdMap)
+	{
+		delete COLD_DOWN_Timer;
+		COLD_DOWN_Timer = CreateTimer(20.0, Timer_COLD_DOWN);
+	}
+
+	g_bFirstMap = false;
+}
+
+public void OnClientConnected(int client)
+{
+	if(IsFakeClient(client)) return;
+
+	#if DEBUG
+		LogMessage("OnClientConnected: %N", client);
+	#endif 
+
+	if(!g_bAnyoneConnectedBefore)
+	{
+		if(g_bGameL4D)
+		{
+			g_hConVarHibernate.SetBool(false);
 		}
 	}
+
+	g_bAnyoneConnectedBefore = true;
+}
+
+Action Cmd_RestartServer(int client, int args)
+{
+	if(client > 0 && !IsFakeClient(client))
+	{
+		static char steamid[32];
+		GetClientAuthId(client, AuthId_SteamID64, steamid, sizeof(steamid), true);
+
+		LogToFileEx(g_sPath, "Manually restarting server... by %N [%s]", client, steamid);
+		PrintToServer("Manually restarting server in 5 seconds later... by %N", client);
+		PrintToChatAll("Manually restarting server in 5 seconds later... by %N", client);
+	}
+	else
+	{
+		LogToFileEx(g_sPath, "Manually restarting server by server console...");
+		PrintToServer("Manually restarting server in 5 seconds later...");
+		PrintToChatAll("Manually restarting server in 5 seconds later...");
+	}
+
+	CreateTimer(5.0, Timer_Cmd_RestartServer);
+
+	return Plugin_Continue;
 }
 
 void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 {
-	int client = GetClientOfUserId(GetEventInt(event, "userid"));
-	if(!client || IsFakeClient(client) /*|| (IsClientConnected(client) && !IsClientInGame(client))*/) return;
-	if(client && !CheckPlayerInGame(client)) //檢查是否還有玩家以外的人還在伺服器
+	// event.GetBool("bot") always return false in l4d1/2
+	if(event.GetBool("bot")) return;
+
+	static char networkid[32];
+	event.GetString("networkid", networkid, sizeof(networkid));
+	// "networkid" is "BOT" is fake client
+	if(strcmp(networkid, "BOT", false) == 0) return;
+
+	int userid = event.GetInt("userid");
+	int client = GetClientOfUserId(userid);
+	if(userid > 0 && client == 0 && !CheckPlayerInGame(0)) //player leaves during map change
 	{
 		g_bNoOneInServer = true;
 
 		delete COLD_DOWN_Timer;
-		COLD_DOWN_Timer = CreateTimer(15.0, COLD_DOWN);
+		COLD_DOWN_Timer = CreateTimer(15.0, Timer_COLD_DOWN);
+		return;
+	}
+
+	if(client && !IsFakeClient(client) && !CheckPlayerInGame(client)) //檢查是否還有玩家以外的人還在伺服器
+	{
+		g_bNoOneInServer = true;
+
+		delete COLD_DOWN_Timer;
+		COLD_DOWN_Timer = CreateTimer(15.0, Timer_COLD_DOWN);
 	}
 }
 
-Action COLD_DOWN(Handle timer, any client)
+Action Timer_COLD_DOWN(Handle timer, any client)
 {
+	COLD_DOWN_Timer = null;
+
 	if(CheckPlayerInGame(0)) //有玩家在伺服器中
 	{
 		g_bNoOneInServer = false;
-		COLD_DOWN_Timer = null;
 		return Plugin_Continue;
 	}
-	
-	if(CheckPlayerConnectingSV()) //沒有玩家在伺服器但是有玩家正在連線
-	{
-		COLD_DOWN_Timer = CreateTimer(20.0, COLD_DOWN); //重新計時
-		return Plugin_Continue;
-	}
-	
-	LogMessage("最后一位玩家已离开服务器,现在重启服务器");
-	PrintToServer("最后一位玩家已离开服务器,现在重启服务器");
 
 	UnloadAccelerator();
+	CreateTimer(0.2, Timer_RestartServer, 0);
 
-	CreateTimer(0.1, Timer_RestartServer);
-
-	COLD_DOWN_Timer = null;
 	return Plugin_Continue;
 }
 
-Action restaerserver(Handle timer, any client)
-{	
-	LogMessage("强制重启服务器执行");
-	PrintToServer("强制重启服务器执行");
-
-	UnloadAccelerator();
-
-	CreateTimer(0.1, Timer_RestartServer);
-
-	COLD_DOWN_Timer = null;
-	return Plugin_Continue;
-}
-
-Action Timer_RestartServer(Handle timer)
+Action Timer_RestartServer(Handle timer, int type)
 {
-	SetCommandFlags("crash", GetCommandFlags("crash") &~ FCVAR_CHEAT);
-	ServerCommand("crash");
+	if(type == 0)
+	{
+		LogToFileEx(g_sPath, "Last one player left the server, Restart server now");
+		PrintToServer("Last one player left the server, Restart server now");
+	}
+	else
+	{
+		LogToFileEx(g_sPath, "Manually restart via cmd, Restart server now");
+		PrintToServer("Manually restart via cmd, Restart server now");
+	}
 
-	//SetCommandFlags("sv_crash", GetCommandFlags("sv_crash") &~ FCVAR_CHEAT);
-	//ServerCommand("sv_crash");//crash server, make linux auto restart server
+	if(g_bGameL4D)
+	{
+		SetCommandFlags("crash", GetCommandFlags("crash") &~ FCVAR_CHEAT);
+		ServerCommand("crash");
+	}
+	else
+	{
+		SetCommandFlags("crash", GetCommandFlags("crash") &~ FCVAR_CHEAT);
+		ServerCommand("crash");
+
+		SetCommandFlags("sv_crash", GetCommandFlags("sv_crash") &~ FCVAR_CHEAT);
+		ServerCommand("sv_crash");
+
+		ServerCommand("_restart");
+	}
+
+	return Plugin_Continue;
+}
+
+Action Timer_Cmd_RestartServer(Handle timer)
+{
+	for(int i = 1; i <= MaxClients; i++)
+	{
+		if(!IsClientInGame(i)) continue;
+		if(IsFakeClient(i)) continue;
+
+		KickClient(i, "Server is restarting");
+	}
+
+	UnloadAccelerator();
+	CreateTimer(0.2, Timer_RestartServer, 1);
 
 	return Plugin_Continue;
 }
 
 void UnloadAccelerator()
 {
+	/*Handle hIterator = GetPluginIterator();
+	Handle hPlug;
+
+	ServerCommand("sm plugins load_unlock");
+
+	static char PluginName[256];
+	while (MorePlugins(hIterator))
+	{
+		hPlug = ReadPlugin(hIterator);
+
+		if( hPlug )
+		{
+			// 得到插件全名包含路徑與.smx (路徑相對於plugins/)
+			GetPluginFilename(hPlug, PluginName, sizeof(PluginName));
+			if(StrContains(PluginName, "accelerator_local.smx", false) > 0)
+			{
+				ServerCommand("sm plugins unload %s", PluginName);
+				break;
+			}
+		}
+	}
+	
+	delete hIterator;*/
+
 	/*if( g_iCvarUnloadExtNum )
 	{
 		ServerCommand("sm exts unload %i 0", g_iCvarUnloadExtNum);
@@ -189,15 +275,28 @@ void UnloadAccelerator()
 	if (regex.Match(responseBuffer) > 0 && regex.CaptureCount() == 2)
 	{
 		char sAcceleratorExtNum[4];
-		
-		// 0 is the full string "[?] Accelerator"
-		// 1 is the matched extension number
+		// 索引 0 永遠是「整個匹配成功的字串」，舉例: [01] Accelerator
+		// 索引 1 是第一個括號 ([0-9]+) 內的文字，舉例: 01
 		regex.GetSubString(1, sAcceleratorExtNum, sizeof(sAcceleratorExtNum));
-		
-		// unload it
-		ServerCommand("sm exts unload %s 0", sAcceleratorExtNum);
-		LogMessage("卸载崩溃扩展成功");
-		PrintToServer("卸载崩溃扩展成功");
+
+		ServerCommandEx(responseBuffer, sizeof(responseBuffer), "sm exts unload %s", sAcceleratorExtNum);
+		Regex regex2 = new Regex("sm exts unload ([0-9]+) ([0-9]+)");
+		if (regex2.Match(responseBuffer) > 0)
+		{
+			char sUnloadCode[64];
+			// example: sm exts unload 01 164
+			regex2.GetSubString(0, sUnloadCode, sizeof(sUnloadCode));
+
+			// unload it
+			ServerCommand("%s", sUnloadCode);
+			LogToFileEx(g_sPath, "Unload Accelerator with code successfully");
+		}
+		else
+		{
+			LogToFileEx(g_sPath, "Unload Accelerator successfully");
+			// unload it
+		}
+
 		ServerExecute();
 	}
 	
@@ -206,18 +305,35 @@ void UnloadAccelerator()
 
 bool CheckPlayerInGame(int client)
 {
-	for (int i = 1; i < MaxClients+1; i++)
-		if(IsClientInGame(i) && !IsFakeClient(i) && i!=client)
-			return true;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if(IsClientConnected(i) && !IsFakeClient(i) && i!=client)
+		{
+			if(IsClientInGame(i))
+			{
+				return true;
+			}
+			else
+			{
+				// 幽靈人口: 有client, IsClientConnected: true, IsClientInGame: false, userid: -1
+				// 幽靈人口常發生於換圖時離線，踢不掉，status看不到
+				int userid = GetClientUserId(i);
+				if(userid > 0) return true;
+			}
+		}
+	}
 
 	return false;
 }
 
-bool CheckPlayerConnectingSV()
+//從大廳匹配觸發map
+Action ServerCmd_map(int client, const char[] command, int argc)
 {
-	for (int i = 1; i < MaxClients+1; i++)
-		if(IsClientConnected(i) && !IsClientInGame(i) && !IsFakeClient(i))
-			return true;
+	if(!g_bGameL4D) return Plugin_Continue;
 
-	return false;
+	g_bCmdMap = true;
+	g_hConVarHibernate.SetBool(false);
+
+	delete COLD_DOWN_Timer;
+	return Plugin_Continue;
 }

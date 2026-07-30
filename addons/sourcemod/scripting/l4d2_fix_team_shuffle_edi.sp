@@ -136,6 +136,7 @@ Action EnableFixTeam_Timer(Handle timer)
 Action DisableFixTeam_Timer(Handle timer)
 {
 	DisableFixTeam();
+	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（30秒），如有问题请联系管理员");
 
 	return Plugin_Continue;
 }
@@ -187,6 +188,8 @@ void FixTeams()
 		return;
 	}
 
+	PrintToChatAll("\x01[队伍修正] 正在恢复上回合队伍分配...");
+
 	MoveToSpectatorWhoIsNotInTheTeam(winners, winnerTeam);
 	MoveToSpectatorWhoIsNotInTheTeam(losers, losersTeam);
 
@@ -202,6 +205,7 @@ void FixTeams()
 		return;
 	}
 
+	PrintToChatAll("\x01[队伍修正] 队伍尚未完全归位，等待重试...");
 	EnableFixTeam();
 }
 
@@ -213,7 +217,10 @@ void MoveToSpectatorWhoIsNotInTheTeam(ArrayList arrayList, int team)
 			continue;
 
 		if (FindValueInArray(arrayList, client) == -1)
+		{
 			MovePlayerToTeam(client, L4D2_TEAM_SPECTATOR);
+			PrintToChat(client, "\x01[队伍修正] 你不在上回合的队伍中，已暂时移到旁观");
+		}
 	}
 }
 
@@ -225,7 +232,10 @@ void MoveSpectatorsToTheCorrectTeam(ArrayList arrayList, int team)
 			continue;
 
 		if (FindValueInArray(arrayList, client) != -1)
+		{
 			MovePlayerToTeam(client, team);
+			PrintToChat(client, "\x01[队伍修正] 你已回到上回合的队伍（%s）", team == L4D2_TEAM_SURVIVOR ? "幸存者" : "感染者");
+		}
 	}
 }
 
@@ -299,6 +309,8 @@ bool IsNewGame()
 void MarkFixComplete()
 {
 	g_bFixCompleted = true;
+
+	PrintToChatAll("\x01[队伍修正] 队伍修正完成！所有玩家已归位。");
 
 	Call_StartForward(g_hFwdFixComplete);
 	Call_Finish();

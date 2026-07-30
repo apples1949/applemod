@@ -35,7 +35,7 @@ public void OnPluginStart()
 {
 	HookEvent("round_start", clearcvar);
 	HookEvent("map_transition", clearcvar);
-	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
+	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Post);
 
 	RegConsoleCmd("sm_wpn", cmdwpn);
 }
@@ -84,14 +84,12 @@ public int givewpn(Menu menu, MenuAction action, int client, int param2)
 	{
 		case MenuAction_Select:
 		{
-			switch (param2)
-			{
-				case 0, 1, 2, 3, 4, 5:
-				{
-					Select[client] = param2;
-					Give(client);
-				}
-			}
+			Select[client] = param2;
+			Give(client);
+		}
+		case MenuAction_End:
+		{
+			delete menu;
 		}
 	}
 
@@ -111,14 +109,16 @@ void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 }
 
 public void Give(int client)
-
 {
+	if (Select[client] < 0 || Select[client] >= sizeof(TAG_WEAPON_NAME))
+		return;
+
 	CPrintToChatAll("%s玩家 {lightgreen}%N {lightred}通过指令!wpn获取武器: {lightgreen}%s", TAG, client, TAG_WEAPON_NAME[Select[client]][0]);
 	CheatCommand(client, "give", TAG_WEAPON_NAME[Select[client]][1]);
 	PlayerHaveWpn[client] = true;
 }
 
-stock void CheatCommand(int client, char[] command, char[] arguments)
+stock void CheatCommand(int client, const char[] command, const char[] arguments)
 {
 	if (!client) return;
 	int admin = GetUserFlagBits(client);

@@ -31,7 +31,7 @@ int	   Posture[MAXPLAYERS + 1];
 int	   BhopLim[MAXPLAYERS + 1];
 int	   TracLim[MAXPLAYERS + 1];
 
-ConVar Apex[8];
+ConVar Apex[5];
 
 public Plugin myinfo =
 {
@@ -50,11 +50,8 @@ public void
 	Apex[0] = CreateConVar("tank_block_claw", "1", "阻止坦克同时出拳和扔石头 0-不阻止 1-阻止");
 	Apex[1] = CreateConVar("tank_block_jump", "0", "阻止坦克同时跳跃和扔石块 0-不阻止 1-阻止");
 	Apex[2] = CreateConVar("tank_hp", "0", "坦克多少血量? 0=禁用");
-	Apex[3] = CreateConVar("tank_bohp_hp", "2000", "开启坦克连跳时扣血量.0为禁用");
+	Apex[3] = CreateConVar("tank_bohp_hp", "1500", "开启坦克连跳时扣血量.0为禁用");
 	Apex[4] = CreateConVar("tank_trac_hp", "1000", "开启石头追踪时扣血量.0为禁用");
-	Apex[5] = CreateConVar("tank_bohp_mode", "1", "坦克bohp模式 0-禁用 1-自动连跳.");
-	Apex[6] = CreateConVar("tank_bohp_set", "150", "设置坦克bohp成功的横向速度增益相乘的值.");
-	Apex[7] = CreateConVar("tank_bohp_lim", "500.0", "设置坦克bohp横向速度增益最大值.");
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);
@@ -128,7 +125,7 @@ Action Call_Trac(int client, int args)
 }
 Action Call_Bohp(int client, int args)
 {
-	if (Apex[5].IntValue == BHOPMODE_BLOCK || !IsTank(client))
+	if (!IsTank(client))
 		return Plugin_Handled;
 
 	int mumhp = Apex[3].IntValue;
@@ -187,58 +184,7 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 }
 void Event_PlayerJumpApex(Event event, const char[] name, bool dontBroadcast)
 {
-	int client = GetClientOfUserId(event.GetInt("userid"));
-
-	if (!IsTank(client) || !IsBhop[client])
-		return;
-
-	int button = GetClientButtons(client);
-
-	if (button & IN_MOVELEFT || button & IN_MOVERIGHT)
-	{
-		if (button & IN_MOVELEFT)
-		{
-			if (Dir[client] > L)
-			{
-				Dir[client] = L;
-				return;
-			}
-			else Dir[client] = L;
-		}
-		else if (button & IN_MOVERIGHT)
-		{
-			if (Dir[client] < R)
-			{
-				Dir[client] = R;
-				return;
-			}
-			else Dir[client] = R;
-		}
-
-		float ang[3];
-		float right[3];
-		float front[3];
-		float newspeed[3];
-
-		GetEntPropVector(client, Prop_Send, "m_angRotation", ang);
-		GetAngleVectors(ang, NULL_VECTOR, right, NULL_VECTOR);
-		NormalizeVector(right, right);
-
-		if (button & IN_MOVELEFT) NegateVector(right);
-
-		/* 限制最大速度 */
-		GetEntPropVector(client, Prop_Data, "m_vecVelocity", front);
-		if (RoundToNearest(GetVectorLength(front)) > Apex[7].FloatValue)
-			return;
-
-		ScaleVector(right, GetVectorLength(right) * Apex[6].FloatValue);
-
-		GetEntPropVector(client, Prop_Data, "m_vecAbsVelocity", newspeed);
-		for (int i = 1; i < 3; i++)
-			newspeed[i] += right[i];
-
-		TeleportEntity(client, NULL_VECTOR, NULL_VECTOR, newspeed);
-	}
+	// 不需要处理横向速度
 }
 void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 {
@@ -297,7 +243,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 
 	if (buttons & IN_JUMP)
 	{
-		if (Apex[5].IntValue == BHOPMODE_AUTO && IsBhop[client] && !(GetEntityFlags(client) & FL_ONGROUND) && !(GetEntityMoveType(client) & MOVETYPE_LADDER))
+		if (IsBhop[client] && !(GetEntityFlags(client) & FL_ONGROUND) && !(GetEntityMoveType(client) & MOVETYPE_LADDER))
 			buttons &= ~IN_JUMP;
 	}
 

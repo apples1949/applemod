@@ -49,7 +49,7 @@ public void OnPluginStart()
 	LoadTranslations("charger_power.phrases");
 
 	CreateConVar("charger_power_version", PLUGIN_VERSION, "Charger Power version", FCVAR_DONTRECORD|FCVAR_REPLICATED|FCVAR_NOTIFY);
-	g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "500.0", "Charger撞的力度", FCVAR_NOTIFY, true, 0.0, true, 5000.0);
+	g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "10.0", "Charger撞的力度", FCVAR_NOTIFY, true, 0.0, true, 5000.0);
 	g_h_CvarChargerCarry = CreateConVar("l4d2_charger_power_carry", "1", "Charger带人能不能撞动铁?", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_h_CvarMessageType = CreateConVar("l4d2_charger_power_message_type", "3", "显示消息的方式 (0 - 关闭, 1 - 聊天框, 2 - 屏幕中心, 3 - 游戏提示)", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	g_h_CvarObjects = CreateConVar("l4d2_charger_power_objects", "7", "可以撞动什么铁? (1 - 车, 2 - 警报车, 4 - 垃圾箱, 8 - 货车)", FCVAR_NOTIFY, true, 1.0, true, 15.0);
@@ -165,6 +165,7 @@ public Action TimerRemoveEntity(Handle h_Timer, any i_Ent)
 	{
 		RemoveEntity(i_Ent);
 	}
+	return Plugin_Stop;
 }
 
 public bool TraceFilterClients(int i_Entity, int i_Mask, any i_Data)
@@ -188,7 +189,7 @@ public Action CheckEntity(Handle h_Timer, DataPack h_Pack)
 	if( i_Ent == INVALID_ENT_REFERENCE)
 	{
 		delete h_Pack;
-		return;
+		return Plugin_Stop;
 	}
 
 	float f_LastOrigin = h_Pack.ReadFloat();
@@ -209,6 +210,8 @@ public Action CheckEntity(Handle h_Timer, DataPack h_Pack)
 		else
 			TeleportEntity(i_Ent, NULL_VECTOR, NULL_VECTOR, view_as<float>({0.0, 0.0, 0.0}));
 	}
+
+	return Plugin_Stop;
 }
 
 public Action EventPlayerSpawn(Event h_Event, const char[] s_Name, bool b_DontBroadcast)
@@ -228,6 +231,8 @@ public Action EventPlayerSpawn(Event h_Event, const char[] s_Name, bool b_DontBr
 		// CreateTimer(0.1, DisplayHint, h_Pack); // No longer valid, server prevents executing client commands.
 		CreateTimer(0.4, DelayDisplayHint, h_Pack);
 	}
+
+	return Plugin_Continue;
 }
 
 /*
@@ -256,7 +261,7 @@ public Action DelayDisplayHint(Handle h_Timer, DataPack h_Pack)
 	if( !i_Client)
 	{
 		delete h_Pack;
-		return;
+		return Plugin_Stop;
 	}
 
 	h_Pack.ReadString(s_LanguageKey, sizeof(s_LanguageKey));
@@ -278,6 +283,8 @@ public Action DelayDisplayHint(Handle h_Timer, DataPack h_Pack)
 			DisplayInstructorHint(i_Client, s_Message, s_Bind);
 		}
 	}
+
+	return Plugin_Stop;
 }
 
 public void DisplayInstructorHint(int i_Client, char s_Message[256], char[] s_Bind)
@@ -327,12 +334,14 @@ public Action RemoveInstructorHint(Handle h_Timer, DataPack h_Pack)
 
 	if( !i_Client || !IsClientInGame(i_Client))
 	{
-		return;
+		return Plugin_Stop;
 	}
 
 	// ClientCommand(i_Client, "gameinstructor_enable 0");
 
 	DispatchKeyValue(i_Client, "targetname", "");
+
+	return Plugin_Stop;
 }
 
 stock int GetInfectedClass(int i_Client)

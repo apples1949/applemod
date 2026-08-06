@@ -36,6 +36,7 @@
 	}
 	"[AFK] Inactivity detected! 4"
 	{
+		"#format"		"{1:d}"
 		"en"	"[AFK] Detected that you are currently available to join the game! Press M to join the game\n Once someone leaves the safe zone you will be kicked off the server. Don't be a dick!"
 		"zho"	"[AFK] 檢測到目前可以加入對局! 按 M 加入遊戲\n 壹旦有人離開安全區域妳將踢出服務器. 別占著茅坑不拉屎!"
 		"chi"	"[AFK] 检测到目前可以加入对局! 按 M 加入游戏\n 一旦有人离开安全区域你将踢出服务器. 别占着茅坑不拉屎!"
@@ -43,18 +44,18 @@
 	}
 	"have been kicked from server due to inactivity"
 	{
-		"#format"		"{1:s}"
-		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than 15 seconds."
-		"zho"	"[AFK] {lightgreen}{1} 旁觀閒置太久被踢出."
-		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过15秒而被踢出."
-		"hu"	"[AFK] {lightgreen}{1} Kirúgtak a szerverről, mert több mint 15 másodpercig nem csatlakozott a játékhoz."
+		"#format"		"{1:s}, {2:d}"
+		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than {2} seconds."
+		"zho"	"[AFK] {lightgreen}{1} 因旁觀不補位超過 {2} 秒而被踢出."
+		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过 {2} 秒而被踢出."
+		"hu"	"[AFK] {lightgreen}{1} Kirúgtak a szerverről, mert több mint {2} másodpercig nem csatlakozott a játékhoz."
 	}	
 	"afkForceSpectate"
 	{
 		"en"	"[AFK] You has been switched to {lightgreen}Spectators"
 		"zho"	"[AFK] 你已被轉換到 {lightgreen}旁觀者"
 		"chi"	"[AFK] 你已被移动到 {lightgreen}旁观"
-	}	
+	}
 	"[AFK] Inactivity detected! 5"
 	{
 		"#format"		"{1:s}"

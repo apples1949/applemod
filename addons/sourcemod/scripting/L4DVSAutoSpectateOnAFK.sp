@@ -10,27 +10,17 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.4"
+#define PLUGIN_VERSION "2.6-2025/2/12"
 
 
 // For cvars
-ConVar g_hAfkWarnSpecTime;
-ConVar g_hAfkSpecTime;
-ConVar g_hAfkWarnKickTime;
-ConVar g_hAfkKickTime;
-ConVar g_hAfkCheckInterval;
-ConVar g_hAfkKickEnabled;
-ConVar g_hAfkSaferoomIgnore;
-ConVar g_hImmuneAccess;
-ConVar g_hSayResetTime;
-int afkWarnSpecTime;
-int afkSpecTime;
-int afkWarnKickTime;
-int afkKickTime;
-int afkCheckInterval;
-bool afkKickEnabled;
-bool bAfkSaferoomIgnore;
-bool g_bSayResetTime;
+ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
+ 	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, 
+	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable;
+
+int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
+	afkKickTime, afkCheckInterval;
+bool afkKickEnabled, bAfkSaferoomIgnore, g_bSayResetTime, g_bSpecAfkMsgEnable;
 
 
 // work variables
@@ -40,7 +30,7 @@ float afkPlayerLastPos[MAXPLAYERS + 1][3];
 float afkPlayerLastEyes[MAXPLAYERS + 1][3];
 bool g_bLeftSafeRoom;
 bool L4D2Version;
-char g_sAccesslvl[16];
+char g_sAccesslvl[AdminFlags_TOTAL];
 int g_iPlayerSpawn, g_iRoundStart;
 Handle PlayerLeftStartTimer, afkCheckThreadTimer;
 
@@ -96,21 +86,22 @@ public void OnPluginStart()
 	// For roundstart and roundend..
 	HookEvent("round_start", 			Event_RoundStart, 	EventHookMode_PostNoCopy);
 	HookEvent("round_end", 				Event_RoundEnd,		EventHookMode_PostNoCopy);
-	HookEvent("finale_vehicle_leaving", Event_RoundEnd,		EventHookMode_PostNoCopy);
+	HookEvent("finale_win", 			Event_RoundEnd,		EventHookMode_PostNoCopy);
 	HookEvent("mission_lost", 			Event_RoundEnd,		EventHookMode_PostNoCopy);
 	HookEvent("map_transition", 		Event_RoundEnd,		EventHookMode_PostNoCopy);
 	HookEvent("player_spawn",			Event_PlayerSpawn,	EventHookMode_PostNoCopy);
 
-	g_hAfkWarnSpecTime 		= CreateConVar("l4d_specafk_warnspectime", "10", "游戏中检测到闲置后多少秒出现警告提示", FCVAR_NOTIFY, true, 0.0);
-	g_hAfkSpecTime 			= CreateConVar("l4d_specafk_spectime", "15", "警告后多少秒强制旁观", FCVAR_NOTIFY, true, 0.0);
-	g_hAfkWarnKickTime	 	= CreateConVar("l4d_specafk_warnkicktime", "60", "旁观检测到闲置后多少秒出现警告提示", FCVAR_NOTIFY, true, 0.0);
-	g_hAfkKickTime 			= CreateConVar("l4d_specafk_kicktime", "30", "旁观警告后多少秒踢出", FCVAR_NOTIFY, true, 0.0);
-	g_hAfkCheckInterval 	= CreateConVar("l4d_specafk_checkinteral", "1", "多少秒检测所有玩家是否闲置", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", "1", "如果为1，则旁观闲置时踢出服务器", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", "1", "如果为1, 即使玩家在安全区域时仍然强制旁观并踢出服务器", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", "z", "拥有什么权限的玩家在旁观是不会踢出服务器. (无内容 = 任何人, -1: 没有人)", FCVAR_NOTIFY);
-	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", "1", "如果为1, 当玩家在聊天框中打字时重置闲置检测.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "Version of L4D VS Auto spectate on AFK", FCVAR_DONTRECORD|FCVAR_NOTIFY);
+	g_hAfkWarnSpecTime 		= CreateConVar("l4d_specafk_warnspectime", 			"10", "游戏中检测到闲置后多少秒出现警告提示", FCVAR_NOTIFY, true, 0.0);
+	g_hAfkSpecTime 			= CreateConVar("l4d_specafk_spectime", 				"15", "警告后多少秒强制旁观", FCVAR_NOTIFY, true, 0.0);
+	g_hAfkWarnKickTime	 	= CreateConVar("l4d_specafk_warnkicktime", 			"0", "旁观检测到闲置后多少秒出现警告提示", FCVAR_NOTIFY, true, 0.0);
+	g_hAfkKickTime 			= CreateConVar("l4d_specafk_kicktime", 				"30", "旁观警告后多少秒踢出", FCVAR_NOTIFY, true, 0.0);
+	g_hAfkCheckInterval 	= CreateConVar("l4d_specafk_checkinteral", 			"1", "检测/警告的时间间隔", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", 			"1", "设为1时，当队伍有空位时，旁观状态下的AFK玩家将被踢出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", 		"0", "设为1时，无论幸存者是否离开安全屋，AFK玩家都会被强制旁观（不影响旁观踢出判定）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"z", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
+	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "L4D VS 自动AFK旁观插件的版本", FCVAR_DONTRECORD|FCVAR_NOTIFY);
 	AutoExecConfig(true, "L4DVSAutoSpectateOnAFK");
 	
 
@@ -124,6 +115,7 @@ public void OnPluginStart()
 	g_hAfkSaferoomIgnore.AddChangeHook(ConVarChanged);
 	g_hImmuneAccess.AddChangeHook(ConVarChanged);
 	g_hSayResetTime.AddChangeHook(ConVarChanged);
+	g_hSpecAfkMsgEnable.AddChangeHook(ConVarChanged);
 
 	if(g_bLate)
 	{
@@ -151,17 +143,12 @@ void ReadCvars()
 	g_hImmuneAccess.GetString(g_sAccesslvl,sizeof(g_sAccesslvl));
 
 	g_bSayResetTime = g_hSayResetTime.BoolValue;
+	g_bSpecAfkMsgEnable = g_hSpecAfkMsgEnable.BoolValue;
 }
 
 void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	ReadCvars();
-}
-
-bool g_bFirstMap;
-public void OnMapStart()
-{
-	g_bFirstMap = L4D_IsFirstMapInScenario();
 }
 
 public void OnMapEnd()
@@ -178,19 +165,46 @@ public void OnClientPutInServer(int client)
 	afkPlayerTimeLeftAction[client] = afkKickTime;
 }
 
-bool HasAccess(int client, char[] g_sAcclvl)
+bool HasAccess(int client, char[] sAcclvl)
 {
 	// no permissions set
-	if (strlen(g_sAcclvl) == 0)
+	if (strlen(sAcclvl) == 0)
 		return true;
 
-	else if (StrEqual(g_sAcclvl, "-1"))
+	else if (StrEqual(sAcclvl, "-1"))
 		return false;
 
 	// check permissions
-	if ( GetUserFlagBits(client) & ReadFlagString(g_sAcclvl) )
+	int flag = GetUserFlagBits(client);
+	if ( flag & ReadFlagString(sAcclvl) || flag & ADMFLAG_ROOT )
 	{
 		return true;
+	}
+
+	return false;
+}
+
+bool TeamsHaveOpenSlots()
+{
+	// 生还者队伍有空位：存在 AI 机器人（玩家加入可顶替）
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2)
+			return true;
+	}
+
+	// 感染者队伍有空位：可加入的插槽未满
+	ConVar hMaxInfected = FindConVar("z_max_player_zombies");
+	if (hMaxInfected != null)
+	{
+		int iInfectedCount = 0;
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (IsClientInGame(i) && GetClientTeam(i) == 3)
+				iInfectedCount++;
+		}
+		if (iInfectedCount < hMaxInfected.IntValue)
+			return true;
 	}
 
 	return false;
@@ -232,12 +246,12 @@ Action tmrStart(Handle timer)
 	// If client is not on spec team
 			if (GetClientTeam(client)!=1)
 			{
-				afkPlayerTimeLeftWarn[client] = (g_bFirstMap) ? afkWarnSpecTime * 2 : afkWarnSpecTime;
+				afkPlayerTimeLeftWarn[client] = afkWarnSpecTime;
 				afkPlayerTimeLeftAction[client] = afkSpecTime;
 			}
 			else // if player is on spectators
 			{
-				afkPlayerTimeLeftWarn[client] = (g_bFirstMap) ? afkWarnKickTime * 2 : afkWarnKickTime;
+				afkPlayerTimeLeftWarn[client] = afkWarnKickTime;
 				afkPlayerTimeLeftAction[client] = afkKickTime;
 			}
 			
@@ -246,7 +260,7 @@ Action tmrStart(Handle timer)
 		}
 		else
 		{
-			afkPlayerTimeLeftWarn[client] = (g_bFirstMap) ? afkWarnSpecTime * 2 : afkWarnSpecTime;
+			afkPlayerTimeLeftWarn[client] = afkWarnSpecTime;
 			afkPlayerTimeLeftAction[client] = afkSpecTime;
 		}
 	}
@@ -284,7 +298,7 @@ void afkPlayerAction (Event event, const char[] name, bool dontBroadcast)
 		client = GetClientOfUserId(event.GetInt("userid"));
 	
 	// resets his timers
-	if (client > 0 && client < MaxClients && IsClientInGame(client) && !IsFakeClient(client))
+	if (client > 0 && client <= MaxClients && IsClientInGame(client) && !IsFakeClient(client))
 		afkResetTimers(client);
 }
 
@@ -316,6 +330,8 @@ Action ClientReallyChangeTeam(Handle timer, int victim)
 
 Action afkJoinHint (Handle Timer, int client)
 {
+	if(!g_bSpecAfkMsgEnable) return Plugin_Stop;
+
 	client = GetClientOfUserId(client);
 	// If player is valid
 	if (client && IsClientInGame(client) && afkPlayerTimeLeftWarn[client] > 0)
@@ -351,8 +367,15 @@ void afkResetTimers (int client)
 	GetClientEyeAngles(client, afkPlayerLastEyes[client]);
 }
 
+int g_iLastTick;
 Action afkCheckThread(Handle timer)
 {
+	//時間被暫停
+	if(g_iLastTick == GetGameTickCount()) return Plugin_Continue;
+	g_iLastTick = GetGameTickCount();
+
+	bool bTeamsOpen = TeamsHaveOpenSlots(); // 本次检测时对抗双方队伍是否有空位（仅当有空位时才检测旁观闲置）
+
 	float pos[3];
 	float eyes[3];
 	bool isAFK;
@@ -443,7 +466,7 @@ Action afkCheckThread(Handle timer)
 					}
 				} // player is alive or is infected
 			} // player is not on spectators ...
-			else if (afkKickEnabled)  // if player is on spectators and kick on spectators is enabled ...
+			else if (afkKickEnabled && bTeamsOpen) // 旁观检测：仅当对抗双方队伍有空位时触发（生还者有AI机器人 / 感染者有空位）
 			{
 				// If the player is not registered ...
 				if (HasAccess(i, g_sAccesslvl) == false)
@@ -469,16 +492,8 @@ Action afkCheckThread(Handle timer)
 						// if his action time reached 0 ...
 						if (afkPlayerTimeLeftAction[i] <=  0)
 						{
-							// If players haven't leaved the safe room ..
-							if (g_bLeftSafeRoom || bAfkSaferoomIgnore)
-							{
-								// we kick the player
-								afkKickClient(i);
-							}
-							else // We warn him that he will be kicked ...
-							{
-								PrintHintText(i, "%T", "[AFK] Inactivity detected! 4", i);
-							}
+							// we kick the player
+							afkKickClient(i);
 						}
 						else // we just warn him ...
 							PrintHintText(i, "%T", "[AFK] Inactivity detected! 3", i, afkPlayerTimeLeftAction[i]);	
@@ -513,27 +528,10 @@ void afkKickClient (int client)
 	if (IsFakeClient(client))
 		return;
 	
-	// If player was on infected ....
-	if (GetClientTeam(client) == 3)
-	{
-		// ... and he wasn't a tank ...
-		char iClass[100];
-		GetClientModel(client, iClass, sizeof(iClass));
-		if (StrContains(iClass, "hulk", false) == -1)
-			ForcePlayerSuicide(client);	// we kill him
-	}
-	
-	// We force him to spectate
-	ChangeClientTeam(client, 1);
-	
-	// Then we kick him
 	KickClient(client, "[AFK] You've been kicked due to inactivity.");
 	
 	// Print forced info
-	char PlayerName[200];
-	GetClientName(client, PlayerName, sizeof(PlayerName));
-	
-	CPrintToChatAll("%t", "have been kicked from server due to inactivity", PlayerName);
+	CPrintToChatAll("%t", "have been kicked from server due to inactivity", client, afkKickTime);
 }
 
 Action PlayerLeftStart(Handle Timer)

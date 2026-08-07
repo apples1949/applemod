@@ -4,7 +4,7 @@
 	{
 		"applemod"
 		{
-			"name" "Applemod"
+			"name" "Applemod v0.85"
 		}
 	}
 	"ZoneMod Configs"

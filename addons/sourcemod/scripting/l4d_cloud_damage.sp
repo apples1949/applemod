@@ -346,32 +346,31 @@ public Action Point_Hurt(Handle timer, DataPack dp)
 		{
 			continue;
 		}
-		
+
+		if (IsFakeClient(target)) continue; // AI 生还者不吃毒烟伤害（避免 bot 因持续受伤卡在原地）
+
 		GetClientEyePosition(target, targetVector);
 		distance = GetVectorDistance(targetVector, pos);
 		
 		if (distance > g_fCloudRadius || !IsVisibleTo(pos, targetVector)) continue;
 		
-		if( !IsFakeClient(target) )
+		EmitSoundToClient(target, DAMAGE_SOUND);
+
+		if (g_bCloudShake)
 		{
-			EmitSoundToClient(target, DAMAGE_SOUND);
-			
-			if (g_bCloudShake)
-			{
-				Handle hBf = StartMessageOne("Shake", target);
-				BfWriteByte(hBf, 0);
-				BfWriteFloat(hBf,6.0);
-				BfWriteFloat(hBf,1.0);
-				BfWriteFloat(hBf,1.0);
-				EndMessage();
-				//CreateTimer(1.0, StopShake, GetClientUserId(target), TIMER_FLAG_NO_MAPCHANGE);
-			}
-			
-			if ( g_bCloudMeleeSlowEnabled )
-			{
-				SetInClound(target, true);
-				CreateTimer(2.0, ClearMeleeBlock, target);
-			}
+			Handle hBf = StartMessageOne("Shake", target);
+			BfWriteByte(hBf, 0);
+			BfWriteFloat(hBf,6.0);
+			BfWriteFloat(hBf,1.0);
+			BfWriteFloat(hBf,1.0);
+			EndMessage();
+			//CreateTimer(1.0, StopShake, GetClientUserId(target), TIMER_FLAG_NO_MAPCHANGE);
+		}
+
+		if ( g_bCloudMeleeSlowEnabled )
+		{
+			SetInClound(target, true);
+			CreateTimer(2.0, ClearMeleeBlock, target);
 		}
 		if( client != -1 )
 		{

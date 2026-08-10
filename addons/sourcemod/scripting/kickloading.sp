@@ -11,6 +11,10 @@ public Plugin myinfo =
 ConVar kickloadstuckers_duration;
 Handle playertimers[MAXPLAYERS+1];
 
+// 豁免：同名（暖服机器人）或同 SteamID64 的玩家不会被因连接超时自动踢出
+#define KICKLOADING_EXEMPT_NAME "暖服机器人"
+#define KICKLOADING_EXEMPT_STEAMID64 "76561198760610101"
+
 public void OnPluginStart()
 {
 	LoadTranslations("common.phrases");
@@ -80,6 +84,19 @@ public void OnClientConnected(int client)
 	{
 		// Find player steamid from admin cache (this is not good method for admin immunity check, but we handle client upon connection...)
 		if(FindAdminByIdentity(AUTHMETHOD_STEAM, steamid) != INVALID_ADMIN_ID)
+			return;
+	}
+
+	// 豁免：同名（暖服机器人）或同 SteamID64 的玩家（不会因连接超时被踢出）
+	char name[64];
+	GetClientName(client, name, sizeof(name));
+
+	if(strcmp(name, KICKLOADING_EXEMPT_NAME) == 0)
+		return;
+
+	if(GetClientAuthId(client, AuthId_SteamID64, steamid, sizeof(steamid)))
+	{
+		if(strcmp(steamid, KICKLOADING_EXEMPT_STEAMID64) == 0)
 			return;
 	}
 

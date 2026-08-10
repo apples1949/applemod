@@ -11,12 +11,13 @@
 #include <left4dhooks>
 #include <multicolors>
 #define PLUGIN_VERSION "2.6-2025/2/12"
+#define AUTOSPEC_IDS_MAX 512
 
 
 // For cvars
 ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
  	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, 
-	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable;
+	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
 	afkKickTime, afkCheckInterval;
@@ -31,6 +32,7 @@ float afkPlayerLastEyes[MAXPLAYERS + 1][3];
 bool g_bLeftSafeRoom;
 bool L4D2Version;
 char g_sAccesslvl[AdminFlags_TOTAL];
+char g_sAutoSpecSteamIds[AUTOSPEC_IDS_MAX];
 int g_iPlayerSpawn, g_iRoundStart;
 Handle PlayerLeftStartTimer, afkCheckThreadTimer;
 
@@ -101,8 +103,8 @@ public void OnPluginStart()
 	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"z", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
 	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hAutoSpecSteamIds 	= CreateConVar("l4d_specafk_autospec_steamids", 	"76561198760610101", "符合条件的 SteamID64 玩家将自动被移动到旁观，且不会被本插件踢出（多个用逗号分隔）", FCVAR_NOTIFY);
 	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "L4D VS 自动AFK旁观插件的版本", FCVAR_DONTRECORD|FCVAR_NOTIFY);
-	AutoExecConfig(true, "L4DVSAutoSpectateOnAFK");
 	
 
 	ReadCvars();
@@ -116,6 +118,7 @@ public void OnPluginStart()
 	g_hImmuneAccess.AddChangeHook(ConVarChanged);
 	g_hSayResetTime.AddChangeHook(ConVarChanged);
 	g_hSpecAfkMsgEnable.AddChangeHook(ConVarChanged);
+	g_hAutoSpecSteamIds.AddChangeHook(ConVarChanged);
 
 	if(g_bLate)
 	{
@@ -144,6 +147,8 @@ void ReadCvars()
 
 	g_bSayResetTime = g_hSayResetTime.BoolValue;
 	g_bSpecAfkMsgEnable = g_hSpecAfkMsgEnable.BoolValue;
+
+	g_hAutoSpecSteamIds.GetString(g_sAutoSpecSteamIds, sizeof(g_sAutoSpecSteamIds));
 }
 
 void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -160,9 +165,13 @@ public void OnMapEnd()
 public void OnClientPutInServer(int client)
 {
 	if(IsFakeClient(client)) return;
-	
+
 	afkPlayerTimeLeftWarn[client] = afkWarnKickTime;
 	afkPlayerTimeLeftAction[client] = afkKickTime;
+
+	// 符合自动旁观 cvar 的玩家加入时自动移动到旁观
+	if (IsAutoSpecPlayer(client))
+		CreateTimer(1.0, tmrForceAutoSpec, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
 bool HasAccess(int client, char[] sAcclvl)
@@ -182,6 +191,58 @@ bool HasAccess(int client, char[] sAcclvl)
 	}
 
 	return false;
+}
+
+bool IsAutoSpecPlayer(int client)
+{
+	if (strlen(g_sAutoSpecSteamIds) == 0)
+		return false;
+
+	char sSteamId[32];
+	if (!GetClientAuthId(client, AuthId_SteamID64, sSteamId, sizeof(sSteamId)))
+		return false;
+
+	char sIds[AUTOSPEC_IDS_MAX];
+	strcopy(sIds, sizeof(sIds), g_sAutoSpecSteamIds);
+
+	char sParts[16][32];
+	int iCount = ExplodeString(sIds, ",", sParts, sizeof(sParts), sizeof(sParts[]));
+	for (int i = 0; i < iCount; i++)
+	{
+		TrimString(sParts[i]);
+		if (StrEqual(sParts[i], sSteamId, false))
+			return true;
+	}
+
+	return false;
+}
+
+void ForceAutoSpec(int client)
+{
+	if (client <= 0 || client > MaxClients) return;
+	if (!IsClientInGame(client) || IsFakeClient(client)) return;
+	if (GetClientTeam(client) == 1) return;
+
+	if (IsAutoSpecPlayer(client))
+		ChangeClientTeam(client, 1);
+}
+
+Action tmrForceAutoSpec(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client)
+		ForceAutoSpec(client);
+
+	return Plugin_Continue;
+}
+
+bool IsImmuneName(int client)
+{
+	char sName[MAX_NAME_LENGTH];
+	GetClientName(client, sName, sizeof(sName));
+
+	// 硬编码：名称为"暖服机器人"的玩家不警告不踢出（同64id免疫由 l4d_specafk_autospec_steamids 提供）
+	return StrEqual(sName, "暖服机器人", false);
 }
 
 bool TeamsHaveOpenSlots()
@@ -230,6 +291,10 @@ void Event_RoundStart (Event event, const char[] name, bool dontBroadcast)
 
 void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client)
+		ForceAutoSpec(client);
+
 	if( g_iPlayerSpawn == 0 && g_iRoundStart == 1 )
 		CreateTimer(3.0, tmrStart, _, TIMER_FLAG_NO_MAPCHANGE);
 	g_iPlayerSpawn = 1;
@@ -257,6 +322,9 @@ Action tmrStart(Handle timer)
 			
 			GetClientAbsOrigin(client, afkPlayerLastPos[client]);
 			GetClientEyeAngles(client, afkPlayerLastEyes[client]);
+
+			// 符合自动旁观 cvar 的玩家（含 late load 时已在游戏中的）强制回到旁观
+			ForceAutoSpec(client);
 		}
 		else
 		{
@@ -324,7 +392,10 @@ Action ClientReallyChangeTeam(Handle timer, int victim)
 	
 	// Reset his afk status
 	afkResetTimers(victim);
-	
+
+	// 符合自动旁观 cvar 的玩家换队后强制回到旁观
+	ForceAutoSpec(victim);
+
 	return Plugin_Continue;
 }
 
@@ -469,7 +540,7 @@ Action afkCheckThread(Handle timer)
 			else if (afkKickEnabled && bTeamsOpen) // 旁观检测：仅当对抗双方队伍有空位时触发（生还者有AI机器人 / 感染者有空位）
 			{
 				// If the player is not registered ...
-				if (HasAccess(i, g_sAccesslvl) == false)
+				if (HasAccess(i, g_sAccesslvl) == false && !IsAutoSpecPlayer(i) && !IsImmuneName(i)) // 有权限、符合自动旁观 cvar 或名称匹配免疫列表的玩家不警告不踢出
 				{
 					// If player has not been warned ...
 					if (afkPlayerTimeLeftWarn[i] > 0) // warn time ...

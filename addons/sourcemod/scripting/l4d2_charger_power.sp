@@ -49,7 +49,7 @@ public void OnPluginStart()
 	LoadTranslations("charger_power.phrases");
 
 	CreateConVar("charger_power_version", PLUGIN_VERSION, "Charger Power version", FCVAR_DONTRECORD|FCVAR_REPLICATED|FCVAR_NOTIFY);
-	g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "10.0", "Charger撞的力度", FCVAR_NOTIFY, true, 0.0, true, 5000.0);
+	g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "100.0", "Charger撞的力度", FCVAR_NOTIFY, true, 0.0, true, 5000.0);
 	g_h_CvarChargerCarry = CreateConVar("l4d2_charger_power_carry", "1", "Charger带人能不能撞动铁?", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_h_CvarMessageType = CreateConVar("l4d2_charger_power_message_type", "3", "显示消息的方式 (0 - 关闭, 1 - 聊天框, 2 - 屏幕中心, 3 - 游戏提示)", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	g_h_CvarObjects = CreateConVar("l4d2_charger_power_objects", "7", "可以撞动什么铁? (1 - 车, 2 - 警报车, 4 - 垃圾箱, 8 - 货车)", FCVAR_NOTIFY, true, 1.0, true, 15.0);

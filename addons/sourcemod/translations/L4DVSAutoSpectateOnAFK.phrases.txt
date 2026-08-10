@@ -44,7 +44,7 @@
 	}
 	"have been kicked from server due to inactivity"
 	{
-		"#format"		"{1:s}, {2:d}"
+		"#format"		"{1:s},{2:d}"
 		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than {2} seconds."
 		"zho"	"[AFK] {lightgreen}{1} 因旁觀不補位超過 {2} 秒而被踢出."
 		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过 {2} 秒而被踢出."

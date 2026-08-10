@@ -567,7 +567,10 @@ void IsSaveMessage(const char[] Message)
 //thank sorallll
 void ChangeClientToSpec(int client)
 {
+	// 客户端可能在定时器/事件延迟期间进入断线状态(IsClientInGame 仍为 true 但连接已断),此时 ChangeClientTeam 会报 "Client X is not connected"
+	if (!IsClientConnected(client) || !IsClientInGame(client)) return;
 	if (GetClientTeam(client) == 1 && GetBotOfIdlePlayer(client)) L4D_TakeOverBot(client);
+	if (!IsClientConnected(client) || !IsClientInGame(client)) return;
 	ChangeClientTeam(client, 1);
 }
 

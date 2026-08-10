@@ -40,7 +40,6 @@ enum voteType
 bool	 game_l4d2 = false;
 Handle	 g_hVote = null;
 voteType g_voteType = None;
-char	 g_sVoteArgument[128];
 char	 g_sVotePassText[128];
 
 int		kickplayer_userid;
@@ -419,6 +418,16 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 // ====================================================
 // builtinvotes 投票 (官方投票界面)
 // ====================================================
+// 预格式化投票参数并转义 % : builtinvotes 会把 argument 再次当作格式串解析,
+// 若文本中含 % 必须转义为 %%, 否则运行时报 "String formatted incorrectly"
+void EscapeAndFormat(char[] buffer, int maxlength, const char[] format, const char[] text)
+{
+	char sEscaped[MAX_NAME_LENGTH];
+	strcopy(sEscaped, sizeof(sEscaped), text);
+	ReplaceString(sEscaped, sizeof(sEscaped), "%", "%%");
+	Format(buffer, maxlength, format, sEscaped);
+}
+
 bool StartVote(int client, voteType type, const char[] argument, const char[] passText, VoteBroadcast broadcast)
 {
 	if (client <= 0 || !IsClientInGame(client)) return false;
@@ -462,7 +471,6 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 	}
 
 	g_voteType = type;
-	strcopy(g_sVoteArgument, sizeof(g_sVoteArgument), argument);
 	strcopy(g_sVotePassText, sizeof(g_sVotePassText), passText);
 
 	g_hVote = CreateBuiltinVote(VoteActionHandler, BuiltinVoteType_Custom_YesNo, BuiltinVoteAction_Cancel | BuiltinVoteAction_End);
@@ -472,7 +480,7 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 		return false;
 	}
 
-	SetBuiltinVoteArgument(g_hVote, g_sVoteArgument);
+	SetBuiltinVoteArgument(g_hVote, argument);
 	SetBuiltinVoteInitiator(g_hVote, client);
 	if (broadcast == VoteBroadcast_Team)
 	{
@@ -778,7 +786,10 @@ void DisplayVoteKickMenu(int client)
 	LogMessage("%N(%s) 发起投票: 踢出 %s(%s)", client, SteamId, kickplayer_name, kickplayer_SteamId);	 //紀錄在log文件
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}踢出 %s {default}, 只有投票发起者的阵营才能参与投票", client, kickplayer_name);
-	StartVote(client, kick, "是否踢出 %s ?", kickplayer_name, VoteBroadcast_Team);
+	char sArgument[128], sPassText[MAX_NAME_LENGTH];
+	EscapeAndFormat(sArgument, sizeof(sArgument), "是否踢出 %s ?", kickplayer_name);
+	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", kickplayer_name);
+	StartVote(client, kick, sArgument, sPassText, VoteBroadcast_Team);
 }
 
 // 更换地图
@@ -890,7 +901,10 @@ void DisplayVoteMapsMenu(int client)
 	LogMessage("%N(%s) 发起投票: 更换地图 %s", client, SteamId, votesmapsname);	   //紀錄在log文件
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}更换地图%s{default}, 只有游戏中的玩家才能参与投票", client, votesmapsname);
-	StartVote(client, map, "是否更换地图: %s", votesmapsname, VoteBroadcast_NotSpec);
+	char sArgument[128], sPassText[MAX_NAME_LENGTH];
+	EscapeAndFormat(sArgument, sizeof(sArgument), "是否更换地图: %s", votesmapsname);
+	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", votesmapsname);
+	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec);
 }
 
 // 强制玩家旁观
@@ -967,7 +981,10 @@ void DisplayVoteforcespectateMenu(int client)
 	LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观", client, SteamId, forcespectateplayername);	  //紀錄在log文件
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}强制玩家%s旁观{default}, 只有投票发起者的阵营才能参与投票", client, forcespectateplayername);
-	StartVote(client, forcespectate, "是否强制%s旁观?", forcespectateplayername, VoteBroadcast_Team);
+	char sArgument[128], sPassText[MAX_NAME_LENGTH];
+	EscapeAndFormat(sArgument, sizeof(sArgument), "是否强制%s旁观?", forcespectateplayername);
+	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", forcespectateplayername);
+	StartVote(client, forcespectate, sArgument, sPassText, VoteBroadcast_Team);
 }
 
 // ====================================================

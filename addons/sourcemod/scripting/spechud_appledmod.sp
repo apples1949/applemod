@@ -77,7 +77,7 @@ bool bTankifier;
 bool bStaticTank, bStaticWitch;
 
 bool bTankSkillHud;
-int g_iTankPunch, g_iTankRock, g_iTankHittable;
+int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 
 // Hud Toggle & Hint Message
 bool bSpecHudActive[MAXPLAYERS+1], bTankHudActive[MAXPLAYERS+1];
@@ -406,6 +406,7 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	g_iTankPunch = 0;
 	g_iTankRock = 0;
 	g_iTankHittable = 0;
+	g_iTankDamage = 0;
 }
 
 void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -456,8 +457,10 @@ void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	if (attacker <= 0 || !IsTank(attacker))
 		return;
 
-	if (event.GetInt("dmg_health") <= 0)
+	int dmg = event.GetInt("dmg_health");
+	if (dmg <= 0)
 		return;
+	g_iTankDamage += dmg;
 
 	char weapon[32];
 	event.GetString("weapon", weapon, sizeof(weapon));
@@ -1114,7 +1117,11 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		for (int i = 0; i < len; ++i) info[i] = '_';
 		DrawPanelText(hSpecHud, info);
 
-		FormatEx(info, sizeof(info), "[拳 %i][石 %i][铁 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable);
+		FormatEx(info, sizeof(info), " [拳 %i][石 %i][铁 %i][伤害 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage);
+		DrawPanelText(hSpecHud, info);
+
+		int dlen = strlen(info);
+		for (int i = 0; i < dlen; ++i) info[i] = '-';
 		DrawPanelText(hSpecHud, info);
 	}
 	else

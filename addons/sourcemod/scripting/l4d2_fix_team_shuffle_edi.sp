@@ -13,6 +13,7 @@ ArrayList winners;
 ArrayList losers;
 
 GlobalForward g_hFwdFixComplete;
+Handle g_hTimeoutTimer = INVALID_HANDLE;
 
 public Plugin myinfo =
 {
@@ -128,14 +129,23 @@ Action EnableFixTeam_Timer(Handle timer)
 {
 	EnableFixTeam();
 	FixTeams();
-	CreateTimer(30.0, DisableFixTeam_Timer);
+
+	// 防止 round_start 多次触发导致超时定时器堆积
+	if (g_hTimeoutTimer == INVALID_HANDLE)
+		g_hTimeoutTimer = CreateTimer(30.0, DisableFixTeam_Timer);
 
 	return Plugin_Continue;
 }
 
 Action DisableFixTeam_Timer(Handle timer)
 {
+	g_hTimeoutTimer = INVALID_HANDLE;
 	DisableFixTeam();
+
+	// 修正已完成或被其他流程关闭（回合开始/新游戏），不输出超时提示
+	if (!fixTeam || g_bFixCompleted)
+		return Plugin_Continue;
+
 	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（30秒），如有问题请联系管理员");
 
 	return Plugin_Continue;
@@ -309,6 +319,13 @@ bool IsNewGame()
 void MarkFixComplete()
 {
 	g_bFixCompleted = true;
+
+	// 修正已完成，取消挂起的超时定时器
+	if (g_hTimeoutTimer != INVALID_HANDLE)
+	{
+		KillTimer(g_hTimeoutTimer);
+		g_hTimeoutTimer = INVALID_HANDLE;
+	}
 
 	PrintToChatAll("\x01[队伍修正] 队伍修正完成！所有玩家已归位。");
 

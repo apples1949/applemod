@@ -89,6 +89,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	if (!IsEligibleInfectedPlayer(client)) return Plugin_Continue;
 	if (!g_bSurvivorsLeftSafeArea) return Plugin_Continue;
 	if (CountInfectedPlayers() >= INFECTED_PLAYER_LIMIT) return Plugin_Continue;
+	if (!GetEntProp(client, Prop_Send, "m_isGhost")) return Plugin_Continue;
 
 	if (buttons & IN_ATTACK2)
 	{

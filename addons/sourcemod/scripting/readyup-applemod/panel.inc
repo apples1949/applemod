@@ -6,7 +6,7 @@
 static const char
 	hintPhrase[2][] = {"你还没有准备\n输入 !ready / 按 F1 确认准备", "你已经准备了\n输入 !unready / 按 F2 取消准备"},
 	// 团队模式 (l4d_ready_enabled=3) 专用提示: 一人准备即可代表团队准备
-	teamHintPhrase[2][] = {"输入 !ready / 按 F1 确认团队准备", "团队已准备"},
+	teamHintPhrase[2][] = {"输入 !ready / 按 F1 确认团队准备", "团队已准备\n输入 !unready / 按 F2 取消团队准备"},
 	readySymbol[2][] = {"☐", "☑"},
 	teamReadySymbol[2][] = {" [X]", " [√]"};
 

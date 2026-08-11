@@ -1538,8 +1538,10 @@ void GetHUD2_Text(char[] output, int size)
 	FormatEx(output, size, "\0");
 	int PlayerLimit = GetConVarInt(FindConVar("sv_maxplayers"));
 	char hostname[64];
- 	FindConVar("hostname").GetString(hostname,sizeof(hostname));   
- 	FormatEx(output, size, "%s(%d/%d/%d)",  hostname, GetPlayerNumber(), g_iPlayerNum, PlayerLimit);
+ 	FindConVar("hostname").GetString(hostname,sizeof(hostname));
+	char timeStr[64];
+	FormatTime(timeStr, sizeof(timeStr), "%Y年%m月%d日 %H时%M分%S秒");
+ 	FormatEx(output, size, "%s(%d/%d/%d)\n%s",  hostname, GetPlayerNumber(), g_iPlayerNum, PlayerLimit, timeStr);
 }
 
 /****************************************************************************************************/

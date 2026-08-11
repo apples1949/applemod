@@ -146,7 +146,7 @@ Action DisableFixTeam_Timer(Handle timer)
 	if (!fixTeam || g_bFixCompleted)
 		return Plugin_Continue;
 
-	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（30秒），如有问题请联系管理员");
+	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（30秒）");
 
 	return Plugin_Continue;
 }

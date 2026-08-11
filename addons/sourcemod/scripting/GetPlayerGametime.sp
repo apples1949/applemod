@@ -12,7 +12,7 @@ public Plugin myinfo =
 	name		= "get player real gametime",
 	author		= "apples1949 , 豆瓣酱な , deepseek",
 	description = "",
-	version		= "1.4.2",
+	version		= "1.5.0",
 	url			= "https://github.com/apples1949",
 };
 
@@ -58,7 +58,31 @@ ConVar
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	CheckPluginLate = late;
+	RegPluginLibrary("GetPlayerGametime");
+
+	// 供其他插件调用的公共接口 (配合 include/GetPlayerGametime.inc)
+	CreateNative("GetPlayerGametime_GetTime", Native_GetPlayerGametime_GetTime);
+	CreateNative("GetPlayerGametime_GetLerp", Native_GetPlayerGametime_GetLerp);
+
 	return APLRes_Success;
+}
+
+// 返回玩家的真实游戏时长(秒), <=0 表示未获取到/未知
+any Native_GetPlayerGametime_GetTime(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+	return i_PlayerTime[client];
+}
+
+// 返回玩家的 Lerp 值(秒, 如 0.0156), readyup-applemod 会将其转换为毫秒显示
+any Native_GetPlayerGametime_GetLerp(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients || !IsClientInGame(client))
+		return 0.0;
+	return GetPlayerLerp(client);
 }
 
 public void OnPluginStart()

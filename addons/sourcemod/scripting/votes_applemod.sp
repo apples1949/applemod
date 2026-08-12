@@ -35,6 +35,7 @@ enum voteType
 	forcespectate,
 	forcedellobby,
 	forcestartgame,
+	hud,
 }
 
 bool	 game_l4d2 = false;
@@ -64,6 +65,7 @@ ConVar VotensKickED;
 ConVar VotensForceSpectateED;
 ConVar VotenForceDelLobby;
 ConVar VotensForceStartGameED;
+ConVar VotensHudED;
 ConVar g_hCvarPlayerLimit;
 ConVar g_hKickImmueAccess;
 ConVar hforcespectate_penalty;
@@ -72,7 +74,7 @@ ConVar hvotedelay_time;
 int	 g_iCvarPlayerLimit;
 float g_fLimit;
 bool VotensHpE_D, VotensAlltalkE_D, VotensRestartmapE_D, VotensMapE_D, VotensMap2E_D;
-bool g_bEnable, g_bVotensKickED, g_bVotensForceSpectateED, g_bVotenForceDelLobby, VotensForceStartGameE_D;
+bool g_bEnable, g_bVotensKickED, g_bVotensForceSpectateED, g_bVotenForceDelLobby, VotensForceStartGameE_D, VotensHudE_D;
 char g_sKickImmueAccesslvl[16];
 int	 iforcespectate_penalty;
 int	 ivotedelay_time;
@@ -124,6 +126,7 @@ public void OnPluginStart()
 	RegConsoleCmd("votesforcespectate", Command_Votesforcespectate);
 	RegConsoleCmd("votesforcedellobby", Command_Votesforcedellobby);
 	RegConsoleCmd("votesforcestartgame", Command_Votesforcestartgame);
+	RegConsoleCmd("voteshud", Command_VoteHud);
 	RegAdminCmd("sm_restartmap", CommandRestartMap, ADMFLAG_CHANGEMAP, "sm_restartmap - changelevels to the current map");
 	RegAdminCmd("sm_rs", CommandRestartMap, ADMFLAG_CHANGEMAP, "sm_restartmap - changelevels to the current map");
 
@@ -138,6 +141,7 @@ public void OnPluginStart()
 	VotensForceSpectateED  = CreateConVar("l4d_VotesForceSpectateED", "1", "如果为1，则开启投票强制玩家旁观选项", FCVAR_NOTIFY);
 	VotenForceDelLobby	   = CreateConVar("l4d_VotesForceDelLobby", "1", "如果为1,则开启投票删除大厅选项", FCVAR_NOTIFY);
 	VotensForceStartGameED = CreateConVar("l4d_VotesForceStartGame", "1", "如果为1，则开启投票强制开始游戏选项", FCVAR_NOTIFY);
+	VotensHudED			   = CreateConVar("l4d_VotensHudED", "1", "如果为1，则开启投票开关顶部HUD选项", FCVAR_NOTIFY);
 	g_hCvarPlayerLimit	   = CreateConVar("sm_vote_player_limit", "2", "当有多少玩家才能启动插件", FCVAR_NOTIFY);
 	g_hKickImmueAccess	   = CreateConVar("l4d_VotesKick_immue_access_flag", "z", "有这些标识的玩家不会被投票踢出以及强制旁观(无内容=所有人, -1:没有人)", FCVAR_NOTIFY);
 	hforcespectate_penalty = CreateConVar("l4d_forcespectate_penalty", "10", "强制旁观多久才能重新加入队伍", FCVAR_NOTIFY);
@@ -157,6 +161,7 @@ public void OnPluginStart()
 	VotensForceSpectateED.AddChangeHook(ConVarChanged_Cvars);
 	VotenForceDelLobby.AddChangeHook(ConVarChanged_Cvars);
 	VotensForceStartGameED.AddChangeHook(ConVarChanged_Cvars);
+	VotensHudED.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarPlayerLimit.AddChangeHook(ConVarChanged_Cvars);
 	g_hKickImmueAccess.AddChangeHook(ConVarChanged_Cvars);
 	hforcespectate_penalty.AddChangeHook(ConVarChanged_Cvars);
@@ -183,6 +188,7 @@ void GetCvars()
 	g_bVotensForceSpectateED = VotensForceSpectateED.BoolValue;
 	g_bVotenForceDelLobby	= VotenForceDelLobby.BoolValue;
 	VotensForceStartGameE_D = VotensForceStartGameED.BoolValue;
+	VotensHudE_D			= VotensHudED.BoolValue;
 	g_bEnable				= VotensED.BoolValue;
 	g_hKickImmueAccess.GetString(g_sKickImmueAccesslvl, sizeof(g_sKickImmueAccesslvl));
 	iforcespectate_penalty = hforcespectate_penalty.IntValue;
@@ -278,6 +284,7 @@ public Action Command_Votes(int client, int args)
 	menu.AddItem("forcespectate", g_bVotensForceSpectateED ? "强制玩家旁观" : "强制玩家旁观 (禁用中)");
 	menu.AddItem("dellobby", g_bVotenForceDelLobby ? "强制删除游戏大厅" : "强制删除游戏大厅 (禁用中)");
 	menu.AddItem("forcestart", (VotensForceStartGameE_D && !IsGameLive()) ? "强制开始游戏" : "强制开始游戏 (禁用中)");
+	menu.AddItem("hud", VotensHudE_D ? "开关顶部HUD" : "开关顶部HUD (禁用中)");
 	menu.ExitButton = true;
 	menu.Display(client, MENU_TIME);
 
@@ -401,6 +408,18 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 			else
 			{
 				FakeClientCommand(client, "votesforcestartgame");
+			}
+		}
+		else if (StrEqual(item, "hud"))
+		{
+			if (!VotensHudE_D)
+			{
+				CPrintToChat(client, "[{olive}VOTE{default}]开关顶部HUD已禁用");
+				FakeClientCommand(client, "sm_votes");
+			}
+			else
+			{
+				FakeClientCommand(client, "voteshud");
 			}
 		}
 	}
@@ -596,6 +615,27 @@ public Action Command_Votesforcestartgame(int client, int args)
 		StartVote(client, forcestartgame, "是否强制开始游戏?", "强制开始游戏", VoteBroadcast_NotSpec);
 	}
 	else if (!g_bEnable || !VotensForceStartGameE_D)
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]投票被禁止");
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_VoteHud(int client, int args)
+{
+	if (g_bEnable && VotensHudE_D)
+	{
+		if (!TestVoteDelay(client)) return Plugin_Handled;
+		if (!CanStartVotes(client)) return Plugin_Handled;
+
+		char SteamId[35];
+		GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
+		LogMessage("%N(%s) 发起了一个投票: 开关顶部HUD!", client, SteamId);	//記錄在log文件
+
+		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起了一个投票: {blue}开关顶部HUD{default}, 所有玩家都可以参与投票", client);
+		StartVote(client, hud, "是否开关顶部HUD?", "开关顶部HUD", VoteBroadcast_All);
+	}
+	else if (!g_bEnable || !VotensHudE_D)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]投票被禁止");
 	}
@@ -1103,6 +1143,11 @@ public Action COLD_DOWN(Handle timer, any client)
 		{
 			L4D_LobbyUnreserve();
 			LogMessage("删除匹配大厅通过");
+		}
+		case hud:
+		{
+			ServerCommand("sm_hud");
+			LogMessage("开关顶部HUD通过");
 		}
 		case forcestartgame:
 		{

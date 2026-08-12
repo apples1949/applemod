@@ -3,6 +3,12 @@
 #endif
 #define _readyup_panel_included
 
+static Footer
+	cmdFooter;
+
+static int
+	curCmd;
+
 static const char
 	hintPhrase[2][] = {"你还没有准备\n输入 !ready / 按 F1 确认准备", "你已经准备了\n输入 !unready / 按 F2 取消准备"},
 	// 团队模式 (l4d_ready_enabled=3) 专用提示: 一人准备即可代表团队准备
@@ -12,8 +18,28 @@ static const char
 
 void InitPanel()
 {
-	// 已移除指令循环显示 (原 4 秒轮播 cmdFooter)
+	if (cmdFooter == null)
+	{
+		cmdFooter = new Footer();
+		cmdFooter.Add("!ready|!r / !unready|!nr 准备/取消准备");
+		cmdFooter.Add("!return 准备状态挂边自救及返回安全区域");
+		cmdFooter.Add("!lerps 查看lerp值");
+		cmdFooter.Add("!match 切换比赛配置");
+		cmdFooter.Add("!rmatch 关闭重置比赛配置");
+		cmdFooter.Add("!s 旁观");
+		cmdFooter.Add("!cur 查看路程进度");
+		cmdFooter.Add("!health 查看目前奖励分情况 如有");
+		cmdFooter.Add("!maplist mixmap下查看地图列表");
+		cmdFooter.Add("!kickspecs 投票踢出非管理旁观玩家");
+		cmdFooter.Add("!swapto 1/2/3/4 灵魂特感切换到相当于路程哪个玩家位置");
+		cmdFooter.Add("!tankhud 坦克在场时开关坦克状态hud");
+		cmdFooter.Add("!spechud 旁观hud开关");
+		cmdFooter.Add("!playertime 查看所有玩家的真实时长及lerp值");
+	}
+
+	curCmd = 0;
 	CreateTimer(1.0, MenuRefresh_Timer, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+	CreateTimer(4.0, MenuCmd_Timer, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 }
 
 int DummyHandler(Handle menu, MenuAction action, int param1, int param2) { return 1; }
@@ -23,6 +49,19 @@ Action MenuRefresh_Timer(Handle timer)
 	if (inReadyUp)
 	{
 		UpdatePanel();
+		return Plugin_Continue;
+	}
+	return Plugin_Stop;
+}
+
+Action MenuCmd_Timer(Handle timer)
+{
+	if (inReadyUp)
+	{
+		if (cmdFooter.Length)
+		{
+			curCmd = (curCmd + 1) % cmdFooter.Length;
+		}
 		return Plugin_Continue;
 	}
 	return Plugin_Stop;
@@ -52,7 +91,10 @@ void UpdatePanel()
 	menuPanel.DrawText(ServerBuffer);
 
 	menuPanel.DrawText(" ");
-	
+	menuPanel.DrawText("▸ 指令:");
+	menuPanel.DrawText(FooterGet(cmdFooter, curCmd));
+	menuPanel.DrawText(" ");
+
 	char nameBuf[64];
 	
 	for (int client = 1; client <= MaxClients; client++)
@@ -209,5 +251,5 @@ void GetPlayerGametimeDisplay(int client, char[] buffer, int maxlen)
 		return;
 
 	float fLerp = GetPlayerGametime_GetLerp(client) * 1000.0; // 秒 -> 毫秒
-	FormatEx(buffer, maxlen, " %dh/lerp%.1f", iTime / 3600, fLerp);
+	FormatEx(buffer, maxlen, " %dh/%.1f", iTime / 3600, fLerp);
 }

@@ -1121,7 +1121,7 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		DrawPanelText(hSpecHud, info);
 
 		int dlen = strlen(info);
-		for (int i = 0; i < dlen; ++i) info[i] = '-';
+		for (int i = 0; i < dlen; ++i) info[i] = '_';
 		DrawPanelText(hSpecHud, info);
 	}
 	else

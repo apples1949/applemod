@@ -15,12 +15,26 @@ ArrayList losers;
 GlobalForward g_hFwdFixComplete;
 Handle g_hTimeoutTimer = INVALID_HANDLE;
 
+ConVar g_cvIgnoreOffline;
+ConVar g_cvTimeoutRound1;
+ConVar g_cvTimeoutRound2;
+ConVar g_cvMaxAttempts;
+
+bool g_bIgnoreOffline;
+float g_fTimeoutRound1;
+float g_fTimeoutRound2;
+int g_iMaxAttempts;
+
+int g_iSavedRound = 0;        // 保存队伍数据时的回合号（0=第一回合, 1=第二回合）
+float g_fLastTimeout = 30.0;  // 最近创建的超时时间（用于提示）
+int g_iFixAttempts = 0;       // 当前数据下的修正尝试次数
+
 public Plugin myinfo =
 {
 	name = "L4D2 - Fix team shuffle",
 	author = "Altair Sossai, edited by apples1949",
 	description = "Fix teams shuffling during map switching",
-	version = "1.0.2",
+	version = "1.2.3",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -49,6 +63,42 @@ public void OnPluginStart()
 	losers = CreateArray(64);
 
 	g_hFwdFixComplete = new GlobalForward("L4D2_FixTeamShuffle_OnFixComplete", ET_Ignore);
+
+	// 上一回合玩家已不在服务器时，不等待其重新进入
+	g_cvIgnoreOffline = CreateConVar("l4d2_fix_team_shuffle_ignore_offline", "1", "上一回合的玩家若已不在服务器中，忽略该玩家立即进行修正，不等待其重新进入", FCVAR_NONE, true, 0.0, true, 1.0);
+	// 对抗第一回合/第二回合结束后修正的超时时间（秒），0=禁用超时
+	g_cvTimeoutRound1 = CreateConVar("l4d2_fix_team_shuffle_timeout_round1", "5.0", "对抗第一回合结束后队伍修正的超时时间（秒），0=禁用超时");
+	g_cvTimeoutRound2 = CreateConVar("l4d2_fix_team_shuffle_timeout_round2", "15.0", "对抗第二回合结束后队伍修正的超时时间（秒），0=禁用超时");
+	// 最大修正次数，超过后不再修正，0=不限制
+	g_cvMaxAttempts = CreateConVar("l4d2_fix_team_shuffle_max_attempts", "2", "队伍修正的最大尝试次数，超过后不再修正，0=不限制", FCVAR_NONE, true, 0.0);
+
+	g_cvIgnoreOffline.AddChangeHook(CvarChanged_IgnoreOffline);
+	g_cvTimeoutRound1.AddChangeHook(CvarChanged_Timeout);
+	g_cvTimeoutRound2.AddChangeHook(CvarChanged_Timeout);
+	g_cvMaxAttempts.AddChangeHook(CvarChanged_MaxAttempts);
+
+	g_bIgnoreOffline = g_cvIgnoreOffline.BoolValue;
+	g_fTimeoutRound1 = g_cvTimeoutRound1.FloatValue;
+	g_fTimeoutRound2 = g_cvTimeoutRound2.FloatValue;
+	g_iMaxAttempts = g_cvMaxAttempts.IntValue;
+}
+
+void CvarChanged_IgnoreOffline(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	g_bIgnoreOffline = convar.BoolValue;
+}
+
+void CvarChanged_Timeout(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (convar == g_cvTimeoutRound1)
+		g_fTimeoutRound1 = convar.FloatValue;
+	else if (convar == g_cvTimeoutRound2)
+		g_fTimeoutRound2 = convar.FloatValue;
+}
+
+void CvarChanged_MaxAttempts(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	g_iMaxAttempts = convar.IntValue;
 }
 
 public void OnRoundIsLive()
@@ -65,6 +115,11 @@ public void L4D2_OnEndVersusModeRound_Post()
 void RoundStart_Event(Handle event, const char[] name, bool dontBroadcast)
 {
 	DisableFixTeam();
+
+	// 回合一开始即确认当前回合（0=第一回合, 1=第二回合）
+	// L4D2 使用 m_bInSecondHalfOfRound：第一回合=0，第二回合（换边后）=1
+	// 注意：m_iRoundNumber 是 L4D1 的属性，L4D2 中不存在
+	g_iSavedRound = GameRules_GetProp("m_bInSecondHalfOfRound");
 
 	if (L4D_HasMapStarted() && IsNewGame())
 	{
@@ -127,12 +182,25 @@ Action FixTeam_Timer(Handle timer)
 
 Action EnableFixTeam_Timer(Handle timer)
 {
+	// 上一回合玩家已不在服务器中（断线）时，从名单移除，不等待其重新进入
+	if (g_bIgnoreOffline)
+	{
+		RemoveOfflinePlayersFromArray(winners);
+		RemoveOfflinePlayersFromArray(losers);
+	}
+
 	EnableFixTeam();
 	FixTeams();
 
 	// 防止 round_start 多次触发导致超时定时器堆积
 	if (g_hTimeoutTimer == INVALID_HANDLE)
-		g_hTimeoutTimer = CreateTimer(30.0, DisableFixTeam_Timer);
+	{
+		// 按保存数据时的回合选择超时时间
+		g_fLastTimeout = (g_iSavedRound == 0) ? g_fTimeoutRound1 : g_fTimeoutRound2;
+
+		if (g_fLastTimeout > 0.0)
+			g_hTimeoutTimer = CreateTimer(g_fLastTimeout, DisableFixTeam_Timer);
+	}
 
 	return Plugin_Continue;
 }
@@ -146,7 +214,7 @@ Action DisableFixTeam_Timer(Handle timer)
 	if (!fixTeam || g_bFixCompleted)
 		return Plugin_Continue;
 
-	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（30秒）");
+	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（%.0f秒），如有问题请联系管理员", g_fLastTimeout);
 
 	return Plugin_Continue;
 }
@@ -156,6 +224,11 @@ Action DisableFixTeam_Timer(Handle timer)
 void SaveTeams()
 {
 	ClearTeamsData();
+
+	// 新一轮修正周期，重置修正次数
+	g_iFixAttempts = 0;
+
+	// 回合号已在回合开始时（RoundStart_Event）确认，直接用于选择对应的超时时间
 
 	bool survivorsAreWinning = SurvivorsAreWinning();
 
@@ -183,6 +256,16 @@ void FixTeams()
 {
 	if (!MustFixTheTeams())
 		return;
+
+	// 超过最大修正次数则不再修正
+	if (g_iMaxAttempts > 0 && g_iFixAttempts >= g_iMaxAttempts)
+	{
+		DisableFixTeam();
+		PrintToChatAll("\x01[队伍修正] 已超过最大修正次数（%d），停止修正", g_iMaxAttempts);
+		return;
+	}
+
+	g_iFixAttempts++;
 
 	DisableFixTeam();
 
@@ -299,6 +382,18 @@ void ClearTeamsData()
 {
 	winners.Clear();
 	losers.Clear();
+}
+
+void RemoveOfflinePlayersFromArray(ArrayList arrayList)
+{
+	for (int i = GetArraySize(arrayList) - 1; i >= 0; i--)
+	{
+		int client = GetArrayCell(arrayList, i);
+
+		// 断线玩家（连接中的也算在服务器内）无需等待，直接移除
+		if (!IsClientConnected(client))
+			RemoveFromArray(arrayList, i);
+	}
 }
 
 bool TeamsDataIsEmpty()

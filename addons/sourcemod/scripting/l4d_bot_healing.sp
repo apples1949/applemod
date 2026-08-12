@@ -1,6 +1,6 @@
 /*
 *	Bot Healing Values
-*	Copyright (C) 2023 Silvers
+*	Copyright (C) 2026 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.2"
+#define PLUGIN_VERSION 		"2.4"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,13 @@
 
 ========================================================================================
 	Change Log:
+
+2.4 (25-Jan-2026)
+	- Fixed rarely throwing errors for invalid clients.
+	- L4D1: GameData updated, fix for Linux servers due to some L4D1 update breaking the plugin. Thanks to "Re:Creator" for reporting.
+
+2.3 (07-Nov-2023)
+	- Fixed not deleting 1 handle on plugin start.
 
 2.2 (25-May-2023)
 	- Fixed invalid client errors. Thanks to "Mystik Spiral" for reporting and "BHaType" for information.
@@ -65,8 +72,8 @@
 #include <sourcemod>
 
 #undef REQUIRE_EXTENSIONS
-#include <sourcescramble>
 #include <actions>
+#include <sourcescramble>
 #define REQUIRE_EXTENSIONS
 
 
@@ -187,6 +194,8 @@ public void OnPluginStart()
 		if( !g_hPatchPills2.Validate() ) SetFailState("Failed to validate \"BotHealing_Pills_B\" target.");
 		if( !g_hPatchPills2.Enable() ) SetFailState("Failed to patch \"BotHealing_Pills_B\" target.");
 
+		delete hGameData;
+
 
 
 		// ====================
@@ -212,10 +221,10 @@ public void OnPluginStart()
 		g_hCvarMaxIncap.AddChangeHook(ConVarChanged_Cvars);
 	}
 
-	g_hCvarDieFirst = CreateConVar("l4d_bot_healing_die_first", "0", "0=游戏默认 1=只允许自己或目标是黑白状态时打包(需要'Actions'扩展)", CVAR_FLAGS);
-	g_hCvarDiePills = CreateConVar("l4d_bot_healing_die_pills", "0", "0=游戏默认 1=只允许自己或目标是黑白状态时打包或给药(需要'Actions'扩展)", CVAR_FLAGS);
-	g_hCvarFirst = CreateConVar("l4d_bot_healing_first", g_bLeft4Dead2 ? "15.0" : "15.0", "当bot血量低于此值时，允许其打包", CVAR_FLAGS);
-	g_hCvarPills = CreateConVar("l4d_bot_healing_pills", g_bLeft4Dead2 ? "39.0" : "39.0", "当bot血量低于此值时，允许其吃药", CVAR_FLAGS);
+	g_hCvarDieFirst = CreateConVar("l4d_bot_healing_die_first", "0", "0=Ignored. 1=Only allowing healing when self or target is black and white (requires \"Actions\" extension).", CVAR_FLAGS);
+	g_hCvarDiePills = CreateConVar("l4d_bot_healing_die_pills", "0", "0=Ignored. 1=Only allowing healing or giving pills when self or target is black and white (requires \"Actions\" extension).", CVAR_FLAGS);
+	g_hCvarFirst = CreateConVar("l4d_bot_healing_first", g_bLeft4Dead2 ? "30.0" : "40.0", "Allow bots to use First Aid when their health is below this value.", CVAR_FLAGS);
+	g_hCvarPills = CreateConVar("l4d_bot_healing_pills", g_bLeft4Dead2 ? "50.0" : "60.0", "Allow bots to use Pills or Adrenaline when their health is below this value.", CVAR_FLAGS);
 	CreateConVar("l4d_bot_healing_version", PLUGIN_VERSION, "Bot Healing Values plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	AutoExecConfig(true, "l4d_bot_healing");
 
@@ -273,7 +282,7 @@ public void OnActionCreated(BehaviorAction action, int actor, const char[] name)
 	if( !g_bCvarDieFirst && !g_bCvarDiePills )
 		return;
 
-	if( strncmp(name, "Survivor", 8) == 0 )
+	if( actor > 0 && actor <= MaxClients && strncmp(name, "Survivor", 8) == 0 )
 	{
 		/* Hooking self healing action (when bot wants to heal self) */
 		if( g_bCvarDieFirst && strcmp(name[8], "HealSelf") == 0 )
@@ -293,7 +302,7 @@ public void OnActionCreated(BehaviorAction action, int actor, const char[] name)
 	}
 }
 
-public Action OnSelfActionFirst(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
+Action OnSelfActionFirst(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
 {
 	bool allow = g_bLeft4Dead2 ? GetEntProp(actor, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(actor) : GetEntProp(actor, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
 
@@ -304,7 +313,7 @@ public Action OnSelfActionFirst(BehaviorAction action, int actor, BehaviorAction
 	return Plugin_Changed;
 }
 
-public Action OnSelfActionPills(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
+Action OnSelfActionPills(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
 {
 	bool allow = g_bLeft4Dead2 ? GetEntProp(actor, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(actor) : GetEntProp(actor, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
 
@@ -315,9 +324,10 @@ public Action OnSelfActionPills(BehaviorAction action, int actor, BehaviorAction
 	return Plugin_Changed;
 }
 
-public Action OnFriendActionFirst(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
+Action OnFriendActionFirst(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
 {
 	int target = action.Get(0x34) & 0xFFF;
+
 	bool allow = g_bLeft4Dead2 ? GetEntProp(target, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(target) : GetEntProp(target, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
 
 	if( !g_bExtensionScramble && allow && GetClientHealth(target) + L4D_GetPlayerTempHealth(target) > g_fCvarFirst )
@@ -327,9 +337,10 @@ public Action OnFriendActionFirst(BehaviorAction action, int actor, BehaviorActi
 	return Plugin_Changed;
 }
 
-public Action OnFriendActionPills(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
+Action OnFriendActionPills(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
 {
 	int target = action.Get(0x34) & 0xFFF;
+
 	bool allow = g_bLeft4Dead2 ? GetEntProp(target, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(target) : GetEntProp(target, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
 
 	if( !g_bExtensionScramble && allow && GetClientHealth(target) + L4D_GetPlayerTempHealth(target) > g_fCvarPills )

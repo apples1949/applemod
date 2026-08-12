@@ -1,27 +1,43 @@
 #pragma semicolon 1
 #pragma newdecls required
-
-// Define constants
-#define PLUGIN_NAME					"All4Dead"
-#define PLUGIN_TAG					"[A4D]"
-#define PLUGIN_VERSION				"3.6"
-#define MENU_DISPLAY_TIME		15
-
-// Include necessary files
 #include <sourcemod>
 #include <sdktools>
 #include <sdkhooks>
-// Make the admin menu optional
-#undef REQUIRE_PLUGIN
 #include <adminmenu>
-// Make the left4dhooks optional
 #include <left4dhooks>
 #include <multicolors>
+#include <spawn_infected_nolimit> //https://github.com/fbef0102/L4D1_2-Plugins/tree/master/spawn_infected_nolimit
+
+#define PLUGIN_NAME					"All4Dead"
+#define PLUGIN_TAG					"[A4D]"
+#define PLUGIN_VERSION				"4.0-2026/7/12"
+
+public Plugin myinfo = {
+	name = PLUGIN_NAME,
+	author = "James Richardson (grandwazir) & HarryPotter",
+	description = "Enables admins to have control over the AI Director and spawn all weapons, melee, items, special infected, and Uncommon Infected without using sv_cheats 1",
+	version = PLUGIN_VERSION,
+	url = "https://github.com/fbef0102/L4D2-Plugins/tree/master/all4dead2"
+};
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) 
+{
+	EngineVersion test = GetEngineVersion();
+	
+	if( test != Engine_Left4Dead2 )
+	{
+		strcopy(error, err_max, "Plugin only supports Left 4 Dead 2.");
+		return APLRes_SilentFailure;
+	}
+	
+	return APLRes_Success; 
+}
+
+#define ENTITY_SAFE_LIMIT 2000 //don't spawn boxes when it's index is above this
 
 // Create ConVar Handles
-ConVar notify_players, zombies_increment, always_force_bosses, refresh_zombie_location = null;
-ConVar director_force_tank, director_force_witch, director_panic_forever, sb_all_bot_team,
-	z_mega_mob_size, z_mob_spawn_max_size, z_mob_spawn_min_size, z_common_limit_size, z_background_limit_size;
+ConVar notify_players;
+ConVar director_panic_forever;
 
 // Menu handlers
 TopMenu top_menu;
@@ -35,11 +51,8 @@ TopMenuObject director_menu;
 TopMenuObject config_menu;
 
 // Other stuff
-bool currently_spawning = false;
 char change_zombie_model_to[128] = "";
-float last_zombie_spawn_location[3];
 Handle refresh_timer = null;
-int last_zombie_spawned = 0;
 bool automatic_placement = true;
 bool g_bSpawnWitchBride;
 
@@ -89,103 +102,55 @@ static char g_sWeaponModels2[MAX_WEAPONS2][] =
 #define MODEL_COLA			"models/w_models/weapons/w_cola.mdl"
 #define MODEL_GNOME			"models/props_junk/gnome.mdl"
 
-// Infected models
-#define MODEL_SMOKER "models/infected/smoker.mdl"
-#define MODEL_BOOMER "models/infected/boomer.mdl"
-#define MODEL_HUNTER "models/infected/hunter.mdl"
-#define MODEL_SPITTER "models/infected/spitter.mdl"
-#define MODEL_JOCKEY "models/infected/jockey.mdl"
-#define MODEL_CHARGER "models/infected/charger.mdl"
-#define MODEL_TANK "models/infected/hulk.mdl"
+#define MODEL_AMMO_L4D2			"models/props/terror/ammo_stack.mdl"
 
-// Signature call
-static Handle hCreateSmoker = null;
-#define NAME_CreateSmoker "NextBotCreatePlayerBot<Smoker>"
-static Handle hCreateBoomer = null;
-#define NAME_CreateBoomer "NextBotCreatePlayerBot<Boomer>"
-static Handle hCreateHunter = null;
-#define NAME_CreateHunter "NextBotCreatePlayerBot<Hunter>"
-static Handle hCreateSpitter = null;
-#define NAME_CreateSpitter "NextBotCreatePlayerBot<Spitter>"
-static Handle hCreateJockey = null;
-#define NAME_CreateJockey "NextBotCreatePlayerBot<Jockey>"
-static Handle hCreateCharger = null;
-#define NAME_CreateCharger "NextBotCreatePlayerBot<Charger>"
-static Handle hCreateTank = null;
-#define NAME_CreateTank "NextBotCreatePlayerBot<Tank>"
+ArrayList
+	g_aMeleeScripts;
 
-/// Metadata for the mod - used by SourceMod
-public Plugin myinfo = {
-	name = PLUGIN_NAME,
-	author = "James Richardson (grandwazir) & HarryPotter",
-	description = "Enables admins to have control over the AI Director and spawn all weapons, melee, items, special infected, and Uncommon Infected without using sv_cheats 1",
-	version = PLUGIN_VERSION,
-	url = "https://github.com/fbef0102/L4D2-Plugins/tree/master/all4dead2"
-};
+StringMap
+	g_smMeleeTrans;
 
-public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) 
-{
-	EngineVersion test = GetEngineVersion();
-	
-	if( test != Engine_Left4Dead2 )
-	{
-		strcopy(error, err_max, "Plugin only supports Left 4 Dead 2.");
-		return APLRes_SilentFailure;
-	}
-	
-	return APLRes_Success; 
-}
-
-/// Create plugin Convars, register all our commands and hook any events we need. View the generated all4dead.cfg file for a list of generated Convars.
 public void OnPluginStart() {
 
 	// Translations
 	LoadTranslations("all4dead2.phrases");
-	
-	GetGameData();
 
-	director_force_tank = FindConVar("director_force_tank");
-	director_force_witch = FindConVar("director_force_witch");
 	director_panic_forever = FindConVar("director_panic_forever");
-	sb_all_bot_team = FindConVar("sb_all_bot_team");
-	z_mega_mob_size = FindConVar("z_mega_mob_size");
-	z_common_limit_size = FindConVar("z_common_limit");
-	z_background_limit_size = FindConVar("z_background_limit");
-	z_mob_spawn_max_size = FindConVar("z_mob_spawn_max_size");
-	z_mob_spawn_min_size = FindConVar("z_mob_spawn_min_size");
 	
-	always_force_bosses = CreateConVar("a4d_always_force_bosses", "0", "是否一直生成boss", FCVAR_NOTIFY);
-	notify_players = CreateConVar("a4d_notify_players", "0", "是否向玩家宣布插件使用情况", FCVAR_NOTIFY);	
-	zombies_increment = CreateConVar("a4d_zombies_to_add", "10", "一次向僵尸总数量添加多少数量的僵尸", FCVAR_NOTIFY, true, 10.0, true, 100.0);
-	refresh_zombie_location = CreateConVar("a4d_refresh_zombie_location", "20.0", "位置刷新之间的时间，以秒计。仅用于自动放置不常见的感染者", FCVAR_NOTIFY, true, 5.0, true, 30.0);
-	// Register all spawning commands
-	RegAdminCmd("a4d_spawn_infected", Command_SpawnInfected, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_spawn_uinfected", Command_SpawnUInfected, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_spawn_item", Command_SpawnItem, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_spawn_weapon", Command_SpawnItem, ADMFLAG_CHEATS);
-	// Director commands
-	RegAdminCmd("a4d_force_panic", Command_ForcePanic, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_panic_forever", Command_PanicForever, ADMFLAG_CHEATS);	
-	RegAdminCmd("a4d_force_tank", Command_ForceTank, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_force_witch", Command_ForceWitch, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_continuous_bosses", Command_AlwaysForceBosses, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_add_zombies", Command_AddZombies, ADMFLAG_CHEATS);	
-	// Config settings
-	RegAdminCmd("a4d_enable_notifications", Command_EnableNotifications, ADMFLAG_CHEATS);
-	RegAdminCmd("a4d_reset_to_defaults", Command_ResetToDefaults, ADMFLAG_CHEATS);
-	// RegAdminCmd("a4d_debug_teleport", Command_TeleportToZombieSpawn, ADMFLAG_CHEATS);
-	// Hook events
-	HookEvent("player_spawn", Event_PlayerSpawn);
-	HookEvent("tank_spawn", Event_BossSpawn, EventHookMode_PostNoCopy);
-	HookEvent("witch_spawn", Event_BossSpawn, EventHookMode_PostNoCopy);
+	notify_players = CreateConVar("a4d_notify_players", "1", "Whether or not we announce changes in game.", FCVAR_NOTIFY);	
+	AutoExecConfig(true, "all4dead2");	
 
-	// Create location refresh timer
-	refresh_timer = CreateTimer(refresh_zombie_location.FloatValue, Timer_RefreshLocation, _, TIMER_REPEAT);
-	// If the Admin menu has been loaded start adding stuff to it
+	RegAdminCmd("a4d_spawn_infected", Command_SpawnInfected, ADMFLAG_ROOT);
+	RegAdminCmd("a4d_spawn_uinfected", Command_SpawnUInfected, ADMFLAG_ROOT);
+	RegAdminCmd("a4d_spawn_item", Command_SpawnItem, ADMFLAG_ROOT);
+	RegAdminCmd("a4d_spawn_weapon", Command_SpawnItem, ADMFLAG_ROOT);
+
+	RegAdminCmd("a4d_force_panic", Command_ForcePanic, ADMFLAG_ROOT);
+	RegAdminCmd("a4d_panic_forever", Command_PanicForever, ADMFLAG_ROOT);	
+
+	RegAdminCmd("a4d_enable_notifications", Command_EnableNotifications, ADMFLAG_ROOT);
+
 	if (LibraryExists("adminmenu") && ((top_menu = GetAdminTopMenu()) != null))
 		OnAdminMenuReady(top_menu);
 
-	AutoExecConfig(true, "all4dead2");	
+	g_smMeleeTrans = new StringMap();
+	g_aMeleeScripts = new ArrayList(ByteCountToCells(64));
+
+	g_smMeleeTrans.SetString("fireaxe", "Spawn a fire axe");
+	g_smMeleeTrans.SetString("frying_pan", "Spawn a frying pan");
+	g_smMeleeTrans.SetString("machete", "Spawn a machete");
+	g_smMeleeTrans.SetString("baseball_bat", "Spawn a baseball bat");
+	g_smMeleeTrans.SetString("crowbar", "Spawn a crowbar");
+	g_smMeleeTrans.SetString("cricket_bat", "Spawn a cricket bat");
+	g_smMeleeTrans.SetString("tonfa", "Spawn a police baton");
+	g_smMeleeTrans.SetString("katana", "Spawn a katana");
+	g_smMeleeTrans.SetString("electric_guitar", "Spawn an electric guitar");
+	g_smMeleeTrans.SetString("knife", "Spawn a knife");
+	g_smMeleeTrans.SetString("golfclub", "Spawn a golf club");
+	g_smMeleeTrans.SetString("shovel", "Spawn a shovel");
+	g_smMeleeTrans.SetString("pitchfork", "Spawn a pitchfork");
+	g_smMeleeTrans.SetString("riotshield", "Spawn a shield");
+	g_smMeleeTrans.SetString("riot_shield", "Spawn a shield");
 }
 
 public void OnMapStart() {
@@ -197,14 +162,8 @@ public void OnMapStart() {
 	PrecacheModel("models/infected/common_male_roadcrew.mdl", true);
 	PrecacheModel("models/infected/common_male_jimmy.mdl", true);
 	PrecacheModel("models/infected/common_male_fallen_survivor.mdl", true);
-	
-	PrecacheModel(MODEL_SMOKER);
-	PrecacheModel(MODEL_BOOMER);
-	PrecacheModel(MODEL_HUNTER);
-	PrecacheModel(MODEL_SPITTER);
-	PrecacheModel(MODEL_JOCKEY);
-	PrecacheModel(MODEL_CHARGER);
-	PrecacheModel(MODEL_TANK);
+
+	PrecacheModel(MODEL_AMMO_L4D2, true);
 
 	int max = MAX_WEAPONS2;
 	for( int i = 0; i < max; i++ )
@@ -221,61 +180,28 @@ public void OnMapStart() {
 		g_bSpawnWitchBride = true;
 	else
 		g_bSpawnWitchBride = false;
+
+	CreateTimer(1.0, Timer_GetMeleeTable, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action Timer_GetMeleeTable(Handle timer)
+{
+	delete g_aMeleeScripts;
+	g_aMeleeScripts = new ArrayList(ByteCountToCells(64));
+	int table = FindStringTable("meleeweapons");
+	if (table != INVALID_STRING_TABLE) {
+		int num = GetStringTableNumStrings(table);
+		char melee[64];
+		for (int i; i < num; i++) {
+			ReadStringTable(table, i, melee, sizeof melee);
+			g_aMeleeScripts.PushString(melee);
+		}
+	}
+	return Plugin_Continue;
 }
 
 public void OnPluginEnd() {
 	CloseHandle(refresh_timer);
-}
-
-/**
- * <summary>
- * 	Fired when a player is spawned and gives that player maximum health. This	
- * 	is to fix an issue where entities created through z_spawn have random amount 
- * 	of health
- * </summary>
- * <remarks>
- * 	This callback will only affect players on the infected team. It also only 
- * 	occurs when the global currently_spawning is true. It automatically resets
- * 	currently_spawning to false once the health has been given.
- * </remarks>
- * <seealso>
- * 	Command_SpawnInfected
- * </seealso>
-*/
-void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
-	int client = GetClientOfUserId(GetEventInt(event, "userid"));
-	/* If something spawns and we have just requested something to spawn - assume it is the same thing and make sure it has max health */
-	if (GetClientTeam(client) == 3 && currently_spawning) {
-		StripAndExecuteClientCommand(client, "give", "health");
-		LogAction(0, -1, "[NOTICE] Given full health to client %L that (hopefully) was spawned by A4D.", client);
-		// We have added health to the thing we have spawned so turn ourselves off
-		currently_spawning = false;	
-	}
-}
-/**
- * <summary>
- * 	Fired when a boss has been spawned (witch or tank) and sets director_force_tank/
- * 	director_force_witch to false if necessary.
- * </summary>
- * <remarks>
- * 	Forcing the director to spawn bosses is the most natural way for them to enter
- * 	the game. However the game does not toggle these ConVars off once a boss has 
- * 	been spawned. This leads to odd behavior such as four tanks on one map. This callback
- * 	ensures that if a4d_continuous_bosses is false we set the relevent director ConVar back
- * 	to false once the boss has been spawned.
- * </remarks>
- * <seealso>
- * 	Command_ForceTank
- * 	Command_ForceWitch
- * 	Command_SpawnBossesContinuously
- * </seealso>
-*/
-void Event_BossSpawn(Event event, const char[] name, bool dontBroadcast) {
-	if (always_force_bosses.BoolValue == false)
-		if (strcmp(name, "tank_spawn") == 0 && director_force_tank.BoolValue)
-			Do_ForceTank(0, false);
-		else if (strcmp(name, "witch_spawn") == 0 && director_force_witch.BoolValue)
-			Do_ForceWitch(0, false);
 }
 
 /// Register our menus with SourceMod
@@ -293,37 +219,14 @@ public void OnAdminMenuReady(Handle menu) {
 		return;
 	// The order that items are added to menus has no relation to the order that they appear. Items are sorted alphabetically automatically.
 	// Assign the menus to global values so we can easily check what a menu is when it is chosen.
-	director_menu = AddToTopMenu(admin_menu, "a4d_director_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_director_menu", ADMFLAG_CHEATS);
-	config_menu = AddToTopMenu(admin_menu, "a4d_config_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_config_menu", ADMFLAG_CHEATS);
-	spawn_special_infected_menu = AddToTopMenu(admin_menu, "a4d_spawn_special_infected_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_special_infected_menu", ADMFLAG_CHEATS);
-	spawn_melee_weapons_menu = AddToTopMenu(admin_menu, "a4d_spawn_melee_weapons_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_melee_weapons_menu", ADMFLAG_CHEATS);
-	spawn_weapons_menu = AddToTopMenu(admin_menu, "a4d_spawn_weapons_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_weapons_menu", ADMFLAG_CHEATS);
-	spawn_items_menu = AddToTopMenu(admin_menu, "a4d_spawn_items_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_items_menu", ADMFLAG_CHEATS);
-	spawn_uncommon_infected_menu = AddToTopMenu(admin_menu, "a4d_spawn_uncommon_infected_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_uncommon_infected_menu", ADMFLAG_CHEATS);
+	director_menu = AddToTopMenu(admin_menu, "a4d_director_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_director_menu", ADMFLAG_ROOT);
+	config_menu = AddToTopMenu(admin_menu, "a4d_config_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_config_menu", ADMFLAG_ROOT);
+	spawn_special_infected_menu = AddToTopMenu(admin_menu, "a4d_spawn_special_infected_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_special_infected_menu", ADMFLAG_ROOT);
+	spawn_melee_weapons_menu = AddToTopMenu(admin_menu, "a4d_spawn_melee_weapons_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_melee_weapons_menu", ADMFLAG_ROOT);
+	spawn_weapons_menu = AddToTopMenu(admin_menu, "a4d_spawn_weapons_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_weapons_menu", ADMFLAG_ROOT);
+	spawn_items_menu = AddToTopMenu(admin_menu, "a4d_spawn_items_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_items_menu", ADMFLAG_ROOT);
+	spawn_uncommon_infected_menu = AddToTopMenu(admin_menu, "a4d_spawn_uncommon_infected_menu", TopMenuObject_Item, Menu_TopItemHandler, a4d_menu, "a4d_spawn_uncommon_infected_menu", ADMFLAG_ROOT);
 }
-
-public void OnEntityCreated(int entity, const char[] classname) {
-	// If the last thing that was spawned as a zombie then store that entity
-	// for future use
-	if (strcmp(classname, "infected", false) == 0) {
-		last_zombie_spawned = entity;
-		if (currently_spawning && strcmp(change_zombie_model_to, "") != 0) {
-			currently_spawning = false;
-			SetEntityModel(entity, change_zombie_model_to);
-			change_zombie_model_to = "";
-		}
-	}	
-}
-
-Action Timer_RefreshLocation(Handle timer) {
-	if (!IsValidEntity(last_zombie_spawned) || !IsValidEdict(last_zombie_spawned)) return Plugin_Continue;
-	char class_name[128];
-	GetEdictClassname(last_zombie_spawned, class_name, 128);
-	if (strcmp(class_name, "infected") != 0) return Plugin_Continue;
-	GetEntityAbsOrigin(last_zombie_spawned, last_zombie_spawn_location);
-	return Plugin_Continue;
-}
-
 
 /// Handles the top level "All4Dead" category and how it is displayed on the core admin menu
 int Menu_CategoryHandler(TopMenu topmenu, TopMenuAction action, TopMenuObject object_id, int client, char[] buffer, int maxlength) {
@@ -525,6 +428,12 @@ Action Command_SpawnInfected(int client, int args) {
 
 /// Sourcemod Action for the SpawnUncommonInfected command.
 Action Command_SpawnUInfected(int client, int args) { 
+	if (client == 0)
+	{
+		PrintToServer("[TS] This Command cannot be used by server.");
+		return Plugin_Handled;
+	}
+
 	if (args < 1) {
 		ReplyToCommand(client, "Usage: a4d_spawn_uinfected <riot|ceda|clown|mud|roadcrew|jimmy>"); 
 	} else {
@@ -557,7 +466,8 @@ Action Command_SpawnUInfected(int client, int args) {
  * 	the action is the console.
  * </remarks>
 */
-void Do_SpawnInfected(int client, const char[] type) {
+void Do_SpawnInfected(int client, const char[] type) 
+{
 	if(client == 0)
 	{
 		return;
@@ -566,6 +476,12 @@ void Do_SpawnInfected(int client, const char[] type) {
 	if(RealFreePlayersOnInfected())
 	{
 		Do_SpawnInfected_Old(client, type, false);
+		return;
+	}
+
+	if (GetClientCount(false) >= MaxClients)
+	{
+		CPrintToChat(client, "%T", "Not enough player slots", client);
 		return;
 	}
 
@@ -588,7 +504,8 @@ void Do_SpawnInfected(int client, const char[] type) {
 	float vPos[3], vAng[3] = {0.0, 0.0, 0.0};
 	if (automatic_placement == true)
 	{
-		if(L4D_GetRandomPZSpawnPosition(L4D_GetHighestFlowSurvivor(), zombieclass, 5, vPos) == false)
+		int survivor = L4D_GetHighestFlowSurvivor();
+		if(survivor <= 0 || L4D_GetRandomPZSpawnPosition(survivor, zombieclass, 5, vPos) == false)
 		{
 			PrintToChat(client, "%T", "Could not find a valid spawn position for S.I. in 5 tries", client);
 			return;
@@ -596,123 +513,117 @@ void Do_SpawnInfected(int client, const char[] type) {
 	}
 	else
 	{
-		if( !SetTeleportEndPoint(client, vPos, vAng) ) {
+		if( !SetTeleportEndPoint(client, vPos, vAng) )
+		 {
 			PrintToChat(client, "%T", "Can not spawn, please try again", client);
 			return;
 		}
 	}
 
-	bool bSpawnSuccessful = false;
 	int bot = 0;
 	switch(zombieclass)
 	{
 		case 1:
 		{
-			bot = SDKCall(hCreateSmoker, "Smoker Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_SMOKER);
-				bSpawnSuccessful = true;
-			}	
+			bot = NoLimit_CreateInfected("smoker", vPos, NULL_VECTOR);
 		}
 		case 2:
 		{
-			bot = SDKCall(hCreateBoomer, "Boomer Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_BOOMER);
-				bSpawnSuccessful = true;
-			}		
+			bot = NoLimit_CreateInfected("boomer", vPos, NULL_VECTOR);
 		}
 		case 3:
 		{
-			bot = SDKCall(hCreateHunter, "Hunter Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_HUNTER);
-				bSpawnSuccessful = true;
-			}	
+			bot = NoLimit_CreateInfected("hunter", vPos, NULL_VECTOR);
 		}
 		case 4:
 		{
-			bot = SDKCall(hCreateSpitter, "Spitter Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_SPITTER);
-				bSpawnSuccessful = true;
-			}	
+			bot = NoLimit_CreateInfected("spitter", vPos, NULL_VECTOR);
 		}
 		case 5:
 		{
-			bot = SDKCall(hCreateJockey, "Jockey Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_JOCKEY);
-				bSpawnSuccessful = true;
-			}		
+			bot = NoLimit_CreateInfected("jockey", vPos, NULL_VECTOR);
 		}
 		case 6:
 		{
-			bot = SDKCall(hCreateCharger, "Charger Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_CHARGER);
-				bSpawnSuccessful = true;
-			}		
+			bot = NoLimit_CreateInfected("charger", vPos, NULL_VECTOR);
 		}
 		case 8:
 		{
-			bot = SDKCall(hCreateTank, "Tank Bot");
-			if (IsValidClient(bot))
-			{
-				SetEntityModel(bot, MODEL_TANK);
-				bSpawnSuccessful = true;
-			}	
+			bot = NoLimit_CreateInfected("tank", vPos, NULL_VECTOR);
 		}		
 	}
 
-	if (bot > 0 && bSpawnSuccessful)
+	if (bot > 0)
 	{
-		ChangeClientTeam(bot, 3);
-		SetEntProp(bot, Prop_Send, "m_usSolidFlags", 16);
-		SetEntProp(bot, Prop_Send, "movetype", 2);
-		SetEntProp(bot, Prop_Send, "deadflag", 0);
-		SetEntProp(bot, Prop_Send, "m_lifeState", 0);
-		SetEntProp(bot, Prop_Send, "m_iObserverMode", 0);
-		SetEntProp(bot, Prop_Send, "m_iPlayerState", 0);
-		SetEntProp(bot, Prop_Send, "m_zombieState", 0);
-		DispatchSpawn(bot);
-		ActivateEntity(bot);
-		TeleportEntity(bot, vPos, NULL_VECTOR, NULL_VECTOR); //移動到相同位置
-
 		if(notify_players.BoolValue) CPrintToChatAll("%t", "has been spawned", type);
 		LogAction(client, -1, "[NOTICE]: (%L) has spawned a %s", client, type);
+
+		if (automatic_placement == false)
+		{
+			CreateTimer(0.15, Timer_CheckIfStuck, GetClientUserId(bot));
+		}
 	}
+	else
+	{
+		CPrintToChat(client, "%T", "Not enough player slots", client);
+	}
+}
+
+Action Timer_CheckIfStuck(Handle timer, int client)
+{
+	client = GetClientOfUserId(client);
+	if (client && IsClientInGame(client) && GetClientTeam(client) == 3 && IsPlayerAlive(client))
+	{
+		L4D_WarpToValidPositionIfStuck(client);
+	}
+
+	return Plugin_Continue;
 }
 
 void Do_SpawnInfected_Old(int client, const char[] type, bool spawning_uncommon ) {
 
 	char arguments[16];
 	if (automatic_placement == true && !spawning_uncommon)
-		Format(arguments, sizeof(arguments), "%s %t", type, "auto");
+		Format(arguments, sizeof(arguments), "%s %s", type, "auto");
 	else
 		Format(arguments, sizeof(arguments), "%s", type);
-	// If we are spawning an uncommon
-	if (spawning_uncommon)
-		currently_spawning = true;
+
 	// If we are spawning from the console make sure we force auto placement on	
 	if (client == 0) {
-		Format(arguments, sizeof(arguments), "%s %t", type, "auto");
-		StripAndExecuteClientCommand(Misc_GetAnyClient(), "z_spawn_old", arguments);
-	} else if (spawning_uncommon && automatic_placement == true) {
-		currently_spawning = false;
+		return;
+	} else if (spawning_uncommon) 
+	{
+		float vPos[3], vAng[3] = {0.0, 0.0, 0.0};
+		if (automatic_placement == true)
+		{
+			int survivor = L4D_GetHighestFlowSurvivor();
+			if(survivor <= 0 || L4D_GetRandomPZSpawnPosition(survivor, view_as<int>(L4D2ZombieClass_Hunter), 5, vPos) == false)
+			{
+				PrintToChat(client, "%T", "Could not find a valid spawn position for zombie in 5 tries", client);
+				return;
+			}
+		}
+		else
+		{
+			if( !SetTeleportEndPoint(client, vPos, vAng) ) {
+				PrintToChat(client, "%T", "Can not spawn, please try again", client);
+				return;
+			}
+		}
+
 		int zombie = CreateEntityByName("infected");
+		if (CheckIfEntitySafe( zombie ) == false)
+		{
+			CPrintToChat(client, "%T", "Too many enities on server", client);
+			return;
+		}
+
 		SetEntityModel(zombie, change_zombie_model_to);
 		int ticktime = RoundToNearest( GetGameTime() / GetTickInterval()  ) + 5;
 		SetEntProp(zombie, Prop_Data, "m_nNextThinkTick", ticktime);
 		DispatchSpawn(zombie);
 		ActivateEntity(zombie);
-		TeleportEntity(zombie, last_zombie_spawn_location, NULL_VECTOR, NULL_VECTOR);
+		TeleportEntity(zombie, vPos, NULL_VECTOR, NULL_VECTOR);
 		if(notify_players.BoolValue) CPrintToChatAll("%t", "has been spawned", type);
 		LogAction(client, -1, "[NOTICE]: (%L) has spawned a %s", client, type);
 		return;
@@ -728,7 +639,9 @@ void Do_SpawnWitch(const int client, const bool bAutoSpawn)
 {
 	float vPos[3], vAng[3] = {0.0, 0.0, 0.0};
 	if (bAutoSpawn) {
-		if(L4D_GetRandomPZSpawnPosition(L4D_GetHighestFlowSurvivor(),7,ZOMBIESPAWN_Attempts,vPos) == false) {
+		
+		int survivor = L4D_GetHighestFlowSurvivor();
+		if(survivor <= 0 || L4D_GetRandomPZSpawnPosition(survivor,7,ZOMBIESPAWN_Attempts,vPos) == false) {
 			PrintToChat(client, "%T", "Can not spawn witch in tries at this moment", client, ZOMBIESPAWN_Attempts);
 			return;
 		}
@@ -740,12 +653,22 @@ void Do_SpawnWitch(const int client, const bool bAutoSpawn)
 		}
 	}
 
+	int witch;
 	if( g_bSpawnWitchBride ) {
-		L4D2_SpawnWitchBride(vPos,NULL_VECTOR);
+		witch = NoLimit_CreateInfected("witch", vPos, NULL_VECTOR, 2);
 	}
 	else {
-		L4D2_SpawnWitch(vPos,NULL_VECTOR);
+		witch = NoLimit_CreateInfected("witch", vPos, NULL_VECTOR);
 	}
+
+	if(witch < MaxClients)
+	{
+		PrintToChat(client, "%T", "Can not spawn, please try again", client);
+		return;
+	}
+
+	if(notify_players.BoolValue) CPrintToChatAll("%t", "has been spawned", "witch");
+	LogAction(client, -1, "[NOTICE]: (%L) has spawned a witch", client);
 }
 
 void Do_SpawnUncommonInfected(int client, int type) {
@@ -780,14 +703,14 @@ void Do_SpawnUncommonInfected(int client, int type) {
  * 	spawned through z_spawn.
  * </remarks>
 */
-stock void Do_EnableAutoPlacement(int client, bool value) {
+void Do_EnableAutoPlacement(int client, bool value) {
 	automatic_placement = value;
 	if (notify_players.BoolValue)
 	{
 		if (value == true)
-			CPrintToChatAll("%t", "Automatic placement of spawned infected has been enabled");
+			CPrintToChat(client, "%T", "Automatic placement of spawned infected has been enabled", client);
 		else
-			CPrintToChatAll("%t", "Automatic placement of spawned infected has been disabled");
+			CPrintToChat(client, "%T", "Automatic placement of spawned infected has been disabled", client);
 	}
 	//LogAction(client, -1, "(%L) set %s to %i", client, "a4d_automatic_placement", value);	
 }
@@ -850,7 +773,7 @@ int Menu_SpawnItemsHandler(Menu menu, MenuAction action, int cindex, int itempos
 				if (!Misc_TraceClientViewToLocation(cindex, location)) {
 					GetClientAbsOrigin(cindex, location);
 				}
-				Do_CreateEntity(cindex, "weapon_ammo_spawn", "models/props/terror/ammo_stack.mdl", location, false);
+				Do_CreateEntity(cindex, "weapon_ammo_spawn", MODEL_AMMO_L4D2, location, false);
 			} case 12: {
 				float location[3];
 				if (!Misc_TraceClientViewToLocation(cindex, location)) {
@@ -880,6 +803,12 @@ int Menu_SpawnItemsHandler(Menu menu, MenuAction action, int cindex, int itempos
 }
 /// Sourcemod Action for the Do_SpawnItem command.
 Action Command_SpawnItem(int client, int args) { 
+	if (client == 0)
+	{
+		PrintToServer("[TS] This Command cannot be used by server.");
+		return Plugin_Handled;
+	}
+	
 	if (args < 1) {
 		ReplyToCommand(client, "Usage: a4d_spawn_item <item_type>");
 	} else {
@@ -909,13 +838,19 @@ void Do_SpawnItem(int client, const char[] type) {
 		ReplyToCommand(client, "Can not use this command from the console."); 
 	} else {
 		StripAndExecuteClientCommand(client, "give", type);
-		if(notify_players.BoolValue) CPrintToChatAll("%t", "has been spawned", type);
+		if(notify_players.BoolValue) CPrintToChat(client, "%T", "has been spawned", client, type);
 		LogAction(client, -1, "[NOTICE]: (%L) has spawned a %s", client, type);
 	}
 }
 
 void Do_CreateEntity(int client, const char[] name, const char[] model, float location[3], const bool zombie) {
 	int entity = CreateEntityByName(name);
+	if (CheckIfEntitySafe( entity ) == false)
+	{
+		CPrintToChat(client, "%T", "Too many enities on server", client);
+		return;
+	}
+
 	if (strcmp(model, "PROVIDED") != 0)
 		SetEntityModel(entity, model);
 	DispatchSpawn(entity);
@@ -1023,67 +958,52 @@ void Menu_CreateMeleeWeaponMenu(int client) {
 	menu.SetTitle(Translate(client, "%t", "Spawn Melee Weapons"));
 	menu.ExitBackButton = true;
 	menu.ExitButton = true;
+
+	menu.AddItem("chainsaw", Translate(client, "%t", "Spawn a chainsaw"));
 	
-	menu.AddItem("ma", Translate(client, "%t", "Spawn a baseball bat"));
-	menu.AddItem("mb", Translate(client, "%t", "Spawn a chainsaw"));
-	menu.AddItem("mc", Translate(client, "%t", "Spawn a cricket bat"));
-	menu.AddItem("md", Translate(client, "%t", "Spawn a crowbar"));
-	menu.AddItem("me", Translate(client, "%t", "Spawn an electric guitar"));
-	menu.AddItem("mf", Translate(client, "%t", "Spawn a fire axe"));
-	menu.AddItem("mg", Translate(client, "%t", "Spawn a frying pan"));
-	menu.AddItem("mh", Translate(client, "%t", "Spawn a katana"));
-	menu.AddItem("mi", Translate(client, "%t", "Spawn a machete"));
-	menu.AddItem("mj", Translate(client, "%t", "Spawn a police baton"));
-	menu.AddItem("mk", Translate(client, "%t", "Spawn a knife"));
-	menu.AddItem("ml", Translate(client, "%t", "Spawn a golf club"));
-	menu.AddItem("mm", Translate(client, "%t", "Spawn a pitchfork"));
-	menu.AddItem("mn", Translate(client, "%t", "Spawn a shovel"));
+	char melee[64];
+	char trans[64];
+	int count = g_aMeleeScripts.Length;
+	for (int i; i < count; i++) 
+	{
+		g_aMeleeScripts.GetString(i, melee, sizeof melee);
+		if (!g_smMeleeTrans.GetString(melee, trans, sizeof trans))
+			strcopy(trans, sizeof trans, melee);
+
+		if(TranslationPhraseExists(trans))
+		{
+			menu.AddItem(melee, Translate(client, "%t", trans));
+		}
+		else
+		{
+			menu.AddItem(melee, trans);
+		}
+	}
 	
 	menu.DisplayAt( client, g_iMeleeMenuPosition[client], MENU_TIME_FOREVER);
 }
 /// Handles callbacks from a client using the spawn weapon menu.
-int Menu_SpawnMeleeWeaponHandler(Menu menu, MenuAction action, int cindex, int itempos) {
-	if (action == MenuAction_Select) {
-		switch (itempos) {
-			case 0: {
-				Do_SpawnItem(cindex, "baseball_bat");
-			} case 1: {
-				Do_SpawnItem(cindex, "chainsaw");
-			} case 2: {
-				Do_SpawnItem(cindex, "cricket_bat");
-			} case 3: {
-				Do_SpawnItem(cindex, "crowbar");
-			} case 4: {
-				Do_SpawnItem(cindex, "electric_guitar");
-			} case 5: {
-				Do_SpawnItem(cindex, "fireaxe");
-			} case 6: {
-				Do_SpawnItem(cindex, "frying_pan");
-			} case 7: {
-				Do_SpawnItem(cindex, "katana");
-			} case 8: {
-				Do_SpawnItem(cindex, "machete");
-			} case 9: {
-				Do_SpawnItem(cindex, "tonfa");
-			} case 10: {
-				Do_SpawnItem(cindex, "knife");
-			} case 11: {
-				Do_SpawnItem(cindex, "golfclub");
-			} case 12: {
-				Do_SpawnItem(cindex, "pitchfork");
-			} case 13: {
-				Do_SpawnItem(cindex, "shovel");
-			} 
-			
-		}
+int Menu_SpawnMeleeWeaponHandler(Menu menu, MenuAction action, int cindex, int itempos) 
+{
+	if (action == MenuAction_Select) 
+	{
+		char item[64];
+		menu.GetItem(itempos, item, sizeof item);
+
+		Do_SpawnItem(cindex, item);
+
 		g_iMeleeMenuPosition[cindex] = menu.Selection;
 		Menu_CreateMeleeWeaponMenu(cindex);
-	} else if (action == MenuAction_End)
+	}
+	else if (action == MenuAction_End)
+	{
 		delete menu;
-	/* If someone presses 'back' (8), return to main All4Dead menu */
+	}
 	else if (action == MenuAction_Cancel)
+	{
 		if (itempos == MenuCancel_ExitBack && admin_menu != null)
 			admin_menu.Display( cindex, TopMenuPosition_LastCategory);
+	}
 
 	return 0;
 }
@@ -1098,10 +1018,6 @@ void Menu_CreateDirectorMenu(int client) {
 	menu.ExitButton = true;
 	menu.AddItem("fp", Translate(client, "%t", "Force a panic event to start"));
 	if (director_panic_forever.BoolValue) { menu.AddItem("pf", Translate(client, "%t", "End non-stop panic events")); } else { menu.AddItem("pf", Translate(client, "%t", "Force non-stop panic events")); }
-	if (director_force_tank.BoolValue) { menu.AddItem("ft", Translate(client, "%t", "Director controls if a tank spawns this round")); } else { menu.AddItem("ft", Translate(client, "%t", "Force a tank to spawn this round")); }
-	if (director_force_witch.BoolValue) { menu.AddItem("fw", Translate(client, "%t", "Director controls if a witch spawns this round")); } else { menu.AddItem("fw", Translate(client, "%t", "Force a witch to spawn this round")); }
-	if (always_force_bosses.BoolValue) { menu.AddItem("fd", Translate(client, "%t", "Stop bosses spawning continuously")); } else { menu.AddItem("fw", Translate(client, "%t", "Force bosses to spawn continuously")); }
-	menu.AddItem("mz", Translate(client, "%t", "Add more zombies to the horde"));	
 	menu.Display( client, MENU_TIME_FOREVER);
 }
 /// Handles callbacks from a client using the director commands menu.
@@ -1115,24 +1031,7 @@ int Menu_DirectorMenuHandler(Menu menu, MenuAction action, int cindex, int itemp
 					Do_PanicForever(cindex, false); 
 				else
 					Do_PanicForever(cindex, true);
-			} case 2: {
-				if (director_force_tank.BoolValue)
-					Do_ForceTank(cindex, false); 
-				else
-					Do_ForceTank(cindex, true);
-			} case 3: {
-				if (director_force_witch.BoolValue) 
-					Do_ForceWitch(cindex, false);
-				else
-					Do_ForceWitch(cindex, true);
-			}  case 4: {
-				if (always_force_bosses.BoolValue)
-					Do_AlwaysForceBosses(cindex, false); 
-				else
-					Do_AlwaysForceBosses(cindex, true);
-			} case 5: {
-				Do_AddZombies(cindex, zombies_increment.IntValue);
-			} 
+			}
 		}
 		Menu_CreateDirectorMenu(cindex);
 	} else if (action == MenuAction_End) {
@@ -1145,63 +1044,20 @@ int Menu_DirectorMenuHandler(Menu menu, MenuAction action, int cindex, int itemp
 	return 0;
 }
 
-/// Sourcemod Action for the AlwaysForceBosses command.
-Action Command_AlwaysForceBosses(int client, int args) {
-	if (args < 1) { 
-		ReplyToCommand(client, "Usage: a4d_always_force_bosses <0|1>"); 
-		return Plugin_Handled;
-	}
-	char value[2];
-	GetCmdArg(1, value, sizeof(value));
-	if (strcmp(value, "0") == 0)
-		Do_AlwaysForceBosses(client, false);		
-	else
-		Do_AlwaysForceBosses(client, true);
-	return Plugin_Handled;
-}
-/**
- * <summary>
- * 	Do not revert director_force_tank and director_force_witch when a boss spawns.
- * </summary>
- * <remarks>
- * 	This has the effect of continously spawning bosses when either force_tank
- * 	or force_witch is enabled.
- * </remarks>
-*/
-stock void Do_AlwaysForceBosses(int client, bool value) {
-	SetConVarBool(always_force_bosses, value);
-
-	if (notify_players.BoolValue)
-	{
-		if (value == true)
-			CPrintToChatAll("%t", "Bosses will now spawn continuously");
-		else
-			CPrintToChatAll("%t", "Bosses will no longer spawn continuously");
-	}
-}
-
 /// Sourcemod Action for the Do_ForcePanic command.
 Action Command_ForcePanic(int client, int args) { 
 	Do_ForcePanic(client);
 	return Plugin_Handled;
 }
-/**
- * <summary>
- * 	This command forces the AI director to start a panic event
- * </summary>
- * <remarks>
- * 	A panic event is the same as a cresendo event, like pushing a button which calls
- * 	the lift in No Mercy. The director will not start more than one panic event at once.
- * </remarks>
-*/
+
+
 void Do_ForcePanic(int client) {
-	if (client == 0)
-		StripAndExecuteClientCommand(Misc_GetAnyClient(), "director_force_panic_event", "");
-	else
-		StripAndExecuteClientCommand(client, "director_force_panic_event", "");
+	L4D_ForcePanicEvent();
+	
 	if (notify_players.BoolValue) CPrintToChatAll("%t", "The zombies are coming!");	
 	LogAction(client, -1, "[NOTICE]: (%L) executed %s", client, "a4d_force_panic");
 }
+
 /// Sourcemod Action for the Do_PanicForever command.
 Action Command_PanicForever(int client, int args) {
 	if (args < 1) { 
@@ -1216,21 +1072,10 @@ Action Command_PanicForever(int client, int args) {
 		Do_PanicForever(client, true);
 	return Plugin_Handled;
 }
-/**
- * <summary>
- * 	This command forces the AI director to start a panic event endlessly, 
- * 	one after each other.
- * </summary>
- * <remarks>
- * 	This does not trigger a panic event. If you are intending for endless panic
- * 	events to start straight away use this and then Do_ForcePanic. 
- * </remarks>
- * <seealso>
- * 	Do_ForcePanic
- * </seealso>
-*/
-stock void Do_PanicForever(int client, bool value) {
+
+void Do_PanicForever(int client, bool value) {
 	StripAndChangeServerConVarBool(client, director_panic_forever, value);
+	if (value == true) L4D_ForcePanicEvent();
 	if (notify_players.BoolValue)
 	{
 		if (value == true)
@@ -1238,100 +1083,6 @@ stock void Do_PanicForever(int client, bool value) {
 		else
 			CPrintToChatAll("%t", "Endless panic events have ended");
 	}
-}
-/// Sourcemod Action for the Do_ForceTank command.
-Action Command_ForceTank(int client, int args) {
-	if (args < 1) { 
-		ReplyToCommand(client, "Usage: a4d_force_tank <0|1>"); 
-		return Plugin_Handled; 
-	}
-	
-	char value[2];
-	GetCmdArg(1, value, sizeof(value));
-
-	if (strcmp(value, "0") == 0)
-		Do_ForceTank(client, false);	
-	else 
-		Do_ForceTank(client, true);
-	return Plugin_Handled;
-}
-
-stock void Do_ForceTank(int client, bool value) {
-	StripAndChangeServerConVarBool(client, director_force_tank, value);
-	if (notify_players.BoolValue)
-	{
-		if (value == true)
-			CPrintToChatAll("%t", "A tank is guaranteed to spawn this round");
-		else
-			CPrintToChatAll("%t", "A tank is no longer guaranteed to spawn this round");
-	}
-}
-/// Sourcemod Action for the Do_ForceWitch command.
-Action Command_ForceWitch(int client, int args) {
-	if (args < 1) { 
-		ReplyToCommand(client, "Usage: a4d_force_witch <0|1>"); 
-		return Plugin_Handled;
-	}
-	char value[2];
-	GetCmdArg(1, value, sizeof(value));
-	if (strcmp(value, "0") == 0)
-		Do_ForceWitch(client, false);
-	else 
-		Do_ForceWitch(client, true);
-	return Plugin_Handled;
-}
-
-stock void Do_ForceWitch(int client, bool value) {
-	StripAndChangeServerConVarBool(client, director_force_witch, value);
-	if (notify_players.BoolValue)
-	{
-		if (value == true)
-			CPrintToChatAll("{lightgreen}%t", "A witch is guaranteed to spawn this round");
-		else 
-			CPrintToChatAll("{lightgreen}%t", "A witch is no longer guaranteed to spawn this round");
-	}
-}
-
-
-/// Sourcemod Action for the AddZombies command.
-Action Command_AddZombies(int client, int args) {
-	if (args < 1) { 
-		ReplyToCommand(client, "Usage: a4d_add_zombies <0..99>"); 
-		return Plugin_Handled;
-	}
-	char value[4];
-	GetCmdArg(1, value, sizeof(value));
-	int zombies = StringToInt(value);
-	Do_AddZombies(client, zombies);
-	return Plugin_Handled;
-}
-/**
- * <summary>
- * 	The director will spawn more zombies in the mobs and mega mobs.
- * </summary>
- * <remarks>
- * 	Make sure to not put silly values in for this as it may cause severe performance problems.
- * 	You can reset all settings back to their defaults by calling a4d_reset_to_defaults.
- * </remarks>
-*/
-void Do_AddZombies(int client, int zombies_to_add) {
-	int new_zombie_total = zombies_to_add + z_mega_mob_size.IntValue;
-	StripAndChangeServerConVarInt(client, z_mega_mob_size, new_zombie_total);
-	PrintToChat(client, "z_mega_mob_size:%d", new_zombie_total);
-	new_zombie_total = zombies_to_add + z_mob_spawn_max_size.IntValue;
-	StripAndChangeServerConVarInt(client, z_mob_spawn_max_size, new_zombie_total);
-	PrintToChat(client, "z_mob_spawn_max:%d", new_zombie_total);
-	new_zombie_total = zombies_to_add + z_mob_spawn_min_size.IntValue;
-	StripAndChangeServerConVarInt(client, z_mob_spawn_min_size, new_zombie_total);
-	PrintToChat(client, "z_mob_spawn_min:%d", new_zombie_total);
-	new_zombie_total = zombies_to_add + z_common_limit_size.IntValue;
-	StripAndChangeServerConVarInt(client, z_common_limit_size, new_zombie_total);
-	PrintToChat(client, "z_common_limit:%d", new_zombie_total);
-	new_zombie_total = zombies_to_add + z_background_limit_size.IntValue;
-	StripAndChangeServerConVarInt(client, z_background_limit_size, new_zombie_total);
-	PrintToChat(client, "z_background_limit:%d", new_zombie_total);
-	PrintToChat(client, " ");
-	if (notify_players.BoolValue) CPrintToChatAll("%t", "The horde grows larger");
 }
 
 // Configuration commands
@@ -1342,8 +1093,8 @@ void Menu_CreateConfigMenu(int client) {
 	menu.SetTitle(Translate(client, "%t", "Configuration Commands"));
 	menu.ExitBackButton = true;
 	menu.ExitButton = true;
-	if (notify_players.BoolValue) { menu.AddItem("pn", Translate(client, "%t", "Disable player notifications")); } else { menu.AddItem("pn", Translate(client, "%t", "Enable player notifications")); }
-	menu.AddItem("rs", Translate(client, "%t", "Restore all settings to game defaults now"));
+	if (notify_players.BoolValue) { menu.AddItem("pn", Translate(client, "%t", "Disable player notifications")); } 
+	else { menu.AddItem("pn", Translate(client, "%t", "Enable player notifications")); }
 	menu.Display( client, MENU_TIME_FOREVER);
 }
 /// Handles callbacks from a client using the configuration menu.
@@ -1356,8 +1107,6 @@ int Menu_ConfigCommandsHandler(Menu menu, MenuAction action, int cindex, int ite
 					Do_EnableNotifications(cindex, false); 
 				else
 					Do_EnableNotifications(cindex, true); 
-			} case 1: {
-				Do_ResetToDefaults(cindex);
 			}
 		}
 		Menu_CreateConfigMenu(cindex);
@@ -1385,34 +1134,12 @@ Action Command_EnableNotifications(int client, int args) {
 		Do_EnableNotifications(client, true);
 	return Plugin_Handled;
 }
-/**
- * <summary>
- * 	Enable (or disable) in game notifications of all4dead actions.
- * </summary>
- * <remarks>
- * 	When enabled notifications honour sm_activity settings.
- * </remarks>
-*/
+
+
 void Do_EnableNotifications(int client, bool value) {
 	SetConVarBool(notify_players, value);
-	if (notify_players.BoolValue) CPrintToChatAll("%t", "Player notifications have now been enabled");
+	if (notify_players.BoolValue) CPrintToChat(client, "%T", "Player notifications have now been enabled", client);
 	LogAction(client, -1, "(%L) set %s to %i", client, "a4d_notify_players", value);	
-}
-/// Sourcemod Action for the Do_ResetToDefaults command.
-Action Command_ResetToDefaults(int client, int args) {
-	Do_ResetToDefaults(client);
-	return Plugin_Handled;
-}
-/// Resets all ConVars to their default settings.
-void Do_ResetToDefaults(int client) {
-	Do_ForceTank(client, false);
-	Do_ForceWitch(client, false);
-	Do_PanicForever(client, false);
-	StripAndChangeServerConVarInt(client, z_mega_mob_size, 50);
-	StripAndChangeServerConVarInt(client, z_mob_spawn_max_size, 30);
-	StripAndChangeServerConVarInt(client, z_mob_spawn_min_size, 10);
-	if (notify_players.BoolValue) CPrintToChatAll("%t", "Restored the default settings");
-	LogAction(client, -1, "(%L) executed %s", client, "a4d_reset_to_defaults");
 }
 
 // Helper functions
@@ -1431,26 +1158,6 @@ void StripAndExecuteClientCommand(int client, const char[] command, const char[]
 	FakeClientCommand(client, "%s %s", command, arguments);
 	SetCommandFlags(command, flags);
 }
-/// Strip and change a ConVarInt to another value. This allows modification of otherwise cheat-protected ConVars.
-void StripAndChangeServerConVarInt(int client, ConVar convar, int value) {
-	char command[32];
-	convar.GetName(command,32);
-	convar.SetInt(value, false, false);
-	LogAction(client, -1, "[NOTICE]: (%L) set %s to %i", client, command, value);	
-}
-// Gets a client ID to allow various commands to be called as console
-int Misc_GetAnyClient() {
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i))
-		{
-			// PrintToChatAll("Using client %L for command", i);
-			return i;
-		}
-	}
-	return 0;
-}
-
 
 
 bool Misc_TraceClientViewToLocation(int client, float location[3]) {
@@ -1474,17 +1181,6 @@ bool TraceRayDontHitSelf(int entity, int mask, any data) {
 		return false; // Don't let the entity be hit
 	}
 	return true; // It didn't hit itself
-}
-
-void GetEntityAbsOrigin(int entity, float origin[3]) {
-	float mins[3], maxs[3];
-	GetEntPropVector(entity,Prop_Send,"m_vecOrigin",origin);
-	GetEntPropVector(entity,Prop_Send,"m_vecMins",mins);
-	GetEntPropVector(entity,Prop_Send,"m_vecMaxs",maxs);
-	
-	origin[0] += (mins[0] + maxs[0]) * 0.5;
-	origin[1] += (mins[1] + maxs[1]) * 0.5;
-	origin[2] += (mins[2] + maxs[2]) * 0.5;
 }
 
 // ====================================================================================================
@@ -1616,185 +1312,16 @@ bool IsPlayerGhost (int client)
 	return false;
 }
 
-Handle hGameConf;
-void GetGameData()
+
+bool CheckIfEntitySafe(int entity)
 {
-	hGameConf = LoadGameConfigFile("all4dead2");
-	if( hGameConf != null )
+	if(entity == -1) return false;
+
+	if(	entity > ENTITY_SAFE_LIMIT)
 	{
-		PrepSDKCall();
+		RemoveEntity(entity);
+		return false;
 	}
-	else
-	{
-		SetFailState("Unable to find all4dead2.txt gamedata file.");
-	}
-	delete hGameConf;
-}
-
-void PrepSDKCall()
-{
-	//find create bot signature
-	Address replaceWithBot = GameConfGetAddress(hGameConf, "NextBotCreatePlayerBot.jumptable");
-	if (replaceWithBot != Address_Null && LoadFromAddress(replaceWithBot, NumberType_Int8) == 0x68) {
-		// We're on L4D2 and linux
-		PrepWindowsCreateBotCalls(replaceWithBot);
-	}
-	else
-	{
-		PrepL4D2CreateBotCalls();
-	}
-}
-
-void LoadStringFromAdddress(Address addr, char[] buffer, int maxlength) {
-	int i = 0;
-	while(i < maxlength) {
-		char val = LoadFromAddress(addr + view_as<Address>(i), NumberType_Int8);
-		if(val == 0) {
-			buffer[i] = 0;
-			break;
-		}
-		buffer[i] = val;
-		i++;
-	}
-	buffer[maxlength - 1] = 0;
-}
-
-Handle PrepCreateBotCallFromAddress(Handle hSiFuncTrie, const char[] siName) {
-	Address addr;
-	StartPrepSDKCall(SDKCall_Static);
-	if (!GetTrieValue(hSiFuncTrie, siName, addr) || !PrepSDKCall_SetAddress(addr))
-	{
-		SetFailState("Unable to find NextBotCreatePlayer<%s> address in memory.", siName);
-		return null;
-	}
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	return EndPrepSDKCall();	
-}
-
-void PrepWindowsCreateBotCalls(Address jumpTableAddr) {
-	Handle hInfectedFuncs = CreateTrie();
-	// We have the address of the jump table, starting at the first PUSH instruction of the
-	// PUSH mem32 (5 bytes)
-	// CALL rel32 (5 bytes)
-	// JUMP rel8 (2 bytes)
-	// repeated pattern.
-	
-	// Each push is pushing the address of a string onto the stack. Let's grab these strings to identify each case.
-	// "Hunter" / "Smoker" / etc.
-	for(int i = 0; i < 7; i++) {
-		// 12 bytes in PUSH32, CALL32, JMP8.
-		Address caseBase = jumpTableAddr + view_as<Address>(i * 12);
-		Address siStringAddr = view_as<Address>(LoadFromAddress(caseBase + view_as<Address>(1), NumberType_Int32));
-		static char siName[32];
-		LoadStringFromAdddress(siStringAddr, siName, sizeof(siName));
-
-		Address funcRefAddr = caseBase + view_as<Address>(6); // 2nd byte of call, 5+1 byte offset.
-		int funcRelOffset = LoadFromAddress(funcRefAddr, NumberType_Int32);
-		Address callOffsetBase = caseBase + view_as<Address>(10); // first byte of next instruction after the CALL instruction
-		Address nextBotCreatePlayerBotTAddr = callOffsetBase + view_as<Address>(funcRelOffset);
-		//PrintToServer("Found NextBotCreatePlayerBot<%s>() @ %08x", siName, nextBotCreatePlayerBotTAddr);
-		SetTrieValue(hInfectedFuncs, siName, nextBotCreatePlayerBotTAddr);
-	}
-
-	hCreateSmoker = PrepCreateBotCallFromAddress(hInfectedFuncs, "Smoker");
-	if (hCreateSmoker == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateSmoker); return; }
-
-	hCreateBoomer = PrepCreateBotCallFromAddress(hInfectedFuncs, "Boomer");
-	if (hCreateBoomer == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateBoomer); return; }
-
-	hCreateHunter = PrepCreateBotCallFromAddress(hInfectedFuncs, "Hunter");
-	if (hCreateHunter == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateHunter); return; }
-
-	hCreateTank = PrepCreateBotCallFromAddress(hInfectedFuncs, "Tank");
-	if (hCreateTank == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateTank); return; }
-	
-	hCreateSpitter = PrepCreateBotCallFromAddress(hInfectedFuncs, "Spitter");
-	if (hCreateSpitter == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateSpitter); return; }
-	
-	hCreateJockey = PrepCreateBotCallFromAddress(hInfectedFuncs, "Jockey");
-	if (hCreateJockey == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateJockey); return; }
-
-	hCreateCharger = PrepCreateBotCallFromAddress(hInfectedFuncs, "Charger");
-	if (hCreateCharger == null)
-	{ SetFailState("Cannot initialize %s SDKCall, address lookup failed.", NAME_CreateCharger); return; }
-}
-
-void PrepL4D2CreateBotCalls() {
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateSpitter))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateSpitter); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateSpitter = EndPrepSDKCall();
-	if (hCreateSpitter == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateSpitter); return; }
-	
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateJockey))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateJockey); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateJockey = EndPrepSDKCall();
-	if (hCreateJockey == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateJockey); return; }
-	
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateCharger))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateCharger); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateCharger = EndPrepSDKCall();
-	if (hCreateCharger == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateCharger); return; }
-
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateSmoker))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateSmoker); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateSmoker = EndPrepSDKCall();
-	if (hCreateSmoker == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateSmoker); return; }
-	
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateBoomer))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateBoomer); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateBoomer = EndPrepSDKCall();
-	if (hCreateBoomer == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateBoomer); return; }
-	
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateHunter))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateHunter); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateHunter = EndPrepSDKCall();
-	if (hCreateHunter == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateHunter); return; }
-	
-	StartPrepSDKCall(SDKCall_Static);
-	if (!PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, NAME_CreateTank))
-	{ SetFailState("Unable to find %s signature in gamedata file.", NAME_CreateTank); return; }
-	PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
-	PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
-	hCreateTank = EndPrepSDKCall();
-	if (hCreateTank == null)
-	{ SetFailState("Cannot initialize %s SDKCall, signature is broken.", NAME_CreateTank); return; }
-}
-
-bool IsValidClient(int client)
-{
-	if (client <= 0 || client > MaxClients) return false;
-	if (!IsClientInGame(client)) return false;
 	return true;
 }
 

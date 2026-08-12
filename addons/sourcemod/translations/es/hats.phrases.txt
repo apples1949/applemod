@@ -1,0 +1,143 @@
+"Phrases"
+{
+	"Hat_Wearing"
+	{
+		"#format"		"{1:s}"
+		"es"			"Ahora llevas el sombrero {ORANGE}[{1}] {DEFAULT}."
+	}
+	"Hat_Changed"
+	{
+		"#format"		"{1:s}"
+		"es"			"Cambio de sombrero en {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_No_Index"
+	{
+		"#format"		"{1:d}{2:d}"
+		"es"			"No se encuentra el índice {ORANGE}{1}{DEFAULT}, valores entre  {ORANGE}1{DEFAULT} y {ORANGE}{2}{DEFAULT}."
+	}
+	"Hat_Not_Found"
+	{
+		"#format"		"{1:s}"
+		"es"			"No se encuentra el sombrero {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_Invalid"
+	{
+		"es"			"Jugador no válido seleccionado."
+	}
+	"Hat_Unblocked"
+	{
+		"#format"		"{1:s}"
+		"es"			"Sombreros desbloqueados para {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_Blocked"
+	{
+		"#format"		"{1:s}"
+		"es"			"Sombreros bloqueados para {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_View"
+	{
+		"#format"		"{1:s}"
+		"es"			"{DEFAULT}La vista personal se ha convertido {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_Ability"
+	{
+		"#format"		"{1:s}"
+		"es"			"{DEFAULT}Se ha convertido en {ORANGE}{1}{DEFAULT} la capacidad de usar sombreros."
+	}
+	"Hat_On"
+	{
+		"es"			"Activado"
+	}
+	"Hat_Off"
+	{
+		"es"			"Desactivado"
+	}
+	"Hat_Menu_Title"
+	{
+		"es"			"Seleccione su sombrero."
+	}
+	"Hat_Missing"
+	{
+		"es"			"¡No llevas sombrero!"
+	}
+
+	"HAT_SYSTEM"
+	{
+		"es"			"{GREEN}[HAT]{DEFAULT} "
+	}
+	"HAT_NOT_RIGHT_NOW"
+	{
+		"es"			"No puedo usar este comando en este momento."
+	}
+	"ADMIN_DISABLE_HAT"
+	{
+		"es"			"Selecciona jugador para desactivar:"
+	}
+	"ADMIN_CHANGE_HAT"
+	{
+		"es"			"Selecciona jugador para cambiar:"
+	}
+	"ADMIN_VISIBILITY"
+	{
+		"es"			"Selecciona jugador para configurar la visibilidad:"
+	}
+	"HAT_SET_ANGLE"
+	{
+		"es"			"Establecer ángulo:"
+	}
+	"HAT_SET_POSITION"
+	{
+		"es"			"Posición de ajuste:"
+	}
+	"HAT_SET_SIZE"
+	{
+		"es"			"Establecer tamaño:"
+	}
+	"HAT_MAIN"
+	{
+		"es"			"Configuración:"
+	}
+	"HAT_MENU"
+	{
+		"es"			"Menú de sombreros"
+	}
+	"HAT_WORE"
+	{
+		"es"			"Uso"
+	}
+	"HAT_VIEWABLE"
+	{
+		"es"			"Vista personal"
+	}
+	"HAT_ENABLED"
+	{
+		"es"			"Activado"
+	}
+	"HAT_DISABLED"
+	{
+		"es"			"Desactivado"
+	}
+	"HAT_VIEWABLE_TP"
+	{
+		"es"			"Tercera persona"
+	}
+	"HAT_VISIBILITY"
+	{
+		"es"			"Visibilidad general"
+	}
+	"Hat_ViewTP"
+	{
+		"#format"		"{1:s}"
+		"es"			"La vista de sombrero en tercera persona se ha cambiado a {ORANGE}{1}{DEFAULT}."
+	}
+	"Hat_ViewSet"
+	{
+		"#format"		"{1:s}{2:s}"
+		"es"			"La visibilidad general para {ORANGE}{1}{DEFAULT} se ha convertido en {ORANGE}{2}{DEFAULT}."
+	}
+	"Hat_Visibility_Set"
+	{
+		"#format"		"{1:s}"
+		"es"			"Has cambiado la visibilidad de los sombreros a {ORANGE}{1}{DEFAULT}."
+	}
+}

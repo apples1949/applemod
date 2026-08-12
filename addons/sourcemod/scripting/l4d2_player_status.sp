@@ -4,9 +4,11 @@
 #pragma newdecls required
 #include <sourcemod>
 #include <sdkhooks>
-#include <l4d2_GetWitchNumber>
+#undef REQUIRE_PLUGIN	//标记为可选开始.
+#include <l4d2_GetWitchNumber>//女巫自定义编号插件.
+#define REQUIRE_PLUGIN	//标记为可选结束.
 
-#define PLUGIN_VERSION	"1.2.9"
+#define PLUGIN_VERSION	"1.4.9"
 
 char g_sZombieClass[][] = 
 {
@@ -112,7 +114,7 @@ public void Event_PlayerLedgeGrab(Event event, const char[] name, bool dontBroad
 	if (!g_iPlayerGrab || g_bShowPromptVariable)
 		return;
 	
-	if(IsValidClient(client))
+	if(IsValidClient(client) && GetClientTeam(client) == 2)
 		PrintToChatAll("\x04[提示]\x03%s\x05挂边了.", GetTrueName(client));//聊天窗提示.
 }
 
@@ -132,98 +134,92 @@ void OnTakeDamageAlivePost(int victim, int attacker, int inflictor, float damage
 	if (victim < 1 || victim > MaxClients || !IsClientInGame(victim) || GetClientTeam(victim) != 2 || GetEntProp(victim, Prop_Data, "m_iHealth") > 0)
 		return;
 
-	if (bIsValidClient(attacker)) 
+	if (IsValidClient(attacker)) 
 	{
-		if (IsClientInGame(attacker)) 
+		switch (GetClientTeam(attacker)) 
 		{
-			switch (GetClientTeam(attacker)) 
-			{
-				case 2: 
-					PrintToChatAll("\x04[提示]\x03%s\x05黑死了\x03%s", GetTrueName(attacker), GetTrueName(victim));//聊天窗提示.
-				case 3: 
-					PrintToChatAll("\x04[提示]\x03%s%s\x05杀死了\x03%s", g_sZombieName[GetEntProp(attacker, Prop_Send, "m_zombieClass") - 1], GetPlayerName(attacker), GetTrueName(victim));//聊天窗提示.
-			}
+			case 2: 
+				PrintToChatAll("\x04[提示]\x03%s\x05黑死了\x03%s", GetTrueName(attacker), GetTrueName(victim));//聊天窗提示.
+			case 3: 
+				PrintToChatAll("\x04[提示]\x03%s%s\x05杀死了\x03%s", g_sZombieName[GetEntProp(attacker, Prop_Send, "m_zombieClass") - 1], GetPlayerName(attacker), GetTrueName(victim));//聊天窗提示.
 		}
 	}
-	else if (IsValidEntity(attacker)) 
+	else
 	{
-		char classname[32];
-		GetEntityClassname(attacker, classname, sizeof classname);
+		if (IsValidEntity(attacker)) 
+		{
+			char classname[32];
+			GetEntityClassname(attacker, classname, sizeof classname);
 
-		if (damagetype & DMG_DROWN && GetEntProp(victim, Prop_Data, "m_nWaterLevel") > 1)
-			PrintToChatAll("\x04[提示]\x03%s\x05淹死了.", GetTrueName(victim));//聊天窗提示.
-		else if (damagetype & DMG_FALL && RoundToFloor(Pow(GetEntPropFloat(victim, Prop_Send, "m_flFallVelocity") / (g_fFallSpeedFatal - g_fFallSpeedSafe), 2.0) * 100.0) == damage)
-			PrintToChatAll("\x04[提示]\x03%s\x05摔死了,亲亲也起不来了.", GetTrueName(victim));//聊天窗提示.
-		else if (strcmp(classname, "worldspawn") == 0 && damagetype == 131072)
-			PrintToChatAll("\x04[提示]\x03%s\x05流血而死.", GetTrueName(victim));//聊天窗提示.
-		else if (strcmp(classname, "infected") == 0)
-			PrintToChatAll("\x04[提示]\x03丧尸\x05杀死了\x03%s", GetTrueName(victim));//聊天窗提示.
-		else if (StrEqual(classname, "witch", false))
-			PrintToChatAll("\x04[提示]\x03%s\x05杀死了\x03%s", GetWitchName(attacker), GetTrueName(victim));//聊天窗提示.
-		else if (strcmp(classname, "insect_swarm") == 0)
-			PrintToChatAll("\x04[提示]\x05踩痰达人\x03%s\x05已死亡.", GetTrueName(victim));//聊天窗提示.
-		else
-			PrintToChatAll("\x04[提示]\x03%s\x05已死亡.", GetTrueName(victim));//聊天窗提示.
+			if (damagetype & DMG_DROWN && GetEntProp(victim, Prop_Data, "m_nWaterLevel") > 1)
+				PrintToChatAll("\x04[提示]\x03%s\x05淹死了.", GetTrueName(victim));//聊天窗提示.
+			else if (damagetype & DMG_FALL && RoundToFloor(Pow(GetEntPropFloat(victim, Prop_Send, "m_flFallVelocity") / (g_fFallSpeedFatal - g_fFallSpeedSafe), 2.0) * 100.0) == damage)
+				PrintToChatAll("\x04[提示]\x03%s\x05摔死了,亲亲也起不来了.", GetTrueName(victim));//聊天窗提示.
+			else if (strcmp(classname, "worldspawn") == 0 && damagetype == 131072)
+				PrintToChatAll("\x04[提示]\x03%s\x05流血而死.", GetTrueName(victim));//聊天窗提示.
+			else if (strcmp(classname, "infected") == 0)
+				PrintToChatAll("\x04[提示]\x03丧尸\x05杀死了\x03%s", GetTrueName(victim));//聊天窗提示.
+			else if (StrEqual(classname, "witch", false))
+				PrintToChatAll("\x04[提示]\x03%s\x05杀死了\x03%s", GetWitchName(attacker), GetTrueName(victim));//聊天窗提示.
+			else if (strcmp(classname, "insect_swarm") == 0)
+				PrintToChatAll("\x04[提示]\x05踩痰达人\x03%s\x05已死亡.", GetTrueName(victim));//聊天窗提示.
+			else
+				PrintToChatAll("\x04[提示]\x03%s\x05已死亡.", GetTrueName(victim));//聊天窗提示.
+		}
 	}
 }
 
-bool bIsValidClient(int client) 
-{
-	return 0 < client <= MaxClients;
-}
-
+//victim
 //玩家倒下.
 public void Event_Incapacitate(Event event, const char[] name, bool dontBroadcast)
 {
 	if (!g_iPlayerDown || g_bShowPromptVariable)
 		return;
 	
-	int victim = GetClientOfUserId(event.GetInt("userid"));
-	int attacker = GetClientOfUserId(event.GetInt("attacker"));
-	
-	//int damage = event.GetInt("dmg_health");
 	int damagetype = GetEventInt(event, "type");
 	int entity = GetEventInt(event, "attackerentid");
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	int attacker = GetClientOfUserId(event.GetInt("attacker"));
 	
-	if (IsValidClient(victim))
+	if (IsValidClient(client) && GetClientTeam(client) == 2)
 	{
-		if (bIsValidClient(attacker)) 
+		if (IsValidClient(attacker))
 		{
-			if (IsClientInGame(attacker) && IsValidClient(victim))
+			switch (GetClientTeam(attacker)) 
 			{
-				switch (GetClientTeam(attacker)) 
-				{
-					case 2: 
-						PrintToChatAll("\x04[提示]\x03%s\x05黑倒了\x03%s", GetTrueName(attacker), GetTrueName(victim));//聊天窗提示.
-					case 3: 
-						PrintToChatAll("\x04[提示]\x03%s%s\x05制服了\x03%s", g_sZombieName[GetEntProp(attacker, Prop_Send, "m_zombieClass") - 1], GetPlayerName(attacker), GetTrueName(victim));//聊天窗提示.
-				}
+				case 2: 
+					PrintToChatAll("\x04[提示]\x03%s\x05黑倒了\x03%s", GetTrueName(attacker), GetTrueName(client));//聊天窗提示.
+				case 3: 
+					PrintToChatAll("\x04[提示]\x03%s%s\x05制服了\x03%s", g_sZombieName[GetEntProp(attacker, Prop_Send, "m_zombieClass") - 1], GetPlayerName(attacker), GetTrueName(client));//聊天窗提示.
 			}
 		}
-		else if (IsValidEntity(entity)) 
+		else
 		{
-			char classname[32];
-			GetEntityClassname(entity, classname, sizeof(classname));
+			if (IsValidEntity(entity)) 
+			{
+				char classname[32];
+				GetEntityClassname(entity, classname, sizeof(classname));
 
-			if (damagetype & DMG_DROWN && GetEntProp(victim, Prop_Data, "m_nWaterLevel") > 1)
-				PrintToChatAll("\x04[提示]\x03%s\x05晕倒了.", GetTrueName(victim));//聊天窗提示.
-			else if (damagetype & DMG_FALL)
-				PrintToChatAll("\x04[提示]\x03%s\x05摔倒了,需要亲亲才能起来.", GetTrueName(victim));//聊天窗提示.
-			else if (strcmp(classname, "infected") == 0)
-				PrintToChatAll("\x04[提示]\x03丧尸\x05制服了\x03%s", GetTrueName(victim));//聊天窗提示.
-			else if (StrEqual(classname, "witch", false))
-				PrintToChatAll("\x04[提示]\x03%s\x05制服了\x03%s", GetWitchName(entity), GetTrueName(victim));//聊天窗提示.
-			else if (strcmp(classname, "insect_swarm") == 0)
-				PrintToChatAll("\x04[提示]\x05踩痰达人\x03%s\x05倒下了.", GetTrueName(victim));//聊天窗提示.
-			else
-				PrintToChatAll("\x04[提示]\x03%s\x05倒下了.", GetTrueName(victim));//聊天窗提示.
+				if (damagetype & DMG_DROWN && GetEntProp(client, Prop_Data, "m_nWaterLevel") > 1)
+					PrintToChatAll("\x04[提示]\x03%s\x05晕倒了.", GetTrueName(client));//聊天窗提示.
+				else if (damagetype & DMG_FALL)
+					PrintToChatAll("\x04[提示]\x03%s\x05摔倒了,需要亲亲才能起来.", GetTrueName(client));//聊天窗提示.
+				else if (strcmp(classname, "infected") == 0)
+					PrintToChatAll("\x04[提示]\x03丧尸\x05制服了\x03%s", GetTrueName(client));//聊天窗提示.
+				else if (StrEqual(classname, "witch", false))
+					PrintToChatAll("\x04[提示]\x03%s\x05制服了\x03%s", GetWitchName(entity), GetTrueName(client));//聊天窗提示.
+				else if (strcmp(classname, "insect_swarm") == 0)
+					PrintToChatAll("\x04[提示]\x05踩痰达人\x03%s\x05倒下了.", GetTrueName(client));//聊天窗提示.
+				else
+					PrintToChatAll("\x04[提示]\x03%s\x05倒下了.", GetTrueName(client));//聊天窗提示.
+			}
 		}
 	}
 }
 
 bool IsValidClient(int client)
 {
-	return (client > 0 && client <= MaxClients && IsClientInGame(client) && GetClientTeam(client) == 2);
+	return client > 0 && client <= MaxClients && IsClientInGame(client);
 }
 
 char[] GetPlayerName(int client)
@@ -262,7 +258,8 @@ char[] GetTrueName(int client)
 	return g_sName;
 }
 
-int IsClientIdle(int client) {
+int IsClientIdle(int client)
+{
 	if (!HasEntProp(client, Prop_Send, "m_humanSpectatorUserID"))
 		return 0;
 

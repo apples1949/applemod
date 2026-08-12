@@ -1,125 +1,139 @@
-#pragma semicolon 1
-//強制1.7以後的新語法
-#pragma newdecls required
-#include <sourcemod>
-
-ConVar Changeplayerkick, Changereturntolobby, Changealltalk, Changerestartgame, Changemission, Changechapter, Changedifficulty;
-int g_Changealltalk, g_Changechapter, g_Changedifficulty, g_Changemission, g_Changeplayerkick, g_Changerestartgame, g_Changereturntolobby;
-
+/*
+ *	v1.0.0
+ *
+ *	1:初始版本发布.
+ *
+ */
+#pragma semicolon 1			//添加结束符.
+#pragma newdecls required	//强制新语法.
+#include <sourcemod>		//加载函数库.
+#define PLUGIN_VERSION		"1.0.0"	//定义插件版本.
+//定义全局变量.
+int    g_iChangeAlltalk, g_iChangeChapter, g_iChangeDifficulty, g_iChangeMission, g_iChangePlayerKick, g_iChangeRestartGame, g_iChangeReturnTolobby;
+ConVar g_hChangeAlltalk, g_hChangeChapter, g_hChangeDifficulty, g_hChangeMission, g_hChangePlayerKick, g_hChangeRestartGame, g_hChangeReturnTolobby;
+//定义插件信息.
+public Plugin myinfo =  
+{
+	name = "l4d2_callvote",
+	author = "豆瓣酱な",
+	description = "阻止游戏自带的投票功能.",
+	version = PLUGIN_VERSION,
+	url = "N/A"
+};
+//插件开始.
 public void OnPluginStart()
 {
-	Changealltalk		= CreateConVar("l4d2_enabled_change_alltalk", "1", "启用全局通话投票? 0=禁用, 1=启用.");
-	Changechapter		= CreateConVar("l4d2_enabled_change_chapter", "0", "启用投票更换章节? 0=禁用, 1=启用.");
-	Changedifficulty	= CreateConVar("l4d2_enabled_change_difficulty", "0", "启用投票更换难度? 0=禁用, 1=启用.");
-	Changemission		= CreateConVar("l4d2_enabled_change_mission", "0", "启用投票开始新图? 0=禁用, 1=启用.");
-	Changeplayerkick	= CreateConVar("l4d2_enabled_change_playerkick", "0", "启用投票踢出玩家? 0=禁用, 1=启用.");
-	Changerestartgame	= CreateConVar("l4d2_enabled_change_restartgame", "0", "启用投票重新开始? 0=禁用, 1=启用.");
-	Changereturntolobby	= CreateConVar("l4d2_enabled_change_returntolobby", "0", "启用投票返回大厅? 0=禁用, 1=启用.");
+	g_hChangeAlltalk		= CreateConVar("l4d2_enabled_change_alltalk", "0", "启用全局通话投票? 0=禁用, 1=启用.");
+	g_hChangeChapter		= CreateConVar("l4d2_enabled_change_chapter", "0", "启用更换章节投票? 0=禁用, 1=启用.");
+	g_hChangeDifficulty		= CreateConVar("l4d2_enabled_change_difficulty", "0", "启用更换难度投票? 0=禁用, 1=启用.");
+	g_hChangeMission		= CreateConVar("l4d2_enabled_change_mission", "0", "启用开始新图投票? 0=禁用, 1=启用.");
+	g_hChangePlayerKick		= CreateConVar("l4d2_enabled_change_playerkick", "0", "启用踢出玩家投票? 0=禁用, 1=启用.");
+	g_hChangeRestartGame	= CreateConVar("l4d2_enabled_change_restartgame", "0", "启用重新开始投票? 0=禁用, 1=启用.");
+	g_hChangeReturnTolobby	= CreateConVar("l4d2_enabled_change_returntolobby", "0", "启用返回大厅投票? 0=禁用, 1=启用.");
 	
-	Changealltalk.AddChangeHook(gConVarChanged);
-	Changechapter.AddChangeHook(gConVarChanged);
-	Changedifficulty.AddChangeHook(gConVarChanged);
-	Changemission.AddChangeHook(gConVarChanged);
-	Changeplayerkick.AddChangeHook(gConVarChanged);
-	Changerestartgame.AddChangeHook(gConVarChanged);
-	Changereturntolobby.AddChangeHook(gConVarChanged);
+	g_hChangeAlltalk.AddChangeHook(ConVarChangedHook);
+	g_hChangeChapter.AddChangeHook(ConVarChangedHook);
+	g_hChangeDifficulty.AddChangeHook(ConVarChangedHook);
+	g_hChangeMission.AddChangeHook(ConVarChangedHook);
+	g_hChangePlayerKick.AddChangeHook(ConVarChangedHook);
+	g_hChangeRestartGame.AddChangeHook(ConVarChangedHook);
+	g_hChangeReturnTolobby.AddChangeHook(ConVarChangedHook);
 	
 	AutoExecConfig(true, "l4d2_callvote");//生成指定文件名的CFG.
 	AddCommandListener(Listener_CallVote, "callvote");
 }
-
 //地图开始.
 public void OnMapStart()
 {
-	l4d2_gChange();
+	GetConVarChange();
 }
-
-public void gConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+//参数更改回调.
+void ConVarChangedHook(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-	l4d2_gChange();
+	GetConVarChange();
 }
-
-void l4d2_gChange()
+//赋值到全局变量.
+void GetConVarChange()
 {
-	g_Changealltalk = Changealltalk.IntValue;
-	g_Changechapter = Changechapter.IntValue;
-	g_Changedifficulty = Changedifficulty.IntValue;
-	g_Changemission = Changemission.IntValue;
-	g_Changeplayerkick = Changeplayerkick.IntValue;
-	g_Changerestartgame = Changerestartgame.IntValue;
-	g_Changereturntolobby = Changereturntolobby.IntValue;
+	g_iChangeAlltalk = g_hChangeAlltalk.IntValue;
+	g_iChangeChapter = g_hChangeChapter.IntValue;
+	g_iChangeDifficulty = g_hChangeDifficulty.IntValue;
+	g_iChangeMission = g_hChangeMission.IntValue;
+	g_iChangePlayerKick = g_hChangePlayerKick.IntValue;
+	g_iChangeRestartGame = g_hChangeRestartGame.IntValue;
+	g_iChangeReturnTolobby = g_hChangeReturnTolobby.IntValue;
 }
-
-public Action Listener_CallVote(int client, const char[] command, int args)
+//监听回调.
+Action Listener_CallVote(int client, const char[] command, int args)
 {
-	char Msg[MAX_NAME_LENGTH];
-	// Get the arguments of the callvote command and store them in the global variables
-	GetCmdArg(1, Msg, sizeof(Msg)); //Msg
-	//踢人时候的对象。
+	char Msg[128];
+	//获取callvote命令的参数并将其存储在变量中.
+	GetCmdArg(1, Msg, sizeof(Msg));
+	//踢人时候的对象.
 	//GetCmdArg(2, g_sTarget[client], sizeof(g_sTarget[]));
-	// Block spectators from voting if the cvar bool is set to true
-	if(!IsValidClient(client))
+
+	if(!IsValidClient(client) || IsFakeClient(client))
 		return Plugin_Continue;
 	
-	if (g_Changeplayerkick != 1 && g_Changeplayerkick == 0)
+	if(strcmp(Msg, "kick", false) == 0)
 	{
-		if(strcmp(Msg, "kick", false) == 0)
+		if (g_iChangePlayerKick == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用,请使用指令!votes投票,也可以考虑暂时将你想踢的玩家强制旁观哦.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
-	if (g_Changereturntolobby != 1 && g_Changereturntolobby == 0)
+	else if(strcmp(Msg, "returntolobby", false) == 0)
 	{
-		if(strcmp(Msg, "returntolobby", false) == 0)
+		if (g_iChangeReturnTolobby == 0)
 		{
 			PrintToChat(client,"\x04[提示]\x05游戏自带的投票返回大厅已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
-	if (g_Changealltalk != 1 && g_Changealltalk == 0)
+	else if(strcmp(Msg, "changealltalk", false) == 0)
 	{
-		if(strcmp(Msg, "changealltalk", false) == 0)
+		if (g_iChangeAlltalk == 0)
 		{
 			PrintToChat(client,"\x04[提示]\x05游戏自带的全局通话投票已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
-	if (g_Changerestartgame != 1 && g_Changerestartgame == 0)
+	else if(strcmp(Msg, "restartgame", false) == 0)
 	{
-		if(strcmp(Msg, "restartgame", false) == 0)
+		if (g_iChangeRestartGame == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
+				PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用.");//聊天窗提示.
+				return Plugin_Handled;
+		}
+	}
+	else if(strcmp(Msg, "changemission", false) == 0)
+	{
+		if (g_iChangeMission == 0)
+		{
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
-	if (g_Changemission != 1 && g_Changemission == 0)
+	else if(strcmp(Msg, "changechapter", false) == 0)
 	{
-		if(strcmp(Msg, "changemission", false) == 0)
+		if (g_iChangeChapter == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
-	if (g_Changechapter != 1 && g_Changechapter == 0)
+	else if(strcmp(Msg, "changedifficulty", false) == 0)
 	{
-		if(strcmp(Msg, "changechapter", false) == 0)
+		if (g_iChangeDifficulty == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用,请使用指令!votes投票.我想你也不想等其他玩家慢悠悠的加载完才能开始游戏吧?");//聊天窗提示.
-			return Plugin_Handled;
-		}
-	}
-	if (g_Changedifficulty != 1 && g_Changedifficulty == 0)
-	{
-		if(strcmp(Msg, "changedifficulty", false) == 0)
-		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.请使用指令!votes投票.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
 	return Plugin_Continue;
 }
-
+//玩家有效性.
 stock bool IsValidClient(int client)
 {
 	return client > 0 && client <= MaxClients && IsClientInGame(client);

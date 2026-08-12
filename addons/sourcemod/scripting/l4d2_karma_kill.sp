@@ -7,10 +7,12 @@
 #include <left4dhooks>
 #include <multicolors>
 
-#define PLUGIN_VERSION "4.2"
+#define PLUGIN_VERSION "1.2h-2026/3/11"
 
 #define CVAR_FLAGS                    FCVAR_NOTIFY
 #define CVAR_FLAGS_PLUGIN_VERSION     FCVAR_NOTIFY|FCVAR_DONTRECORD|FCVAR_SPONLY
+
+#define ENTITY_SAFE_LIMIT 2000 //don't entity when it's index is above this
 
 bool TEST_DEBUG = false;
 
@@ -19,7 +21,6 @@ static const float NO_MERCY_DEBUG_ORIGIN[] = { 7547.976563, 3661.247803, 78.0312
 // All of these must be 0.1 * n, basically 0.1, 0.2, 0.3, 0.4...
 // All of these are seconds after you reach the height you jumped from.
 
-bool g_bMapStarted   = false;
 bool g_bRoundStarted = false;
 
 float JOCKEY_JUMP_SECONDS_NEEDED_AGAINST_LEDGE_HANG_PER_FORCE = 0.3;
@@ -33,22 +34,21 @@ float CHARGE_CHECKING_INTERVAL = 0.1;
 float ANGLE_STRAIGHT_DOWN[3] = { 90.0, 0.0, 0.0 };
 char  SOUND_EFFECT[]         = "./level/loud/climber.wav";
 
-ConVar cvarisEnabled, cvarNoFallDamageOnCarry, cvarNoFallDamageProtectFromIncap;
-ConVar karmaPrefix, karmaJump, karmaAwardConfirmed, karmaDamageAwardConfirmed, karmaOnlyConfirmed,
-	karmaBirdCharge, karmaSlowTimeOnServer, karmaSlowTimeOnCouple, karmaSlow, cvarModeSwitch,
-	cvarCooldown, cvarAllowDefib;
-bool g_bEnabled, g_bNoFallDamageOnCarry, g_bkarmaJump, g_bkarmaOnlyConfirmed, g_bkarmaBirdCharge,
-	g_bNoFallDamageProtectFromIncap, g_bModeSwitch, g_bAllowDefib;
-int g_ikarmaAwardConfirmed;
-float g_fkarmaSlowTimeOnServer, g_fkarmaSlowTimeOnCouple, g_fkarmaSlow, g_fCooldown;
-char g_sPrefix[64];
+ConVar cvarisEnabled/*, cvarNoFallDamageProtectFromIncap*/;
+ConVar karmaJump, karmaAwardConfirmed, karmaDamageAwardConfirmed, karmaOnlyConfirmed,
+	karmaSlowTimeOnServer, karmaSlowSpeed,
+	/*cvarCooldown,*/ cvarAllowDefib;
+bool g_bEnabled, g_bkarmaJump, g_bkarmaAwardConfirmed, g_bkarmaOnlyConfirmed, g_bAllowDefib;
+int g_ikarmaDamageAwardConfirmed;
+float g_fkarmaSlowTimeOnServer, g_fkarmaSlowSpeed/*, g_fCooldown*/;
 
 ConVar cvarFatalFallDamage;
 float g_fFatalFallDamage;
 
 
-Handle fw_OnKarmaEventPost = INVALID_HANDLE;
-Handle fw_OnKarmaJumpPost  = INVALID_HANDLE;
+Handle fw_OnKarmaEventPost = null;
+Handle fw_OnRPGKarmaEventPost = null;
+Handle fw_OnKarmaJumpPost  = null;
 
 enum
 {
@@ -101,16 +101,16 @@ float apexHeight[MAXPLAYERS + 1];
 // This is set to current height whenever the charger is on the ground.
 float catchHeight[MAXPLAYERS + 1];
 
-Handle chargerTimer[MAXPLAYERS] = { INVALID_HANDLE, ... };
+Handle chargerTimer[MAXPLAYERS] = { null, ... };
 
 enum struct enVictimTimer
 {
-	Handle   timer;
-	DataPack dp;
+	Handle   	m_hTimer;
+	float 		m_fSecondsLeft;
 }
 
 enVictimTimer victimTimer[MAXPLAYERS];
-Handle        ledgeTimer[MAXPLAYERS] = { INVALID_HANDLE, ... };
+Handle        ledgeTimer[MAXPLAYERS] = { null, ... };
 
 /* Blockers have two purposes:
 1. For the duration they are there, the last responsible karma maker cannot change.
@@ -118,15 +118,16 @@ Handle        ledgeTimer[MAXPLAYERS] = { INVALID_HANDLE, ... };
 */
 
 bool   BlockAnnounce[MAXPLAYERS + 1];
-Handle AllKarmaRegisterTimer[MAXPLAYERS + 1] = { INVALID_HANDLE, ... };
-Handle BlockRegisterTimer[MAXPLAYERS + 1]    = { INVALID_HANDLE, ... };
-Handle JockRegisterTimer[MAXPLAYERS + 1]     = { INVALID_HANDLE, ... };
-Handle SlapRegisterTimer[MAXPLAYERS + 1]     = { INVALID_HANDLE, ... };
-Handle PunchRegisterTimer[MAXPLAYERS + 1]    = { INVALID_HANDLE, ... };
-Handle SmokeRegisterTimer[MAXPLAYERS + 1]    = { INVALID_HANDLE, ... };
-Handle JumpRegisterTimer[MAXPLAYERS + 1]     = { INVALID_HANDLE, ... };
+Handle AllKarmaRegisterTimer[MAXPLAYERS + 1] = { null, ... };
+Handle BlockRegisterTimer[MAXPLAYERS + 1]    = { null, ... };
+Handle JockRegisterTimer[MAXPLAYERS + 1]     = { null, ... };
+Handle SlapRegisterTimer[MAXPLAYERS + 1]     = { null, ... };
+Handle PunchRegisterTimer[MAXPLAYERS + 1]    = { null, ... };
+Handle SmokeRegisterTimer[MAXPLAYERS + 1]    = { null, ... };
+Handle JumpRegisterTimer[MAXPLAYERS + 1]     = { null, ... };
 
-Handle cooldownTimer = INVALID_HANDLE;
+//Handle 
+//	cooldownTimer = null;
 
 float fLogHeight[MAXPLAYERS + 1] = { -1.0, ... };
 
@@ -136,159 +137,33 @@ public Plugin myinfo =
 	author      = "AtomicStryker, heavy edit by Eyal282, Harry",
 	description = "Very Very loudly announces the predicted event of a player leaving the map and or life through height or drown.",
 	version     = PLUGIN_VERSION,
-	url         = "http://forums.alliedmods.net/showthread.php?p=1239108"
+	url         = "https://github.com/fbef0102/L4D1_2-Plugins/tree/master/l4d2_karma_kill"
 
 };
 
 bool bLate;
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
-    EngineVersion test = GetEngineVersion();
+	EngineVersion test = GetEngineVersion();
 
-    if( test != Engine_Left4Dead2 )
-    {
-        strcopy(error, err_max, "Plugin only supports Left 4 Dead 2.");
-        return APLRes_SilentFailure;
-    }
+	if( test != Engine_Left4Dead2 )
+	{
+		strcopy(error, err_max, "Plugin only supports Left 4 Dead 2.");
+		return APLRes_SilentFailure;
+	}
 
-    bLate = late;
-    return APLRes_Success;
+	fw_OnKarmaEventPost 	= CreateGlobalForward("KarmaKillSystem_OnKarmaEventPost", ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_Cell, Param_Cell);
+	fw_OnRPGKarmaEventPost 	= CreateGlobalForward("KarmaKillSystem_OnRPGKarmaEventPost", ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Array, Param_Array, Param_Array, Param_Cell, Param_String, Param_String);
+	fw_OnKarmaJumpPost  	= CreateGlobalForward("KarmaKillSystem_OnKarmaJumpPost", ET_Ignore, Param_Cell, Param_Array, Param_Array, Param_Array, Param_Cell, Param_String, Param_String);
+	
+	RegPluginLibrary("l4d2_karma_kill");
+
+	bLate = late;
+	return APLRes_Success;
 }
 
-public void fuckZones_OnStartTouchZone_Post(int client, int entity, const char[] zone_name, int type)
-{
-	OnCheckKarmaZoneTouch(client, entity, zone_name);
-}
-
-void OnCheckKarmaZoneTouch(int victim, int entity, const char[] zone_name, int pinner = 0)
-{
-	if (!IsPlayerAlive(victim) || L4D_IsPlayerGhost(victim))
-		return;
-
-	// This is for bad out of bounds areas that we don't want to exist.
-	if (StrContains(zone_name, "ForcePummel", false) != -1)
-	{
-		L4DTeam team = L4D_GetClientTeam(victim);
-
-		if (team == L4DTeam_Infected)
-		{
-			if (L4D2_GetPlayerZombieClass(victim) == L4D2ZombieClass_Charger)
-			{
-				int trueVictim = L4D_GetVictimCarry(victim);
-
-				if (trueVictim != 0)
-				{
-					int ability = L4D_GetPlayerCustomAbility(victim);
-
-					if (ability != -1)
-					{
-						// Make game think we're on ground because you don't pummel mid-air.
-						SetEntityFlags(victim, GetEntityFlags(victim) | FL_ONGROUND);
-
-						// Set time at which we started charging to the beginning of the map, usually over 100 seconds.
-						SetEntPropFloat(ability, Prop_Send, "m_chargeStartTime", 0.0);
-
-						SetEntityFlags(victim, GetEntityFlags(victim) | FL_ONGROUND);
-
-						TeleportEntity(victim, NULL_VECTOR, NULL_VECTOR, view_as<float>({ 0.0, 0.0, 0.0 }));
-					}
-				}
-			}
-		}
-	}
-
-	if (StrContains(zone_name, "KarmaKill", false) == -1)
-		return;
-
-	L4DTeam team = L4D_GetClientTeam(victim);
-
-	int trueVictim = 0;
-
-	if (team == L4DTeam_Infected)
-	{
-		trueVictim = L4D_GetPinnedSurvivor(victim);
-
-		if (trueVictim != 0)
-		{
-			OnCheckKarmaZoneTouch(trueVictim, entity, zone_name, victim);
-
-			if (!IsPlayerAlive(trueVictim))
-				CreateTimer(0.1, Timer_ResetAbility, GetClientUserId(victim), TIMER_FLAG_NO_MAPCHANGE);
-		}
-	}
-
-	bool bInfectedKiller = false;
-
-	if (StrContains(zone_name, "KarmaKillAll", false) != -1 || StrContains(zone_name, "KarmaKillAny", false) != -1)
-		bInfectedKiller = true;
-
-	if (team == L4DTeam_Infected && !bInfectedKiller)
-		return;
-
-	float fOrigin[3], fZoneOrigin[3];
-
-	GetEntPropVector(victim, Prop_Data, "m_vecAbsOrigin", fOrigin);
-	GetEntPropVector(entity, Prop_Data, "m_vecAbsOrigin", fZoneOrigin);
-
-	// 62.0 is player height
-	if (fOrigin[2] + 62.0 < fZoneOrigin[2])
-	{
-		float fVelocity[3];
-		GetEntPropVector(victim, Prop_Data, "m_vecVelocity", fVelocity);
-
-		if (fVelocity[2] > 0.0)
-			fVelocity[2] = 0.0;
-
-		TeleportEntity(victim, NULL_VECTOR, NULL_VECTOR, fVelocity);
-
-		return;
-	}
-
-	if (team == L4DTeam_Survivor)
-	{
-		if (IsDoubleCharged(victim) && pinner != 0)
-		{
-			ClearAllPinners(victim);
-
-			float fPinnerOrigin[3];
-
-			GetEntPropVector(pinner, Prop_Data, "m_vecAbsOrigin", fPinnerOrigin);
-
-			TeleportEntity(victim, fPinnerOrigin, NULL_VECTOR, NULL_VECTOR);
-		}
-
-		// Enable ability to register karma kills by simulating fall damage
-		if (AllKarmaRegisterTimer[victim] != INVALID_HANDLE)
-		{
-			CloseHandle(AllKarmaRegisterTimer[victim]);
-			AllKarmaRegisterTimer[victim] = INVALID_HANDLE;
-		}
-
-		AllKarmaRegisterTimer[victim] = CreateTimer(3.0, RegisterAllKarmaDelay, victim);
-
-		if (g_bAllowDefib)
-		{
-		// Makes body undefibable.
-		SetEntProp(victim, Prop_Send, "m_isFallingFromLedge", true);
-		}
-
-		// Incap & kill, this should not trigger the SDKHook_OnTakeDamage
-		SDKHooks_TakeDamage(victim, victim, victim, 10000.0, DMG_FALL);
-		SDKHooks_TakeDamage(victim, victim, victim, 10000.0, DMG_FALL);
-
-		// Safety measures.
-		if (IsPlayerAlive(victim))
-		{
-			ForcePlayerSuicide(victim);
-
-			int type;
-			int lastKarma = GetAnyLastKarma(victim, type);
-
-			if (lastKarma != 0)
-				AnnounceKarma(lastKarma, victim, type, false, true);
-		}
-	}
-}
+int 
+	g_iEntRef_func_timescale;
 
 public void OnPluginStart()
 {
@@ -312,49 +187,37 @@ public void OnPluginStart()
 	HookEvent("round_start", event_RoundStart, EventHookMode_Post);
 	HookEvent("round_end", event_RoundEnd, EventHookMode_Post);
 
+	//HookEvent("pounce_end", event_VictimFreeFromPinPre, EventHookMode_Pre);
+	//HookEvent("tongue_release", event_VictimFreeFromPinPre, EventHookMode_Pre);
+	//HookEvent("jockey_ride_end", event_VictimFreeFromPinPre, EventHookMode_Pre);
+	//HookEvent("charger_carry_end", event_VictimFreeFromPinPre, EventHookMode_Pre);
+	//HookEvent("charger_pummel_end", event_VictimFreeFromPinPre, EventHookMode_Pre);
+
 	cvarFatalFallDamage = FindConVar("survivor_incap_max_fall_damage");
 
-	karmaPrefix                      = CreateConVar("l4d2_karma_charge_prefix", "提示", "公告的前缀. 对颜色代码之间的内容 .例如: [{olive}%s{default}]", CVAR_FLAGS);
-	karmaJump                        = CreateConVar("l4d2_karma_jump", "1", "启用慢动作跳跃. 仅确认必定击杀时才会出现慢动作特效.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	karmaAwardConfirmed              = CreateConVar("l4d2_karma_award_confirmed", "1", "用玩家的死亡事件奖励一个确认的慢动作制造者.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	karmaDamageAwardConfirmed        = CreateConVar("l4d2_karma_damage_award_confirmed", "300", "在确认击杀后获得伤害分数奖励, 或者-1表示禁用.要求l4d2_karma_award_confirmed设置为1.", CVAR_FLAGS, true, -1.0);
-	karmaOnlyConfirmed               = CreateConVar("l4d2_karma_only_confirmed", "0", "仅死亡还是任意时刻出现慢动作特效", CVAR_FLAGS, true, 0.0, true, 1.0);
-	karmaBirdCharge                  = CreateConVar("l4d2_karma_kill_bird", "1", "当charger从高度撞下玩家时(即使不致命), 是否进行慢动作特效", CVAR_FLAGS, true, 0.0, true, 1.0);
-	karmaSlowTimeOnServer            = CreateConVar("l4d2_karma_kill_slowtime_on_server", "5.0", " 对服务器来说, 时间会被减慢多长时间", CVAR_FLAGS, true, 1.0);
-	karmaSlowTimeOnCouple            = CreateConVar("l4d2_karma_kill_slowtime_on_couple", "3.0", " 时间会在多长的时间内被放慢, 以便于衔接慢动作特效", CVAR_FLAGS, true, 1.0);
-	karmaSlow                        = CreateConVar("l4d2_karma_kill_slowspeed", "0.2", " 时间变慢多少倍. 最好是不低于0.03，否则服务器就会崩溃", CVAR_FLAGS, true, 0.03);
-	cvarisEnabled                    = CreateConVar("l4d2_karma_kill_enabled", "1", " 是否启用慢动作特效 ", CVAR_FLAGS, true, 0.0, true, 1.0);
-	cvarNoFallDamageOnCarry          = CreateConVar("l4d2_karma_kill_no_fall_damage_on_carry", "1", "通过禁用携带时的坠落伤害来解决这个问题: https://streamable.com/xuipb6", CVAR_FLAGS, true, 0.0, true, 1.0);
-	cvarNoFallDamageProtectFromIncap = CreateConVar("l4d2_karma_kill_no_fall_damage_protect_from_incap", "0", "如果倒地时受到超过224的伤害则死亡.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	cvarModeSwitch                   = CreateConVar("l4d2_karma_kill_slowmode", "0", " 0 - 整个服务器都会搜到慢动作特效, 1 - 只有Charger和携带的生还者有慢动作特效", CVAR_FLAGS, true, 0.0, true, 1.0);
-	cvarCooldown                     = CreateConVar("l4d2_karma_kill_cooldown", "0.0", "如果slowmode为0, 下一个慢动作特效需要多长时间来冻结整个地图. 从上一次冻结的结束时间开始计算", CVAR_FLAGS, true, 0.0);
-	cvarAllowDefib                   = CreateConVar("l4d2_karma_kill_allow_defib", "0", " 是否运行电击器复活因慢动作特效死亡的生还者? 0 - 否, 1 - 是.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	karmaJump                        = CreateConVar("l4d2_karma_jump", 							"1", 	"Enable karma jumping. Karma jumping only registers on confirmed kills.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	karmaAwardConfirmed              = CreateConVar("l4d2_karma_award_confirmed", 				"1", 	"Award a confirmed karma maker with a player_death event.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	karmaDamageAwardConfirmed        = CreateConVar("l4d2_karma_damage_award_confirmed", 		"300", 	"Damage to award on confirmed kills, or -1 to disable. Requires _karma_award_confirmed set to 1", CVAR_FLAGS, true, -1.0);
+	karmaOnlyConfirmed               = CreateConVar("l4d2_karma_only_confirmed", 				"0", 	"Whenever or not to make karma announce only happen upon death.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	karmaSlowTimeOnServer            = CreateConVar("l4d2_karma_kill_slowtime_on_server", 		"5.0", 	"How long does Time get slowed for the server", CVAR_FLAGS, true, 1.0);
+	karmaSlowSpeed                   = CreateConVar("l4d2_karma_kill_slowspeed", 				"0.2", 	"How slow Time gets. Hardwired to minimum 0.03 or the server crashes", CVAR_FLAGS, true, 0.03);
+	cvarisEnabled                    = CreateConVar("l4d2_karma_kill_enabled", 					"1", 	"Turn Karma Kills on and off ", CVAR_FLAGS, true, 0.0, true, 1.0);
+	//cvarCooldown                     = CreateConVar("l4d2_karma_kill_cooldown", 				"0.0", 	"How long does it take for the next karma to freeze the entire map. Begins counting from the end of the previous freeze", CVAR_FLAGS, true, 0.0);
+	cvarAllowDefib                   = CreateConVar("l4d2_karma_kill_allow_defib", 				"0", 	"Allow karma victims to be revived with defibrillator? 0 - No, 1 - Yes.", CVAR_FLAGS, true, 0.0, true, 1.0);
 	CreateConVar("l4d2_karma_charge_version", PLUGIN_VERSION, " L4D2 Karma Charge Plugin Version ", CVAR_FLAGS_PLUGIN_VERSION);
 	AutoExecConfig(true, "l4d2_karma_kill");
 
 	GetCvars();
 	cvarFatalFallDamage.AddChangeHook(ConVarChanged_Cvars);
-	karmaPrefix.AddChangeHook(ConVarChanged_Cvars);
 	karmaJump.AddChangeHook(ConVarChanged_Cvars);
 	karmaAwardConfirmed.AddChangeHook(ConVarChanged_Cvars);
 	karmaDamageAwardConfirmed.AddChangeHook(ConVarChanged_Cvars);
 	karmaOnlyConfirmed.AddChangeHook(ConVarChanged_Cvars);
-	karmaBirdCharge.AddChangeHook(ConVarChanged_Cvars);
 	karmaSlowTimeOnServer.AddChangeHook(ConVarChanged_Cvars);
-	karmaSlowTimeOnCouple.AddChangeHook(ConVarChanged_Cvars);
-	karmaSlow.AddChangeHook(ConVarChanged_Cvars);
+	karmaSlowSpeed.AddChangeHook(ConVarChanged_Cvars);
 	cvarisEnabled.AddChangeHook(ConVarChanged_Cvars);
-	cvarNoFallDamageOnCarry.AddChangeHook(ConVarChanged_Cvars);
-	cvarNoFallDamageProtectFromIncap.AddChangeHook(ConVarChanged_Cvars);
-	cvarModeSwitch.AddChangeHook(ConVarChanged_Cvars);
-	cvarCooldown.AddChangeHook(ConVarChanged_Cvars);
+	//cvarCooldown.AddChangeHook(ConVarChanged_Cvars);
 	cvarAllowDefib.AddChangeHook(ConVarChanged_Cvars);
-
-	fw_OnKarmaEventPost = CreateGlobalForward("KarmaKillSystem_OnKarmaEventPost", ET_Ignore, Param_Cell, Param_Cell, Param_String, Param_Cell, Param_Cell, Param_Cell);
-	fw_OnKarmaJumpPost  = CreateGlobalForward("KarmaKillSystem_OnKarmaJumpPost", ET_Ignore, Param_Cell, Param_Array, Param_Array, Param_Array, Param_Cell, Param_String, Param_String);
-
-	//RegConsoleCmd("sm_xyz", Command_XYZ);
-	//RegAdminCmd("sm_ultimateheightdebug", Command_UltimateKarma, ADMFLAG_ROOT);
 
 	if(bLate)
 	{
@@ -370,44 +233,15 @@ public void OnPluginStart()
 	}
 }
 
-/**
- * Description
- *
- * @param victim             Muse that was honored to model a karma event
- * @param attacker           Artist that crafted the karma event. The only way to check if attacker is valid is: if(attacker > 0)
- * @param KarmaName          Name of karma: "Charge", "Impact", "Jockey", "Slap", "Punch", "Smoke"
- * @param bBird              true if a bird charge event occured, false if a karma kill was detected or performed.
- * @param bKillConfirmed     Whether or not this indicates the complete death of the player. This is NOT just !IsPlayerAlive(victim)
- * @param bOnlyConfirmed     Whether or not only kill confirmed are allowed.
-
- * @noreturn
- * @note					This can be called more than once. One for the announcement, one for the kill confirmed.
-                            If you want to reward both killconfirmed and killunconfirmed you should reward when killconfirmed is false.
-                            If you want to reward if killconfirmed you should reward when killconfirmed is true.
-
- * @note					If the plugin makes a kill confirmed without a previous announcement without kill confirmed,
-                            it compensates by sending two consecutive events, one without kill confirmed, one with kill confirmed.
-
-
-
- */
-forward void KarmaKillSystem_OnKarmaEventPost(int victim, int attacker, const char[] KarmaName, bool bBird, bool bKillConfirmed, bool bOnlyConfirmed);
-
-/**
- * Description
- *
- * @param victim             Player who got killed by the karma jump. This can be anybody. Useful to revive the victim.
- * @param lastPos            Origin from which the jump began.
- * @param jumperWeapons		 Weapon Refs of the jumper at the moment of the jump. Every invalid slot is -1
- * @param jumperHealth    	 jumperHealth[0] and jumperHealth[1] = Health and Temp health from which the jump began.
- * @param jumperTimestamp    Timestamp from which the jump began.
- * @param jumperSteamId      jumper's Steam ID.
- * @param jumperName     	 jumper's name
-
- * @noreturn
-
- */
-forward void KarmaKillSystem_OnKarmaJumpPost(int victim, float lastPos[3], int jumperWeapons[64], int jumperHealth[2], float jumperTimestamp, char[] jumperSteamId, char[] jumperName);
+public void OnPluginEnd()
+{
+	if(IsValidEntRef(g_iEntRef_func_timescale))
+	{
+		AcceptEntityInput(g_iEntRef_func_timescale, "Stop");
+		AcceptEntityInput(g_iEntRef_func_timescale, "Reset");
+		AcceptEntityInput(g_iEntRef_func_timescale, "kill");
+	}
+}
 
 public void OnClientPutInServer(int client)
 {
@@ -415,7 +249,7 @@ public void OnClientPutInServer(int client)
 }
 
 // I don't know why, but player_hurt won't trigger on incap in the boathouse finale...
-public Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, float& damage, int& damagetype)
+Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, float& damage, int& damagetype)
 {
 	if (L4D_GetClientTeam(victim) != L4DTeam_Survivor)
 		return Plugin_Continue;
@@ -432,11 +266,7 @@ public Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, f
 			fLogHeight[victim] -= 2.5;
 		}
 
-		if (AllKarmaRegisterTimer[victim] != INVALID_HANDLE)
-		{
-			CloseHandle(AllKarmaRegisterTimer[victim]);
-			AllKarmaRegisterTimer[victim] = INVALID_HANDLE;
-		}
+		delete AllKarmaRegisterTimer[victim];
 
 		AllKarmaRegisterTimer[victim] = CreateTimer(3.0, RegisterAllKarmaDelay, victim);
 
@@ -446,18 +276,19 @@ public Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, f
 		{
 			SetEntProp(victim, Prop_Send, "m_isFallingFromLedge", false);
 		}
-		if (g_bNoFallDamageOnCarry && L4D_GetAttackerCarry(victim) != 0)
+
+		if ( L4D_GetAttackerCarry(victim) != 0)
 		{
 			damage = 0.0;
 			return Plugin_Changed;
 		}
 
-		else if (g_bNoFallDamageProtectFromIncap && damage >= g_fFatalFallDamage && L4D_IsPlayerIncapacitated(victim))
+		/*else if (g_bNoFallDamageProtectFromIncap && damage >= g_fFatalFallDamage && L4D_IsPlayerIncapacitated(victim))
 		{
 			// Spike it!
 			damage *= 64.0;
 			return Plugin_Changed;
-		}
+		}*/
 	}
 
 	return Plugin_Continue;
@@ -465,24 +296,7 @@ public Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, f
 
 public void OnClientDisconnect(int client)
 {
-	if (chargerTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
-	}
-
-	if (victimTimer[client].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[client].timer);
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
-	}
-
-	if (ledgeTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(ledgeTimer[client]);
-		ledgeTimer[client] = INVALID_HANDLE;
-	}
+	ResetKarma(client);
 
 	if (IsFakeClient(client))
 	{
@@ -493,13 +307,11 @@ public void OnClientDisconnect(int client)
 
 public void OnMapEnd()
 {
-	g_bMapStarted = false;
+
 }
 
 public void OnMapStart()
 {
-	g_bMapStarted = true;
-
 	PrefetchSound(SOUND_EFFECT);
 	PrecacheSound(SOUND_EFFECT);
 
@@ -507,8 +319,7 @@ public void OnMapStart()
 	{
 		delete chargerTimer[i];
 		delete ledgeTimer[i];
-		delete victimTimer[i].timer;
-		victimTimer[i].dp = null;
+		delete victimTimer[i].m_hTimer;
 
 		delete AllKarmaRegisterTimer[i];
 		delete BlockRegisterTimer[i];
@@ -523,10 +334,10 @@ public void OnMapStart()
 		fLogHeight[i]  = -1.0;
 	}
 
-	cooldownTimer = INVALID_HANDLE;
+	//cooldownTimer = null;
 }
 
-public void ConVarChanged_Cvars(Handle hCvar, const char[] sOldVal, const char[] sNewVal)
+void ConVarChanged_Cvars(Handle hCvar, const char[] sOldVal, const char[] sNewVal)
 {
 	GetCvars();
 }
@@ -534,40 +345,34 @@ public void ConVarChanged_Cvars(Handle hCvar, const char[] sOldVal, const char[]
 void GetCvars()
 {
 	g_fFatalFallDamage = cvarFatalFallDamage.FloatValue;
-	karmaPrefix.GetString(g_sPrefix, sizeof(g_sPrefix));
 	g_bkarmaJump = karmaJump.BoolValue;
-	g_ikarmaAwardConfirmed = karmaDamageAwardConfirmed.IntValue;
+	g_bkarmaAwardConfirmed = karmaAwardConfirmed.BoolValue;
+	g_ikarmaDamageAwardConfirmed = karmaDamageAwardConfirmed.IntValue;
 	g_bkarmaOnlyConfirmed = karmaOnlyConfirmed.BoolValue;
-	g_bkarmaBirdCharge = karmaBirdCharge.BoolValue;
 	g_fkarmaSlowTimeOnServer = karmaSlowTimeOnServer.FloatValue;
-	g_fkarmaSlowTimeOnCouple = karmaSlowTimeOnCouple.FloatValue;
-	g_fkarmaSlow = karmaSlow.FloatValue;
+	g_fkarmaSlowSpeed = karmaSlowSpeed.FloatValue;
 	g_bEnabled = cvarisEnabled.BoolValue;
-	g_bNoFallDamageOnCarry = cvarNoFallDamageOnCarry.BoolValue;
-	g_bNoFallDamageProtectFromIncap = cvarNoFallDamageProtectFromIncap.BoolValue;
-	g_bModeSwitch = cvarModeSwitch.BoolValue;
-	g_fCooldown = cvarCooldown.FloatValue;
+	//g_fCooldown = cvarCooldown.FloatValue;
 	g_bAllowDefib = cvarAllowDefib.BoolValue;
 }
 
 public void Plugins_OnJockeyJumpPost(int victim, int jockey, float fForce)
 {
+	ResetKarma(victim);
+
 	AttachKarmaToVictim(victim, jockey, KT_Jockey);
 
 	JockRegisterTimer[victim] = CreateTimer(0.7, EndLastJockey, victim);
 
-	if (victimTimer[victim].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[victim].timer);
-		victimTimer[victim].timer = INVALID_HANDLE;
-		victimTimer[victim].dp    = null;
-	}
+	delete victimTimer[victim].m_hTimer;
 
-	victimTimer[victim].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[victim].dp, TIMER_REPEAT);
+	DataPack hPack;
+	victimTimer[victim].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+	victimTimer[victim].m_fSecondsLeft = (JOCKEY_JUMP_SECONDS_NEEDED_AGAINST_LEDGE_HANG_PER_FORCE * (fForce / 500.0));
 
-	victimTimer[victim].dp.WriteFloat(JOCKEY_JUMP_SECONDS_NEEDED_AGAINST_LEDGE_HANG_PER_FORCE * (fForce / 500.0));
-	victimTimer[victim].dp.WriteCell(victim);
-	victimTimer[victim].dp.WriteCell(INVALID_HANDLE);
+	hPack.WriteFloat(JOCKEY_JUMP_SECONDS_NEEDED_AGAINST_LEDGE_HANG_PER_FORCE * (fForce / 500.0));
+	hPack.WriteCell(victim);
+	hPack.WriteCell(INVALID_HANDLE);
 }
 
 public void L4D2_OnPounceOrLeapStumble_Post(int victim, int attacker)
@@ -580,7 +385,7 @@ public void L4D2_OnPounceOrLeapStumble_Post(int victim, int attacker)
 
 	DettachKarmaFromVictim(victim, KT_Jump);
 
-	// No need to set up a remove timer, because as long as the player is under stagger, the player is saving the status.
+	// No need to set up a remove m_hTimer, because as long as the player is under stagger, the player is saving the status.
 }
 
 public void L4D2_OnStagger_Post(int victim, int attacker)
@@ -604,72 +409,63 @@ public void L4D2_OnPlayerFling_Post(int victim, int attacker, const float vecDir
 	else if (L4D_GetClientTeam(victim) != L4DTeam_Survivor || L4D_GetClientTeam(attacker) != L4DTeam_Infected)
 		return;
 
+	ResetKarma(victim);
+
 	L4D2ZombieClassType class = L4D2_GetPlayerZombieClass(attacker);
 
 	if (class == L4D2ZombieClass_Boomer)    // Boomer
 	{
 		AttachKarmaToVictim(victim, attacker, KT_Slap);
 
-		if (SlapRegisterTimer[victim] != INVALID_HANDLE)
-		{
-			CloseHandle(SlapRegisterTimer[victim]);
-			SlapRegisterTimer[victim] = INVALID_HANDLE;
-		}
-
+		delete SlapRegisterTimer[victim];
 		SlapRegisterTimer[victim] = CreateTimer(0.25, RegisterSlapDelay, victim);
 
-		if (victimTimer[victim].timer != INVALID_HANDLE)
-		{
-			CloseHandle(victimTimer[victim].timer);
-			victimTimer[victim].timer = INVALID_HANDLE;
-			victimTimer[victim].dp    = null;
-		}
+		delete victimTimer[victim].m_hTimer;
 
-		victimTimer[victim].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[victim].dp, TIMER_REPEAT);
+		DataPack hPack;
 
-		victimTimer[victim].dp.WriteFloat(FLING_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
-		victimTimer[victim].dp.WriteCell(victim);
-		victimTimer[victim].dp.WriteCell(INVALID_HANDLE);
+		victimTimer[victim].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+		victimTimer[victim].m_fSecondsLeft = FLING_SECONDS_NEEDED_AGAINST_LEDGE_HANG;
+
+		hPack.WriteFloat(FLING_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
+		hPack.WriteCell(victim);
+		hPack.WriteCell(INVALID_HANDLE);
 	}
 }
 
-public Action Timer_CheckVictim(Handle timer, DataPack DP)
+Action Timer_CheckVictim(Handle m_hTimer, DataPack hPack)
 {
-	DP.Reset();
+	hPack.Reset();
 
-	float secondsLeft = DP.ReadFloat();
-	int   client      = DP.ReadCell();
+	float secondsLeft = hPack.ReadFloat();
+	int   client      = hPack.ReadCell();
 
-	Handle hIgnoreTimer = DP.ReadCell();
+	Handle hIgnoreTimer = hPack.ReadCell();
 
 	if (!IsClientInGame(client))
 	{
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
+		victimTimer[client].m_hTimer = null;
 		return Plugin_Stop;
 	}
 
 	if (!IsPlayerAlive(client))
 	{
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
+		victimTimer[client].m_hTimer = null;
 		return Plugin_Stop;
 	}
 
 	int type;
 	int lastKarma = GetAnyLastKarma(client, type);
 
-	if (lastKarma == 0)
+	if (lastKarma <= 0 || !IsClientInGame(lastKarma))
 	{
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
+		victimTimer[client].m_hTimer = null;
 		return Plugin_Stop;
 	}
 
 	else if (GetEntProp(client, Prop_Send, "m_isHangingFromLedge"))
 	{
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
+		victimTimer[client].m_hTimer = null;
 		return Plugin_Stop;
 	}
 
@@ -703,7 +499,7 @@ public Action Timer_CheckVictim(Handle timer, DataPack DP)
 
 	float fPlaneNormal[3];
 	// For bird charges to find if it's a slope.
-	TR_GetPlaneNormal(INVALID_HANDLE, fPlaneNormal);
+	TR_GetPlaneNormal(null, fPlaneNormal);
 
 	if (fPlaneNormal[2] < 0.7 && fPlaneNormal[2] != 0.0)
 	{
@@ -767,18 +563,19 @@ public Action Timer_CheckVictim(Handle timer, DataPack DP)
 	{
 		if (secondsLeft <= 0.0)
 		{
-			AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].timer, hIgnoreTimer);
-			victimTimer[client].timer = INVALID_HANDLE;
-			victimTimer[client].dp    = null;
+			AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer);
+			victimTimer[client].m_hTimer = null;
+
+			delete aEntities;
 			return Plugin_Stop;
 		}
 		else
 		{
 			secondsLeft -= CHARGE_CHECKING_INTERVAL;
 
-			victimTimer[client].dp.Reset();
-
-			victimTimer[client].dp.WriteFloat(secondsLeft);
+			hPack.Reset();
+			hPack.WriteFloat(secondsLeft);
+			victimTimer[client].m_fSecondsLeft = secondsLeft;
 		}
 	}
 	// No height? Maybe we can find some useful trigger_hurt.
@@ -793,21 +590,21 @@ public Action Timer_CheckVictim(Handle timer, DataPack DP)
 		{
 			if (secondsLeft <= 0.0)
 			{
-				AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].timer, hIgnoreTimer);
-				victimTimer[client].timer = INVALID_HANDLE;
-				victimTimer[client].dp    = null;
+				AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer);
+				victimTimer[client].m_hTimer = null;
 				return Plugin_Stop;
 			}
 			else
 			{
 				secondsLeft -= CHARGE_CHECKING_INTERVAL;
 
-				victimTimer[client].dp.Reset();
-
-				victimTimer[client].dp.WriteFloat(secondsLeft);
+				hPack.Reset();
+				hPack.WriteFloat(secondsLeft);
+				victimTimer[client].m_fSecondsLeft = secondsLeft;
 			}
 		}
 	}
+	delete aEntities;
 
 	return Plugin_Continue;
 }
@@ -823,66 +620,61 @@ public void L4D_TankClaw_OnPlayerHit_Post(int tank, int claw, int victim)
 	else if (L4D_GetAttackerCarry(victim) != 0)
 		return;
 
+	ResetKarma(victim);
+
 	AttachKarmaToVictim(victim, tank, KT_Punch);
 
-	if (PunchRegisterTimer[victim] != INVALID_HANDLE)
-	{
-		CloseHandle(PunchRegisterTimer[victim]);
-		PunchRegisterTimer[victim] = INVALID_HANDLE;
-	}
-
+	delete PunchRegisterTimer[victim];
 	PunchRegisterTimer[victim] = CreateTimer(0.25, RegisterPunchDelay, victim);
 
-	if (victimTimer[victim].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[victim].timer);
-		victimTimer[victim].timer = INVALID_HANDLE;
-		victimTimer[victim].dp    = null;
-	}
+	delete victimTimer[victim].m_hTimer;
 
-	victimTimer[victim].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[victim].dp, TIMER_REPEAT);
+	DataPack hPack;
 
-	victimTimer[victim].dp.WriteFloat(PUNCH_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
-	victimTimer[victim].dp.WriteCell(victim);
-	victimTimer[victim].dp.WriteCell(INVALID_HANDLE);
+	victimTimer[victim].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+	victimTimer[victim].m_fSecondsLeft = PUNCH_SECONDS_NEEDED_AGAINST_LEDGE_HANG;
+
+	hPack.WriteFloat(PUNCH_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
+	hPack.WriteCell(victim);
+	hPack.WriteCell(INVALID_HANDLE);
 }
 
-public Action RegisterAllKarmaDelay(Handle timer, any victim)
+Action RegisterAllKarmaDelay(Handle m_hTimer, any victim)
 {
-	AllKarmaRegisterTimer[victim] = INVALID_HANDLE;
+	AllKarmaRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public Action RegisterSlapDelay(Handle timer, any victim)
+Action RegisterSlapDelay(Handle m_hTimer, any victim)
 {
-	SlapRegisterTimer[victim] = INVALID_HANDLE;
+	SlapRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public Action RegisterPunchDelay(Handle timer, any victim)
+Action RegisterPunchDelay(Handle m_hTimer, any victim)
 {
-	PunchRegisterTimer[victim] = INVALID_HANDLE;
+	PunchRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public Action RegisterCaptorDelay(Handle timer, any victim)
+Action RegisterCaptorDelay(Handle m_hTimer, any victim)
 {
-	BlockRegisterTimer[victim] = INVALID_HANDLE;
+	BlockRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public Action RegisterJumpDelay(Handle timer, any victim)
+Action RegisterJumpDelay(Handle m_hTimer, any victim)
 {
-	JumpRegisterTimer[victim] = INVALID_HANDLE;
+	JumpRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public void Event_PlayerLedgeGrab(Event event, const char[] name, bool dontBroadcast)
+void Event_PlayerLedgeGrab(Event event, const char[] name, bool dontBroadcast)
 {
 	int victim = GetClientOfUserId(event.GetInt("userid"));
 
@@ -892,15 +684,17 @@ public void Event_PlayerLedgeGrab(Event event, const char[] name, bool dontBroad
 	int type;
 	int lastKarma = GetAnyLastKarma(victim, type);
 
-	if (lastKarma == 0)
+	if (lastKarma <= 0)
 		return;
+
+	ResetKarma(victim);
 
 	if(!g_bEnabled) return;
 
 	CreateTimer(0.1, Timer_CheckLedgeChange, GetClientUserId(victim), TIMER_FLAG_NO_MAPCHANGE | TIMER_REPEAT);
 }
 
-public Action Timer_CheckLedgeChange(Handle hTimer, int userId)
+Action Timer_CheckLedgeChange(Handle hTimer, int userId)
 {
 	int victim = GetClientOfUserId(userId);
 
@@ -918,10 +712,10 @@ public Action Timer_CheckLedgeChange(Handle hTimer, int userId)
 		int type;
 		int lastKarma = GetAnyLastKarma(victim, type);
 
-		if (lastKarma == 0 || g_bkarmaOnlyConfirmed || type == KT_Jump)
+		if (lastKarma <= 0 || !IsClientInGame(lastKarma) || g_bkarmaOnlyConfirmed || type == KT_Jump)
 			return Plugin_Stop;
 
-		AnnounceKarma(lastKarma, victim, type, false, false, INVALID_HANDLE);
+		AnnounceKarma(lastKarma, victim, type, false, false, null);
 		return Plugin_Stop;
 	}
 	else if (GetEntProp(victim, Prop_Send, "m_isHangingFromLedge"))
@@ -931,26 +725,26 @@ public Action Timer_CheckLedgeChange(Handle hTimer, int userId)
 		return Plugin_Stop;
 }
 
-public void event_playerDeathPre(Event event, const char[] name, bool dontBroadcast)
+Action event_playerDeathPre(Event event, const char[] name, bool dontBroadcast)
 {
 	int victim = GetClientOfUserId(event.GetInt("userid"));
 
 	if (!g_bEnabled || !victim || !IsClientInGame(victim))
-		return;
+		return Plugin_Continue;
 
 	if (L4D_GetClientTeam(victim) != L4DTeam_Survivor)    // L4D_GetClientTeam(victim) == 2 -> Victim is a survivor
-		return;
+		return Plugin_Continue;
 
 	FixChargeTimeleftBug();
 
 	// New by Eyal282 because any fall or drown damage trigger this block.
 
-	if (AllKarmaRegisterTimer[victim] == INVALID_HANDLE)
-		return;
+	if (AllKarmaRegisterTimer[victim] == null)
+		return Plugin_Continue;
 
 	for (int i = 0; i < KarmaType_MAX; i++)
 	{
-		if (LastKarma[victim][i].artist != 0)
+		if (LastKarma[victim][i].artist != 0 && IsClientInGame(LastKarma[victim][i].artist))
 		{
 			if (i == KT_Charge && LastKarma[victim][i].artist > 0 && IsPlayerAlive(LastKarma[victim][i].artist))
 			{
@@ -964,9 +758,9 @@ public void event_playerDeathPre(Event event, const char[] name, bool dontBroadc
 
 			AnnounceKarma(LastKarma[victim][i].artist, victim, i, false, true);
 
-			if (memoryLastKarma > 0 && GetConVarBool(karmaAwardConfirmed))
+			if (memoryLastKarma > 0 && g_bkarmaAwardConfirmed)
 			{
-				int damageReward = g_ikarmaAwardConfirmed;
+				int damageReward = g_ikarmaDamageAwardConfirmed;
 
 				if (damageReward > 0)
 				{
@@ -978,41 +772,46 @@ public void event_playerDeathPre(Event event, const char[] name, bool dontBroadc
 				SetEventInt(event, "attacker", GetClientUserId(memoryLastKarma));
 				SetEventInt(event, "attackerentid", memoryLastKarma);
 				SetEventInt(event, "headshot", 2);
-				return;
+				return Plugin_Changed;
 			}
 		}
 	}
 
-	return;
+	return Plugin_Continue;
 }
 
-public void event_RoundStart(Event event, const char[] name, bool dontBroadcast)
+void event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	// SlowTime creates an entity, and round_start can be called before a map starts ( and before entities can be created )
-
-	if (g_bMapStarted)
-		SlowTime("0.0", "0.0", "0.0", 0.0, 1.0);
+	SlowWorldTimeSpeed("0.0", "0.0", "0.0", 0.0, 1.0);
 }
 
-public void event_RoundStartPostNav(Event event, const char[] name, bool dontBroadcast)
+void event_RoundStartPostNav(Event event, const char[] name, bool dontBroadcast)
 {
-	// SlowTime creates an entity, and round_start can be called before a map starts ( and before entities can be created )
-
 	g_bRoundStarted = true;
 
-	if (g_bMapStarted)
-		SlowTime("0.0", "0.0", "0.0", 0.0, 1.0);
+	SlowWorldTimeSpeed("0.0", "0.0", "0.0", 0.0, 1.0);
 }
 
-public void event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+void event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bRoundStarted = false;
 
-	// Because round_start has bugs when calling on first chapters.
-	SlowTime("0.0", "0.0", "0.0", 0.0, 1.0);
+	SlowWorldTimeSpeed("0.0", "0.0", "0.0", 0.0, 1.0);
 }
 
-public void FixChargeTimeleftBug()
+/*Action event_VictimFreeFromPinPre(Handle event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(GetEventInt(event, "victim"));
+
+	if (!victim || !IsClientInGame(victim))
+		return Plugin_Continue;
+
+	SetEntPropFloat(victim, Prop_Send, "m_flLaggedMovementValue", 1.0);
+
+	return Plugin_Continue;	
+}*/
+
+void FixChargeTimeleftBug()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -1031,7 +830,7 @@ public void FixChargeTimeleftBug()
 		int iCustomAbility = L4D_GetPlayerCustomAbility(i);
 
 		// I have no clue why it's exactly 3600.0 when it bugs, but whatever.
-		if (GetEntPropFloat(iCustomAbility, Prop_Send, "m_duration") == 3600.0)
+		if (iCustomAbility > MaxClients && GetEntPropFloat(iCustomAbility, Prop_Send, "m_duration") == 3600.0)
 		{
 			SetEntPropFloat(iCustomAbility, Prop_Send, "m_timestamp", GetGameTime());
 			SetEntPropFloat(iCustomAbility, Prop_Send, "m_duration", 0.0);
@@ -1039,7 +838,7 @@ public void FixChargeTimeleftBug()
 	}
 }
 
-public Action Timer_ResetAbility(Handle hTimer, int userID)
+Action Timer_ResetAbility(Handle hTimer, int userID)
 {
 	int client = GetClientOfUserId(userID);
 
@@ -1062,68 +861,6 @@ public Action Timer_ResetAbility(Handle hTimer, int userID)
 
 	return Plugin_Continue;
 }
-/*
-public Action Command_XYZ(int client, int args)
-{
-	float Origin[3], Velocity[3];
-	GetEntPropVector(client, Prop_Data, "m_vecAbsOrigin", Origin);
-	GetEntPropVector(client, Prop_Data, "m_vecVelocity", Velocity);
-
-	PrintToChat(client, "Origin: %.4f, %.4f, %.4f | Velocity: %.2f, %.2f, %.2f | FV: %.2f", Origin[0], Origin[1], Origin[2], Velocity[0], Velocity[1], Velocity[2], GetEntPropFloat(client, Prop_Send, "m_flFallVelocity"));
-
-	return Plugin_Handled;
-}
-
-public Action Command_UltimateKarma(int client, int args)
-{
-	if (!IsServerDebugMode())
-	{
-		PrintToChat(client, "This command can only be executed in a server with debug mode enabled");
-		return Plugin_Handled;
-	}
-
-	char sMapName[64];
-
-	GetCurrentMap(sMapName, sizeof(sMapName));
-
-	if (!StrEqual(sMapName, "c8m5_rooftop"))
-	{
-		PrintToChat(client, "This command can only be executed in No Mercy Finale.\x04 sm_map c8m5_rooftop");
-		return Plugin_Handled;
-	}
-
-	else if (L4D_GetClientTeam(client) != L4DTeam_Survivor)
-	{
-		PrintToChat(client, "This command can only be executed by survivors");
-		return Plugin_Handled;
-	}
-
-	if (fLogHeight[client] == -1.0)
-	{
-		fLogHeight[client] = 160.0;
-
-		PrintToChat(client, "Height debug enabled.");
-
-		float fDebugOrigin[3];
-
-		fDebugOrigin = NO_MERCY_DEBUG_ORIGIN;
-
-		fDebugOrigin[2] += fLogHeight[client];
-
-		TeleportEntity(client, fDebugOrigin, NULL_VECTOR, NULL_VECTOR);
-	}
-	else
-	{
-		fLogHeight[client] = -1.0;
-
-		PrintToChat(client, "Height debug disabled.");
-
-		ForcePlayerSuicide(client);
-	}
-
-	return Plugin_Handled;
-}
-*/
 public void OnGameFrame()
 {
 	for (int i = 1; i <= MaxClients; i++)
@@ -1169,10 +906,10 @@ public void OnGameFrame()
 				}
 			}
 
-			if (AllKarmaRegisterTimer[i] != INVALID_HANDLE)
+			if (AllKarmaRegisterTimer[i] != null)
 				continue;
 
-			else if (!GetAnyLastKarma(i))
+			else if (GetAnyLastKarma(i) <= 0)
 				continue;
 
 			else if (!IsClientInGame(i))
@@ -1198,19 +935,19 @@ public void OnGameFrame()
 			if (LastKarma[i][KT_Charge].artist != 0 && !IsPinnedByCharger(i))
 				DettachKarmaFromVictim(i, KT_Charge);
 
-			else if (LastKarma[i][KT_Jockey].artist != 0 && JockRegisterTimer[i] == INVALID_HANDLE)
+			else if (LastKarma[i][KT_Jockey].artist != 0 && JockRegisterTimer[i] == null)
 				DettachKarmaFromVictim(i, KT_Jockey);
 
-			else if (LastKarma[i][KT_Slap].artist != 0 && SlapRegisterTimer[i] == INVALID_HANDLE)
+			else if (LastKarma[i][KT_Slap].artist != 0 && SlapRegisterTimer[i] == null)
 				DettachKarmaFromVictim(i, KT_Slap);
 
-			else if (LastKarma[i][KT_Punch].artist != 0 && PunchRegisterTimer[i] == INVALID_HANDLE)
+			else if (LastKarma[i][KT_Punch].artist != 0 && PunchRegisterTimer[i] == null)
 				DettachKarmaFromVictim(i, KT_Punch);
 
 			else if (LastKarma[i][KT_Impact].artist != 0)
 				DettachKarmaFromVictim(i, KT_Impact);
 
-			else if (LastKarma[i][KT_Smoke].artist != 0 && SmokeRegisterTimer[i] == INVALID_HANDLE)
+			else if (LastKarma[i][KT_Smoke].artist != 0 && SmokeRegisterTimer[i] == null)
 				DettachKarmaFromVictim(i, KT_Smoke);
 
 			// Staggers despite keeping the player on the ground will have L4D_IsPlayerStaggering that appears above.
@@ -1218,18 +955,13 @@ public void OnGameFrame()
 				DettachKarmaFromVictim(i, KT_Stagger);
 
 			// If you hold jump, you can make yourself fall from ledges, so don't detach if you're holding jump button.
-			else if (LastKarma[i][KT_Jump].artist != 0 && JumpRegisterTimer[i] == INVALID_HANDLE && !(GetClientButtons(i) & IN_JUMP))
+			else if (LastKarma[i][KT_Jump].artist != 0 && JumpRegisterTimer[i] == null && !(GetClientButtons(i) & IN_JUMP))
 				DettachKarmaFromVictim(i, KT_Jump);
 
-			// No blocks, remove victim timer.
+			// No blocks, remove victim m_hTimer.
 			if (!FindAnyRegisterBlocks(i))
 			{
-				if (victimTimer[i].timer != INVALID_HANDLE)
-				{
-					CloseHandle(victimTimer[i].timer);
-					victimTimer[i].timer = INVALID_HANDLE;
-					victimTimer[i].dp    = null;
-				}
+				delete victimTimer[i].m_hTimer;
 
 				BlockAnnounce[i] = false;
 			}
@@ -1237,7 +969,7 @@ public void OnGameFrame()
 	}
 }
 
-public void event_BotReplacesAPlayer(Event event, const char[] name, bool dontBroadcast)
+void event_BotReplacesAPlayer(Event event, const char[] name, bool dontBroadcast)
 {
 	int oldPlayer = GetClientOfUserId(event.GetInt("player"));
 	int newPlayer = GetClientOfUserId(event.GetInt("bot"));
@@ -1250,7 +982,7 @@ public void event_BotReplacesAPlayer(Event event, const char[] name, bool dontBr
 	OnPlayersSwapped(oldPlayer, newPlayer);
 }
 
-public void event_PlayerReplacesABot(Event event, const char[] name, bool dontBroadcast)
+void event_PlayerReplacesABot(Event event, const char[] name, bool dontBroadcast)
 {
 	int oldPlayer = GetClientOfUserId(event.GetInt("bot"));
 	int newPlayer = GetClientOfUserId(event.GetInt("player"));
@@ -1264,79 +996,22 @@ public void event_PlayerReplacesABot(Event event, const char[] name, bool dontBr
 }
 
 // Called before the takeover events. This allows you to clear variables.
-public void event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+void event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
 	if (!g_bEnabled || !client || !IsClientInGame(client))
 		return;
 
-	BlockAnnounce[client] = false;
+	preJumpHeight[client] = 0.0;
+	ResetKarma(client);
 
 	DettachKarmaFromVictim(client, KarmaType_MAX);
-
-	preJumpHeight[client] = 0.0;
-	apexHeight[client]    = -65535.0;
-	catchHeight[client]   = -65535.0;
-
-	if (chargerTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
-	}
-	if (victimTimer[client].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[client].timer);
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
-	}
-	if (ledgeTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(ledgeTimer[client]);
-		ledgeTimer[client] = INVALID_HANDLE;
-	}
-	if (AllKarmaRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(AllKarmaRegisterTimer[client]);
-		AllKarmaRegisterTimer[client] = INVALID_HANDLE;
-	}
-
-	if (BlockRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(BlockRegisterTimer[client]);
-		BlockRegisterTimer[client] = INVALID_HANDLE;
-	}
-
-	if (JockRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(JockRegisterTimer[client]);
-		JockRegisterTimer[client] = INVALID_HANDLE;
-	}
-	if (SlapRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(SlapRegisterTimer[client]);
-		SlapRegisterTimer[client] = INVALID_HANDLE;
-	}
-	if (PunchRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(PunchRegisterTimer[client]);
-		PunchRegisterTimer[client] = INVALID_HANDLE;
-	}
-	if (JumpRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(JumpRegisterTimer[client]);
-		JumpRegisterTimer[client] = INVALID_HANDLE;
-	}
-	if (SmokeRegisterTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(SmokeRegisterTimer[client]);
-		SmokeRegisterTimer[client] = INVALID_HANDLE;
-	}
 }
 
 // Called after player_spawn, so you're allowed to clear variables in player_spawn
 // Note to self consider adding here: CreateTimer(0.1, Timer_CheckLedgeChange, GetClientUserId(victim), TIMER_FLAG_NO_MAPCHANGE | TIMER_REPEAT);
-public void OnPlayersSwapped(int oldPlayer, int newPlayer)
+void OnPlayersSwapped(int oldPlayer, int newPlayer)
 {
 	// FL_ONGROUND is bugged for an instant on takeovers, maybe other flags are too?
 	if (!(GetEntityFlags(oldPlayer) & FL_ONGROUND))
@@ -1361,155 +1036,87 @@ public void OnPlayersSwapped(int oldPlayer, int newPlayer)
 	apexHeight[oldPlayer]    = 0.0;
 	catchHeight[oldPlayer]   = 0.0;
 
-	if (chargerTimer[oldPlayer] != INVALID_HANDLE)
+	if (chargerTimer[oldPlayer] != null)
 	{
-		CloseHandle(chargerTimer[oldPlayer]);
-		chargerTimer[oldPlayer] = INVALID_HANDLE;
+		delete chargerTimer[oldPlayer];
 
-		if (chargerTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(chargerTimer[newPlayer]);
-			chargerTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete chargerTimer[newPlayer];
 		chargerTimer[newPlayer] = CreateTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckCharge, newPlayer, TIMER_REPEAT);
 	}
-	if (victimTimer[oldPlayer].timer != INVALID_HANDLE)
+	
+	if (victimTimer[oldPlayer].m_hTimer != null)
 	{
-		victimTimer[oldPlayer].dp.Reset();
+		float secondsLeft = victimTimer[oldPlayer].m_fSecondsLeft;
 
-		float secondsLeft = victimTimer[oldPlayer].dp.ReadFloat();
+		delete victimTimer[oldPlayer].m_hTimer;
+		delete victimTimer[newPlayer].m_hTimer;
 
-		CloseHandle(victimTimer[oldPlayer].timer);
-		victimTimer[oldPlayer].timer = INVALID_HANDLE;
-		victimTimer[oldPlayer].dp    = null;
+		DataPack hPack;
 
-		if (victimTimer[newPlayer].timer != INVALID_HANDLE)
-		{
-			CloseHandle(victimTimer[newPlayer].timer);
-			victimTimer[newPlayer].timer = INVALID_HANDLE;
-			victimTimer[newPlayer].dp    = null;
-		}
+		victimTimer[newPlayer].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+		victimTimer[newPlayer].m_fSecondsLeft = secondsLeft;
 
-		victimTimer[newPlayer].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[newPlayer].dp, TIMER_REPEAT);
-
-		victimTimer[newPlayer].dp.WriteFloat(secondsLeft);
-		victimTimer[newPlayer].dp.WriteCell(newPlayer);
-		victimTimer[newPlayer].dp.WriteCell(INVALID_HANDLE);
+		hPack.WriteFloat(secondsLeft);
+		hPack.WriteCell(newPlayer);
+		hPack.WriteCell(INVALID_HANDLE);
 	}
-	if (ledgeTimer[oldPlayer] != INVALID_HANDLE)
+	if (ledgeTimer[oldPlayer] != null)
 	{
-		CloseHandle(ledgeTimer[oldPlayer]);
-		ledgeTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (ledgeTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(ledgeTimer[newPlayer]);
-			ledgeTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete ledgeTimer[oldPlayer];
+		delete ledgeTimer[newPlayer];
 		ledgeTimer[newPlayer] = CreateTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckJockeyRideLedge, newPlayer, TIMER_REPEAT);
 	}
-	if (AllKarmaRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (AllKarmaRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(AllKarmaRegisterTimer[oldPlayer]);
-		AllKarmaRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (AllKarmaRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(AllKarmaRegisterTimer[newPlayer]);
-			AllKarmaRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete AllKarmaRegisterTimer[oldPlayer];
+		delete AllKarmaRegisterTimer[newPlayer];
 		AllKarmaRegisterTimer[newPlayer] = CreateTimer(3.0, RegisterAllKarmaDelay, newPlayer);
 	}
 
-	if (BlockRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (BlockRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(BlockRegisterTimer[oldPlayer]);
-		BlockRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (BlockRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(BlockRegisterTimer[newPlayer]);
-			BlockRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete BlockRegisterTimer[oldPlayer];
+		delete BlockRegisterTimer[newPlayer];
 		BlockRegisterTimer[newPlayer] = CreateTimer(15.0, RegisterCaptorDelay, newPlayer);
 	}
 
-	if (JockRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (JockRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(JockRegisterTimer[oldPlayer]);
-		JockRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (JockRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(JockRegisterTimer[newPlayer]);
-			JockRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete JockRegisterTimer[oldPlayer];
+		delete JockRegisterTimer[newPlayer];
 		JockRegisterTimer[newPlayer] = CreateTimer(0.7, EndLastJockey, newPlayer);
 	}
 
-	if (SlapRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (SlapRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(SlapRegisterTimer[oldPlayer]);
-		SlapRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (SlapRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(SlapRegisterTimer[newPlayer]);
-			SlapRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete SlapRegisterTimer[oldPlayer];
+		delete SlapRegisterTimer[newPlayer];
 		SlapRegisterTimer[newPlayer] = CreateTimer(0.25, RegisterSlapDelay, newPlayer);
 	}
 
-	if (PunchRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (PunchRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(PunchRegisterTimer[oldPlayer]);
-		PunchRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (PunchRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(PunchRegisterTimer[newPlayer]);
-			PunchRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete PunchRegisterTimer[oldPlayer];
+		delete PunchRegisterTimer[newPlayer];
 		PunchRegisterTimer[newPlayer] = CreateTimer(0.25, RegisterPunchDelay, newPlayer);
 	}
 
-	if (JumpRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (JumpRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(JumpRegisterTimer[oldPlayer]);
-		JumpRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (JumpRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(JumpRegisterTimer[newPlayer]);
-			JumpRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete JumpRegisterTimer[oldPlayer];
+		delete JumpRegisterTimer[newPlayer];
 		JumpRegisterTimer[newPlayer] = CreateTimer(0.25, RegisterJumpDelay, newPlayer);
 	}
 
-	if (SmokeRegisterTimer[oldPlayer] != INVALID_HANDLE)
+	if (SmokeRegisterTimer[oldPlayer] != null)
 	{
-		CloseHandle(SmokeRegisterTimer[oldPlayer]);
-		SmokeRegisterTimer[oldPlayer] = INVALID_HANDLE;
-
-		if (SmokeRegisterTimer[newPlayer] != INVALID_HANDLE)
-		{
-			CloseHandle(SmokeRegisterTimer[newPlayer]);
-			SmokeRegisterTimer[newPlayer] = INVALID_HANDLE;
-		}
-
+		delete SmokeRegisterTimer[oldPlayer];
+		delete SmokeRegisterTimer[newPlayer];
 		SmokeRegisterTimer[newPlayer] = CreateTimer(0.7, EndLastSmoker, newPlayer);
 	}
 }
 
-public void event_PlayerJump(Event event, const char[] name, bool dontBroadcast)
+void event_PlayerJump(Event event, const char[] name, bool dontBroadcast)
 {
 	if (!g_bkarmaJump)
 		return;
@@ -1521,16 +1128,11 @@ public void event_PlayerJump(Event event, const char[] name, bool dontBroadcast)
 
 	AttachKarmaToVictim(victim, victim, KT_Jump, true);
 
-	if (JumpRegisterTimer[victim] != INVALID_HANDLE)
-	{
-		CloseHandle(JumpRegisterTimer[victim]);
-		JumpRegisterTimer[victim] = INVALID_HANDLE;
-	}
-
+	delete JumpRegisterTimer[victim];
 	JumpRegisterTimer[victim] = CreateTimer(0.25, RegisterJumpDelay, victim);
 }
 
-public void event_ChargerKill(Event event, const char[] name, bool dontBroadcast)
+void event_ChargerKill(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
@@ -1539,7 +1141,7 @@ public void event_ChargerKill(Event event, const char[] name, bool dontBroadcast
 		return;
 	}
 
-	if (g_ikarmaAwardConfirmed < 0)
+	if (g_ikarmaDamageAwardConfirmed < 0)
 		return;
 
 	int maxDamage = GetConVarInt(FindConVar("z_max_survivor_damage"));
@@ -1553,7 +1155,7 @@ public void event_ChargerKill(Event event, const char[] name, bool dontBroadcast
 	L4D2Direct_SetTankTickets(client, L4D2Direct_GetTankTickets(client) - maxDamage);
 }
 
-public void event_ChargerGrab(Event event, const char[] name, bool dontBroadcast)
+void event_ChargerGrab(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (!g_bEnabled || client == 0 || !IsClientInGame(client))
@@ -1563,15 +1165,11 @@ public void event_ChargerGrab(Event event, const char[] name, bool dontBroadcast
 
 	int victim = GetClientOfUserId(event.GetInt("victim"));
 
+	ResetKarma(victim);
+
 	AttachKarmaToVictim(victim, client, KT_Charge);
 
-	DebugPrintToAll("Charger Carry event caught, initializing timer");
-
-	if (chargerTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
-	}
+	DebugPrintToAll("Charger Carry event caught, initializing m_hTimer");
 
 	float fOrigin[3];
 	GetEntPropVector(client, Prop_Data, "m_vecAbsOrigin", fOrigin);
@@ -1581,7 +1179,7 @@ public void event_ChargerGrab(Event event, const char[] name, bool dontBroadcast
 	TriggerTimer(chargerTimer[client], true);
 }
 
-public void event_GrabEnded(Event event, const char[] name, bool dontBroadcast)
+void event_GrabEnded(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (client == 0 || !IsClientInGame(client))
@@ -1589,16 +1187,12 @@ public void event_GrabEnded(Event event, const char[] name, bool dontBroadcast)
 		return;
 	}
 
-	if (chargerTimer[client] != INVALID_HANDLE)
-	{
-		CloseHandle(chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
-	}
+	delete chargerTimer[client];
 
 	return;
 }
 
-public void event_ChargerImpact(Event event, const char[] name, bool dontBroadcast)
+void event_ChargerImpact(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	int victim = GetClientOfUserId(event.GetInt("victim"));
@@ -1609,44 +1203,40 @@ public void event_ChargerImpact(Event event, const char[] name, bool dontBroadca
 		return;
 	}
 
+	ResetKarma(victim);
+
 	if (GetEntPropEnt(victim, Prop_Send, "m_carryAttacker") == -1)
 	{
 		AttachKarmaToVictim(victim, client, KT_Impact);
 
-		if (victimTimer[victim].timer != INVALID_HANDLE)
-		{
-			CloseHandle(victimTimer[victim].timer);
-			victimTimer[victim].timer = INVALID_HANDLE;
-			victimTimer[victim].dp    = null;
-		}
+		delete victimTimer[victim].m_hTimer;
 
-		victimTimer[victim].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[victim].dp, TIMER_REPEAT);
+		DataPack hPack;
 
-		victimTimer[victim].dp.WriteFloat(IMPACT_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
-		victimTimer[victim].dp.WriteCell(victim);
-		victimTimer[victim].dp.WriteCell(INVALID_HANDLE);
+		victimTimer[victim].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+		victimTimer[victim].m_fSecondsLeft = IMPACT_SECONDS_NEEDED_AGAINST_LEDGE_HANG;
+
+		hPack.WriteFloat(IMPACT_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
+		hPack.WriteCell(victim);
+		hPack.WriteCell(INVALID_HANDLE);
 	}
 }
 
-public void event_jockeyRideStart(Event event, const char[] name, bool dontBroadcast)
+void event_jockeyRideStart(Event event, const char[] name, bool dontBroadcast)
 {
 	int victim = GetClientOfUserId(event.GetInt("victim"));
 
 	if (!victim || !IsClientInGame(victim))
 		return;
 
-	if (ledgeTimer[victim] != INVALID_HANDLE)
-	{
-		CloseHandle(ledgeTimer[victim]);
-		ledgeTimer[victim] = INVALID_HANDLE;
-	}
+	ResetKarma(victim);
 
 	if(!g_bEnabled) return;
 
 	ledgeTimer[victim] = CreateTimer(0.1, Timer_CheckJockeyRideLedge, victim, TIMER_REPEAT);
 }
 
-public void event_jockeyRideEndPre(Event event, const char[] name, bool dontBroadcast)
+void event_jockeyRideEndPre(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	int victim = GetClientOfUserId(event.GetInt("victim"));
@@ -1662,29 +1252,29 @@ public void event_jockeyRideEndPre(Event event, const char[] name, bool dontBroa
 		CreateTimer(0.7, EndLastJockey, victim, TIMER_FLAG_NO_MAPCHANGE);
 	}
 
-	else if (!IsPlayerAlive(client) && ledgeTimer[victim] == INVALID_HANDLE)
+	else if (!IsPlayerAlive(client) && ledgeTimer[victim] == null)
 	{
 		TriggerTimer(CreateTimer(0.1, Timer_CheckJockeyRideLedge, victim, TIMER_FLAG_NO_MAPCHANGE));
 	}
 }
 
 // For when a survivor cannot hang. Either shallow water like the passing and memorial bridge, or last survivor.
-public Action Timer_CheckJockeyRideLedge(Handle timer, any client)
+Action Timer_CheckJockeyRideLedge(Handle m_hTimer, any client)
 {
 	if (!IsClientInGame(client) || !IsPlayerAlive(client) || L4D_GetClientTeam(client) != L4DTeam_Survivor)
 	{
-		ledgeTimer[client] = INVALID_HANDLE;
+		ledgeTimer[client] = null;
 		return Plugin_Stop;
 	}
 	else if (L4D_GetAttackerJockey(client) == 0)
 	{
-		ledgeTimer[client] = INVALID_HANDLE;
+		ledgeTimer[client] = null;
 		return Plugin_Stop;
 	}
 
 	else if (GetEntProp(client, Prop_Send, "m_isHangingFromLedge"))
 	{
-		ledgeTimer[client] = INVALID_HANDLE;
+		ledgeTimer[client] = null;
 		return Plugin_Stop;
 	}
 
@@ -1692,7 +1282,7 @@ public Action Timer_CheckJockeyRideLedge(Handle timer, any client)
 		return Plugin_Continue;
 
 	// Something else is calculating karma so who cares?
-	else if (GetAnyLastKarma(client) != 0)
+	else if (GetAnyLastKarma(client) > 0)
 		return Plugin_Continue;
 
 	float fOrigin[3], fEndOrigin[3], fMins[3], fMaxs[3];
@@ -1717,39 +1307,39 @@ public Action Timer_CheckJockeyRideLedge(Handle timer, any client)
 
 	AttachKarmaToVictim(client, L4D_GetAttackerJockey(client), KT_Jockey);
 
-	if (victimTimer[client].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[client].timer);
-		victimTimer[client].timer = INVALID_HANDLE;
-		victimTimer[client].dp    = null;
-	}
+	delete victimTimer[client].m_hTimer;
 
-	victimTimer[client].timer = CreateDataTimer(1.0, Timer_CheckVictim, victimTimer[client].dp, TIMER_REPEAT);
+	DataPack hPack;
 
-	victimTimer[client].dp.WriteFloat(0.0);
-	victimTimer[client].dp.WriteCell(client);
-	victimTimer[client].dp.WriteCell(ledgeTimer[client]);
+	victimTimer[client].m_hTimer = CreateDataTimer(1.0, Timer_CheckVictim, hPack, TIMER_REPEAT);
+	victimTimer[client].m_fSecondsLeft = 0.0;
 
-	// AnnounceKarma deletes this timer to avoid infinite karma spam.
-	TriggerTimer(victimTimer[client].timer);
+	hPack.WriteFloat(0.0);
+	hPack.WriteCell(client);
+	hPack.WriteCell(ledgeTimer[client]);
+
+	// AnnounceKarma deletes this m_hTimer to avoid infinite karma spam.
+	TriggerTimer(victimTimer[client].m_hTimer);
 
 	return Plugin_Continue;
 }
 
-public Action EndLastJockey(Handle timer, any victim)
+Action EndLastJockey(Handle m_hTimer, any victim)
 {
-	JockRegisterTimer[victim] = INVALID_HANDLE;
+	JockRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public void event_tongueGrabOrRelease(Event event, const char[] name, bool dontBroadcast)
+void event_tongueGrabOrRelease(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	int victim = GetClientOfUserId(event.GetInt("victim"));
 
 	if (!g_bEnabled || !client || !IsClientInGame(client)
 		|| !victim || !IsClientInGame(victim)) return;
+
+	ResetKarma(victim);
 
 	AttachKarmaToVictim(victim, client, KT_Smoke);
 
@@ -1760,34 +1350,32 @@ public void event_tongueGrabOrRelease(Event event, const char[] name, bool dontB
 	preJumpHeight[victim]      = fOrigin[2];
 	SmokeRegisterTimer[victim] = CreateTimer(0.7, EndLastSmoker, victim);
 
-	if (victimTimer[victim].timer != INVALID_HANDLE)
-	{
-		CloseHandle(victimTimer[victim].timer);
-		victimTimer[victim].timer = INVALID_HANDLE;
-		victimTimer[victim].dp    = null;
-	}
+	delete victimTimer[victim].m_hTimer;
 
 	if(!g_bEnabled) return;
 
-	victimTimer[victim].timer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, victimTimer[victim].dp, TIMER_REPEAT);
+	DataPack hPack;
 
-	victimTimer[victim].dp.WriteFloat(SMOKE_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
-	victimTimer[victim].dp.WriteCell(victim);
-	victimTimer[victim].dp.WriteCell(INVALID_HANDLE);
+	victimTimer[victim].m_hTimer = CreateDataTimer(CHARGE_CHECKING_INTERVAL, Timer_CheckVictim, hPack, TIMER_REPEAT);
+	victimTimer[victim].m_fSecondsLeft = SMOKE_SECONDS_NEEDED_AGAINST_LEDGE_HANG;
+
+	hPack.WriteFloat(SMOKE_SECONDS_NEEDED_AGAINST_LEDGE_HANG);
+	hPack.WriteCell(victim);
+	hPack.WriteCell(INVALID_HANDLE);
 }
 
-public Action EndLastSmoker(Handle timer, any victim)
+Action EndLastSmoker(Handle m_hTimer, any victim)
 {
-	SmokeRegisterTimer[victim] = INVALID_HANDLE;
+	SmokeRegisterTimer[victim] = null;
 
 	return Plugin_Continue;
 }
 
-public Action Timer_CheckCharge(Handle timer, any client)
+Action Timer_CheckCharge(Handle m_hTimer, any client)
 {
 	if (!client || !IsClientInGame(client) || !IsPlayerAlive(client))
 	{
-		chargerTimer[client] = INVALID_HANDLE;
+		chargerTimer[client] = null;
 		return Plugin_Stop;
 	}
 
@@ -1821,7 +1409,7 @@ public Action Timer_CheckCharge(Handle timer, any client)
 
 	float fPlaneNormal[3];
 	// For bird charges to find if it's a slope.
-	TR_GetPlaneNormal(INVALID_HANDLE, fPlaneNormal);
+	TR_GetPlaneNormal(null, fPlaneNormal);
 
 	// 0.0 is also flat apparently.
 	if (fPlaneNormal[2] < 0.7 && fPlaneNormal[2] != 0.0)
@@ -1873,17 +1461,16 @@ public Action Timer_CheckCharge(Handle timer, any client)
 	if (iSize > 0)
 	{
 		AnnounceKarma(client, victim, KT_Charge, false, false, chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
+		chargerTimer[client] = null;
 		return Plugin_Stop;
 	}
-
-	else if (g_bkarmaBirdCharge)
+	else
 	{
 		// 0.0 is also flat apparently.
 		if ((fPlaneNormal[2] >= 0.7 || fPlaneNormal[2] == 0.0) && !CanClientSurviveFall(victim, catchHeight[client] - fEndOrigin[2]))
 		{
 			AnnounceKarma(client, victim, KT_Charge, true, false, chargerTimer[client]);
-			chargerTimer[client] = INVALID_HANDLE;
+			chargerTimer[client] = null;
 			return Plugin_Stop;
 		}
 	}
@@ -1891,7 +1478,7 @@ public Action Timer_CheckCharge(Handle timer, any client)
 	return Plugin_Continue;
 }
 
-public bool TraceFilter_DontHitPlayersAndClips(int entity, int contentsMask)
+bool TraceFilter_DontHitPlayersAndClips(int entity, int contentsMask)
 {
 	if (IsEntityPlayer(entity))
 		return false;
@@ -1908,7 +1495,7 @@ public bool TraceFilter_DontHitPlayersAndClips(int entity, int contentsMask)
 	return true;
 }
 
-public bool TraceEnum_TriggerHurt(int entity, ArrayList aEntities)
+bool TraceEnum_TriggerHurt(int entity, ArrayList aEntities)
 {
 	// If we hit the world, stop enumerating.
 	if (!entity)
@@ -1969,34 +1556,29 @@ public bool TraceEnum_TriggerHurt(int entity, ArrayList aEntities)
 
 // Client will be negative if the karma is done by a bot and the bot left the server.
 // In that case, client = -1 * zombieclass
-void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfirmed, Handle hDontKillHandle = INVALID_HANDLE, Handle hDontKillHandle2 = INVALID_HANDLE)
+void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfirmed, Handle hDontKillHandle = null, Handle hDontKillHandle2 = INVALID_HANDLE)
 {
 	char KarmaName[64];
 	FormatEx(KarmaName, sizeof(KarmaName), karmaNames[type]);
 
-	if (victimTimer[victim].timer != INVALID_HANDLE && hDontKillHandle != victimTimer[victim].timer && hDontKillHandle2 != victimTimer[victim].timer)
+	if (victimTimer[victim].m_hTimer != null && hDontKillHandle != victimTimer[victim].m_hTimer && hDontKillHandle2 != victimTimer[victim].m_hTimer)
 	{
-		CloseHandle(victimTimer[victim].timer);
-		victimTimer[victim].timer = INVALID_HANDLE;
-		victimTimer[victim].dp    = null;
+		delete victimTimer[victim].m_hTimer;
 	}
 
-	if (ledgeTimer[victim] != INVALID_HANDLE && hDontKillHandle != ledgeTimer[victim] && hDontKillHandle2 != ledgeTimer[victim])
+	if (ledgeTimer[victim] != null && hDontKillHandle != ledgeTimer[victim] && hDontKillHandle2 != ledgeTimer[victim])
 	{
-		CloseHandle(ledgeTimer[victim]);
-		ledgeTimer[victim] = INVALID_HANDLE;
+		delete ledgeTimer[victim];
 	}
 
-	if (client > 0 && chargerTimer[client] != INVALID_HANDLE && hDontKillHandle != chargerTimer[client] && hDontKillHandle2 != chargerTimer[client])
+	if (client > 0 && chargerTimer[client] != null && hDontKillHandle != chargerTimer[client] && hDontKillHandle2 != chargerTimer[client])
 	{
-		CloseHandle(chargerTimer[client]);
-		chargerTimer[client] = INVALID_HANDLE;
+		delete chargerTimer[client];
 	}
 
-	if (BlockRegisterTimer[victim] != INVALID_HANDLE)
+	if (BlockRegisterTimer[victim] != null)
 	{
-		CloseHandle(BlockRegisterTimer[victim]);
-		BlockRegisterTimer[victim] = INVALID_HANDLE;
+		delete BlockRegisterTimer[victim] ;
 	}
 
 	// Enforces a one karma per 15 seconds per victim, exlcuding height checkers.
@@ -2010,23 +1592,23 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 
 		EmitSoundToAll(SOUND_EFFECT);
 
-		if (g_bModeSwitch || cooldownTimer != INVALID_HANDLE)
-			SlowKarmaCouple(victim, client, KarmaName);
+		//if (g_bModeSwitch || cooldownTimer != null)
+		//{
+		//	SlowKarmaCouple(victim, client, KarmaName);
+		//}
+		//else
+		//{
+		SlowWorldTimeSpeed(_, _, _, g_fkarmaSlowTimeOnServer, g_fkarmaSlowSpeed);
+		//}
 
-		else
-		{
-			SlowTime();
-		}
-/*
 		if (type == KT_Jump)
 		{
-			CPrintToChatAll("[{olive}%s{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}, for great justice!!", g_sPrefix, LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "Bird" : "Karma", KarmaName, victim);
+			CPrintToChatAll("[{olive}TS{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}, for great justice!!", LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "Bird" : "Karma", KarmaName, victim);
 		}
 		else
 		{
-			CPrintToChatAll("[{olive}%s{default}] {green}%s{default} %s %s {olive}%N{default}, for great justice!!", g_sPrefix, LastKarma[victim][type].artistName, bBird ? "Bird" : "Karma", KarmaName, victim);
+			CPrintToChatAll("[{olive}TS{default}] {green}%s{default} %s %s {olive}%N{default}, for great justice!!", LastKarma[victim][type].artistName, bBird ? "Bird" : "Karma", KarmaName, victim);
 		}
-*/
 	}
 
 	if (type != KT_Jump)
@@ -2058,6 +1640,23 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 		Call_PushCell(g_bkarmaOnlyConfirmed);
 
 		Call_Finish();
+
+		if(bKillConfirmed)
+		{
+			Call_StartForward(fw_OnRPGKarmaEventPost);
+
+			Call_PushCell(victim);
+			Call_PushCell(victim);
+			Call_PushString(KarmaName);
+			Call_PushArray(LastKarma[victim][type].lastPos, 3);
+			Call_PushArray(LastKarma[victim][type].artistWeapons, 64);
+			Call_PushArray(LastKarma[victim][type].artistHealth, 2);
+			Call_PushCell(LastKarma[victim][type].artistTimestamp);
+			Call_PushString(LastKarma[victim][type].artistSteamId);
+			Call_PushString(LastKarma[victim][type].artistName);
+
+			Call_Finish();
+		}
 	}
 	else
 	{
@@ -2067,6 +1666,20 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 
 			Call_PushCell(victim);
 
+			Call_PushArray(LastKarma[victim][type].lastPos, 3);
+			Call_PushArray(LastKarma[victim][type].artistWeapons, 64);
+			Call_PushArray(LastKarma[victim][type].artistHealth, 2);
+			Call_PushCell(LastKarma[victim][type].artistTimestamp);
+			Call_PushString(LastKarma[victim][type].artistSteamId);
+			Call_PushString(LastKarma[victim][type].artistName);
+
+			Call_Finish();
+
+			Call_StartForward(fw_OnRPGKarmaEventPost);
+
+			Call_PushCell(victim);
+			Call_PushCell(victim);
+			Call_PushString(KarmaName);
 			Call_PushArray(LastKarma[victim][type].lastPos, 3);
 			Call_PushArray(LastKarma[victim][type].artistWeapons, 64);
 			Call_PushArray(LastKarma[victim][type].artistHealth, 2);
@@ -2097,39 +1710,37 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 }
 
 // This does nothing except avoid double freezing of time.
-public Action RestoreSlowmo(Handle Timer)
+/*Action RestoreSlowmo(Handle Timer)
 {
-	cooldownTimer = INVALID_HANDLE;
+	cooldownTimer = null;
 
 	return Plugin_Continue;
-}
+}*/
 
-void SlowKarmaCouple(int victim, int attacker, char[] sKarmaName)
+/*void SlowKarmaCouple(int victim, int attacker, char[] sKarmaName)
 {
 	// Karma can register a lot of time after the register because of ledge hang, so no random slowdowns...
 	if (StrEqual(sKarmaName, "Charge") && attacker > 0 && IsPlayerAlive(attacker))
-		SetEntPropFloat(attacker, Prop_Send, "m_flLaggedMovementValue", g_fkarmaSlow);
+		SetEntPropFloat(attacker, Prop_Send, "m_flLaggedMovementValue", g_fkarmaSlowSpeed);
 
-	SetEntPropFloat(victim, Prop_Send, "m_flLaggedMovementValue", g_fkarmaSlow);
+	SetEntPropFloat(victim, Prop_Send, "m_flLaggedMovementValue", g_fkarmaSlowSpeed);
 
-	Handle data = CreateDataPack();
+	DataPack data;
+	CreateDataTimer(g_fkarmaSlowTimeOnCouple, _revertCoupleTimeSlow, data, TIMER_FLAG_NO_MAPCHANGE);
 	WritePackCell(data, GetClientUserId(victim));
 
-	if (StrEqual(sKarmaName, "Charge") && attacker > 0 && IsPlayerAlive(attacker))
+	if (StrEqual(sKarmaName, "Charge") && attacker > 0 && IsClientInGame(attacker) && IsPlayerAlive(attacker))
 		WritePackCell(data, GetClientUserId(attacker));
 
 	else
 		WritePackCell(data, 0);
-
-	CreateTimer(g_fkarmaSlowTimeOnCouple, _revertCoupleTimeSlow, data, TIMER_FLAG_NO_MAPCHANGE);
 }
 
-public Action _revertCoupleTimeSlow(Handle timer, Handle data)
+Action _revertCoupleTimeSlow(Handle m_hTimer, Handle data)
 {
 	ResetPack(data);
 	int victim   = GetClientOfUserId(ReadPackCell(data));
 	int attacker = GetClientOfUserId(ReadPackCell(data));
-	CloseHandle(data);
 
 	if (victim != 0)
 	{
@@ -2143,10 +1754,13 @@ public Action _revertCoupleTimeSlow(Handle timer, Handle data)
 
 	return Plugin_Continue;
 }
+*/
 
 bool IsPinnedByCharger(int client)
 {
-	return GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1 || GetEntPropEnt(client, Prop_Send, "m_pummelAttacker") != -1;
+	return GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1 
+		|| GetEntPropEnt(client, Prop_Send, "m_pummelAttacker") != -1 
+		|| L4D2_GetQueuedPummelAttacker(client) != -1;
 }
 
 int GetCarryVictim(int client)
@@ -2162,41 +1776,40 @@ int GetCarryVictim(int client)
 	return victim;
 }
 
-void SlowTime(const char[] re_Acceleration = "2.0", const char[] minBlendRate = "1.0", const char[] blendDeltaMultiplier = "2.0", float fTime = -1.0, float fSlowPower = -65535.0)
+void SlowWorldTimeSpeed(const char[] re_Acceleration = "2.0", const char[] minBlendRate = "1.0", const char[] blendDeltaMultiplier = "2.0", float fTime = 0.0, float fSlowPower = 1.0)
 {
+	if(IsValidEntRef(g_iEntRef_func_timescale))
+	{
+		AcceptEntityInput(g_iEntRef_func_timescale, "Stop");
+		AcceptEntityInput(g_iEntRef_func_timescale, "Reset");
+		AcceptEntityInput(g_iEntRef_func_timescale, "kill");
+	}
+
 	char desiredTimeScale[16];
 	char sAddOutput[64];
 
-	if (fSlowPower == -65535.0)
-	{
-		fSlowPower = g_fkarmaSlow;
-
-		if (fSlowPower < 0.03)
-			fSlowPower = 0.03;
-	}
+	if (fSlowPower < 0.03)
+		fSlowPower = 0.03;
 
 	FloatToString(fSlowPower, desiredTimeScale, sizeof(desiredTimeScale));
-
-	int ent = CreateEntityByName("func_timescale");
-
-	DispatchKeyValue(ent, "desiredTimescale", desiredTimeScale);
-	DispatchKeyValue(ent, "acceleration", re_Acceleration);
-	DispatchKeyValue(ent, "minBlendRate", minBlendRate);
-	DispatchKeyValue(ent, "blendDeltaMultiplier", blendDeltaMultiplier);
-	DispatchKeyValue(ent, "targetname", "THE WORLD");
-
-	DispatchSpawn(ent);
 
 	if (fSlowPower == 1.0 || !g_bRoundStarted)
 	{
 		int theWorldEnt = -1;
-
-		while ((theWorldEnt = FindEntityByTargetname(theWorldEnt, "THE WORLD", true, false)) != -1)
+		static char EntTargetName[64];
+		while ((theWorldEnt = FindEntityByClassname(theWorldEnt, "func_timescale")) != -1)
 		{
+			if (!IsValidEntity(theWorldEnt))
+				continue;
+
+			GetEntPropString(theWorldEnt, Prop_Data, "m_iName", EntTargetName, sizeof(EntTargetName));
+
+			if (StrEqual(EntTargetName, "THE WORLD", false) == false) continue;
+
 			AcceptEntityInput(theWorldEnt, "Stop");
 			AcceptEntityInput(theWorldEnt, "Reset");
 
-			// Must compensate for the timescale making every single timer slower, both CreateTimer type timers and OnUser1 type timers
+			// Must compensate for the timescale making every single m_hTimer slower, both CreateTimer type timers and OnUser1 type timers
 			FormatEx(sAddOutput, sizeof(sAddOutput), "OnUser2 !self:Kill::3.0:1");
 			SetVariantString(sAddOutput);
 			AcceptEntityInput(theWorldEnt, "AddOutput");
@@ -2205,24 +1818,37 @@ void SlowTime(const char[] re_Acceleration = "2.0", const char[] minBlendRate = 
 	}
 	else
 	{
+		int ent = CreateEntityByName("func_timescale");
+		if( CheckIfEntitySafe(ent) == false) return;
+
+		DispatchKeyValue(ent, "desiredTimescale", desiredTimeScale);
+		DispatchKeyValue(ent, "acceleration", re_Acceleration);
+		DispatchKeyValue(ent, "minBlendRate", minBlendRate);
+		DispatchKeyValue(ent, "blendDeltaMultiplier", blendDeltaMultiplier);
+		DispatchKeyValue(ent, "targetname", "THE WORLD");
+
+		DispatchSpawn(ent);
+
 		AcceptEntityInput(ent, "Start");
 
-		if (fTime == -1.0)
-			fTime = g_fkarmaSlowTimeOnServer;
+		if (fTime > 0.0)
+		{
+			// Must compensate for the timescale making every single m_hTimer slower, both CreateTimer type timers and OnUser1 type timers
+			FormatEx(sAddOutput, sizeof(sAddOutput), "OnUser1 !self:Stop::%.2f:1", fTime * fSlowPower);
+			SetVariantString(sAddOutput);
+			AcceptEntityInput(ent, "AddOutput");
+			AcceptEntityInput(ent, "FireUser1");
 
-		// Must compensate for the timescale making every single timer slower, both CreateTimer type timers and OnUser1 type timers
-		FormatEx(sAddOutput, sizeof(sAddOutput), "OnUser1 !self:Stop::%.2f:1", fTime * fSlowPower);
-		SetVariantString(sAddOutput);
-		AcceptEntityInput(ent, "AddOutput");
-		AcceptEntityInput(ent, "FireUser1");
+			FormatEx(sAddOutput, sizeof(sAddOutput), "OnUser2 !self:Kill::%.2f:1", (fTime * fSlowPower) + 5.0);
+			SetVariantString(sAddOutput);
+			AcceptEntityInput(ent, "AddOutput");
+			AcceptEntityInput(ent, "FireUser2");
 
-		FormatEx(sAddOutput, sizeof(sAddOutput), "OnUser2 !self:Kill::%.2f:1", (fTime * fSlowPower) + 5.0);
-		SetVariantString(sAddOutput);
-		AcceptEntityInput(ent, "AddOutput");
-		AcceptEntityInput(ent, "FireUser2");
+			// Start counting the cvarCooldown from after the freeze ends, also this m_hTimer needs to account for the timescale.
+			//cooldownTimer = CreateTimer((fTime * fSlowPower) + g_fCooldown, RestoreSlowmo);
+		}
 
-		// Start counting the cvarCooldown from after the freeze ends, also this timer needs to account for the timescale.
-		cooldownTimer = CreateTimer((fTime * fSlowPower) + g_fCooldown, RestoreSlowmo);
+		g_iEntRef_func_timescale = EntIndexToEntRef(ent);
 	}
 }
 
@@ -2331,7 +1957,7 @@ bool IsClientAffectedByFling(int client)
 
 void RegisterCaptor(int victim)
 {
-	if (BlockRegisterTimer[victim] != INVALID_HANDLE)
+	if (BlockRegisterTimer[victim] != null)
 		return;
 
 	int charger = L4D_GetAttackerCharger(victim);
@@ -2380,7 +2006,7 @@ int GetAnyLastKarma(int victim, int& type = 0)
 
 bool FindAnyRegisterBlocks(int victim)
 {
-	return BlockRegisterTimer[victim] != INVALID_HANDLE || AllKarmaRegisterTimer[victim] != INVALID_HANDLE || SlapRegisterTimer[victim] != INVALID_HANDLE || JockRegisterTimer[victim] != INVALID_HANDLE || PunchRegisterTimer[victim] != INVALID_HANDLE || SmokeRegisterTimer[victim] != INVALID_HANDLE || JumpRegisterTimer[victim] != INVALID_HANDLE;
+	return BlockRegisterTimer[victim] != null || AllKarmaRegisterTimer[victim] != null || SlapRegisterTimer[victim] != null || JockRegisterTimer[victim] != null || PunchRegisterTimer[victim] != null || SmokeRegisterTimer[victim] != null || JumpRegisterTimer[victim] != null;
 }
 
 bool CanClientSurviveFall(int client, float fTotalDistance)
@@ -2390,7 +2016,7 @@ bool CanClientSurviveFall(int client, float fTotalDistance)
 	// 137.5 is the lowest height of fall damage, making you take 0.000000 damage.
 	float fDistancesVsDamages[][] = {
 
-		{157.5,   2.777781    },
+		{ 157.5,  2.777781    },
 		{ 177.5,  11.111101   },
 		{ 197.5,  24.999961   },
 		{ 220.0,  44.444358   },
@@ -2608,29 +2234,6 @@ bool IsLastStandingSurvivor(int client)
 	return true;
 }
 
-int FindEntityByTargetname(int startEnt, const char[] TargetName, bool caseSensitive, bool bContains)    // Same as FindEntityByClassname with sensitivity and contain features
-{
-	int entCount = GetEntityCount();
-
-	char EntTargetName[300];
-
-	for (int i = startEnt + 1; i < entCount; i++)
-	{
-		if (!IsValidEntity(i))
-			continue;
-
-		else if (!IsValidEdict(i))
-			continue;
-
-		GetEntPropString(i, Prop_Data, "m_iName", EntTargetName, sizeof(EntTargetName));
-
-		if ((StrEqual(EntTargetName, TargetName, caseSensitive) && !bContains) || (StrContains(EntTargetName, TargetName, caseSensitive) != -1 && bContains))
-			return i;
-	}
-
-	return -1;
-}
-
 void AttachKarmaToVictim(int victim, int attacker, int type, bool bLastPos = false)
 {
 	LastKarma[victim][type].artist = attacker;
@@ -2673,12 +2276,12 @@ void StripKarmaArtistFromVictim(int victim, int type)
 	{
 		for (int i = 0; i < KarmaType_MAX; i++)
 		{
-			LastKarma[victim][i].artist = -1;
+			LastKarma[victim][i].artist = 0;
 		}
 	}
 	else
 	{
-		LastKarma[victim][type].artist = -1;
+		LastKarma[victim][type].artist = 0;
 	}
 }
 
@@ -2757,4 +2360,173 @@ void TransferKarmaToVictim(int toVictim, int fromVictim)
 	}
 
 	DettachKarmaFromVictim(fromVictim, KarmaType_MAX);
+}
+
+bool CheckIfEntitySafe(int entity)
+{
+	if(entity == -1) return false;
+
+	if(	entity > ENTITY_SAFE_LIMIT)
+	{
+		AcceptEntityInput(entity, "Kill");
+		return false;
+	}
+	return true;
+}
+
+void ResetKarma(int client)
+{
+	BlockAnnounce[client] = false;
+	apexHeight[client]    = -65535.0;
+	catchHeight[client]   = -65535.0;
+
+	delete chargerTimer[client];
+
+	delete victimTimer[client].m_hTimer;
+
+	delete ledgeTimer[client];
+	delete AllKarmaRegisterTimer[client];
+	delete BlockRegisterTimer[client];
+	delete JockRegisterTimer[client];
+	delete SlapRegisterTimer[client];
+	delete PunchRegisterTimer[client];
+	delete JumpRegisterTimer[client];
+	delete SmokeRegisterTimer[client];
+}
+
+void OnCheckKarmaZoneTouch(int victim, int entity, const char[] zone_name, int pinner = 0)
+{
+	if (!IsPlayerAlive(victim) || L4D_IsPlayerGhost(victim))
+		return;
+
+	// This is for bad out of bounds areas that we don't want to exist.
+	if (StrContains(zone_name, "ForcePummel", false) != -1)
+	{
+		L4DTeam team = L4D_GetClientTeam(victim);
+
+		if (team == L4DTeam_Infected)
+		{
+			if (L4D2_GetPlayerZombieClass(victim) == L4D2ZombieClass_Charger)
+			{
+				int trueVictim = L4D_GetVictimCarry(victim);
+
+				if (trueVictim != 0)
+				{
+					int ability = L4D_GetPlayerCustomAbility(victim);
+
+					if (ability > MaxClients)
+					{
+						// Make game think we're on ground because you don't pummel mid-air.
+						SetEntityFlags(victim, GetEntityFlags(victim) | FL_ONGROUND);
+
+						// Set time at which we started charging to the beginning of the map, usually over 100 seconds.
+						SetEntPropFloat(ability, Prop_Send, "m_chargeStartTime", 0.0);
+
+						SetEntityFlags(victim, GetEntityFlags(victim) | FL_ONGROUND);
+
+						TeleportEntity(victim, NULL_VECTOR, NULL_VECTOR, view_as<float>({ 0.0, 0.0, 0.0 }));
+					}
+				}
+			}
+		}
+	}
+
+	if (StrContains(zone_name, "KarmaKill", false) == -1)
+		return;
+
+	L4DTeam team = L4D_GetClientTeam(victim);
+
+	int trueVictim = 0;
+
+	if (team == L4DTeam_Infected)
+	{
+		trueVictim = L4D_GetPinnedSurvivor(victim);
+
+		if (trueVictim != 0)
+		{
+			// Thanks for Haigen, smokers can be in karma zone while the victim is not, must wait for survivors to trip that alarm.
+			if(L4D2_GetPlayerZombieClass(victim) != L4D2ZombieClass_Smoker)
+			{
+				OnCheckKarmaZoneTouch(trueVictim, entity, zone_name, victim);
+			}
+
+			if (!IsPlayerAlive(trueVictim))
+				CreateTimer(0.1, Timer_ResetAbility, GetClientUserId(victim), TIMER_FLAG_NO_MAPCHANGE);
+		}
+	}
+
+	bool bInfectedKiller = false;
+
+	if (StrContains(zone_name, "KarmaKillAll", false) != -1 || StrContains(zone_name, "KarmaKillAny", false) != -1)
+		bInfectedKiller = true;
+
+	if (team == L4DTeam_Infected && !bInfectedKiller)
+		return;
+
+	float fOrigin[3], fZoneOrigin[3];
+
+	GetEntPropVector(victim, Prop_Data, "m_vecAbsOrigin", fOrigin);
+	GetEntPropVector(entity, Prop_Data, "m_vecAbsOrigin", fZoneOrigin);
+
+	// 62.0 is player height
+	if (fOrigin[2] + 62.0 < fZoneOrigin[2])
+	{
+		float fVelocity[3];
+		GetEntPropVector(victim, Prop_Data, "m_vecVelocity", fVelocity);
+
+		if (fVelocity[2] > 0.0)
+			fVelocity[2] = 0.0;
+
+		TeleportEntity(victim, NULL_VECTOR, NULL_VECTOR, fVelocity);
+
+		return;
+	}
+
+	if (team == L4DTeam_Survivor)
+	{
+		if (IsDoubleCharged(victim) && pinner != 0)
+		{
+			ClearAllPinners(victim);
+
+			float fPinnerOrigin[3];
+
+			GetEntPropVector(pinner, Prop_Data, "m_vecAbsOrigin", fPinnerOrigin);
+
+			TeleportEntity(victim, fPinnerOrigin, NULL_VECTOR, NULL_VECTOR);
+		}
+
+		// Enable ability to register karma kills by simulating fall damage
+		delete AllKarmaRegisterTimer[victim];
+
+		AllKarmaRegisterTimer[victim] = CreateTimer(3.0, RegisterAllKarmaDelay, victim);
+
+		if (g_bAllowDefib)
+		{
+		// Makes body undefibable.
+		SetEntProp(victim, Prop_Send, "m_isFallingFromLedge", true);
+		}
+
+		// Incap & kill, this should not trigger the SDKHook_OnTakeDamage
+		SDKHooks_TakeDamage(victim, victim, victim, 10000.0, DMG_FALL);
+		SDKHooks_TakeDamage(victim, victim, victim, 10000.0, DMG_FALL);
+
+		// Safety measures.
+		if (IsPlayerAlive(victim))
+		{
+			ForcePlayerSuicide(victim);
+
+			int type;
+			int lastKarma = GetAnyLastKarma(victim, type);
+
+			if (lastKarma > 0 && IsClientInGame(lastKarma))
+				AnnounceKarma(lastKarma, victim, type, false, true);
+		}
+	}
+}
+
+bool IsValidEntRef(int entity)
+{
+	if( entity && EntRefToEntIndex(entity) != INVALID_ENT_REFERENCE)
+		return true;
+	return false;
 }

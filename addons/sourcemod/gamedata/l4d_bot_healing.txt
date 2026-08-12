@@ -4,7 +4,7 @@
 	{
 		"MemPatches"
 		{
-			"BotHealing_FirstAid_A"
+			"BotHealing_FirstAid_A" // 40.0
 			{
 				"signature"		"SurvivorBot::UseHealingItems"
 				"windows"
@@ -15,12 +15,12 @@
 				}
 				"linux"
 				{
-					"offset"	"35Bh"
+					"offset"	"2ECh"
 					"verify"	"\xD9\x83"
 					"patch"		"\xD9\x05\x90\x90\x90\x90"
 				}
 			}
-			"BotHealing_FirstAid_B"
+			"BotHealing_FirstAid_B" // 40.0
 			{
 				"signature"		"SurvivorBot::UseHealingItems"
 				"windows"
@@ -31,13 +31,13 @@
 				}
 				"linux"
 				{
-					"offset"	"3E3h"
+					"offset"	"367h"
 					"verify"	"\xD9\x83"
 					"patch"		"\xD9\x05\x90\x90\x90\x90"
 				}
 			}
 
-			"BotHealing_Pills_A"
+			"BotHealing_Pills_A" // 60.0
 			{
 				"signature"		"SurvivorBot::UseHealingItems"
 				"windows"
@@ -48,12 +48,12 @@
 				}
 				"linux"
 				{
-					"offset"	"341h"
+					"offset"	"2D6h"
 					"verify"	"\xD9\x83"
 					"patch"		"\xD9\x05\x90\x90\x90\x90"
 				}
 			}
-			"BotHealing_Pills_B"
+			"BotHealing_Pills_B" // 60.0
 			{
 				"signature"		"SurvivorBot::UseHealingItems"
 				"windows"
@@ -64,7 +64,7 @@
 				}
 				"linux"
 				{
-					"offset"	"421h"
+					"offset"	"39Eh"
 					"verify"	"\xD9\x83"
 					"patch"		"\xD9\x05\x90\x90\x90\x90"
 				}

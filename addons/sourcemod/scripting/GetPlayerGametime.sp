@@ -18,6 +18,7 @@ public Plugin myinfo =
 
 int	   i_Count[MAXPLAYERS + 1];
 int	   i_PlayerTime[MAXPLAYERS + 1];
+bool   b_IsProcessingLimitPlayer[MAXPLAYERS + 1];
 bool   CheckPluginLate = false;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
@@ -377,8 +378,18 @@ void CheckPlayerGametime(int client)
 */
 void LimitPlayer(int client)
 {
+	// 防重入: ChangeClientToSpec 移动玩家时会触发 player_team 事件重入本函数,无限递归导致栈溢出
+	if (b_IsProcessingLimitPlayer[client]) return;
 	if (!IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
+
+	b_IsProcessingLimitPlayer[client] = true;
+	LimitPlayerInner(client);
+	b_IsProcessingLimitPlayer[client] = false;
+}
+
+void LimitPlayerInner(int client)
+{
 #if DEBUG
 	PrintToChatAll("%N i_PlayerTime=%d", client, i_PlayerTime[client]);
 #endif

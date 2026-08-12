@@ -3,23 +3,16 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define TEAM_SPECTATOR 1
-#define CVAR_FLAGS			FCVAR_NOTIFY
-
-char g_sPrefixType[32];
-ConVar g_hCvarAllow, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hPrefixType;
-ConVar g_hCvarMPGameMode;
-bool g_bCvarAllow, g_bMapStarted;
-
 public Plugin myinfo = 
 {
 	name = "Spectator Prefix",
 	author = "Nana & Harry Potter",
 	description = "when player in spec team, add prefix",
-	version = "1.2",
-	url = "https://steamcommunity.com/id/fbef0102/"
+	version = "1.4-2025/2/27",
+	url = "https://steamcommunity.com/profiles/76561198026784913"
 };
 
+bool bLate;
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) 
 {
 	EngineVersion test = GetEngineVersion();
@@ -30,17 +23,35 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		return APLRes_SilentFailure;
 	}
 	
+	bLate = late;
 	return APLRes_Success; 
 }
 
+#define TEAM_SPECTATOR 1
+#define CVAR_FLAGS			FCVAR_NOTIFY
+
+
+ConVar g_hCvarAllow, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hPrefixType;
+ConVar g_hCvarMPGameMode;
+char g_sPrefixType[32];
+
+bool 
+	g_bCvarAllow, g_bMapStarted,
+	g_bPostAdminCheck[MAXPLAYERS+1],
+	g_bPlayerCanChangedName[MAXPLAYERS+1];
+
+Handle 
+	g_hCheckPlayersTimer,
+	g_hPlayerChangedNameTimer[MAXPLAYERS+1];
+
 public void OnPluginStart()
 {
-	g_hCvarAllow = CreateConVar(	"l4d_spectator_prefix_allow",			"1",					"0=Plugin off, 1=Plugin on.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	g_hCvarModes =	CreateConVar("l4d_spectator_prefix_modes",	"",	"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
-	g_hCvarModesOff = CreateConVar("l4d_spectator_prefix_modes_off",	"",	"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesTog = CreateConVar("l4d_spectator_prefix_modes_tog",   "0", "Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	g_hPrefixType = CreateConVar("l4d_spectator_prefix_type", "(S)", "Determine your preferred type of Spectator Prefix", CVAR_FLAGS);
-	
+	g_hCvarAllow 	= CreateConVar(	"l4d_spectator_prefix_allow",			"1",	"0=Plugin off, 1=Plugin on.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	g_hCvarModes 	= CreateConVar( "l4d_spectator_prefix_modes",			"",		"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
+	g_hCvarModesOff = CreateConVar( "l4d_spectator_prefix_modes_off",		"",		"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
+	g_hCvarModesTog = CreateConVar( "l4d_spectator_prefix_modes_tog",   	"0",	"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
+	g_hPrefixType 	= CreateConVar( "l4d_spectator_prefix_type", 			"(S)",  "Determine your preferred type of Spectator Prefix", CVAR_FLAGS);
+
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);
 	g_hCvarAllow.AddChangeHook(ConVarChanged_Allow);
@@ -50,6 +61,22 @@ public void OnPluginStart()
 	g_hPrefixType.AddChangeHook(ConVarChanged_PrefixType);
 
 	AutoExecConfig(true, "l4d_spectator_prefix");
+
+	if(bLate)
+	{
+		LateLoad();
+	}
+}
+
+void LateLoad()
+{
+    for (int client = 1; client <= MaxClients; client++)
+    {
+        if (!IsClientInGame(client))
+            continue;
+
+        OnClientPostAdminCheck(client);
+    }
 }
 
 public void OnPluginEnd()
@@ -65,26 +92,46 @@ public void OnMapStart()
 public void OnMapEnd()
 {
 	g_bMapStarted = false;
+	delete g_hCheckPlayersTimer;
 }
 
-// ====================================================================================================
-//					CVARS
-// ====================================================================================================
+public void OnClientPostAdminCheck(int client)
+{
+	if(IsFakeClient(client)) return;
+
+	delete g_hPlayerChangedNameTimer[client];
+	g_hPlayerChangedNameTimer[client] = CreateTimer(3.0, Timer_OnPostAdminCheck, client);
+}
+
+public void OnClientDisconnect(int client)
+{
+	if(IsFakeClient(client)) return;
+
+	delete g_hPlayerChangedNameTimer[client];
+	g_bPostAdminCheck[client] = false;
+	g_bPlayerCanChangedName[client] = false;
+}
+
 public void OnConfigsExecuted()
 {
 	IsAllowed();
+
+	if(g_bCvarAllow)
+	{
+		delete g_hCheckPlayersTimer;
+		g_hCheckPlayersTimer = CreateTimer(1.0, Timer_CheckPlayers, _, TIMER_REPEAT);
+	}
 }
 
-public void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	IsAllowed();
 }
 
-public void ConVarChanged_PrefixType(ConVar convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_PrefixType(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	RemoveAllClientPrefix();
 	GetCvars();
-	AddAllClientPrefix();
 }
 
 void GetCvars()
@@ -102,18 +149,19 @@ void IsAllowed()
 	{
 		g_bCvarAllow = true;
 
-		HookEvent("player_team", Event_PlayerTeam, EventHookMode_PostNoCopy);
-		HookEvent("player_changename", Event_NameChanged);
+		HookEvent("player_changename", Event_NameChanged_Post, EventHookMode_Post);
 
-		AddAllClientPrefix();
+		delete g_hCheckPlayersTimer;
+		g_hCheckPlayersTimer = CreateTimer(1.0, Timer_CheckPlayers, _, TIMER_REPEAT);
 	}
 
 	else if( g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false) )
 	{
 		g_bCvarAllow = false;
 
-		UnhookEvent("player_team", Event_PlayerTeam, EventHookMode_PostNoCopy);
-		UnhookEvent("player_changename", Event_NameChanged);
+		UnhookEvent("player_changename", Event_NameChanged_Post, EventHookMode_Post);
+
+		delete g_hCheckPlayersTimer;
 
 		RemoveAllClientPrefix();
 	}
@@ -177,7 +225,7 @@ bool IsAllowedGameMode()
 	return true;
 }
 
-public void OnGamemode(const char[] output, int caller, int activator, float delay)
+void OnGamemode(const char[] output, int caller, int activator, float delay)
 {
 	if( strcmp(output, "OnCoop") == 0 )
 		g_iCurrentMode = 1;
@@ -190,42 +238,69 @@ public void OnGamemode(const char[] output, int caller, int activator, float del
 }
 
 //event
-public Action Event_NameChanged(Event event, const char[] name, bool dontBroadcast) 
+void Event_NameChanged_Post(Event event, const char[] name, bool dontBroadcast) 
 {
-	int client = GetClientOfUserId(GetEventInt(event, "userid"));
-	CreateTimer(0.8,PlayerNameCheck,client,TIMER_FLAG_NO_MAPCHANGE);//延遲0.8秒檢查
+	int userid = event.GetInt("userid");
+	int client = GetClientOfUserId(userid);
+	if(!client || !IsClientInGame(client) || IsFakeClient(client)) return;
+	if(!g_bPostAdminCheck[client]) return;
 
-	return Plugin_Continue;
-}
+	char oldname[256];
+	event.GetString("oldname", oldname, sizeof(oldname));
+	char newname[256];
+	event.GetString("newname", newname, sizeof(newname));
 
-public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast) 
-{
-	int client = GetClientOfUserId(GetEventInt(event, "userid"));
-	CreateTimer(0.8,PlayerNameCheck,client,TIMER_FLAG_NO_MAPCHANGE);//延遲0.8秒檢查
+	if(strcmp(oldname, newname, false) == 0) return;
 
-	return Plugin_Continue;
+	g_bPlayerCanChangedName[client] = false;
+
+	delete g_hPlayerChangedNameTimer[client];
+	g_hPlayerChangedNameTimer[client] = CreateTimer(1.5, Timer_ChangedNameCheck, client);
 }
 
 //timer
-public Action PlayerNameCheck(Handle timer,any client)
+
+Action Timer_OnPostAdminCheck(Handle timer, int client)
 {
-	if(!IsClientInGame(client) || IsFakeClient(client)) return Plugin_Continue;
-	
-	int team = GetClientTeam(client);
-	
-	//PrintToChatAll("client: %N - %d",client,team);
-	if (IsClientAndInGame(client) && !IsFakeClient(client))
+	g_hPlayerChangedNameTimer[client] = null;
+
+	if(IsClientInGame(client) && !IsFakeClient(client))
 	{
-		char sOldname[256], sNewname[256];
-		GetClientName(client, sOldname, sizeof(sOldname));
-		if (team == TEAM_SPECTATOR)
+		g_bPostAdminCheck[client] = true;
+		g_bPlayerCanChangedName[client] = true;
+	}
+
+	return Plugin_Continue;
+}
+
+Action Timer_ChangedNameCheck(Handle timer, int client)
+{
+	g_hPlayerChangedNameTimer[client] = null;
+
+	if(IsClientInGame(client) && !IsFakeClient(client))
+	{
+		g_bPlayerCanChangedName[client] = true;
+	}
+
+	return Plugin_Continue;
+}
+
+Action Timer_CheckPlayers(Handle timer)
+{
+	char sOldname[256], sNewname[256];
+	for(int player = 1; player <= MaxClients; player++)
+	{
+		if(!IsClientInGame(player)) continue;
+		if(IsFakeClient(player)) continue;
+		if(g_bPlayerCanChangedName[player] == false) continue;
+
+		GetClientName(player, sOldname, sizeof(sOldname));
+		if(GetClientTeam(player) == TEAM_SPECTATOR)
 		{
 			if(!CheckClientHasPreFix(sOldname))
 			{
 				Format(sNewname, sizeof(sNewname), "%s%s", g_sPrefixType, sOldname);
-				CS_SetClientName(client, sNewname);
-				
-				//PrintToChatAll("sNewname: %s",sNewname);
+				CS_SetClientName(player, sNewname);
 			}
 		}
 		else
@@ -234,20 +309,20 @@ public Action PlayerNameCheck(Handle timer,any client)
 			{
 				ReplaceString(sOldname, sizeof(sOldname), g_sPrefixType, "", true);
 				strcopy(sNewname,sizeof(sOldname),sOldname);
-				CS_SetClientName(client, sNewname);
+				CS_SetClientName(player, sNewname);
 				
 				//PrintToChatAll("sNewname: %s",sNewname);
 			}
 		}
 	}
-	
+
 	return Plugin_Continue;
 }
 
 //function
 stock bool IsClientAndInGame(int index)
 {
-	if (index > 0 && index < MaxClients)
+	if (index > 0 && index <= MaxClients)
 	{
 		return IsClientInGame(index);
 	}
@@ -256,68 +331,13 @@ stock bool IsClientAndInGame(int index)
 
 bool CheckClientHasPreFix(const char[] sOldname)
 {
-	for(int i =0 ; i< strlen(g_sPrefixType); ++i)
-	{
-		if(sOldname[i] == g_sPrefixType[i])
-		{
-			//PrintToChatAll("%d-%c",i,g_sPrefixType[i]);
-			continue;
-		}
-		else
-			return false;
-	}
-	return true;
+	return (strncmp(sOldname, g_sPrefixType, strlen(g_sPrefixType)) == 0);
 }
 
-stock void CS_SetClientName(int client, const char[] name, bool silent=false)
+void CS_SetClientName(int client, const char[] name)
 {
-    char oldname[MAX_NAME_LENGTH];
-    GetClientName(client, oldname, sizeof(oldname));
-
-    SetClientInfo(client, "name", name);
-    SetEntPropString(client, Prop_Data, "m_szNetname", name);
-
-    Event event = CreateEvent("player_changename");
-
-    if (event != null)
-    {
-        event.SetInt("userid", GetClientUserId(client));
-        event.SetString("oldname", oldname);
-        event.SetString("newname", name);
-        event.Fire();
-    }
-
-    if (silent)
-        return;
-    
-    Handle msg = StartMessageAll("SayText2");
-
-    if (msg != null)
-    {
-        BfWriteByte(msg, client);
-        BfWriteByte(msg, true);
-        BfWriteString(msg, "#Cstrike_Name_Change");
-        BfWriteString(msg, oldname);
-        BfWriteString(msg, name);
-        EndMessage();
-    }
-}
-
-void AddAllClientPrefix()
-{
-	char sOldname[256],sNewname[256];
-	for( int i = 1; i <= MaxClients; i++ ) 
-	{
-		if(IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_SPECTATOR)
-		{
-			GetClientName(i, sOldname, sizeof(sOldname));
-			if(!CheckClientHasPreFix(sOldname))
-			{
-				Format(sNewname, sizeof(sNewname), "%s%s", g_sPrefixType, sOldname);
-				CS_SetClientName(i, sNewname);
-			}
-		}
-	}
+    SetClientInfo(client, "name", name); //不會觸發 "player_changename"
+    SetEntPropString(client, Prop_Data, "m_szNetname", name); //不會觸發 "player_changename"
 }
 
 void RemoveAllClientPrefix()

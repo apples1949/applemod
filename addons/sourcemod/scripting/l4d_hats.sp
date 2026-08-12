@@ -1,6 +1,6 @@
 /*
 *	Hats
-*	Copyright (C) 2022 Silvers
+*	Copyright (C) 2026 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.45"
+#define PLUGIN_VERSION 		"1.56"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,50 @@
 
 ========================================================================================
 	Change Log:
+
+1.56 (18-Jun-2026)
+	- Added forwards "Hats_OnHatCreated" and "Hats_OnHatKilled" to report to other plugins when hats are created/killed for players.
+	- Added native "Hats_GetHatEntity" to get the hat enttiy index of a client.
+	- Requested and initial code by "Mr.Creamy".
+	- New include file "l4d_hats.inc" added for 3rd party plugins.
+
+1.55 (14-Mar-2026)
+	- Plugin now attaches the hat to cloned Survivors when using "Incapped Crawling", "Climb Everywhere" and "Fortnite Emotes" plugins. Thanks to "Voevoda" for reporting and testing.
+	- Fixed code that was removed last update, to prevent hats when the "l4d_hats_make" cvar is set. Thanks to "Hawkins" for reporting.
+
+1.54 (25-Jan-2026)
+	- Added cvar "l4d_hats_notify" to reduce chat notifications about hats. Requested by "S.A.S".
+
+1.53 (21-Mar-2025)
+	- Fixed the plugin resetting a clients "l4d_hats_all" cookie setting. Thanks to "Voevoda" for reporting.
+	- Fixed error thrown on SM 1.12 due to incorrect string size.
+
+1.52 (04-Jan-2025)
+	- Fixed ledge release not removing the hat view. Thanks to "Voevoda" for reporting.
+
+1.51 (31-May-2024)
+	- Fixed client not in game errors being thrown on player death. Thanks to "lzvs" for reporting.
+	- Fixed invalid entity errors being thrown. Thanks to "Voevoda" for reporting.
+	- Added Spanish translations. Thanks to "lechuga" for providing.
+
+1.50 (12-Mar-2024)
+	- Added a thirdperson camera detection for "m_hViewEntity". Thanks to "Marttt" for reporting.
+	- More fixes to keep the hat visible when changing between thirdperson modes (events, cvar, TP plugin). Thanks to "Yabi" for reporting.
+
+1.49 (27-Nov-2023)
+	- Fixed the hat showing when being healed by someone else.
+	- Fixed hats randomly showing in first person. Thanks to "Yabi" for reporting.
+	- Fixed the "l4d_hats_random" value "2" not saving across map changes. Thanks to "Yabi" for reporting.
+
+1.48 (24-Nov-2023)
+	- Fixed the hat showing after staggering when the stagger timer didn't reset (due to some plugins such as "Stagger Gravity").
+
+1.47 (22-Nov-2023)
+	- Now shows hats in 3rd person view when healing someone, using a generator or opening a footlocker, and possibly more situations. Thanks to "Voevoda" for reporting.
+	- Fixed invalid handle errors caused by the last update. Should have worked, seems to be some weirdness with SourceMod. Thanks to "Voevoda" for reporting and "HarryPotter" for help.
+
+1.46 (07-Nov-2023)
+	- Now shows hats in 3rd person view when deploying upgrade ammo packs, staggering or recovering from a pounce/charge. Thanks to "Voevoda" for reporting.
 
 1.45a (27-Aug-2022)
 	- Updated "Russian" translation file. Thanks to "A1ekin" for making changes.
@@ -302,6 +346,15 @@
 #define CONFIG_SPAWNS		"data/l4d_hats.cfg"
 #define	MAX_HATS			128
 
+#define HIDEHUD_CROSSHAIR	(1 << 8)
+
+enum
+{
+	FIX_CRAWLING = 0,
+	FIX_CLIMBING,
+	FIX_EMOTES
+}
+
 
 
 //////////////////////////////////
@@ -312,12 +365,12 @@ bool g_bIsThirdPerson[MAXPLAYERS+1];	// View on TP
 bool g_bHatViewTP[MAXPLAYERS+1];		// View on TP
 //////////////////////////////////
 
-ConVar g_hCvarAllow, g_hCvarBots, g_hCvarChange, g_hCvarDetect, g_hCvarMake, g_hCvarMenu, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarOpaq, g_hCvarPrecache, g_hCvarRand, g_hCvarSave, g_hCvarThird, g_hCvarWall;
+ConVar g_hCvarAllow, g_hCvarBots, g_hCvarChange, g_hCvarDetect, g_hCvarMake, g_hCvarMenu, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarNotify, g_hCvarOpaq, g_hCvarPrecache, g_hCvarRand, g_hCvarSave, g_hCvarThird, g_hCvarWall;
 ConVar g_hCvarMPGameMode, g_hPluginReadyUp;
 Handle g_hCookie_Hat, g_hCookie_All;
 Menu g_hMenu, g_hMenus[MAXPLAYERS+1];
 bool g_bCvarAllow, g_bMapStarted, g_bCvarBots, g_bCvarWall, g_bLeft4Dead2, g_bTranslation, g_bViewHooked, g_bValidMap;
-int g_iCount, g_iCvarMake, g_iCvarMenu, g_iCvarOpaq, g_iCvarRand, g_iCvarSave, g_iCvarThird;
+int g_iCount, g_iCvarMake, g_iCvarMenu, g_iCvarNotify, g_iCvarOpaq, g_iCvarRand, g_iCvarSave, g_iCvarThird;
 float g_fCvarChange, g_fCvarDetect;
 
 float g_fSize[MAX_HATS], g_vAng[MAX_HATS][3], g_vPos[MAX_HATS][3];
@@ -325,10 +378,11 @@ char g_sModels[MAX_HATS][64], g_sNames[MAX_HATS][64];
 char g_sFlagsMake[32];
 char g_sFlagsMenu[32];
 char g_sSteamID[MAXPLAYERS+1][32];		// Stores client user id to determine if the blocked player is the same
+int g_iParented[MAXPLAYERS+1];			// Parented to another entity that is parented to clients (e.g. "Incapped Crawling" or "Fortnite Emotes" plugins
 int g_iHatIndex[MAXPLAYERS+1];			// Player hat entity reference
 int g_iHatWalls[MAXPLAYERS+1];			// Hidden hat entity reference
 int g_iSelected[MAXPLAYERS+1];			// The selected hat index (0 to MAX_HATS)
-int g_iTarget[MAXPLAYERS+1];			// For admins to change clients hats
+int g_iTarget[MAXPLAYERS+1];				// For admins to change clients hats
 int g_iType[MAXPLAYERS+1];				// Stores selected hat to give players
 int g_iMenuType[MAXPLAYERS+1];			// Admin var for menu
 bool g_bHatAll[MAXPLAYERS+1] = {true, ...};			// Visibility of everyones hats (personal setting)
@@ -341,10 +395,15 @@ bool g_bExternalState[MAXPLAYERS+1];	// If thirdperson view was detected
 bool g_bExternalChange[MAXPLAYERS+1];	// When changing hats, show in 3rd person
 bool g_bCookieAuth[MAXPLAYERS+1];		// When cookies cached and client is authorized
 Handle g_hTimerView[MAXPLAYERS+1];		// Thirdperson view when selecting hat
+Handle g_hTimerDelay[MAXPLAYERS+1];		// Delayed return to 1st person
 Handle g_hTimerDetect;
 
 // ReadyUP plugin
 native bool ToggleReadyPanel(bool show, int target = 0);
+
+// Forwards:
+GlobalForward g_hOnHatCreated;
+GlobalForward g_hOnHatKilled;
 
 
 
@@ -371,7 +430,14 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		return APLRes_SilentFailure;
 	}
 
+	RegPluginLibrary("l4d_hats");
+
 	MarkNativeAsOptional("ToggleReadyPanel");
+
+	CreateNative("Hats_GetHatEntity", Native_GetHatEntity);
+
+	g_hOnHatCreated = CreateGlobalForward("Hats_OnHatCreated", ET_Event, Param_Cell, Param_Cell, Param_String);
+	g_hOnHatKilled  = CreateGlobalForward("Hats_OnHatKilled", ET_Event, Param_Cell, Param_Cell);
 
 	return APLRes_Success;
 }
@@ -476,21 +542,22 @@ public void OnPluginStart()
 
 
 	// Cvars
-	g_hCvarAllow = CreateConVar(		"l4d_hats_allow",		"1",			"0=禁用插件, 1=启用插件.", CVAR_FLAGS );
-	g_hCvarBots = CreateConVar(			"l4d_hats_bots",		"1",			"0=不允许生还者机器人带帽子生成. 1=允许生还者机器人带帽子生成.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarChange = CreateConVar(		"l4d_hats_change",		"1.3",			"0=关闭. 在选择帽子时，会使玩家保持第三人称状态多少秒.", CVAR_FLAGS );
-	g_hCvarDetect = CreateConVar(		"l4d_hats_detect",		"0.3",			"0.0=关闭. 检测第三人称视角的频率。如果有的话也会使用ThirdPersonShoulder_Detect插件.", CVAR_FLAGS );
-	g_hCvarMake = CreateConVar(			"l4d_hats_make",		"",				"指定管理员标志或空白，允许所有玩家带帽子生成，需要l4d_hats_random  cvar来生成.", CVAR_FLAGS );
-	g_hCvarMenu = CreateConVar(			"l4d_hats_menu",		"",				"指定管理员标志或空白来允许所有玩家进入帽子菜单.", CVAR_FLAGS );
+	g_hCvarAllow = CreateConVar(		"l4d_hats_allow",		"1",			"0=Plugin off, 1=Plugin on.", CVAR_FLAGS );
+	g_hCvarBots = CreateConVar(			"l4d_hats_bots",		"1",			"0=Disallow bots from spawning with Hats. 1=Allow bots to spawn with hats.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarChange = CreateConVar(		"l4d_hats_change",		"1.3",			"0=Off. Other value puts the player into thirdperson for this many seconds when selecting a hat.", CVAR_FLAGS );
+	g_hCvarDetect = CreateConVar(		"l4d_hats_detect",		"0.3",			"0.0=Off. How often to detect thirdperson view. Also uses ThirdPersonShoulder_Detect plugin if available.", CVAR_FLAGS );
+	g_hCvarMake = CreateConVar(			"l4d_hats_make",		"",				"Specify admin flags or blank to allow all players to spawn with a hat, requires the l4d_hats_random cvar to spawn.", CVAR_FLAGS );
+	g_hCvarMenu = CreateConVar(			"l4d_hats_menu",		"",				"Specify admin flags or blank to allow all players access to the hats menu.", CVAR_FLAGS );
 	g_hCvarModes = CreateConVar(		"l4d_hats_modes",		"",				"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
 	g_hCvarModesOff = CreateConVar(		"l4d_hats_modes_off",	"",				"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
 	g_hCvarModesTog = CreateConVar(		"l4d_hats_modes_tog",	"",				"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	g_hCvarOpaq = CreateConVar(			"l4d_hats_opaque",		"255", 			"帽子的透明或实心程度。0=透明的，255=不透明的.", CVAR_FLAGS, true, 0.0, true, 255.0 );
+	g_hCvarNotify = CreateConVar(		"l4d_hats_notify",		"0", 			"0=Off. 1=Notify a player when their hat spawns or changes. Always shows when manually changing.", CVAR_FLAGS );
+	g_hCvarOpaq = CreateConVar(			"l4d_hats_opaque",		"255", 			"How transparent or solid should the hats appear. 0=Translucent, 255=Opaque.", CVAR_FLAGS, true, 0.0, true, 255.0 );
 	g_hCvarPrecache = CreateConVar(		"l4d_hats_precache",	"",				"Prevent pre-caching models on these maps, separate by commas (no spaces). Enabling plugin on these maps will crash the server.", CVAR_FLAGS );
-	g_hCvarRand = CreateConVar(			"l4d_hats_random",		"1", 			"当幸存者出生时，随机附上一顶帽子。0=从不。1=在回合开始时。2=只在第一轮产生时（下一轮保持相同的帽子）.", CVAR_FLAGS, true, 0.0, true, 3.0 );
-	g_hCvarSave = CreateConVar(			"l4d_hats_save",		"1", 			"0=关闭, 1=保存玩家选择的帽子，并在他们生成或重新加入服务器时附加.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarThird = CreateConVar(		"l4d_hats_third",		"1", 			" 当玩家处于第三人称视角时，显示他们的帽子。当处于第一人称视角时则隐藏.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarWall = CreateConVar(			"l4d_hats_wall",		"1",			"0=显示帽子透过墙壁发光，1=隐藏帽子在墙壁后面发光（每顶帽子创建一个额外的实体）.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarRand = CreateConVar(			"l4d_hats_random",		"1", 			"Attach a random hat when survivors spawn. 0=Never. 1=On round start. 2=Only first spawn (keeps the same hat next round).", CVAR_FLAGS, true, 0.0, true, 2.0 );
+	g_hCvarSave = CreateConVar(			"l4d_hats_save",		"1", 			"0=Off, 1=Save the players selected hats and attach when they spawn or rejoin the server. Overrides the random setting.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarThird = CreateConVar(		"l4d_hats_third",		"1", 			"0=Off, 1=When a player is in third person view, display their hat. Hide when in first person view.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarWall = CreateConVar(			"l4d_hats_wall",		"1",			"0=Show hats glowing through walls, 1=Hide hats glowing when behind walls (creates 1 extra entity per hat).", CVAR_FLAGS, true, 0.0, true, 1.0 );
 	CreateConVar(						"l4d_hats_version",		PLUGIN_VERSION,	"Hats plugin version.",	FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	AutoExecConfig(true,				"l4d_hats");
 
@@ -505,6 +572,7 @@ public void OnPluginStart()
 	g_hCvarDetect.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarMake.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarMenu.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarNotify.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarRand.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarSave.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarWall.AddChangeHook(ConVarChanged_Cvars);
@@ -522,7 +590,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_hatshowon",	CmdHatShowOn,						"See your own hat. Applies to first person view or third person using the optional command argument \"tp\" e.g. \"sm_hatshowon tp\"");
 	RegConsoleCmd("sm_hatshowoff",	CmdHatShowOff,						"Hide your own hat. Applies to first person view or third person using the optional command argument \"tp\" e.g. \"sm_hatshowoff tp\"");
 	RegConsoleCmd("sm_hatall",		CmdHatsToggle,						"Toggles the visibility of everyone's hats.");
-	RegAdminCmd("sm_hatclient",		CmdHatClient,		ADMFLAG_ROOT,	"Set a clients hat. Usage: sm_hatclient <#userid|name> [hat name or hat index: 0-128 (MAX_HATS)].");
+	RegAdminCmd("sm_hatclient",		CmdHatClient,		ADMFLAG_ROOT,	"Set a clients hat. Usage: sm_hatclient <#userid|name> [hat name or hat index: 0-128 (MAX_HATS) or blank for random].");
 	RegAdminCmd("sm_hatoffc",		CmdHatOffTarget,	ADMFLAG_ROOT,	"Toggle the ability of wearing hats on specific players.");
 	RegAdminCmd("sm_hatallc",		CmdHatAllTarget,	ADMFLAG_ROOT,	"Toggle the visibility of all hats on specific players.");
 	RegAdminCmd("sm_hatc",			CmdHatTarget,		ADMFLAG_ROOT,	"Displays a menu listing players, select one to change their hat.");
@@ -580,6 +648,7 @@ void GetCvars()
 	g_bCvarBots = g_hCvarBots.BoolValue;
 	g_fCvarChange = g_hCvarChange.FloatValue;
 	g_fCvarDetect = g_hCvarDetect.FloatValue;
+	g_iCvarNotify = g_hCvarNotify.IntValue;
 	g_iCvarOpaq = g_hCvarOpaq.IntValue;
 	g_iCvarRand = g_hCvarRand.IntValue;
 	g_iCvarSave = g_hCvarSave.IntValue;
@@ -791,7 +860,7 @@ public void OnMapEnd()
 	g_bMapStarted = false;
 }
 
-public void OnClientPutInServer(int client)
+public void OnClientConnected(int client)
 {
 	g_iMenuType[client] = 0;
 	g_bHatAll[client] = true;
@@ -890,6 +959,7 @@ public void OnClientDisconnect(int client)
 	g_bExternalCvar[client] = false;
 	g_bExternalChange[client] = false;
 	g_bCookieAuth[client] = false;
+	delete g_hTimerDelay[client];
 	delete g_hTimerView[client];
 }
 
@@ -1009,19 +1079,22 @@ void HookViewEvents()
 	{
 		g_bViewHooked = true;
 
-		HookEvent("revive_success",			Event_First2);
-		HookEvent("player_ledge_grab",		Event_Third1);
-		HookEvent("lunge_pounce",			Event_Third2);
-		HookEvent("pounce_end",				Event_First1);
-		HookEvent("tongue_grab",			Event_Third2);
-		HookEvent("tongue_release",			Event_First1);
+		HookEvent("revive_success",					Event_First2);
+		HookEvent("player_ledge_grab",				Event_Third1);
+		HookEvent("player_ledge_release",			Event_First3);
+		HookEvent("lunge_pounce",					Event_Third2);
+		HookEvent("pounce_end",						Event_FirstDelay);
+		HookEvent("tongue_grab",					Event_Third2);
+		HookEvent("tongue_release",					Event_First1);
 
 		if( g_bLeft4Dead2 )
 		{
+			HookEvent("upgrade_pack_begin",			Event_Third1);
+			HookEvent("upgrade_pack_used",			Event_First3);
 			HookEvent("charger_pummel_start",		Event_Third2);
 			HookEvent("charger_carry_start",		Event_Third2);
 			HookEvent("charger_carry_end",			Event_First1);
-			HookEvent("charger_pummel_end",			Event_First1);
+			HookEvent("charger_pummel_end",			Event_FirstDelay);
 		}
 	}
 }
@@ -1032,19 +1105,22 @@ void UnhookViewEvents()
 	{
 		g_bViewHooked = true;
 
-		UnhookEvent("revive_success",		Event_First2);
-		UnhookEvent("player_ledge_grab",	Event_Third1);
-		UnhookEvent("lunge_pounce",			Event_Third2);
-		UnhookEvent("pounce_end",			Event_First1);
-		UnhookEvent("tongue_grab",			Event_Third2);
-		UnhookEvent("tongue_release",		Event_First1);
+		UnhookEvent("revive_success",				Event_First2);
+		UnhookEvent("player_ledge_grab",			Event_Third1);
+		UnhookEvent("player_ledge_release",			Event_First3);
+		UnhookEvent("lunge_pounce",					Event_Third2);
+		UnhookEvent("pounce_end",					Event_FirstDelay);
+		UnhookEvent("tongue_grab",					Event_Third2);
+		UnhookEvent("tongue_release",				Event_First1);
 
 		if( g_bLeft4Dead2 )
 		{
+			UnhookEvent("upgrade_pack_begin",		Event_Third1);
+			UnhookEvent("upgrade_pack_used",		Event_First3);
 			UnhookEvent("charger_pummel_start",		Event_Third2);
 			UnhookEvent("charger_carry_start",		Event_Third2);
 			UnhookEvent("charger_carry_end",		Event_First1);
-			UnhookEvent("charger_pummel_end",		Event_First1);
+			UnhookEvent("charger_pummel_end",		Event_FirstDelay);
 		}
 	}
 }
@@ -1084,7 +1160,7 @@ void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
-	if( !client || GetClientTeam(client) != 2 )
+	if( !client || !IsClientInGame(client) || GetClientTeam(client) != 2 )
 		return;
 
 	RemoveHat(client);
@@ -1120,7 +1196,7 @@ void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 		CreateTimer(0.1, TimerDelayCreate, clientID);
 }
 
-Action TimerDelayCreate(Handle timer, any client)
+Action TimerDelayCreate(Handle timer, int client)
 {
 	client = GetClientOfUserId(client);
 
@@ -1153,32 +1229,169 @@ Action TimerDelayCreate(Handle timer, any client)
 	return Plugin_Continue;
 }
 
+void Event_FirstDelay(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("victim"));
+	if( client )
+	{
+		delete g_hTimerDelay[client];
+
+		if( name[0] == 'c' ) // charger_pummel_end
+			g_hTimerDelay[client] = CreateTimer(3.0, TimerDelayFirst, client);
+		else // pounce_end .. if( name[0] == 'p' )
+			g_hTimerDelay[client] = CreateTimer(2.5, TimerDelayFirst, client);
+	}
+}
+
+Action TimerDelayFirst(Handle timer, int client)
+{
+	g_hTimerDelay[client] = null;
+
+	if( IsClientInGame(client) )
+	{
+		EventHatView(client, false);
+	}
+
+	return Plugin_Continue;
+}
+
 void Event_First1(Event event, const char[] name, bool dontBroadcast)
 {
-	EventView(GetClientOfUserId(event.GetInt("victim")), false);
+	EventView(event.GetInt("victim"), false);
+}
+
+void Event_First3(Event event, const char[] name, bool dontBroadcast)
+{
+	EventView(event.GetInt("userid"), false);
 }
 
 void Event_First2(Event event, const char[] name, bool dontBroadcast)
 {
-	EventView(GetClientOfUserId(event.GetInt("subject")), false);
+	EventView(event.GetInt("subject"), false);
 }
 
 void Event_Third1(Event event, const char[] name, bool dontBroadcast)
 {
-	EventView(GetClientOfUserId(event.GetInt("userid")), true);
+	EventView(event.GetInt("userid"), true);
 }
 
 void Event_Third2(Event event, const char[] name, bool dontBroadcast)
 {
-	EventView(GetClientOfUserId(event.GetInt("victim")), true);
+	EventView(event.GetInt("victim"), true);
 }
 
-void EventView(int client, bool bIsThirdPerson)
+void EventView(int client, bool bToThirdPerson)
+{
+	DataPack dPack = new DataPack();
+	dPack.WriteCell(client);
+	dPack.WriteCell(bToThirdPerson);
+	RequestFrame(OnFrameEvent, dPack);
+}
+
+void OnFrameEvent(DataPack dPack)
+{
+	dPack.Reset();
+	int client = dPack.ReadCell();
+	bool bToThirdPerson = dPack.ReadCell();
+	delete dPack;
+
+	client = GetClientOfUserId(client);
+
+	if( client && IsClientInGame(client) )
+	{
+		EventHatView(client, bToThirdPerson);
+	}
+}
+
+void EventHatView(int client, bool bToThirdPerson)
 {
 	if( HatsValidClient(client) )
 	{
-		SetHatView(client, bIsThirdPerson);
+		if( bToThirdPerson ) delete g_hTimerDelay[client];
+
+		SetHatView(client, bToThirdPerson);
 	}
+}
+
+bool AttachToParent(int client, int type)
+{
+	// Already attached, ignore
+	if( IsValidEntRef(g_iParented[client]) ) return true;
+
+	// Verify hat exists
+	int entity = g_iHatIndex[client];
+	if( EntRefToEntIndex(entity) == INVALID_ENT_REFERENCE )
+	{
+		RemoveHat(client);
+		CreateHat(client, g_iSelected[client]);
+		entity = g_iHatIndex[client];
+	}
+
+	int parent;
+	static char sModel[64];
+	static char sChar[64];
+	float vPos[3];
+	float vEnd[3];
+
+	// Get Survivors model
+	GetEntPropString(client, Prop_Data, "m_ModelName", sChar, sizeof(sChar));
+	if( type == FIX_CLIMBING )
+	{
+		GetClientAbsOrigin(client, vPos);
+	}
+
+	// Loop entities
+	int i = -1;
+	while( (i = FindEntityByClassname(i, "commentary_dummy")) != INVALID_ENT_REFERENCE )
+	{
+		if( type != FIX_CLIMBING )
+		{
+			// Check if entity is parented to a player ("Incapped Crawling" and "Fortnite Emotes" plugins attach to clone)
+			if( IsValidEdict(i) && HasEntProp(i, Prop_Send, "moveparent") )
+			{
+				parent = GetEntPropEnt(i, Prop_Send, "moveparent");
+
+				while( parent > MaxClients )
+				{
+					if( HasEntProp(parent, Prop_Send, "moveparent") )
+						parent = GetEntPropEnt(parent, Prop_Send, "moveparent");
+					else
+						break;
+				}
+			}
+		}
+		else
+		{
+			// Check if entity is near to a player ("Climb Everywhere" plugin does not attach entity)
+			GetEntPropVector(i, Prop_Send, "m_vecOrigin", vEnd);
+			if( GetVectorDistance(vPos, vEnd) < 10.0 )
+			{
+				parent = client;
+			}
+		}
+
+		// Verify matched to client
+		if( parent == client )
+		{
+			// Match entity model to Survivor model
+			GetEntPropString(i, Prop_Data, "m_ModelName", sModel, sizeof(sModel));
+			if( strcmp(sModel, sChar) == 0 )
+			{
+				// Parent hat to this new, temporary, model
+				g_iParented[client] = EntIndexToEntRef(i);
+				int index = g_iSelected[client];
+				SetVariantString("!activator");
+				AcceptEntityInput(entity, "SetParent", i);
+				SetVariantString("eyes");
+				AcceptEntityInput(entity, "SetParentAttachment");
+				TeleportEntity(entity, g_vPos[index], g_vAng[index], NULL_VECTOR);
+
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 // Show hat when thirdperson view
@@ -1190,41 +1403,111 @@ Action TimerDetect(Handle timer)
 		return Plugin_Stop;
 	}
 
-	for( int i = 1; i <= MaxClients; i++ )
+	int target;
+	int index;
+	bool pass;
+
+	for( int client = 1; client <= MaxClients; client++ )
 	{
-		if( g_bExternalCvar[i] == false && g_iHatIndex[i] && IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i) )
+		if( g_bExternalCvar[client] == false && g_iHatIndex[client] && IsClientInGame(client) && GetClientTeam(client) == 2 && IsPlayerAlive(client) )
 		{
-			if( (g_bLeft4Dead2 && GetEntPropFloat(i, Prop_Send, "m_TimeForceExternalView") > GetGameTime()) || GetEntPropEnt(i, Prop_Send, "m_reviveTarget") != -1 )
+			pass = false;
+
+			if( g_bLeft4Dead2 )
 			{
-				g_bIsThirdPerson[i] = true;
-
-				if( g_bExternalProp[i] == false )
+				if(
+					GetEntPropFloat(client, Prop_Send, "m_TimeForceExternalView") > GetGameTime() ||
+					(GetEntPropEnt(client, Prop_Send, "m_useActionTarget") != -1 && GetEntPropEnt(client, Prop_Send, "m_useActionOwner") == client)
+				)
 				{
-					g_bExternalProp[i] = true;
+					pass = true;
+				}
+			}
+			else
+			{
+				target = GetEntPropEnt(client, Prop_Send, "m_healTarget");
+				if( target > 0 && target != client )
+				{
+					pass = true;
+				}
+			}
 
-					if( g_bHatViewTP[i] )
+			if( !pass )
+			{
+				if(
+					GetEntPropEnt(client, Prop_Send, "m_hViewEntity") != -1 ||
+					GetEntPropEnt(client, Prop_Send, "m_reviveTarget") != -1 ||
+					GetEntPropFloat(client, Prop_Send, "m_staggerTimer", 1) > GetGameTime()
+				)
+				{
+					pass = true;
+				}
+			}
+
+			// Attach Hat to clone model when using "Incapped Crawling", "Climb Everywhere" and "Fortnite Emotes" plugins
+			if( GetEntProp(client, Prop_Send, "m_bDrawViewmodel") == 0 )
+			{
+				if( GetEntProp(client, Prop_Send, "m_isIncapacitated", 1) == 1 )
+				{
+					pass = AttachToParent(client, FIX_CRAWLING);
+				}
+				else if( GetEntProp(client, Prop_Send, "m_iObserverMode") == 1 )
+				{
+					// Bad identifier for "Fortnite Emotes" plugin, should really just check all attached and failing that search for nearby clones
+					if( GetEntProp(client, Prop_Send, "m_iHideHUD") & HIDEHUD_CROSSHAIR == HIDEHUD_CROSSHAIR )
 					{
-						SetHatView(i, true);
-					} else {
-						SetHatView(i, false);
+						pass = AttachToParent(client, FIX_EMOTES);
+					}
+					else
+					{
+						pass = AttachToParent(client, FIX_CLIMBING);
 					}
 				}
 			}
 			else
 			{
-				g_bIsThirdPerson[i] = false;
-
-				if( g_bExternalProp[i] == true )
+				// Was using above plugins and crawling or climbing stops, the attached hat is deleted, re-create
+				if( g_iParented[client] )
 				{
-					g_bExternalProp[i] = false;
+					g_iParented[client] = 0;
 
-					if( !g_bHatView[i] )
+					index = g_iSelected[client];
+					RemoveHat(client);
+					CreateHat(client, index);
+				}
+			}
+
+			if( pass )
+			{
+				// g_bIsThirdPerson[client] = true;
+
+				if( g_bExternalProp[client] == false )
+				{
+					g_bExternalProp[client] = true;
+
+					if( g_bHatViewTP[client] )
 					{
-						SetHatView(i, false);
+						SetHatView(client, true);
+					} else {
+						SetHatView(client, false);
+					}
+				}
+			}
+			else
+			{
+				// g_bIsThirdPerson[client] = false;
+
+				if( g_bExternalProp[client] == true )
+				{
+					g_bExternalProp[client] = false;
+
+					if( !g_bHatView[client] )
+					{
+						SetHatView(client, false);
 					}
 					else
 					{
-						SetHatView(i, true);
+						SetHatView(client, true);
 					}
 				}
 			}
@@ -1240,11 +1523,12 @@ public void TP_OnThirdPersonChanged(int client, bool bIsThirdPerson)
 
 	if( g_fCvarDetect )
 	{
-		if( bIsThirdPerson && g_bExternalCvar[client] )
-		{
-			SetHatView(client, false);
-		}
-		else if( bIsThirdPerson && !g_bExternalCvar[client] )
+		// if( bIsThirdPerson && g_bExternalCvar[client] )
+		// {
+			// SetHatView(client, false);
+		// }
+		// else if( bIsThirdPerson && !g_bExternalCvar[client] )
+		if( bIsThirdPerson && !g_bExternalCvar[client] )
 		{
 			g_bExternalCvar[client] = true;
 			if( g_bHatViewTP[client] ) SetHatView(client, true);
@@ -1262,14 +1546,31 @@ void SetHatView(int client, bool bShowHat)
 {
 	if( bShowHat && !g_bExternalState[client] )
 	{
+		// PrintToChatAll("HatStates On: %d %d %d %d %d %d %d", bShowHat, g_bExternalState[client], g_bExternalChange[client], g_bExternalProp[client], g_bHatView[client], g_bIsThirdPerson[client], g_bHatViewTP[client]);
 		g_bExternalState[client] = true;
 
 		int entity = g_iHatIndex[client];
 		if( entity && (entity = EntRefToEntIndex(entity)) != INVALID_ENT_REFERENCE )
 			SDKUnhook(entity, SDKHook_SetTransmit, Hook_SetTransmit);
 	}
-	else if( !bShowHat && g_bExternalState[client] && !g_bExternalChange[client] && ((!g_bHatView[client] && !g_bIsThirdPerson[client]) || (!g_bHatViewTP[client] && g_bIsThirdPerson[client])) )
+	else if( !bShowHat && g_bExternalState[client] && !g_bExternalChange[client] && !g_bExternalProp[client] && ((!g_bHatView[client] && !g_bIsThirdPerson[client]) || (!g_bHatViewTP[client] && g_bIsThirdPerson[client])) )
 	{
+		// Prevent hiding the hat if events are currently triggered to show:
+		if(
+			GetEntProp(client, Prop_Send, "m_isHangingFromLedge") == 1 ||
+			GetEntPropEnt(client, Prop_Send, "m_reviveTarget") != -1 ||
+			GetEntPropEnt(client, Prop_Send, "m_pounceAttacker") != -1 ||
+			GetEntPropEnt(client, Prop_Send, "m_hViewEntity") != -1 ||
+			(
+				g_bLeft4Dead2 &&
+				(GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1 || GetEntPropEnt(client, Prop_Send, "m_pummelAttacker") != -1)
+			)
+		)
+		{
+			return;
+		}
+
+		// PrintToChatAll("HatStates Off: %d %d %d %d %d %d %d", bShowHat, g_bExternalState[client], g_bExternalChange[client], g_bExternalProp[client], g_bHatView[client], g_bIsThirdPerson[client], g_bHatViewTP[client]);
 		g_bExternalState[client] = false;
 
 		int entity = g_iHatIndex[client];
@@ -1321,7 +1622,9 @@ void OnFrameHooks(DataPack dPack)
 	if( client && IsClientInGame(client) && !IsPlayerAlive(client) )
 	{
 		int index = dPack.ReadCell();
-		SDKHook(EntRefToEntIndex(g_iHatIndex[index]), SDKHook_SetTransmit, Hook_SetSpecTransmit);
+		int entity = EntRefToEntIndex(g_iHatIndex[index]);
+		if( entity != INVALID_ENT_REFERENCE )
+			SDKHook(entity, SDKHook_SetTransmit, Hook_SetSpecTransmit);
 	}
 
 	delete dPack;
@@ -1392,7 +1695,7 @@ Action CmdHatMain(int client, int args)
 	Format(option, sizeof(option), "%T", options[0], client);
 	menu.AddItem("option0", option);
 
-	for( int i=0; i < sizeof(bEnabled); i++ )
+	for( int i = 0; i < sizeof(bEnabled); i++ )
 	{
 		Format(option, sizeof(option), "%T: %T", options[i+1], client, bEnabled[i] ? "HAT_ENABLED" : "HAT_DISABLED", client);
 		Format(optionName, sizeof(optionName),"option%d", i);
@@ -1474,7 +1777,7 @@ Action CmdHat(int client, int args)
 		if( len < 4 && IsCharNumeric(sTemp[0]) && (len == 1 || IsCharNumeric(sTemp[1])) && (len == 2 || IsCharNumeric(sTemp[2])) )
 		{
 			int index = StringToInt(sTemp);
-			if( index < 0 || index >= (g_iCount + 1) )
+			if( index < 0 || index > g_iCount )
 			{
 				CPrintToChat(client, "%T%T", "HAT_SYSTEM", client, "Hat_No_Index", client, index, g_iCount);
 			}
@@ -1492,7 +1795,7 @@ Action CmdHat(int client, int args)
 
 					CPrintToChat(client, "%T%T", "HAT_SYSTEM", client, "Hat_Off", client);
 				}
-				else if( CreateHat(client, index - 1) )
+				else if( CreateHat(client, index - 1, true) )
 				{
 					ExternalView(client);
 				}
@@ -1502,7 +1805,7 @@ Action CmdHat(int client, int args)
 		{
 			RemoveHat(client);
 
-			if( CreateHat(client, GetRandomInt(1, g_iCount) - 1) )
+			if( CreateHat(client, GetRandomInt(1, g_iCount) - 1, true) )
 			{
 				ExternalView(client);
 				return Plugin_Handled;
@@ -1518,7 +1821,7 @@ Action CmdHat(int client, int args)
 				{
 					RemoveHat(client);
 
-					if( CreateHat(client, i) )
+					if( CreateHat(client, i, true) )
 					{
 						ExternalView(client);
 					}
@@ -1561,7 +1864,7 @@ int HatMenuHandler(Menu menu, MenuAction action, int client, int index)
 				CPrintToChat(client, "%T%T", "HAT_SYSTEM", client, "Hat_Changed", client, name);
 				RemoveHat(target);
 
-				if( index != 0 && CreateHat(target, index - 1) )
+				if( index != 0 && CreateHat(target, index - 1, true) )
 				{
 					ExternalView(target);
 				}
@@ -1591,7 +1894,7 @@ int HatMenuHandler(Menu menu, MenuAction action, int client, int index)
 
 				CPrintToChat(client, "%T%T", "HAT_SYSTEM", client, "Hat_Off", client);
 			}
-			else if( CreateHat(client, index - 1) )
+			else if( CreateHat(client, index - 1, true) )
 			{
 				ExternalView(client);
 			}
@@ -1831,7 +2134,7 @@ Action CmdHatClient(int client, int args)
 {
 	if( args == 0 )
 	{
-		ReplyToCommand(client, "Usage: sm_hatclient <#userid|name> [hat name or hat index: 0-128 (MAX_HATS)].");
+		ReplyToCommand(client, "Usage: sm_hatclient <#userid|name> [hat name or hat index: 0-128 (MAX_HATS) or blank for random].");
 		return Plugin_Handled;
 	}
 
@@ -1870,14 +2173,15 @@ Action CmdHatClient(int client, int args)
 					break;
 				}
 			}
-		} else {
+		}
+		else
+		{
 			index = StringToInt(sArg);
 		}
 	}
-	else
-	{
+
+	if( index < 0 || index > g_iCount )
 		index = GetRandomInt(0, g_iCount - 1);
-	}
 
 	for( int i = 0; i < target_count; i++ )
 	{
@@ -2595,7 +2899,14 @@ void RemoveHat(int client)
 	g_iHatIndex[client] = 0;
 
 	if( IsValidEntRef(entity) )
+	{
+		Call_StartForward(g_hOnHatKilled);
+		Call_PushCell(client);
+		Call_PushCell(EntRefToEntIndex(entity));
+		Call_Finish();
+
 		RemoveEntity(entity);
+	}
 
 	// Hidden entity
 	entity = g_iHatWalls[client];
@@ -2605,7 +2916,7 @@ void RemoveHat(int client)
 		RemoveEntity(entity);
 }
 
-bool CreateHat(int client, int index = -1)
+bool CreateHat(int client, int index = -1, bool notify = false)
 {
 	if( g_bBlocked[client] || g_bHatOff[client] || IsValidEntRef(g_iHatIndex[client]) == true || HatsValidClient(client) == false )
 		return false;
@@ -2615,18 +2926,18 @@ bool CreateHat(int client, int index = -1)
 		if( g_iCvarRand == 0 ) return false;
 		if( g_iType[client] == -1 ) return false;
 
-		if( g_iCvarMenu != 0 )
+		if( g_iCvarMake != 0 )
 		{
 			if( IsFakeClient(client) )
 				return false;
 
 			int flags = GetUserFlagBits(client);
-			if( !(flags & ADMFLAG_ROOT) && !(flags & g_iCvarMenu) )
+			if( !(flags & ADMFLAG_ROOT) && !(flags & g_iCvarMake) )
 				return false;
 		}
 
-		index = GetRandomInt(0, g_iCount -1);
-		g_iType[client] = index + 1;
+		index = GetRandomInt(1, g_iCount);
+		g_iType[client] = index;
 	}
 	else if( index == -2 ) // Previous random hat
 	{
@@ -2638,6 +2949,7 @@ bool CreateHat(int client, int index = -1)
 		if( index == 0 )
 		{
 			index = GetRandomInt(1, g_iCount);
+			g_iType[client] = index;
 		}
 
 		index--;
@@ -2658,6 +2970,7 @@ bool CreateHat(int client, int index = -1)
 				if( g_iCvarRand == 0 ) return false;
 
 				index = GetRandomInt(1, g_iCount);
+				g_iType[client] = index;
 			}
 		}
 
@@ -2746,6 +3059,13 @@ bool CreateHat(int client, int index = -1)
 		g_iSelected[client] = index;
 		g_iHatIndex[client] = EntIndexToEntRef(entity);
 
+		// Forward
+		Call_StartForward(g_hOnHatCreated);
+		Call_PushCell(client);
+		Call_PushCell(entity);
+		Call_PushString(g_sModels[index]);
+		Call_Finish();
+
 		if( !g_bHatView[client] && (!g_bIsThirdPerson[client] || !g_bHatViewTP[client]) )
 		{
 			g_bExternalState[client] = true;
@@ -2756,7 +3076,10 @@ bool CreateHat(int client, int index = -1)
 			SetHatView(client, true);
 		}
 
-		TranslateHatName(client, index);
+		if( g_iCvarNotify || notify )
+		{
+			TranslateHatName(client, index);
+		}
 
 		SpectatorHatHooks();
 		return true;
@@ -2765,11 +3088,26 @@ bool CreateHat(int client, int index = -1)
 	return false;
 }
 
+int Native_GetHatEntity(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if( client < 1 || client > MaxClients )
+		ThrowNativeError(SP_ERROR_PARAM, "Client index out of bounds %i", client);
+
+	if( !IsClientInGame(client) )
+		ThrowNativeError(SP_ERROR_ABORTED, "Client is not ingame %i", client);
+
+	if( !IsValidEntRef(g_iHatIndex[client]) )
+		return -1;
+
+	return EntRefToEntIndex(g_iHatIndex[client]);
+}
+
 void ExternalView(int client)
 {
 	if( g_fCvarChange && g_bLeft4Dead2 )
 	{
-		EventView(client, true);
+		EventHatView(client, true);
 
 		g_bExternalChange[client] = true;
 
@@ -2782,7 +3120,7 @@ void ExternalView(int client)
 	}
 }
 
-Action TimerEventView(Handle timer, any client)
+Action TimerEventView(Handle timer, int client)
 {
 	client = GetClientOfUserId(client);
 	if( client )
@@ -2790,7 +3128,7 @@ Action TimerEventView(Handle timer, any client)
 		g_hTimerView[client] = null;
 		g_bExternalChange[client] = false;
 
-		EventView(client, false);
+		EventHatView(client, false);
 	}
 
 	return Plugin_Continue;
@@ -2923,7 +3261,7 @@ stock int CFormat(char[] sMessage, int maxlength)
 {
 	int iRandomPlayer = NO_INDEX;
 
-	for ( int i = 0; i < sizeof(CTagCode); i++ )											//	Para otras etiquetas de color se requiere un bucle.
+	for( int i = 0; i < sizeof(CTagCode); i++ )											//	Para otras etiquetas de color se requiere un bucle.
 	{
 		if( StrContains( sMessage, CTag[i]) == -1 ) 										//	Si no se encuentra la etiqueta, omitir.
 			continue;
@@ -2992,7 +3330,7 @@ stock void TranslateHatnames()
 {
 	int maxIndex = 95; // Searches from "1" to maxIndex (including max) in the "hatnames" file. Matches to the data config.
 
-	char sLang[4] = "zho/"; // Language folder to translate. Blank for "en"
+	char sLang[5] = "zho/"; // Language folder to translate. Blank for "en"
 	char sText[256];
 	char sModel[PLATFORM_MAX_PATH];
 	char sTran[PLATFORM_MAX_PATH];
@@ -3022,8 +3360,6 @@ stock void TranslateHatnames()
 		Format(sIndex, sizeof sIndex, "Hat %d", i);
 		hTran.JumpToKey(sIndex);
 		hTran.GetString(sLang, sText, sizeof(sText));
-
-		PrintToServer("%02d (%s) [%s] == [%s]", i, sIndex, sModel, sText);
 
 		hSave.JumpToKey(sModel, true);
 		hSave.SetString(sLang, sText);

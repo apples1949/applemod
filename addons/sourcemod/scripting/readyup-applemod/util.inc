@@ -29,6 +29,18 @@ bool IsTeamReady(int team)
 	return false;
 }
 
+// 团队模式: 将队伍中所有玩家的准备状态复位 (有人取消准备时, 团队准备状态改回未准备)
+void UnreadyTeam(int team)
+{
+	for (int i = 1; i <= MaxClients; ++i)
+	{
+		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == team)
+		{
+			SetPlayerReady(i, false);
+		}
+	}
+}
+
 void UTIL_WrapperForward(GlobalForward fw)
 {
 	if (fw.FunctionCount)

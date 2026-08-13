@@ -251,5 +251,5 @@ void GetPlayerGametimeDisplay(int client, char[] buffer, int maxlen)
 		return;
 
 	float fLerp = GetPlayerGametime_GetLerp(client) * 1000.0; // 秒 -> 毫秒
-	FormatEx(buffer, maxlen, " %dh/%.1f", iTime / 3600, fLerp);
+	FormatEx(buffer, maxlen, " [%dh/%.1f]", iTime / 3600, fLerp);
 }

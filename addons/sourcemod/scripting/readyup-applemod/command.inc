@@ -60,6 +60,12 @@ Action Unready_Cmd(int client, int args)
 				SetButtonTime(client);
 				if (SetPlayerReady(client, false))
 					PlayNotifySound(client);
+
+				// 团队模式: 一人取消准备即代表整个队伍取消准备
+				if (readyUpMode == ReadyMode_TeamReady)
+				{
+					UnreadyTeam(GetClientTeam(client));
+				}
 			}
 			else if (!hasflag)
 			{

@@ -374,8 +374,10 @@ void GetHUD2_Text(char[] output, int size)
     FormatEx(output, size, "\0");
     int PlayerLimit = GetConVarInt(FindConVar("sv_maxplayers"));
     char hostname[64];
+    char sTime[16];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
-    FormatEx(output, size, "%s(%d/%d/%d)\n", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit);
+    FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
+    FormatEx(output, size, "%s(%d/%d/%d)\n%s 可投票关闭HUD", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
 }
 
 // ====================================================================================================

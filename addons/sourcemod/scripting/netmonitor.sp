@@ -3,7 +3,6 @@
 #pragma semicolon 1
 
 #define RECONNECT_WINDOW 30.0
-#define LOG_FILE         "netmonitor.log"
 
 bool    g_bTimingOut[MAXPLAYERS+1];
 float   g_fDisconnectTime[MAXPLAYERS+1];
@@ -23,17 +22,6 @@ public void OnPluginStart()
     CreateTimer(1.0, Timer_CheckTimeout, _, TIMER_REPEAT);
 
     HookEvent("player_disconnect", Event_PlayerDisconnect);
-}
-
-void LogNetMonitor(int client, const char[] reason)
-{
-    char name[MAX_NAME_LENGTH];
-    GetClientName(client, name, sizeof(name));
-
-    char time[32];
-    FormatTime(time, sizeof(time), "%Y-%m-%d %H:%M:%S");
-
-    LogToFileEx(LOG_FILE, "%s | %s | %s", time, name, reason);
 }
 
 public Action Timer_CheckTimeout(Handle timer)
@@ -57,13 +45,11 @@ public Action Timer_CheckTimeout(Handle timer)
 
             if (timingOut)
             {
-                LogNetMonitor(client, "超时");
-                PrintToChatAll("%s 失去与服务器的连接", name);
+                PrintToChatAll("\x04[连接状态]\x01 %s \x03失去与服务器的连接", name);
             }
             else
             {
-                LogNetMonitor(client, "超时回复");
-                PrintToChatAll("%s 恢复与服务器的连接", name);
+                PrintToChatAll("\x04[连接状态]\x01 %s \x04恢复与服务器的连接", name);
             }
         }
     }
@@ -92,7 +78,6 @@ public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroa
     {
         g_bExcluded[client] = false;
         g_fDisconnectTime[client] = GetGameTime();
-        LogNetMonitor(client, "非主动离开");
     }
 }
 
@@ -107,8 +92,7 @@ public void OnClientPutInServer(int client)
     {
         char name[MAX_NAME_LENGTH];
         GetClientName(client, name, sizeof(name));
-        LogNetMonitor(client, "快速回复");
-        PrintToChatAll("%s 恢复与服务器的连接", name);
+        PrintToChatAll("\x04[连接状态]\x01 %s \x04恢复与服务器的连接", name);
     }
 
     g_fDisconnectTime[client] = 0.0;

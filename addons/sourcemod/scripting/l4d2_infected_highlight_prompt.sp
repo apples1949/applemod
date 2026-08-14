@@ -3,9 +3,24 @@
 #pragma newdecls required
 #include <sourcemod>
 
+#define PLUGIN_VERSION	"1.1"
+
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
+
+// ====================================================================================================
+// Plugin Info
+// ====================================================================================================
+
+public Plugin myinfo =
+{
+	name		= "l4d2_infected_highlight_prompt",
+	author		= "apples1949",
+	description	= "感染者阵营高光操作提示: 喷中多名/爆炸炸到多名/一撞多/多控达成.",
+	version		= PLUGIN_VERSION,
+	url			= "N/A"
+}
 
 // ====================================================================================================
 // 中文数字表
@@ -33,21 +48,21 @@ int   g_iSprayCount[MAXPLAYERS+1];		// 本次喷到的不重复生还者数
 bool  g_bSprayVictim[MAXPLAYERS+1][MAXPLAYERS+1];
 
 // ====================================================================================================
-// Boomer 爆炸糊人状态
+// Boomer 爆炸糊人状态(按 boomer 玩家索引)
 // ====================================================================================================
-float g_fExplodeWindowEnd = 0.0;		// 爆炸判定窗口截止时间
-int   g_iExplodeBoomerUserId = 0;		// 爆炸的 boomer 的 userid
-int   g_iExplodeCount = 0;				// 被炸到的不重复生还者数
-bool  g_bExplodeVictim[MAXPLAYERS+1];
+bool  g_bExplodeActive[MAXPLAYERS+1];	// 爆炸判定窗口是否开启
+int   g_iExplodeCount[MAXPLAYERS+1];	// 被炸到的不重复生还者数
+bool  g_bExplodeVictim[MAXPLAYERS+1][MAXPLAYERS+1];
+char  g_sExplodeName[MAXPLAYERS+1][MAX_NAME_LENGTH];	// 开窗时记录的特感名(爆炸后 boomer 已死亡)
+int   g_iLastExplodedBoomer;			// 最近爆炸的 boomer 的 userid(now_it 攻击者异常时的回退)
+float g_fLastExplodedTime;				// 最近爆炸发生的游戏时间
 
 // ====================================================================================================
 // Charger 一撞多状态(按 charger 玩家索引)
 // ====================================================================================================
-bool  g_bChargerPrint[MAXPLAYERS+1];	// 本次冲撞是否已提示
-bool  g_bChargerCarry[MAXPLAYERS+1];	// 本次冲撞是否抓起了生还者
+bool  g_bChargerReady[MAXPLAYERS+1];	// 本次冲撞是否处于可计数窗口内
 int   g_iChargerCount[MAXPLAYERS+1];	// 本次冲撞撞到的不重复生还者数
 bool  g_bChargerHit[MAXPLAYERS+1][MAXPLAYERS+1];
-bool  g_bChargerReady[MAXPLAYERS+1];	// 是否处于可计数的冲撞状态
 
 // ====================================================================================================
 // 多控达成状态
@@ -100,6 +115,7 @@ public void OnPluginStart()
 	HookEvent("player_now_it",			Event_PlayerNowIt);
 	HookEvent("boomer_exploded",		Event_BoomerExploded);
 	HookEvent("ability_use",			Event_AbilityUse);
+	HookEvent("charger_charge_end",		Event_ChargerChargeEnd);
 	HookEvent("player_hurt",			Event_PlayerHurt);
 	HookEvent("charger_carry_start",	Event_ChargerCarryStart);
 	HookEvent("charger_carry_end",		Event_ChargerCarryEnd);
@@ -110,7 +126,7 @@ public void OnPluginStart()
 
 	CreateTimer(PINNED_CHECK_INTERVAL, Timer_CheckPinned, _, TIMER_REPEAT);
 
-	AutoExecConfig(true, "l4d2_infected_highlight_prompt");
+	//AutoExecConfig(true, "l4d2_infected_highlight_prompt");
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -131,25 +147,20 @@ public void OnMapEnd()
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		ResetSpray(i);
-		g_bChargerPrint[i] = false;
-		g_bChargerCarry[i] = false;
-		g_iChargerCount[i] = 0;
-		g_bChargerReady[i] = false;
+		ResetExplode(i);
+		ResetCharger(i);
 	}
 
-	g_fExplodeWindowEnd = 0.0;
-	g_iExplodeBoomerUserId = 0;
-	g_iExplodeCount = 0;
+	g_iLastExplodedBoomer = 0;
+	g_fLastExplodedTime = 0.0;
 	g_bMultiPinnedAnnounced = false;
 }
 
 public void OnClientDisconnect(int client)
 {
 	ResetSpray(client);
-	g_bChargerPrint[client] = false;
-	g_bChargerCarry[client] = false;
-	g_iChargerCount[client] = 0;
-	g_bChargerReady[client] = false;
+	ResetExplode(client);
+	ResetCharger(client);
 }
 
 // ====================================================================================================
@@ -165,14 +176,29 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 
 	int attacker = GetClientOfUserId(event.GetInt("attacker"));
 
-	// 爆炸糊人: 在爆炸判定窗口内即计入
+	// 爆炸糊人: 无论 player_now_it 与 boomer_exploded 事件谁先到达, 都能正确开窗计数
 	if (event.GetBool("exploded"))
 	{
-		if (g_fExplodeWindowEnd > GetGameTime() && !g_bExplodeVictim[victim])
+		int boomer = attacker;
+
+		if (!IsBoomer(boomer))
 		{
-			g_bExplodeVictim[victim] = true;
-			g_iExplodeCount++;
+			// 攻击者异常时的回退: 使用最近一次爆炸的 boomer(需在判定窗口时限内)
+			boomer = GetClientOfUserId(g_iLastExplodedBoomer);
+
+			if (!IsBoomer(boomer) || GetGameTime() - g_fLastExplodedTime > EXPLODE_WINDOW_TIME)
+				return;
 		}
+
+		if (!g_bExplodeActive[boomer])
+			OpenExplodeWindow(boomer);
+
+		if (!g_bExplodeVictim[boomer][victim])
+		{
+			g_bExplodeVictim[boomer][victim] = true;
+			g_iExplodeCount[boomer]++;
+		}
+
 		return;
 	}
 
@@ -213,7 +239,7 @@ public Action Timer_EndSpray(Handle timer, int userid)
 		char name[MAX_NAME_LENGTH];
 		GetActorName(boomer, name, sizeof(name));
 
-		PrintToInfectedTeam("\x04[提示] \x05Boomer(\x03%s\x05) \x01一口喷中\x04%s\x05名生还者",
+		PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01一次性喷中\x04%s\x05名生还者",
 			name, g_NumberTextGe[g_iSprayCount[boomer] - 2]);
 	}
 
@@ -227,35 +253,43 @@ public void Event_BoomerExploded(Event event, const char[] name, bool dontBroadc
 {
 	int boomer = GetClientOfUserId(event.GetInt("userid"));
 
-	if (!IsBoomer(boomer) || !event.GetBool("splashedbile"))
+	if (!IsBoomer(boomer))
 		return;
 
-	g_fExplodeWindowEnd = GetGameTime() + EXPLODE_WINDOW_TIME;
-	g_iExplodeBoomerUserId = event.GetInt("userid");
-	g_iExplodeCount = 0;
+	g_iLastExplodedBoomer = event.GetInt("userid");
+	g_fLastExplodedTime = GetGameTime();
 
-	for (int i = 1; i <= MaxClients; i++)
-		g_bExplodeVictim[i] = false;
-
-	CreateTimer(EXPLODE_WINDOW_TIME, Timer_EndExplode, _, TIMER_FLAG_NO_MAPCHANGE);
+	// 若 player_now_it 已先到达并开窗, 则保留已计数, 不重置窗口
+	if (!g_bExplodeActive[boomer])
+		OpenExplodeWindow(boomer);
 }
 
-public Action Timer_EndExplode(Handle timer)
+void OpenExplodeWindow(int boomer)
 {
-	int boomer = GetClientOfUserId(g_iExplodeBoomerUserId);
+	g_bExplodeActive[boomer] = true;
+	g_iExplodeCount[boomer] = 0;
 
-	if (boomer > 0 && g_iExplodeCount >= g_iBoomerExplodeMin)
+	for (int i = 1; i <= MaxClients; i++)
+		g_bExplodeVictim[boomer][i] = false;
+
+	// 爆炸后 boomer 立即死亡, 先记录名字, 结算时不再解析实体
+	GetActorName(boomer, g_sExplodeName[boomer], MAX_NAME_LENGTH);
+
+	CreateTimer(EXPLODE_WINDOW_TIME, Timer_EndExplode, GetClientUserId(boomer), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_EndExplode(Handle timer, int userid)
+{
+	int boomer = GetClientOfUserId(userid);
+
+	if (boomer > 0 && g_bExplodeActive[boomer] && g_iExplodeCount[boomer] >= g_iBoomerExplodeMin)
 	{
-		char name[MAX_NAME_LENGTH];
-		GetActorName(boomer, name, sizeof(name));
-
-		PrintToInfectedTeam("\x04[提示] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%s\x05名生还者",
-			name, g_NumberTextGe[g_iExplodeCount - 2]);
+		PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%s\x05名生还者",
+			g_sExplodeName[boomer], g_NumberTextGe[g_iExplodeCount[boomer] - 2]);
 	}
 
-	g_fExplodeWindowEnd = 0.0;
-	g_iExplodeBoomerUserId = 0;
-	g_iExplodeCount = 0;
+	if (boomer > 0)
+		ResetExplode(boomer);
 
 	return Plugin_Continue;
 }
@@ -270,6 +304,17 @@ void ResetSpray(int boomer)
 		g_bSprayVictim[boomer][i] = false;
 }
 
+void ResetExplode(int boomer)
+{
+	g_bExplodeActive[boomer] = false;
+	g_iExplodeCount[boomer] = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_bExplodeVictim[boomer][i] = false;
+
+	g_sExplodeName[boomer][0] = '\0';
+}
+
 // ====================================================================================================
 // Charger 一撞多
 // ====================================================================================================
@@ -281,13 +326,25 @@ public void Event_AbilityUse(Event event, const char[] name, bool dontBroadcast)
 	if (!IsCharger(client) || !IsPlayerAlive(client))
 		return;
 
-	g_bChargerPrint[client] = false;
-	g_bChargerCarry[client] = false;
-	g_iChargerCount[client] = 0;
-	g_bChargerReady[client] = true;
+	char ability[32];
+	event.GetString("ability", ability, sizeof(ability));
 
-	for (int i = 1; i <= MaxClients; i++)
-		g_bChargerHit[client][i] = false;
+	if (strcmp(ability, "ability_charge") != 0)
+		return;
+
+	// 一次新冲撞的开始: 无条件重开窗口
+	StartChargerWindow(client);
+}
+
+public void Event_ChargerChargeEnd(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+
+	if (!IsCharger(client))
+		return;
+
+	// 冲锋结束(撞墙/撞击停止/被控打断等)即结算本次冲撞
+	SettleCharger(client);
 }
 
 public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
@@ -299,13 +356,19 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 
 	int attacker = GetClientOfUserId(event.GetInt("attacker"));
 
-	if (!IsCharger(attacker) || !IsPlayerAlive(attacker) || (!ChargerIsCharging(attacker) && !g_bChargerReady[attacker]))
+	if (!IsCharger(attacker) || !IsPlayerAlive(attacker))
 		return;
 
-	if (g_bChargerPrint[attacker] || !g_bChargerReady[attacker] || g_bChargerHit[attacker][client])
-		return;
+	if (!g_bChargerReady[attacker])
+	{
+		// 窗口未开: 只有真正处于冲锋状态才开窗计数(AI 特感可能没有 ability_use 事件)
+		if (!ChargerIsCharging(attacker))
+			return;
 
-	if (event.GetInt("dmg_health") < 1)
+		OpenChargerWindow(attacker);
+	}
+
+	if (g_bChargerHit[attacker][client] || event.GetInt("dmg_health") < 1)
 		return;
 
 	g_bChargerHit[attacker][client] = true;
@@ -324,7 +387,9 @@ public void Event_ChargerCarryStart(Event event, const char[] name, bool dontBro
 	if (!IsSurvivor(victim) || !IsPlayerAlive(victim))
 		return;
 
-	g_bChargerCarry[client] = true;
+	// 抓取本身不一定产生 player_hurt 伤害, 窗口未开时在此开窗
+	if (!g_bChargerReady[client])
+		OpenChargerWindow(client);
 
 	if (g_bChargerHit[client][victim])
 		return;
@@ -337,20 +402,22 @@ public void Event_ChargerCarryEnd(Event event, const char[] name, bool dontBroad
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
-	if (!IsCharger(client) || !IsPlayerAlive(client) || g_bChargerPrint[client] || !g_bChargerCarry[client])
+	if (!IsCharger(client))
 		return;
 
-	PrintCharger(client);
+	// 作为 charger_charge_end 未触发时的兜底结算点
+	SettleCharger(client);
 }
 
 public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
-	if (!IsCharger(client) || g_bChargerPrint[client] || !g_bChargerCarry[client])
+	if (!IsCharger(client))
 		return;
 
-	PrintCharger(client);
+	// 冲锋途中死亡的兜底结算点
+	SettleCharger(client);
 }
 
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -363,10 +430,7 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	if (!IsCharger(client))
 		return;
 
-	g_bChargerPrint[client] = false;
-	g_bChargerCarry[client] = false;
-	g_iChargerCount[client] = 0;
-	g_bChargerReady[client] = false;
+	ResetCharger(client);
 }
 
 public void Event_PlayerBotReplace(Event event, const char[] name, bool dontBroadcast)
@@ -407,20 +471,54 @@ public void Event_BotPlayerReplace(Event event, const char[] name, bool dontBroa
 	}
 }
 
-void PrintCharger(int charger)
+// 一次新冲撞的开始(ability_use 确认发起冲撞): 无条件重开窗口
+void StartChargerWindow(int charger)
+{
+	g_bChargerReady[charger] = true;
+	g_iChargerCount[charger] = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_bChargerHit[charger][i] = false;
+}
+
+// 冲撞伤害已发生但窗口未开(如 AI 特感没有 ability_use 事件): 补开窗口
+void OpenChargerWindow(int charger)
+{
+	if (g_bChargerReady[charger])
+		return;
+
+	StartChargerWindow(charger);
+}
+
+void ResetCharger(int charger)
 {
 	g_bChargerReady[charger] = false;
+	g_iChargerCount[charger] = 0;
 
+	for (int i = 1; i <= MaxClients; i++)
+		g_bChargerHit[charger][i] = false;
+}
+
+// 结算本次冲撞(幂等: 窗口已关闭则直接返回, 不会重复提示)
+void SettleCharger(int charger)
+{
+	if (!g_bChargerReady[charger])
+		return;
+
+	g_bChargerReady[charger] = false;
+	PrintCharger(charger);
+}
+
+void PrintCharger(int charger)
+{
 	if (g_iChargerCount[charger] < g_iChargerMin)
 		return;
 
 	char name[MAX_NAME_LENGTH];
 	GetActorName(charger, name, sizeof(name));
 
-	PrintToInfectedTeam("\x04[提示] \x05Charger(\x03%s\x05) \x01一撞\x04%s\x05",
+	PrintToInfectedTeam("\x04[\x03!\x04] \x05Charger(\x03%s\x05) \x01一撞\x04%s\x05",
 		name, g_NumberText[g_iChargerCount[charger] - 2]);
-
-	g_bChargerPrint[charger] = true;
 }
 
 // ====================================================================================================
@@ -450,7 +548,7 @@ public Action Timer_CheckPinned(Handle timer)
 	{
 		if (!g_bMultiPinnedAnnounced)
 		{
-			PrintToInfectedTeam("\x04[提示] \x03%s控\x05 \x01达成.", g_NumberText[pinned - 2]);
+			PrintToInfectedTeam("\x04[\x03!\x04] \x03%s控\x05 \x01达成.", g_NumberText[pinned - 2]);
 			g_bMultiPinnedAnnounced = true;
 		}
 	}

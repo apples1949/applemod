@@ -60,10 +60,8 @@ ConVar
 /* Tank 受到来自玩家的伤害，tankId，clientId */
 int
 	tankHurt[MAXPLAYERS + 1][MAXPLAYERS + 1],
-	// Tank 血量记录
-	tankHealth[MAXPLAYERS + 1],
-	// Tank 死亡前血量记录
-	tankLastHealth[MAXPLAYERS + 1];
+	// Tank 血量记录（生成时的满血基准, 百分比分母）
+	tankHealth[MAXPLAYERS + 1];
 
 float
 	// 这个 Tank 的存活时间
@@ -220,12 +218,10 @@ public void playerHurtHandler(Event event, const char[] name, bool dontBroadcast
 
 	int attacker,
 		victim,
-		damage,
-		remainHealth;
+		damage;
 	attacker = GetClientOfUserId(event.GetInt("attacker"));
 	victim = GetClientOfUserId(event.GetInt("userid"));
 	damage = event.GetInt("dmg_health");
-	remainHealth = event.GetInt("health");
 
 	static char weapon[64];
 	event.GetString("weapon", weapon, sizeof(weapon));
@@ -246,10 +242,8 @@ public void playerHurtHandler(Event event, const char[] name, bool dontBroadcast
 		else if (strcmp(weapon, "tank_rock") == 0)
 			playerHurts[attacker][victim].rock++;
 	} else if (IsValidSurvivor(attacker) && isTank(victim)) {
-		// 玩家对 Tank 造成伤害
+		// 玩家对 Tank 造成伤害（致死一击的补偿在 player_death 中用"满血基准 - 已统计伤害"的差额计算, 不依赖易失的剩余血量记录）
 		tankHurt[victim][attacker] += damage;
-		// Tank 有死亡动画，最后一次伤害不会算入 playerHurt 中，因此需要记录最后一次剩余血量，Tank 死亡时加入到生还者伤害中
-		tankLastHealth[victim] = remainHealth;
 	}
 }
 
@@ -258,29 +252,31 @@ public void playerSpawnHandler(Event event, const char[] name, bool dontBroadcas
 	if (!isTank(client) || !IsPlayerAlive(client))
 		return;
 
-	/* 若当前仍追踪着另一个有数据的 Tank, 说明这是一次控制权交接产生的新 Tank（如接管 AI Tank、
-	   或旧 Tank 掉线后 Bot 补位），数据将由 player_now_it / 换人事件转移过来，这里不做初始化，
-	   避免清空或覆盖继承自旧控制者的数据 */
+	/* 数据初始化只针对全新 Tank 实例:
+	   1) 当前跟踪着另一个有数据的 Tank → 交接产生的新 Tank, 数据由转移事件继承, 不初始化;
+	   2) 跟踪指针已指向自己且有数据 → 转移事件先于本事件完成, 同样不初始化 */
+	bool isTakeover = false;
 	if (g_iCurrentTank != 0 && g_iCurrentTank != client && tankDataExists(g_iCurrentTank))
-		return;
-	// 极端时序保护: 若转移事件先于本事件执行(此时跟踪指针已指向该客户端), 数据已继承完毕, 不再初始化
-	if (g_iCurrentTank == client && tankDataExists(client))
-		return;
+		isTakeover = true;
+	if (!isTakeover && g_iCurrentTank == client && tankDataExists(client))
+		isTakeover = true;
 
-	/* 全新 Tank 实例生成 */
-	g_iCurrentTank = client;
-	/* 清空这个 Tank 的伤害统计 */
-	clearTankDamage(client);
-	tankLiveTime[client] = GetGameTime();
-	hasPrintDamage[client] = false;
-	/* 延迟一帧获取 Tank 血量，否则可能获取不到 */
-	RequestFrame(nextFrameGetTankHealthHandler, client);
-	/* 显示 Tank 生成 */
+	if (!isTakeover) {
+		/* 全新 Tank 实例生成 */
+		g_iCurrentTank = client;
+		/* 清空这个 Tank 的伤害统计 */
+		clearTankDamage(client);
+		tankLiveTime[client] = GetGameTime();
+		hasPrintDamage[client] = false;
+		/* 延迟一帧获取 Tank 血量，否则可能获取不到 */
+		RequestFrame(nextFrameGetTankHealthHandler, client);
+	}
+
+	/* 显示 Tank 生成并播放提示音: 全新生成与接管都提示, 与旧版行为一致 */
 	if (!IsFakeClient(client))
 		CPrintToChatAll("[{green}!{default}] {green}Tank {default}({green}%N{default}) {blue}已经生成", client);
 	else
 		CPrintToChatAll("[{green}!{default}] {green}Tank {default}({green}AI{default}) {blue}已经生成");
-	// 播放声音
 	if (g_hAllowSound.BoolValue)
 		EmitSoundToAll(SOUND_PATH);
 }
@@ -305,9 +301,17 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 	   能走到这里的 victim 必是 Tank 实体, 无条件清零以保证下一个 Tank 正常初始化 */
 	g_iCurrentTank = 0;
 
-	/* 谁杀死了克，加 Tank 最后剩余的血量（致死一击不触发 player_hurt, 用最后记录的剩余血量补偿） */
-	if (IsValidSurvivor(attacker) && IsPlayerAlive(attacker))
-		tankHurt[victim][attacker] += tankLastHealth[victim];
+	/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
+	   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
+	   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
+	if (IsValidSurvivor(attacker) && IsPlayerAlive(attacker)) {
+		int recordedDamage = 0;
+		for (int i = 1; i <= MaxClients; i++)
+			recordedDamage += tankHurt[victim][i];
+		int remainDamage = tankHealth[victim] - recordedDamage;
+		if (remainDamage > 0)
+			tankHurt[victim][attacker] += remainDamage;
+	}
 	/* 计算 Tank 存活时间 */
 	tankLiveTime[victim] = GetGameTime() - tankLiveTime[victim];
 	/* 是否是强制杀死、自杀或被环境杀死（无有效攻击者） */
@@ -380,10 +384,11 @@ public void playerNowItHandler(Event event, const char[] name, bool dontBroadcas
 		// 事件触发时职业已切换完成, 直接交接
 		resolveTankPass(newTank);
 	} else {
-		// 职业可能尚未切换完成, 延迟复查
+		// 职业可能尚未切换完成, 延迟复查（pack 同时携带事件触发时跟踪到的旧 Tank, 防时序颠倒导致数据丢失）
 		DataPack pack = new DataPack();
 		pack.WriteCell(newTank);
 		pack.WriteCell(causer);
+		pack.WriteCell(g_iCurrentTank);
 		CreateTimer(TANK_PASS_RECHECK_DELAY, tankPassRecheckHandler, pack);
 	}
 }
@@ -395,6 +400,7 @@ public void playerBotReplaceHandler(Event event, const char[] name, bool dontBro
 	DataPack pack = new DataPack();
 	pack.WriteCell(GetClientOfUserId(event.GetInt("player")));
 	pack.WriteCell(GetClientOfUserId(event.GetInt("bot")));
+	pack.WriteCell(g_iCurrentTank);
 	CreateTimer(TANK_PASS_RECHECK_DELAY, tankPassRecheckHandler, pack);
 }
 
@@ -405,13 +411,14 @@ public void botPlayerReplaceHandler(Event event, const char[] name, bool dontBro
 	DataPack pack = new DataPack();
 	pack.WriteCell(GetClientOfUserId(event.GetInt("player")));
 	pack.WriteCell(GetClientOfUserId(event.GetInt("bot")));
+	pack.WriteCell(g_iCurrentTank);
 	CreateTimer(TANK_PASS_RECHECK_DELAY, tankPassRecheckHandler, pack);
 }
 
 public Action tankPassRecheckHandler(Handle timer, DataPack pack)
 {
 	pack.Reset();
-	int player = pack.ReadCell(), bot = pack.ReadCell();
+	int player = pack.ReadCell(), bot = pack.ReadCell(), oldTank = pack.ReadCell();
 	delete pack;
 
 	// 两者中现在是 Tank 的那个就是新 Tank
@@ -423,23 +430,32 @@ public Action tankPassRecheckHandler(Handle timer, DataPack pack)
 	else
 		return Plugin_Stop;
 
-	resolveTankPass(newTank);
+	resolveTankPass(newTank, oldTank);
 	return Plugin_Stop;
 }
 
 /**
 * 处理 Tank 控制权交接: 把旧控制者的全部数据转移到新控制者, 保证数据跟随 Tank 实例。
-* 通过 g_iCurrentTank 保证幂等: 同一对交接只执行一次（player_now_it 与换人事件可能同时触发）。
+* 幂等性: 转移后旧索引数据被清空, 同一对交接的重复事件(如 player_now_it 与换人事件同时触发)再次执行时
+* 提示与跟踪值都已失效, 不会重复转移。
 * @param newTank 新的 Tank 控制者客户端索引
+* @param oldTankHint 交接事件触发时跟踪到的旧 Tank 索引(延迟复查用, 立即路径传 0 回退到当前跟踪值)
 **/
-void resolveTankPass(int newTank)
+void resolveTankPass(int newTank, int oldTankHint = 0)
 {
 	if (!IsValidInfected(newTank) || !isTank(newTank))
 		return;
-	if (newTank == g_iCurrentTank)
-		return;
 
-	int oldTank = g_iCurrentTank;
+	// 优先使用事件触发时跟踪到的数据持有者; 其数据已失效时, 若当前跟踪值仍是事件时的那个(局势未变)则回退到它;
+	// 局势已变(期间又发生了一次交接)则不强行转移, 只更新跟踪值, 避免把数据转给错误的对象
+	int oldTank = oldTankHint;
+	if (oldTank == 0 || oldTank == newTank || !tankDataExists(oldTank)) {
+		if (oldTankHint == 0 || oldTankHint == g_iCurrentTank)
+			oldTank = g_iCurrentTank;
+		else
+			oldTank = 0;
+	}
+
 	if (oldTank != 0 && oldTank != newTank && tankDataExists(oldTank))
 		transferTankData(oldTank, newTank);
 
@@ -475,15 +491,13 @@ void transferTankData(int oldTank, int newTank)
 		playerHurts[newTank][i] = playerHurts[oldTank][i];
 		playerHurts[oldTank][i].init();
 	}
-	// 转移满血基准、最后剩余血量、存活时间与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
+	// 转移满血基准、存活时间与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
 	tankHealth[newTank] = tankHealth[oldTank];
-	tankLastHealth[newTank] = tankLastHealth[oldTank];
 	tankLiveTime[newTank] = tankLiveTime[oldTank];
 	hasPrintDamage[newTank] = hasPrintDamage[oldTank];
 
 	// 清空旧控制者的数据
 	tankHealth[oldTank] = 0;
-	tankLastHealth[oldTank] = 0;
 	tankLiveTime[oldTank] = 0.0;
 	hasPrintDamage[oldTank] = false;
 }
@@ -587,12 +601,7 @@ void doPrintTankDamage(int client) {
 
 			debugAndInfoLog("%s: Tank %d, 生还索引: %d, 伤害 %d, 百分比 %d%%, 名字 %s", PLUGIN_PREFIX, client, survivor, damage, damagePercent, playerName);
 
-			CPrintToChatAll("{blue}[{default}%d{blue}({default}%d%%{blue})]\
-			 [{green}拳:{default}%d]\
-			  [{green}石:{default}%d]\
-			   [{green}铁:{default}%d]\
-			    [{green}承伤:{default}%d{blue}({default}%d%%{blue})]\
-				 {green}%s",
+			CPrintToChatAll("{blue}[{default}%d{blue}({default}%d%%{blue})] [{green}拳:{default}%d] [{green}石:{default}%d] [{green}铁:{default}%d] [{green}承伤:{default}%d{blue}({default}%d%%{blue})] {green}%s",
 			damage, damagePercent,
 			playerHurts[client][survivor].punch,
 			playerHurts[client][survivor].rock,
@@ -640,7 +649,6 @@ void clearTankDamage(int client) {
 	if (client != INVALID_CLIENT)
 	{
 		tankHealth[client] = 0;
-		tankLastHealth[client] = 0;
 		for (i = 1; i <= MaxClients; i++)
 		{
 			tankHurt[client][i] = 0;
@@ -655,7 +663,6 @@ void clearTankDamage(int client) {
 		{
 			hasPrintDamage[i] = false;
 			tankHealth[i] = 0;
-			tankLastHealth[i] = 0;
 			tankLiveTime[i] = 0.0;
 			for (j = 1; j <= MaxClients; j++)
 			{

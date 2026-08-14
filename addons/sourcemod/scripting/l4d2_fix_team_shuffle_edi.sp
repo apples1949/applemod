@@ -29,6 +29,8 @@ int g_iSavedRound = 0;        // 保存队伍数据时的回合号（0=第一回
 float g_fLastTimeout = 30.0;  // 最近创建的超时时间（用于提示）
 int g_iFixAttempts = 0;       // 当前数据下的修正尝试次数
 
+bool g_bWinnersWereSurvivors;  // 上一回合胜方是否为生还者（换边后用于映射到正确队伍）
+
 public Plugin myinfo =
 {
 	name = "L4D2 - Fix team shuffle",
@@ -105,6 +107,7 @@ public void OnRoundIsLive()
 {
 	DisableFixTeam();
 	ClearTeamsData();
+	CancelTimeoutTimer();
 }
 
 public void L4D2_OnEndVersusModeRound_Post()
@@ -114,12 +117,12 @@ public void L4D2_OnEndVersusModeRound_Post()
 
 void RoundStart_Event(Handle event, const char[] name, bool dontBroadcast)
 {
-	DisableFixTeam();
+	// 仅在对抗模式生效，避免在战役/写实等模式下读取对战分数抛错
+	if (!L4D_IsVersusMode())
+		return;
 
-	// 回合一开始即确认当前回合（0=第一回合, 1=第二回合）
-	// L4D2 使用 m_bInSecondHalfOfRound：第一回合=0，第二回合（换边后）=1
-	// 注意：m_iRoundNumber 是 L4D1 的属性，L4D2 中不存在
-	g_iSavedRound = GameRules_GetProp("m_bInSecondHalfOfRound");
+	DisableFixTeam();
+	CancelTimeoutTimer();
 
 	if (L4D_HasMapStarted() && IsNewGame())
 	{
@@ -132,6 +135,10 @@ void RoundStart_Event(Handle event, const char[] name, bool dontBroadcast)
 
 void PlayerTeam_Event(Event event, const char[] name, bool dontBroadcast)
 {
+	// 仅在对抗模式生效，避免在战役/写实等模式下读取对战分数抛错
+	if (!L4D_IsVersusMode())
+		return;
+
 	if (!L4D_HasMapStarted())
 		return;
 
@@ -153,6 +160,7 @@ void PlayerTeam_Event(Event event, const char[] name, bool dontBroadcast)
 	{
 		DisableFixTeam();
 		ClearTeamsData();
+		CancelTimeoutTimer();
 		return;
 	}
 
@@ -173,14 +181,12 @@ Action ReSpec_Timer(Handle timer, any client)
 	return Plugin_Stop;
 }
 
-Action FixTeam_Timer(Handle timer)
+void FixTeam_Timer(Handle timer)
 {
 	FixTeams();
-
-	return Plugin_Continue;
 }
 
-Action EnableFixTeam_Timer(Handle timer)
+void EnableFixTeam_Timer(Handle timer)
 {
 	// 上一回合玩家已不在服务器中（断线）时，从名单移除，不等待其重新进入
 	if (g_bIgnoreOffline)
@@ -192,31 +198,34 @@ Action EnableFixTeam_Timer(Handle timer)
 	EnableFixTeam();
 	FixTeams();
 
-	// 防止 round_start 多次触发导致超时定时器堆积
-	if (g_hTimeoutTimer == INVALID_HANDLE)
-	{
-		// 按保存数据时的回合选择超时时间
-		g_fLastTimeout = (g_iSavedRound == 0) ? g_fTimeoutRound1 : g_fTimeoutRound2;
+	// 修正未挂起（已完成/超次数/无数据）时，无需再创建超时定时器
+	if (!MustFixTheTeams())
+		return;
 
-		if (g_fLastTimeout > 0.0)
-			g_hTimeoutTimer = CreateTimer(g_fLastTimeout, DisableFixTeam_Timer);
-	}
+	// 防止 round_start 多次触发导致超时定时器堆积/残留：先清理旧定时器再创建新的
+	CancelTimeoutTimer();
 
-	return Plugin_Continue;
+	// 按保存数据时的回合选择超时时间
+	g_fLastTimeout = (g_iSavedRound == 0) ? g_fTimeoutRound1 : g_fTimeoutRound2;
+
+	if (g_fLastTimeout > 0.0)
+		g_hTimeoutTimer = CreateTimer(g_fLastTimeout, DisableFixTeam_Timer);
 }
 
-Action DisableFixTeam_Timer(Handle timer)
+void DisableFixTeam_Timer(Handle timer)
 {
 	g_hTimeoutTimer = INVALID_HANDLE;
-	DisableFixTeam();
 
 	// 修正已完成或被其他流程关闭（回合开始/新游戏），不输出超时提示
-	if (!fixTeam || g_bFixCompleted)
-		return Plugin_Continue;
+	// 注意：必须在 DisableFixTeam() 之前读取 fixTeam，否则其恒为 false
+	bool wasPending = fixTeam && !g_bFixCompleted;
+
+	DisableFixTeam();
+
+	if (!wasPending)
+		return;
 
 	PrintToChatAll("\x01[队伍修正] 队伍修正已超时关闭（%.0f秒），如有问题请联系管理员", g_fLastTimeout);
-
-	return Plugin_Continue;
 }
 
 // ========== Team State ==========
@@ -228,9 +237,15 @@ void SaveTeams()
 	// 新一轮修正周期，重置修正次数
 	g_iFixAttempts = 0;
 
-	// 回合号已在回合开始时（RoundStart_Event）确认，直接用于选择对应的超时时间
+	// 记录保存数据时的回合号（0=第一回合, 1=第二回合），用于选择对应的超时时间。
+	// 必须在此处（回合结束）读取 m_bInSecondHalfOfRound：此刻它仍等于刚结束的回合；
+	// 若等到下一个 round_start 才读，值已被新回合覆盖，会选错超时。
+	g_iSavedRound = GameRules_GetProp("m_bInSecondHalfOfRound");
 
 	bool survivorsAreWinning = SurvivorsAreWinning();
+
+	// 记录胜方在上回合的角色，换边后据此映射（避免修正时重新用已翻转的比分导致平局判定不一致）
+	g_bWinnersWereSurvivors = survivorsAreWinning;
 
 	int winnerTeam = survivorsAreWinning ? L4D2_TEAM_SURVIVOR : L4D2_TEAM_INFECTED;
 	int losersTeam = survivorsAreWinning ? L4D2_TEAM_INFECTED : L4D2_TEAM_SURVIVOR;
@@ -261,6 +276,7 @@ void FixTeams()
 	if (g_iMaxAttempts > 0 && g_iFixAttempts >= g_iMaxAttempts)
 	{
 		DisableFixTeam();
+		CancelTimeoutTimer();
 		PrintToChatAll("\x01[队伍修正] 已超过最大修正次数（%d），停止修正", g_iMaxAttempts);
 		return;
 	}
@@ -269,10 +285,9 @@ void FixTeams()
 
 	DisableFixTeam();
 
-	bool survivorsAreWinning = SurvivorsAreWinning();
-
-	int winnerTeam = survivorsAreWinning ? L4D2_TEAM_SURVIVOR : L4D2_TEAM_INFECTED;
-	int losersTeam = survivorsAreWinning ? L4D2_TEAM_INFECTED : L4D2_TEAM_SURVIVOR;
+	// 使用上一回合保存的胜方角色映射当前队伍：换边后，上回合生还者胜方回到感染者，反之回到生还者
+	int winnerTeam = g_bWinnersWereSurvivors ? L4D2_TEAM_INFECTED : L4D2_TEAM_SURVIVOR;
+	int losersTeam = g_bWinnersWereSurvivors ? L4D2_TEAM_SURVIVOR : L4D2_TEAM_INFECTED;
 
 	// 优化：如果所有玩家已经在正确队伍，直接完成
 	if (PlayersInCorrectTeam(winners, winnerTeam) && PlayersInCorrectTeam(losers, losersTeam))
@@ -384,6 +399,15 @@ void ClearTeamsData()
 	losers.Clear();
 }
 
+void CancelTimeoutTimer()
+{
+	if (g_hTimeoutTimer != INVALID_HANDLE)
+	{
+		KillTimer(g_hTimeoutTimer);
+		g_hTimeoutTimer = INVALID_HANDLE;
+	}
+}
+
 void RemoveOfflinePlayersFromArray(ArrayList arrayList)
 {
 	for (int i = GetArraySize(arrayList) - 1; i >= 0; i--)
@@ -416,11 +440,7 @@ void MarkFixComplete()
 	g_bFixCompleted = true;
 
 	// 修正已完成，取消挂起的超时定时器
-	if (g_hTimeoutTimer != INVALID_HANDLE)
-	{
-		KillTimer(g_hTimeoutTimer);
-		g_hTimeoutTimer = INVALID_HANDLE;
-	}
+	CancelTimeoutTimer();
 
 	PrintToChatAll("\x01[队伍修正] 队伍修正完成！所有玩家已归位。");
 
@@ -433,7 +453,7 @@ void MarkFixComplete()
 void MovePlayerToTeam(int client, int team)
 {
 	// 队伍已满时不允许移入
-	if (team != L4D2_TEAM_SPECTATOR && NumberOfPlayersInTheTeam(team) >= TeamSize())
+	if (team != L4D2_TEAM_SPECTATOR && NumberOfPlayersInTheTeam(team) >= TeamSize(team))
 		return;
 
 	// 使用 if-else 替代 switch，避免 SourcePawn 各版本的 fallthrough 行为差异
@@ -466,7 +486,11 @@ int NumberOfPlayersInTheTeam(int team)
 	return count;
 }
 
-int TeamSize()
+int TeamSize(int team)
 {
+	// 感染者与幸存者的人数上限由不同 ConVar 控制
+	if (team == L4D2_TEAM_INFECTED)
+		return GetConVarInt(FindConVar("z_max_player_zombies"));
+
 	return GetConVarInt(FindConVar("survivor_limit"));
 }

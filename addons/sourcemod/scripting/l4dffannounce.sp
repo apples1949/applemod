@@ -107,7 +107,7 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 
 	if(GetClientTeam(attacker) == 2 && GetClientTeam(victim) == 2) //人類 kill &友傷
 	{
-		CPrintToChatAll("[{olive}TS{default}] %t", "KILL", attacker, victim);
+		CPrintToChatAll("[{olive}FF{default}] %t", "KILL", attacker, victim);
 	}	
 }
 
@@ -214,9 +214,9 @@ Action AnnounceFF(Handle timer, int attacker) //Called if the attacker did not f
 					case 1:
 					{
 						if (IsClientInGame(attacker) && !IsFakeClient(attacker))
-							CPrintToChat(attacker, "[{olive}TS{default}] %T", "FF_dealt (C)", attacker, g_iDamageTempCache[attacker][i], sVictimName, g_iTotalDamage[attacker][i]);
+							CPrintToChat(attacker, "[{olive}FF{default}] %T", "FF_dealt (C)", attacker, g_iDamageTempCache[attacker][i], sVictimName, g_iTotalDamage[attacker][i]);
 						if (IsClientInGame(i) && !IsFakeClient(i))
-							CPrintToChat(i, "[{olive}TS{default}] %T", "FF_receive (C)", i, sAttackerName, g_iDamageTempCache[attacker][i], g_iTotalDamage[attacker][i]);
+							CPrintToChat(i, "[{olive}FF{default}] %T", "FF_receive (C)", i, sAttackerName, g_iDamageTempCache[attacker][i], g_iTotalDamage[attacker][i]);
 					}
 					case 2:
 					{

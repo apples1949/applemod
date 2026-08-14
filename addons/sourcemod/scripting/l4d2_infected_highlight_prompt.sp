@@ -601,7 +601,7 @@ void GetActorName(int client, char[] buffer, int maxlen)
 		GetClientName(client, buffer, maxlen);
 }
 
-// 只提示非生还者玩家(感染者阵营), 不提示生还者与旁观
+// 除生还者外的所有真人玩家都提示输出(感染者阵营与旁观), 不提示生还者与Bot
 void PrintToInfectedTeam(const char[] format, any ...)
 {
 	char buffer[256];
@@ -609,7 +609,7 @@ void PrintToInfectedTeam(const char[] format, any ...)
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsClientInGame(i) && GetClientTeam(i) == 3 && !IsFakeClient(i))
+		if (IsClientInGame(i) && GetClientTeam(i) != 2 && !IsFakeClient(i))
 			PrintToChat(i, buffer);
 	}
 }

@@ -93,6 +93,17 @@ void UpdatePanel()
 	menuPanel.DrawText(" ");
 	menuPanel.DrawText("▸ 指令:");
 	menuPanel.DrawText(FooterGet(cmdFooter, curCmd));
+	
+	// 准备条件提示: 显示在指令行下方
+	if (readyUpMode == ReadyMode_PlayerReady)
+	{
+		menuPanel.DrawText("每个队伍满人且所有人准备（F1/!ready）以开始游戏");
+	}
+	else if (readyUpMode == ReadyMode_TeamReady)
+	{
+		menuPanel.DrawText("每个队伍至少一人准备（F1/!ready）开始游戏");
+	}
+	
 	menuPanel.DrawText(" ");
 
 	char nameBuf[64];

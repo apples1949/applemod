@@ -3,8 +3,9 @@
 #pragma newdecls required
 #include <sourcemod>
 #include <sdktools>
+#include <left4dhooks>
 
-#define PLUGIN_VERSION "1.0.2"
+#define PLUGIN_VERSION "1.0.3"
 
 int    g_iSuicide, g_iShowTips;
 ConVar g_hSuicide, g_hShowTips;
@@ -12,7 +13,7 @@ ConVar g_hSuicide, g_hShowTips;
 public Plugin myinfo =  
 {
 	name = "l4d2_player_suicide",
-	author = "豆瓣酱な",  
+	author = "apples1949",  
 	description = "玩家自杀指令",
 	version = PLUGIN_VERSION,
 	url = "N/A"
@@ -135,6 +136,12 @@ void IsPlayerSuicide(int client, int victim, char[] g_sName, char[] g_sTeam)
 {
 	if (IsPlayerAlive(client))
 	{
+		if (IsClientInStartCheckpoint(client))
+		{
+			PrintToChat(victim, "\x04[提示]\x05在安全区域内不能自杀,请离开安全区域后再试.");
+			return;
+		}
+
 		switch (g_iSuicide)
 		{
 			case 1:
@@ -170,6 +177,12 @@ stock bool IsValidClient(int client)
 stock bool IsPlayerState(int client)
 {
 	return !GetEntProp(client, Prop_Send, "m_isIncapacitated") && !GetEntProp(client, Prop_Send, "m_isHangingFromLedge");
+}
+
+//是否位于起始安全区域内.
+stock bool IsClientInStartCheckpoint(int client)
+{
+	return GetFeatureStatus(FeatureType_Native, "L4D_IsInFirstCheckpoint") == FeatureStatus_Available && L4D_IsInFirstCheckpoint(client);
 }
 
 //返回对应的内容.

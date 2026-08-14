@@ -11,7 +11,7 @@
 #undef REQUIRE_PLUGIN
 #include <GetPlayerGametime>
 
-#define PLUGIN_VERSION "10.2.8"
+#define PLUGIN_VERSION "10.2.10"
 
 public Plugin myinfo =
 {
@@ -232,6 +232,17 @@ void PlayerTeam_Event(Event event, const char[] name, bool dontBroadcast)
 	
 	int team = event.GetInt("team");
 	int oldteam = event.GetInt("oldteam");
+	
+	// 团队模式 (l4d_ready_enabled=3): 玩家退出/换边/加入队伍改变团队构成,
+	// 自动取消对应队伍的准备状态 (整队重置为未准备, 面板团队状态恢复为 [X])
+	if (readyUpMode == ReadyMode_TeamReady && team != oldteam)
+	{
+		if (oldteam == L4D2Team_Survivor || oldteam == L4D2Team_Infected)
+			UnreadyTeam(oldteam);
+		
+		if (team == L4D2Team_Survivor || team == L4D2Team_Infected)
+			UnreadyTeam(team);
+	}
 	
 	if (team == L4D2Team_None && oldteam != L4D2Team_Spectator) // Player disconnecting
 	{

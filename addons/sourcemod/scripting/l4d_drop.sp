@@ -16,9 +16,9 @@
 #endif
 
 #define PLUGIN_NAME "[L4D1/2] Weapon Drop"
-#define PLUGIN_AUTHOR "Machine, dcx2, Electr000999 /z, Senip, Shao, NoroHime, HarryPotter"
+#define PLUGIN_AUTHOR "Machine, dcx2, Electr000999 /z, Senip, Shao, NoroHime, HarryPotter, apples1949"
 #define PLUGIN_DESC "Allows players to drop the weapon they are holding"
-#define PLUGIN_VERSION "1.13-2024/2/15"
+#define PLUGIN_VERSION "1.14-2026/8/14"
 #define PLUGIN_URL "https://steamcommunity.com/profiles/76561198026784913/"
 
 public Plugin myinfo =
@@ -31,6 +31,12 @@ public Plugin myinfo =
 }
 
 GlobalForward OnWeaponDrop; // Called whenever weapon prepared to drop by plugin l4d_drop
+
+// Bit flags for sm_drop_block_secondary_bits
+#define BLOCK_SECONDARY_SINGLE_PISTOL	(1 << 0)	// 1 - Single pistol
+#define BLOCK_SECONDARY_DUAL_PISTOLS	(1 << 1)	// 2 - Dual pistols
+#define BLOCK_SECONDARY_MAGNUM			(1 << 2)	// 4 - Magnum
+#define BLOCK_SECONDARY_MELEE			(1 << 3)	// 8 - Melee weapons
 
 bool g_bL4D2Version;
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -61,14 +67,16 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	return APLRes_Success;
 }
 
-ConVar BlockSecondaryDrop;
+ConVar BlockSecondaryDropBits;
 ConVar BlockM60Drop;
 ConVar BlockDropMidAction;
 ConVar g_hCvarDropSoundFile;
-bool g_bBlockSecondaryDrop;
+ConVar g_hCvarDropDualPistols;
+int g_iBlockSecondaryDropBits;
 bool g_bBlockM60Drop;
 int g_iBlockDropMidAction;
 char g_sCvarDropSoundFile[PLATFORM_MAX_PATH];
+bool g_bDropDualPistols;
 
 bool g_bValidMap;
 
@@ -81,7 +89,7 @@ public void OnPluginStart()
 	g_iOffsetAmmo = FindSendPropInfo("CTerrorPlayer", "m_iAmmo");
 	g_iPrimaryAmmoType = FindSendPropInfo("CBaseCombatWeapon", "m_iPrimaryAmmoType");
 
-	BlockSecondaryDrop = CreateConVar("sm_drop_block_secondary", "0", "Prevent players from dropping their secondaries? (Fixes bugs that can come with incapped weapons or A-Posing.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	BlockSecondaryDropBits = CreateConVar("sm_drop_block_secondary_bits", "0", "Prevent players from dropping specific secondary weapons? (Bit flags: 1 = Single pistol, 2 = Dual pistols, 4 = Magnum, 8 = Melee weapons. Examples: 3 = block all pistols, 12 = block Magnum and Melee, 15 = block all secondaries. Bit 2 blocks dual pistols entirely and overrides sm_drop_dual_pistols.)", FCVAR_NOTIFY, true, 0.0, true, 15.0);
 	BlockDropMidAction = CreateConVar("sm_drop_block_mid_action", "1", "Prevent players from dropping objects in between actions? (Fixes throwable cloning.) 1 = All weapons. 2 = Only throwables.", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 	if (g_bL4D2Version)
 	{
@@ -92,16 +100,18 @@ public void OnPluginStart()
 	{
 		g_hCvarDropSoundFile  = 	    CreateConVar(  "sm_drop_soundfile", 	"items/itempickup.wav", 		"Drop - sound file (relative to to sound/, empty=disable)", FCVAR_NOTIFY);
 	}
+	g_hCvarDropDualPistols = CreateConVar("sm_drop_dual_pistols", "0", "How to handle dropping dual pistols? 0 = Drop one pistol and keep the other (become single pistol). 1 = Drop both pistols at once. (Only applies when bit 2 of sm_drop_block_secondary_bits is not set, otherwise dual pistols cannot be dropped.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	CreateConVar("sm_drop_version", PLUGIN_VERSION, "Weapon Drop version.", FCVAR_NOTIFY|FCVAR_REPLICATED|FCVAR_DONTRECORD);
 
 	GetCvars();
-	BlockSecondaryDrop.AddChangeHook(ConVarChanged_Cvars);
+	BlockSecondaryDropBits.AddChangeHook(ConVarChanged_Cvars);
 	BlockDropMidAction.AddChangeHook(ConVarChanged_Cvars);
 	if (g_bL4D2Version)
 	{
 		BlockM60Drop.AddChangeHook(ConVarChanged_Cvars);
 	}
 	g_hCvarDropSoundFile.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarDropDualPistols.AddChangeHook(ConVarChanged_Cvars);
 
 	AutoExecConfig(true, "l4d_drop");
 	GetCvars();
@@ -133,7 +143,7 @@ void ConVarChanged_Cvars(Handle convar, const char[] oldValue, const char[] newV
 
 void GetCvars()
 {
-	g_bBlockSecondaryDrop = BlockSecondaryDrop.BoolValue;
+	g_iBlockSecondaryDropBits = BlockSecondaryDropBits.IntValue;
 	g_iBlockDropMidAction = BlockDropMidAction.IntValue;
 	if (g_bL4D2Version) 
 	{ 
@@ -141,6 +151,7 @@ void GetCvars()
 	}
 
 	g_hCvarDropSoundFile.GetString(g_sCvarDropSoundFile, sizeof(g_sCvarDropSoundFile));
+	g_bDropDualPistols = g_hCvarDropDualPistols.BoolValue;
 	if (g_bValidMap) 
 	{
 		if(strlen(g_sCvarDropSoundFile) > 0) PrecacheSound(g_sCvarDropSoundFile);
@@ -258,7 +269,35 @@ int DropBlocker(int client, int weapon)
 	int wep_Secondary = GetPlayerWeaponSlot(client, 1);
 	
 	// Secondary check
-	if (g_bBlockSecondaryDrop && wep_Secondary == weapon) return false;
+	if (g_iBlockSecondaryDropBits && wep_Secondary == weapon)
+	{
+		static char classname[32];
+		GetEntityClassname(weapon, classname, sizeof(classname));
+
+		if (StrEqual(classname, "weapon_pistol", false))
+		{
+			// Dual pistols
+			if (GetEntProp(weapon, Prop_Send, "m_isDualWielding") > 0)
+			{
+				if (g_iBlockSecondaryDropBits & BLOCK_SECONDARY_DUAL_PISTOLS) return false;
+			}
+			// Single pistol
+			else
+			{
+				if (g_iBlockSecondaryDropBits & BLOCK_SECONDARY_SINGLE_PISTOL) return false;
+			}
+		}
+		// Magnum
+		else if (StrEqual(classname, "weapon_pistol_magnum", false))
+		{
+			if (g_iBlockSecondaryDropBits & BLOCK_SECONDARY_MAGNUM) return false;
+		}
+		// Melee weapons
+		else if (StrEqual(classname, "weapon_melee", false))
+		{
+			if (g_iBlockSecondaryDropBits & BLOCK_SECONDARY_MELEE) return false;
+		}
+	}
 
 	// M60 check
 	if(g_bL4D2Version)
@@ -372,6 +411,12 @@ void DropWeapon(int client, int weapon)
 		DispatchSpawn(single_pistol);
 		EquipPlayerWeapon(client, single_pistol);
 		SetEntProp(single_pistol, Prop_Send, "m_iClip1", second_clip);
+
+		// Drop both pistols at once, player ends up empty-handed
+		if (g_bDropDualPistols)
+		{
+			SDKHooks_DropWeapon(client, single_pistol);
+		}
 
 		return;	
 	}

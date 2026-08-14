@@ -778,12 +778,12 @@ void FillSurvivorInfo(Panel hSpecHud)
 		{
 			if (bRoundLive)
 			{
-				FormatEx(info, sizeof(info), "->1. Sur [%d]",
+				FormatEx(info, sizeof(info), "->1. 生还者 [%d]",
 							L4D2Direct_GetVSCampaignScore(SurvivorTeamIndex) + GetVersusProgressDistance(SurvivorTeamIndex));
 			}
 			else
 			{
-				FormatEx(info, sizeof(info), "->1. Sur [%d]",
+				FormatEx(info, sizeof(info), "->1. 生还者 [%d]",
 							L4D2Direct_GetVSCampaignScore(SurvivorTeamIndex));
 			}
 		}
@@ -993,7 +993,7 @@ void FillInfectedInfo(Panel hSpecHud)
 		}
 		case GAMEMODE_VERSUS:
 		{
-			FormatEx(info, sizeof(info), "->2. Inf [%d]",
+			FormatEx(info, sizeof(info), "->2. 感染者 [%d]",
 						L4D2Direct_GetVSCampaignScore(InfectedTeamIndex));
 		}
 	}

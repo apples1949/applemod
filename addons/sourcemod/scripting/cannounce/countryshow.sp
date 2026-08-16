@@ -20,9 +20,9 @@ Handle hKVCountryShow = null;
 *****************************************************************/
 void SetupCountryShow()
 {
-	g_CvarShowConnect = CreateConVar("sm_ca_showenhanced", "1", "displays enhanced message when player connects");
-	g_CvarShowDisconnect = CreateConVar("sm_ca_showenhanceddisc", "1", "displays enhanced message when player disconnects");
-	g_CvarShowEnhancedToAdmins = CreateConVar("sm_ca_showenhancedadmins", "1", "displays a different enhanced message to admin players (ADMFLAG_GENERIC)");
+	g_CvarShowConnect = CreateConVar("sm_ca_showenhanced", "1", "玩家连接时显示增强消息");
+	g_CvarShowDisconnect = CreateConVar("sm_ca_showenhanceddisc", "1", "玩家断开连接时显示增强消息");
+	g_CvarShowEnhancedToAdmins = CreateConVar("sm_ca_showenhancedadmins", "1", "向管理员玩家显示不同的增强消息 (ADMFLAG_GENERIC)");
 	
 	//prepare kv for countryshow
 	hKVCountryShow = CreateKeyValues("CountryShow");

@@ -164,11 +164,11 @@ public void OnPluginStart()
 	LoadTranslations("core.phrases.txt");
 	LoadTranslations("l4d_votemute.phrases");
 	
-	CreateConVar("l4d_votemute_version", PLUGIN_VERSION, "Version of L4D Votemute on this server", CVAR_FLAGS | FCVAR_DONTRECORD);
+	CreateConVar("l4d_votemute_version", PLUGIN_VERSION, "本服务器上的 L4D Votemute 插件版本", CVAR_FLAGS | FCVAR_DONTRECORD);
 	
 	g_hCvarDelay = CreateConVar(			"sm_votemute_delay",				"60",		" 投票之间允许的最小延迟(秒)", CVAR_FLAGS );
 	g_hCvarTimeout = CreateConVar(			"sm_votemute_timeout",				"10",		"投票菜单持续的时间(秒)", CVAR_FLAGS );
-	g_hCvarAnnounceDelay = CreateConVar(	"sm_votemute_announcedelay",		"2.0",		"提示和投票菜单出现的间隔(秒) between announce and vote menu appearing", CVAR_FLAGS );
+	g_hCvarAnnounceDelay = CreateConVar(	"sm_votemute_announcedelay",		"2.0",		"提示和投票菜单出现的间隔(秒)（通告与投票菜单出现之间）", CVAR_FLAGS );
 	g_hCvarMuteTime = CreateConVar(			"sm_votemute_mutetime",				"3600",		"玩家被禁止语音的时间(秒)", CVAR_FLAGS );
 	g_hCvarGagTime = CreateConVar(			"sm_votemute_gagtime",				"3600",		"玩家被禁止发言的时间(秒)", CVAR_FLAGS );
 	g_hMinPlayers = CreateConVar(			"sm_votemute_minplayers",			"1",		"游戏中允许开始投票决定禁止发言的最低玩家人数", CVAR_FLAGS );
@@ -179,7 +179,7 @@ public void OnPluginStart()
 	//g_hCvarInstaMute = CreateConVar(		"sm_votemute_instant_mute",			"1",		"当有人打开麦克风加入游戏时是否立刻禁止语音 (1 - 是 / 0 - 否)", CVAR_FLAGS );
 	//g_hCvarInstaMuteWait = CreateConVar(	"sm_votemute_instant_mute_wait",	"5",		"玩家加入后等待关闭麦克风的宽限时间(秒)", CVAR_FLAGS );
 	
-	AutoExecConfig(true,				"sm_votemute");
+	//AutoExecConfig(true,				"sm_votemute");
 	
 	RegConsoleCmd("sm_votemute", 	Command_Votemute, 	"投票禁止/解禁玩家语音");
 	RegConsoleCmd("sm_vm", 			Command_Votemute,	"投票禁止/解禁玩家语音");

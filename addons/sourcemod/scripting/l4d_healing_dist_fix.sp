@@ -117,14 +117,14 @@ public void OnPluginStart()
     g_hCvar_player_use_radius = FindConVar("player_use_radius");
 
     CreateConVar("l4d_healing_dist_fix_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, CVAR_FLAGS_PLUGIN_VERSION);
-    g_hCvar_Enabled = CreateConVar("l4d_healing_dist_fix_enable", "1", "Enable/Disable the plugin.\n0 = Disable, 1 = Enable.", CVAR_FLAGS, true, 0.0, true, 1.0);
+    g_hCvar_Enabled = CreateConVar("l4d_healing_dist_fix_enable", "1", "启用/禁用插件.\n0 = 禁用, 1 = 启用.", CVAR_FLAGS, true, 0.0, true, 1.0);
 
     // Hook plugin ConVars change
     g_hCvar_player_use_radius.AddChangeHook(Event_ConVarChanged);
     g_hCvar_Enabled.AddChangeHook(Event_ConVarChanged);
 
     // Load plugin configs from .cfg
-    AutoExecConfig(true, CONFIG_FILENAME);
+    //AutoExecConfig(true, CONFIG_FILENAME);
 
     // Admin Commands
     RegAdminCmd("sm_print_cvars_l4d_healing_dist_fix", CmdPrintCvars, ADMFLAG_ROOT, "Prints the plugin related cvars and their respective values to the console.");

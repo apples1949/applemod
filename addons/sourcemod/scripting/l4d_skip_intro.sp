@@ -130,12 +130,12 @@ public void OnAllPluginsLoaded()
 
 public void OnPluginStart()
 {
-	g_hCvarAllow = CreateConVar(	"l4d_skip_intro_allow",			"1",			"0=Plugin off, 1=Plugin on.", CVAR_FLAGS );
-	g_hCvarModes = CreateConVar(	"l4d_skip_intro_modes",			"",				"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
-	g_hCvarModesOff = CreateConVar(	"l4d_skip_intro_modes_off",		"",				"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesTog = CreateConVar(	"l4d_skip_intro_modes_tog",		"0",			"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	CreateConVar(					"l4d_skip_intro_version",		PLUGIN_VERSION,	"Skip Intro plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,			"l4d_skip_intro");
+	g_hCvarAllow = CreateConVar(	"l4d_skip_intro_allow",			"1",			"0=插件关闭, 1=插件开启.", CVAR_FLAGS );
+	g_hCvarModes = CreateConVar(	"l4d_skip_intro_modes",			"",				"在这些游戏模式中启用插件, 用逗号分隔 (无空格). (留空 = 全部).", CVAR_FLAGS );
+	g_hCvarModesOff = CreateConVar(	"l4d_skip_intro_modes_off",		"",				"在这些游戏模式中关闭插件, 用逗号分隔 (无空格). (留空 = 无).", CVAR_FLAGS );
+	g_hCvarModesTog = CreateConVar(	"l4d_skip_intro_modes_tog",		"0",			"在这些游戏模式中启用插件. 0=全部, 1=合作, 2=生存, 4=对抗, 8=清道夫. 把数字相加.", CVAR_FLAGS );
+	CreateConVar(					"l4d_skip_intro_version",		PLUGIN_VERSION,	"跳过开场动画插件版本.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true,			"l4d_skip_intro");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);

@@ -1,46 +1,61 @@
 "Phrases"
 {
-	"NEW_FIRST_CAPITAN"
+	"VOTE_TITLE"
 	{
-		"#format"		"{1:N},{2:d}"
-		"chi"			"[{green}!{default}] {olive}生还者 {default}队长 {green}{1} {default}({2} 票)"
+		"chi"			"开始队长选人混队"
 	}
 
-	"NEW_SECOND_CAPITAN"
+	"MENU_ITEM"
+	{
+		"chi"			"队长选人混队"
+	}
+
+	"SELECTION_SURVIVOR_CAPTAIN"
+	{
+		"chi"			"{blue}生还者{default}队长投票开始"
+	}
+
+	"SET_SURVIVOR_CAPTAIN"
 	{
 		"#format"		"{1:N},{2:d}"
-		"chi"			"[{green}!{default}] {olive}感染者 {olive}队长 {green}{1} {default}({2} 票)"
+		"chi"			"{blue}生还者{default}队长 {olive}{1}{default}（{2} 票）"
+	}
+
+	"SELECTION_INFECTED_CAPTAIN"
+	{
+		"chi"			"{red}感染者{default}队长投票开始"
+	}
+
+	"SET_INFECTED_CAPTAIN"
+	{
+		"#format"		"{1:N},{2:d}"
+		"chi"			"{red}感染者{default}队长 {olive}{1}{default}（{2} 票）"
 	}
 
 	"PICK_SURVIVOR_TEAM"
 	{
 		"#format"		"{1:N},{2:N}"
-		"chi"			"[{green}!{default}] 队长 {olive}{1} {default}选择了玩家 {green}{2}"
+		"chi"			"生还者队长 {blue}{1}{default} 选择了玩家 {green}{2}"
 	}
 
 	"PICK_INFECTED_TEAM"
 	{
 		"#format"		"{1:N},{2:N}"
-		"chi"			"[{green}!{default}] 队长 {olive}{1} {default}选择了玩家 {green}{2}"
+		"chi"			"感染者队长 {red}{1}{default} 选择了玩家 {green}{2}"
 	}
 
-	"VOTE_DISPLAY_MSG"
+	"MENU_SURVIVOR_CAPTAIN_TITLE"
 	{
-		"chi"			"开始进行mix（队长选人）"
+		"chi"			"选择生还者队长"
 	}
 
-	"MENU_TITLE_FIRST_CAPITAN"
+	"MENU_INFECTED_CAPTAIN_TITLE"
 	{
-		"chi"			"选择第一个队长"
+		"chi"			"选择感染者队长"
 	}
 
-	"MENU_TITLE_SECOND_CAPITAN"
+	"MENU_PICK_PLAYERS_TITLE"
 	{
-		"chi"			"选择第二个队长"
-	}
-
-	"MENU_TITLE_PICK_TEAMS"
-	{
-		"chi"			"选择一个队友"
+		"chi"			"选择一名队友"
 	}
 }

@@ -1,46 +1,61 @@
 "Phrases"
 {
-	"NEW_FIRST_CAPITAN"
-	{
-		"#format"		"{1:N},{2:d}"
-		"ru"			"Капитан команды {blue}выживших {green}{1} {default}(Голосов {2})"
-	}
+    "VOTE_TITLE"
+    {
+        "ru"            "Начать перемешивание команд с капитанами"
+    }
 
-	"NEW_SECOND_CAPITAN"
-	{
-		"#format"		"{1:N},{2:d}"
-		"ru"			"Капитан команды {red}заражённых {green}{1} {default}(Голосов {2})"
-	}
+    "MENU_ITEM"
+    {
+        "ru"            "Перемешать команды с капитанами"
+    }
 
-	"PICK_SURVIVOR_TEAM"
-	{
-		"#format"		"{1:N},{2:N}"
-		"ru"			"Капитан выживших {blue}{1} {default}выбрал игрока {green}{2}"
-	}
+    "SELECTION_SURVIVOR_CAPTAIN"
+    {
+        "ru"            "Начался выбор капитана команды {blue}выживших{default}"
+    }
 
-	"PICK_INFECTED_TEAM"
-	{
-		"#format"		"{1:N},{2:N}"
-		"ru"			"Капитан заражённых {red}{1} {default}выбрал игрока {green}{2}"
-	}
+    "SET_SURVIVOR_CAPTAIN"
+    {
+        "#format"       "{1:N},{2:d}"
+        "ru"            "Капитан команды {blue}выживших{default} — {olive}{1} {default}(голосов: {2})"
+    }
 
-	"VOTE_DISPLAY_MSG"
-	{
-		"ru"			"Начать микс с участием капитанов"
-	}
+    "SELECTION_INFECTED_CAPTAIN"
+    {
+        "ru"            "Начался выбор капитана команды {red}заражённых{default}"
+    }
 
-	"MENU_TITLE_FIRST_CAPITAN"
-	{
-		"ru"			"Выберите первого капитана"
-	}
+    "SET_INFECTED_CAPTAIN"
+    {
+        "#format"       "{1:N},{2:d}"
+        "ru"            "Капитан команды {red}заражённых{default} — {olive}{1} {default}(голосов: {2})"
+    }
 
-	"MENU_TITLE_SECOND_CAPITAN"
-	{
-		"ru"			"Выберите второго капитана"
-	}
+    "PICK_SURVIVOR_TEAM"
+    {
+        "#format"       "{1:N},{2:N}"
+        "ru"            "Капитан {blue}{1}{default} выбрал игрока {green}{2}"
+    }
 
-	"MENU_TITLE_PICK_TEAMS"
-	{
-		"ru"			"Выберите союзника"
-	}
+    "PICK_INFECTED_TEAM"
+    {
+        "#format"       "{1:N},{2:N}"
+        "ru"            "Капитан {red}{1}{default} выбрал игрока {green}{2}"
+    }
+
+    "MENU_SURVIVOR_CAPTAIN_TITLE"
+    {
+        "ru"            "Выберите капитана команды выживших"
+    }
+
+    "MENU_INFECTED_CAPTAIN_TITLE"
+    {
+        "ru"            "Выберите капитана команды заражённых"
+    }
+
+    "MENU_PICK_PLAYERS_TITLE"
+    {
+        "ru"            "Выберите союзника"
+    }
 }

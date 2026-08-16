@@ -383,6 +383,8 @@ public Action L4D_OnFirstSurvivorLeftSafeArea(int client)
 
 public Action OnClientSayCommand(int client, const char[] command, const char[] sArgs)
 {
+	// 修复: 服务器控制台说话时 client = 0, 直接调用 SetButtonTime 会触发 "Client index 0 is invalid" 异常
+	if (!client) return Plugin_Continue;
 	SetButtonTime(client);
 	return Plugin_Continue;
 }

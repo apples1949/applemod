@@ -131,13 +131,13 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
     CreateConVar("l4d_weapon_prop_give_fix_version", PLUGIN_VERSION, PLUGIN_DESCRIPTION, CVAR_FLAGS_PLUGIN_VERSION);
-    g_hCvar_Enabled            = CreateConVar("l4d_weapon_prop_give_fix_enable", "1", "Enable/Disable the plugin.\n0 = Disable, 1 = Enable.", CVAR_FLAGS, true, 0.0, true, 1.0);
-    g_hCvar_Delay              = CreateConVar("l4d_weapon_prop_give_fix_delay", "0.0", "How long (in seconds) should the plugin wait to fix the prop.\n0.0 = No delay (immediately).", CVAR_FLAGS, true, 0.0);
-    g_hCvar_PropaneCanister    = CreateConVar("l4d_weapon_prop_give_fix_propanecanister", "1", "Spawn weapon_propanetank as prop_physics.\n0 = OFF, 1 = ON.", CVAR_FLAGS, true, 0.0, true, 1.0);
-    g_hCvar_OxygenTank         = CreateConVar("l4d_weapon_prop_give_fix_oxygentank", "1", "Spawn weapon_oxygentank as prop_physics.\n0 = OFF, 1 = ON.", CVAR_FLAGS, true, 0.0, true, 1.0);
+    g_hCvar_Enabled            = CreateConVar("l4d_weapon_prop_give_fix_enable", "1", "启用/禁用插件。\n0 = 禁用，1 = 启用。", CVAR_FLAGS, true, 0.0, true, 1.0);
+    g_hCvar_Delay              = CreateConVar("l4d_weapon_prop_give_fix_delay", "0.0", "插件等待多久（秒）来修复道具。\n0.0 = 无延迟（立即）。", CVAR_FLAGS, true, 0.0);
+    g_hCvar_PropaneCanister    = CreateConVar("l4d_weapon_prop_give_fix_propanecanister", "1", "将 weapon_propanetank 生成为 prop_physics。\n0 = 关，1 = 开。", CVAR_FLAGS, true, 0.0, true, 1.0);
+    g_hCvar_OxygenTank         = CreateConVar("l4d_weapon_prop_give_fix_oxygentank", "1", "将 weapon_oxygentank 生成为 prop_physics。\n0 = 关，1 = 开。", CVAR_FLAGS, true, 0.0, true, 1.0);
     if (g_bL4D2)
-        g_hCvar_FireworksCrate = CreateConVar("l4d_weapon_prop_give_fix_fireworkscrate", "1", "Spawn weapon_fireworkcrate as prop_physics.\nL4D2 only.\n0 = OFF, 1 = ON.", CVAR_FLAGS, true, 0.0, true, 1.0);
-    g_hCvar_Gascan             = CreateConVar("l4d_weapon_prop_give_fix_gascan", "1", "Spawn weapon_gascan as prop_physics.\nL4D1 only.\n0 = OFF, 1 = ON.", CVAR_FLAGS, true, 0.0, true, 1.0);
+        g_hCvar_FireworksCrate = CreateConVar("l4d_weapon_prop_give_fix_fireworkscrate", "1", "将 weapon_fireworkcrate 生成为 prop_physics。\n仅 L4D2。\n0 = 关，1 = 开。", CVAR_FLAGS, true, 0.0, true, 1.0);
+    g_hCvar_Gascan             = CreateConVar("l4d_weapon_prop_give_fix_gascan", "1", "将 weapon_gascan 生成为 prop_physics。\n仅 L4D1。\n0 = 关，1 = 开。", CVAR_FLAGS, true, 0.0, true, 1.0);
 
     // Hook plugin ConVars change
     g_hCvar_Enabled.AddChangeHook(Event_ConVarChanged);
@@ -150,7 +150,7 @@ public void OnPluginStart()
         g_hCvar_Gascan.AddChangeHook(Event_ConVarChanged);
 
     // Load plugin configs from .cfg
-    AutoExecConfig(true, CONFIG_FILENAME);
+    //AutoExecConfig(true, CONFIG_FILENAME);
 
     // Admin Commands
     RegAdminCmd("sm_print_cvars_l4d_weapon_prop_give_fix", CmdPrintCvars, ADMFLAG_ROOT, "Prints the plugin related cvars and their respective values to the console.");

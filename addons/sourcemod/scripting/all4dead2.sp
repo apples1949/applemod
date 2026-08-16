@@ -117,8 +117,8 @@ public void OnPluginStart() {
 
 	director_panic_forever = FindConVar("director_panic_forever");
 	
-	notify_players = CreateConVar("a4d_notify_players", "1", "Whether or not we announce changes in game.", FCVAR_NOTIFY);	
-	AutoExecConfig(true, "all4dead2");	
+	notify_players = CreateConVar("a4d_notify_players", "1", "是否在游戏中播报变更。", FCVAR_NOTIFY);	
+	//AutoExecConfig(true, "all4dead2");	
 
 	RegAdminCmd("a4d_spawn_infected", Command_SpawnInfected, ADMFLAG_ROOT);
 	RegAdminCmd("a4d_spawn_uinfected", Command_SpawnUInfected, ADMFLAG_ROOT);

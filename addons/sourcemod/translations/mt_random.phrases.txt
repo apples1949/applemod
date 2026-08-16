@@ -1,7 +1,12 @@
 "Phrases"
 {
-	"VOTE_DISPLAY_MSG"
-	{
-		"en"			"Start command mix randomly"
-	}
+    "VOTE_TITLE"
+    {
+        "en"            "Start randomly shuffling teams"
+    }
+
+    "MENU_ITEM"
+    {
+        "en"            "Random shuffling of teams"
+    }
 }

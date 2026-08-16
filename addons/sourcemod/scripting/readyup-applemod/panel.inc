@@ -93,6 +93,8 @@ void UpdatePanel()
 	menuPanel.DrawText(" ");
 	menuPanel.DrawText("▸ 指令:");
 	menuPanel.DrawText(FooterGet(cmdFooter, curCmd));
+
+	menuPanel.DrawText(" ");
 	
 	// 准备条件提示: 显示在指令行下方
 	if (readyUpMode == ReadyMode_PlayerReady)

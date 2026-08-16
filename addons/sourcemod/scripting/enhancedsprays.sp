@@ -50,7 +50,7 @@ public OnPluginStart()
 	g_iDelay = GetConVarInt(g_hCvarDelay);
 	HookConVarChange(g_hCvarDelay, OnConVarChange);
 	
-	AutoExecConfig(true,				"enhancedspray");
+	//AutoExecConfig(true,				"enhancedspray");
 }
 
 public OnConVarChange(Handle:hConvar, const String:strOldValue[], const String:strNewValue[])

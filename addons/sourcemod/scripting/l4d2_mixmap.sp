@@ -44,9 +44,6 @@ ConVar 	g_cvNextMapPrint,
 		g_cvMaxMapsNum,
 		g_cvFinaleEndStart;
 
-const TEAM_SPECTATOR = 1;
-const TEAM_SURVIVOR = 2;
-const TEAM_INFECTED = 3;
 char cfg_exec[BUF_SZ];
 
 Handle hVoteMixmap;
@@ -103,9 +100,9 @@ public void OnPluginStart()
 {
 	LoadSDK();
 	
-	g_cvNextMapPrint	= CreateConVar("l4d2mm_nextmap_print",		"1",	"Determine whether to show what the next map will be", _, true, 0.0, true, 1.0);
-	g_cvMaxMapsNum		= CreateConVar("l4d2mm_max_maps_num",		"2",	"Determine how many maps of one campaign can be selected; 0 = no limits;", _, true, 0.0, true, 5.0);
-	g_cvFinaleEndStart	= CreateConVar("l4d2mm_finale_end_start",	"1",	"Determine whether to remixmap in the end of finale; 0 = disable;1 = enable", _, true, 0.0, true, 1.0);
+	g_cvNextMapPrint	= CreateConVar("l4d2mm_nextmap_print",		"1",	"决定是否显示下一张地图", _, true, 0.0, true, 1.0);
+	g_cvMaxMapsNum		= CreateConVar("l4d2mm_max_maps_num",		"2",	"决定一个战役中可选择的地图数量；0 = 无限制；", _, true, 0.0, true, 5.0);
+	g_cvFinaleEndStart	= CreateConVar("l4d2mm_finale_end_start",	"1",	"决定是否在最终章结束时重新混图；0 = 禁用；1 = 启用", _, true, 0.0, true, 1.0);
 
 	//Servercmd 服务器指令（用于cfg文件）
 	RegServerCmd( "sm_addmap", AddMap);
@@ -130,7 +127,7 @@ public void OnPluginStart()
 	PluginStartInit();
 	LoadTranslations("l4d2_mixmap.phrases");
 	
-	AutoExecConfig(true, "l4d2_mixmap");
+	//AutoExecConfig(true, "l4d2_mixmap");
 }
 
 void PluginStartInit() 
@@ -356,7 +353,7 @@ public Action Timed_ContinueMixmap(Handle timer)
 // ----------------------------------------------------------
 
 // Loads a specified set of maps
-public Action ForceMixmap(int client, any args) 
+public Action ForceMixmap(int client, int args) 
 {
 	Format(cfg_exec, sizeof(cfg_exec), CFG_DEFAULT);
 	
@@ -397,7 +394,7 @@ public Action ForceMixmap(int client, any args)
 }
 
 // Load a specified set of maps
-public Action ManualMixmap(int client, any args) 
+public Action ManualMixmap(int client, int args) 
 {
 	if (args < 1) 
 	{
@@ -419,7 +416,7 @@ public Action ManualMixmap(int client, any args)
 	return Plugin_Handled;
 }
 
-public Action ShowAllMaps(int client, any Args)
+public Action ShowAllMaps(int client, int Args)
 {
 	CPrintToChat(client, "%t", "AllMaps_Official");
 	CPrintToChat(client, "c1m1_hotel,c1m2_streets,c1m3_mall,c1m4_atrium");
@@ -454,7 +451,7 @@ public void LeftStartArea_Event(Event event, const char[] name, bool dontBroadca
 	bLeftStartArea = true;
 } */
 
-public Action Mixmap_Cmd(int client, any args) 
+public Action Mixmap_Cmd(int client, int args) 
 {
 	if (IsClientAndInGame(client))
 	{
@@ -593,7 +590,7 @@ public Action Mixmap()
 }
 
 // Display current map list
-public Action Maplist(int client, any args) 
+public Action Maplist(int client, int args) 
 {
 	if (! g_bMaplistFinalized) 
 	{
@@ -634,7 +631,7 @@ public Action Maplist(int client, any args)
 }
 
 // Abort a currently loaded mapset
-public Action StopMixmap_Cmd(int client, any args) 
+public Action StopMixmap_Cmd(int client, int args) 
 {
 	if (!g_bMapsetInitialized ) 
 	{
@@ -736,7 +733,7 @@ public Action StartVoteStopMixmap_Timer(Handle timer)
 	return Plugin_Handled;
 }
 
-public Action StopMixmap(int client, any args) 
+public Action StopMixmap(int client, int args) 
 {
 	if (!g_bMapsetInitialized) 
 	{
@@ -893,7 +890,7 @@ public Action Timed_GiveThemTimeToReadTheMapList(Handle timer)
 }
 
 // Specifiy a rank for a given tag
-public Action TagRank(any args) {
+public Action TagRank(int args) {
 	if (args < 2) 
 	{
 		ReplyToCommand(0, "Syntax: sm_tagrank <tag> <map number>");
@@ -925,7 +922,7 @@ public Action TagRank(any args) {
 }
 
 // Add a map to the maplist under specified tags
-public Action AddMap(any args) 
+public Action AddMap(int args) 
 {
 	if (args < 2) 
 	{

@@ -16,7 +16,7 @@ enum TauntType
 {
 	TAUNT_INCAP,                // 生还者BOT嘲讽倒地真人
 	TAUNT_DOOR_CLOSE,           // 生还者BOT嘲讽进安全屋
-	TAUNT_BOOMER_POP,           // BoomerBOT被真人击杀
+	TAUNT_BOOMER_POP,           // 生还者BOT击杀真人Boomer
 	TAUNT_BOOMER_VOMIT,         // BoomerBOT喷到真人
 	TAUNT_TANK_ROCK,            // 生还者BOT嘲讽真人吃石头
 	TAUNT_TANK_HIT,             // TankBOT砸中真人
@@ -413,17 +413,21 @@ bool CanTaunt(TauntType type)
 }
 
 // 从数组中随机取一句并广播（带 [BOT] 前缀）
-// prefix 为空时用 %N 玩家名，否则用类名（Tank/Hunter/Witch/Boomer）
-void SayBotTaunt(TauntType type, int client, const char[][] taunts, int count, const char[] prefix = "")
+// speaker 为发言的 AI 客户端；target 为文案中 %N 所指向的目标（一般是真人玩家）
+// speakerName 非空时使用类名（Witch 等非玩家实体），否则显示 speaker 的 AI 名称
+void SayBotTaunt(TauntType type, int speaker, int target, const char[][] taunts, int count, const char[] speakerName = "")
 {
+	if (speakerName[0] == 0 && !IsValidPlayer(speaker))
+		return;
+
 	if (!CanTaunt(type))
 		return;
 
-	Format(g_sBotChat, sizeof(g_sBotChat), taunts[GetRandomInt(0, count - 1)], client);
-	if (prefix[0] == 0)
-		CPrintToChatAll("{blue}[BOT]%N{default} :  %s", client, g_sBotChat);
+	Format(g_sBotChat, sizeof(g_sBotChat), taunts[GetRandomInt(0, count - 1)], target);
+	if (speakerName[0] == 0)
+		CPrintToChatAll("{blue}[BOT]%N{default} :  %s", speaker, g_sBotChat);
 	else
-		CPrintToChatAll("{red}[BOT]%s{default} :  %s", prefix, g_sBotChat);
+		CPrintToChatAll("{red}[BOT]%s{default} :  %s", speakerName, g_sBotChat);
 }
 
 // 随机挑一个生还者BOT，没有则返回 -1
@@ -510,7 +514,7 @@ public void PlayerIncap(Event event, const char[] name, bool dontBroadcast)
 	{
 		int bot = GetRandomSurvivorBot();
 		if (bot != -1)
-			SayBotTaunt(TAUNT_INCAP, client, g_sIncapTaunts, sizeof(g_sIncapTaunts) / sizeof(g_sIncapTaunts[]));
+			SayBotTaunt(TAUNT_INCAP, bot, client, g_sIncapTaunts, sizeof(g_sIncapTaunts) / sizeof(g_sIncapTaunts[]));
 	}
 }
 
@@ -527,20 +531,22 @@ public void DoorClose(Event event, const char[] name, bool dontBroadcast)
 		g_bDoorClosed = true;
 		int bot = GetRandomSurvivorBot();
 		if (bot != -1)
-			SayBotTaunt(TAUNT_DOOR_CLOSE, bot, g_sDoorCloseTaunts, sizeof(g_sDoorCloseTaunts) / sizeof(g_sDoorCloseTaunts[]));
+			SayBotTaunt(TAUNT_DOOR_CLOSE, bot, bot, g_sDoorCloseTaunts, sizeof(g_sDoorCloseTaunts) / sizeof(g_sDoorCloseTaunts[]));
 	}
 }
 
 public void OnBoomerPop(int survivor, int boomer, int shoveCount, float timeAlive)
 {
-	if (IsValidPlayer(survivor) && IsValidPlayer(boomer) && !IsFakeClient(survivor) && IsFakeClient(boomer))
-		SayBotTaunt(TAUNT_BOOMER_POP, boomer, g_sBoomerPopTaunts, sizeof(g_sBoomerPopTaunts) / sizeof(g_sBoomerPopTaunts[]), "Boomer");
+	if (IsValidPlayer(survivor) && IsValidPlayer(boomer)
+		&& IsFakeClient(survivor) && GetClientTeam(survivor) == 2
+		&& !IsFakeClient(boomer) && GetClientTeam(boomer) == 3)
+		SayBotTaunt(TAUNT_BOOMER_POP, survivor, boomer, g_sBoomerPopTaunts, sizeof(g_sBoomerPopTaunts) / sizeof(g_sBoomerPopTaunts[]));
 }
 
 public void OnBoomerVomitLanded(int boomer, int amount)
 {
 	if (IsValidPlayer(boomer) && IsFakeClient(boomer) && amount > 0)
-		SayBotTaunt(TAUNT_BOOMER_VOMIT, boomer, g_sBoomerVomitTaunts, sizeof(g_sBoomerVomitTaunts) / sizeof(g_sBoomerVomitTaunts[]), "Boomer");
+		SayBotTaunt(TAUNT_BOOMER_VOMIT, boomer, boomer, g_sBoomerVomitTaunts, sizeof(g_sBoomerVomitTaunts) / sizeof(g_sBoomerVomitTaunts[]), "Boomer");
 }
 
 public void OnTankRockEaten(int tank, int survivor)
@@ -550,11 +556,11 @@ public void OnTankRockEaten(int tank, int survivor)
 	{
 		int bot = GetRandomSurvivorBot();
 		if (bot != -1)
-			SayBotTaunt(TAUNT_TANK_ROCK, survivor, g_sTankRockTaunts, sizeof(g_sTankRockTaunts) / sizeof(g_sTankRockTaunts[]));
+			SayBotTaunt(TAUNT_TANK_ROCK, bot, survivor, g_sTankRockTaunts, sizeof(g_sTankRockTaunts) / sizeof(g_sTankRockTaunts[]));
 	}
 	// TankBOT砸中真人
 	if (IsValidPlayer(tank) && IsFakeClient(tank) && IsValidPlayer(survivor) && !IsFakeClient(survivor))
-		SayBotTaunt(TAUNT_TANK_HIT, tank, g_sTankHitTaunts, sizeof(g_sTankHitTaunts) / sizeof(g_sTankHitTaunts[]), "Tank");
+		SayBotTaunt(TAUNT_TANK_HIT, tank, survivor, g_sTankHitTaunts, sizeof(g_sTankHitTaunts) / sizeof(g_sTankHitTaunts[]), "Tank");
 }
 
 public void OnCarAlarmTriggered(int survivor, int infected, CarAlarmTriggerReason reason)
@@ -563,7 +569,7 @@ public void OnCarAlarmTriggered(int survivor, int infected, CarAlarmTriggerReaso
 	{
 		int bot = GetRandomSurvivorBot();
 		if (bot != -1)
-			SayBotTaunt(TAUNT_CAR_ALARM, survivor, g_sCarAlarmTaunts, sizeof(g_sCarAlarmTaunts) / sizeof(g_sCarAlarmTaunts[]));
+			SayBotTaunt(TAUNT_CAR_ALARM, bot, survivor, g_sCarAlarmTaunts, sizeof(g_sCarAlarmTaunts) / sizeof(g_sCarAlarmTaunts[]));
 	}
 }
 
@@ -573,43 +579,43 @@ public void HunterCapped(Event event, const char[] name, bool dontBroadcast)
 	int victim = GetClientOfUserId(GetEventInt(event, "victim"));
 
 	if (IsValidPlayer(hunter) && IsValidPlayer(victim) && IsFakeClient(hunter) && !IsFakeClient(victim))
-		SayBotTaunt(TAUNT_HUNTER_POUNCE, hunter, g_sHunterPounceTaunts, sizeof(g_sHunterPounceTaunts) / sizeof(g_sHunterPounceTaunts[]), "Hunter");
+		SayBotTaunt(TAUNT_HUNTER_POUNCE, hunter, victim, g_sHunterPounceTaunts, sizeof(g_sHunterPounceTaunts) / sizeof(g_sHunterPounceTaunts[]), "Hunter");
 }
 
 public void OnSkeet(int survivor, int hunter)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_SKEET, survivor, g_sSkeetTaunts, sizeof(g_sSkeetTaunts) / sizeof(g_sSkeetTaunts[]));
+		SayBotTaunt(TAUNT_SKEET, survivor, hunter, g_sSkeetTaunts, sizeof(g_sSkeetTaunts) / sizeof(g_sSkeetTaunts[]));
 }
 
 public void OnSkeetMelee(int survivor, int hunter)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_SKEET_MELEE, survivor, g_sSkeetMeleeTaunts, sizeof(g_sSkeetMeleeTaunts) / sizeof(g_sSkeetMeleeTaunts[]));
+		SayBotTaunt(TAUNT_SKEET_MELEE, survivor, hunter, g_sSkeetMeleeTaunts, sizeof(g_sSkeetMeleeTaunts) / sizeof(g_sSkeetMeleeTaunts[]));
 }
 
 public void OnSkeetMeleeHurt(int survivor, int hunter, int damage, bool isOverkill)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_SKEET_MELEE_HURT, survivor, g_sSkeetMeleeHurtTaunts, sizeof(g_sSkeetMeleeHurtTaunts) / sizeof(g_sSkeetMeleeHurtTaunts[]));
+		SayBotTaunt(TAUNT_SKEET_MELEE_HURT, survivor, hunter, g_sSkeetMeleeHurtTaunts, sizeof(g_sSkeetMeleeHurtTaunts) / sizeof(g_sSkeetMeleeHurtTaunts[]));
 }
 
 public void OnSkeetSniper(int survivor, int hunter)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_SKEET_SNIPER, survivor, g_sSkeetSniperTaunts, sizeof(g_sSkeetSniperTaunts) / sizeof(g_sSkeetSniperTaunts[]));
+		SayBotTaunt(TAUNT_SKEET_SNIPER, survivor, hunter, g_sSkeetSniperTaunts, sizeof(g_sSkeetSniperTaunts) / sizeof(g_sSkeetSniperTaunts[]));
 }
 
 public void OnSkeetSniperHurt(int survivor, int hunter, int damage, bool isOverkill)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_SKEET_SNIPER_HURT, survivor, g_sSkeetSniperHurtTaunts, sizeof(g_sSkeetSniperHurtTaunts) / sizeof(g_sSkeetSniperHurtTaunts[]));
+		SayBotTaunt(TAUNT_SKEET_SNIPER_HURT, survivor, hunter, g_sSkeetSniperHurtTaunts, sizeof(g_sSkeetSniperHurtTaunts) / sizeof(g_sSkeetSniperHurtTaunts[]));
 }
 
 public void OnHunterDeadstop(int survivor, int hunter)
 {
 	if (IsValidPlayer(survivor) && IsValidPlayer(hunter) && IsFakeClient(survivor) && GetClientTeam(survivor) == 2 && !IsFakeClient(hunter))
-		SayBotTaunt(TAUNT_HUNTER_DEADSTOP, survivor, g_sHunterDeadstopTaunts, sizeof(g_sHunterDeadstopTaunts) / sizeof(g_sHunterDeadstopTaunts[]));
+		SayBotTaunt(TAUNT_HUNTER_DEADSTOP, survivor, hunter, g_sHunterDeadstopTaunts, sizeof(g_sHunterDeadstopTaunts) / sizeof(g_sHunterDeadstopTaunts[]));
 }
 
 public void OnHunterHighPounce(int hunter, int survivor, int actualDamage, float calculatedDamage, float height, bool reportedHigh)
@@ -618,7 +624,7 @@ public void OnHunterHighPounce(int hunter, int survivor, int actualDamage, float
 	{
 		int bot = GetRandomSurvivorBot();
 		if (bot != -1)
-			SayBotTaunt(TAUNT_HIGH_POUNCE, survivor, g_sHighPounceTaunts, sizeof(g_sHighPounceTaunts) / sizeof(g_sHighPounceTaunts[]));
+			SayBotTaunt(TAUNT_HIGH_POUNCE, bot, survivor, g_sHighPounceTaunts, sizeof(g_sHighPounceTaunts) / sizeof(g_sHighPounceTaunts[]));
 	}
 }
 
@@ -626,7 +632,7 @@ public void SurvivorRescued(Event event, const char[] name, bool dontBroadcast)
 {
 	int bot = GetRandomSurvivorBot();
 	if (bot != -1)
-		SayBotTaunt(TAUNT_RESCUED, bot, g_sRescuedTaunts, sizeof(g_sRescuedTaunts) / sizeof(g_sRescuedTaunts[]));
+		SayBotTaunt(TAUNT_RESCUED, bot, bot, g_sRescuedTaunts, sizeof(g_sRescuedTaunts) / sizeof(g_sRescuedTaunts[]));
 }
 
 public void FriendlyFire(Event event, const char[] name, bool dontBroadcast)
@@ -634,7 +640,7 @@ public void FriendlyFire(Event event, const char[] name, bool dontBroadcast)
 	int attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
 	int victim = GetClientOfUserId(GetEventInt(event, "victim"));
 	if (IsValidPlayer(attacker) && IsValidPlayer(victim) && !IsFakeClient(attacker) && IsFakeClient(victim) && GetClientTeam(victim) == 2)
-		SayBotTaunt(TAUNT_FRIENDLY_FIRE, victim, g_sFriendlyFireTaunts, sizeof(g_sFriendlyFireTaunts) / sizeof(g_sFriendlyFireTaunts[]));
+		SayBotTaunt(TAUNT_FRIENDLY_FIRE, victim, attacker, g_sFriendlyFireTaunts, sizeof(g_sFriendlyFireTaunts) / sizeof(g_sFriendlyFireTaunts[]));
 }
 
 public void HealBegin(Event event, const char[] name, bool dontBroadcast)
@@ -642,13 +648,13 @@ public void HealBegin(Event event, const char[] name, bool dontBroadcast)
 	int healer = GetClientOfUserId(GetEventInt(event, "userid"));
 	int victim = GetClientOfUserId(GetEventInt(event, "subject"));
 	if (IsValidPlayer(healer) && IsValidPlayer(victim) && !IsFakeClient(healer) && IsFakeClient(victim) && GetClientTeam(victim) == 2)
-		SayBotTaunt(TAUNT_HEAL, victim, g_sHealTaunts, sizeof(g_sHealTaunts) / sizeof(g_sHealTaunts[]));
+		SayBotTaunt(TAUNT_HEAL, victim, healer, g_sHealTaunts, sizeof(g_sHealTaunts) / sizeof(g_sHealTaunts[]));
 }
 
 public Action OnTakeDamageByWitch(int victim, int &attacker, int &inflictor, float &damage, int &damagetype)
 {
 	if (IsValidPlayer(victim) && !IsFakeClient(victim) && IsWitch(attacker) && !isPlayerIncap(victim))
-		SayBotTaunt(TAUNT_WITCH, victim, g_sWitchTaunts, sizeof(g_sWitchTaunts) / sizeof(g_sWitchTaunts[]), "Witch");
+		SayBotTaunt(TAUNT_WITCH, 0, victim, g_sWitchTaunts, sizeof(g_sWitchTaunts) / sizeof(g_sWitchTaunts[]), "Witch");
 
 	return Plugin_Continue;
 }

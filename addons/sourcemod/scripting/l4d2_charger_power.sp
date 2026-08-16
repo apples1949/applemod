@@ -60,7 +60,7 @@ enum struct PluginCvars
 
 	void Init()
 	{
-		CreateConVar("charger_power_version", PLUGIN_VERSION, "Charger Power 版本", CVAR_FLAGS|FCVAR_DONTRECORD);
+		CreateConVar("charger_power_version", PLUGIN_VERSION, "冲锋者力量插件版本", CVAR_FLAGS|FCVAR_DONTRECORD);
 		this.g_h_CvarChargerPowerPluginOn = CreateConVar("l4d2_charger_power_on", "1", "启用/禁用插件", CVAR_FLAGS, true, 0.0, true, 1.0);
 		this.g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "100.0", "冲锋者撞击物体的力度", CVAR_FLAGS, true, 0.0, true, 5000.0);
 		this.g_h_CvarChargerCarry = CreateConVar("l4d2_charger_power_carry", "1", "冲锋者携带幸存者时是否可推动物体", CVAR_FLAGS, true, 0.0, true, 1.0);
@@ -70,7 +70,7 @@ enum struct PluginCvars
 		this.g_h_CvarChargerDamage = CreateConVar("l4d2_charger_power_damage", "0", "推动物体时冲锋者受到的额外伤害", CVAR_FLAGS, true, 0.0, true, 100.0);
 
 		//Autoconfig for plugin
-		AutoExecConfig(true, "l4d2_charger_power");
+		//AutoExecConfig(true, "l4d2_charger_power");
 
 		this.g_h_CvarChargerPowerPluginOn.AddChangeHook(OnConVarPluginOnChange);
 		this.g_h_CvarChargerPower.AddChangeHook(ConVarChanged_Cvars);

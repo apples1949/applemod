@@ -200,7 +200,7 @@ public void OnPluginStart()
     g_hCvar_Team.AddChangeHook(Event_ConVarChanged);
 
     // Load plugin configs from .cfg
-    AutoExecConfig(true, CONFIG_FILENAME);
+    //AutoExecConfig(true, CONFIG_FILENAME);
 
     // Admin Commands
     RegAdminCmd("sm_cloudfade", CmdCloudFade, ADMFLAG_ROOT, "对自身(无参数)或指定目标添加淡入淡出效果。示例：self -> sm_cloudfade / target -> sm_cloudfade @humanss.");

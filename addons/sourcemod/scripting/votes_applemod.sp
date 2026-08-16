@@ -167,7 +167,7 @@ public void OnPluginStart()
 	hforcespectate_penalty.AddChangeHook(ConVarChanged_Cvars);
 	hvotedelay_time.AddChangeHook(ConVarChanged_Cvars);
 
-	AutoExecConfig(true, "votes_applemod");
+	//AutoExecConfig(true, "votes_applemod");
 }
 
 public void ConVarChanged_Cvars(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -447,7 +447,7 @@ void EscapeAndFormat(char[] buffer, int maxlength, const char[] format, const ch
 	Format(buffer, maxlength, format, sEscaped);
 }
 
-bool StartVote(int client, voteType type, const char[] argument, const char[] passText, VoteBroadcast broadcast)
+bool StartVote(int client, voteType type, const char[] argument, const char[] passText, VoteBroadcast broadcast, BuiltinVoteType builtinType = BuiltinVoteType_Custom_YesNo)
 {
 	if (client <= 0 || !IsClientInGame(client)) return false;
 
@@ -492,7 +492,7 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 	g_voteType = type;
 	strcopy(g_sVotePassText, sizeof(g_sVotePassText), passText);
 
-	g_hVote = CreateBuiltinVote(VoteActionHandler, BuiltinVoteType_Custom_YesNo, BuiltinVoteAction_Cancel | BuiltinVoteAction_End);
+	g_hVote = CreateBuiltinVote(VoteActionHandler, builtinType, BuiltinVoteAction_Cancel | BuiltinVoteAction_End);
 	if (g_hVote == null)
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]无法创建投票(请确认 builtinvotes 扩展已加载)");
@@ -942,9 +942,10 @@ void DisplayVoteMapsMenu(int client)
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}更换地图%s{default}, 只有游戏中的玩家才能参与投票", client, votesmapsname);
 	char sArgument[128], sPassText[MAX_NAME_LENGTH];
-	EscapeAndFormat(sArgument, sizeof(sArgument), "是否更换地图: %s", votesmapsname);
+	// 使用游戏原生 ChgCampaign 投票类型: 官方投票文案会自行拼出"更换战役", argument 传战役/地图显示名
+	EscapeAndFormat(sArgument, sizeof(sArgument), "%s", votesmapsname);
 	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", votesmapsname);
-	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec);
+	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec, BuiltinVoteType_ChgCampaign);
 }
 
 // 强制玩家旁观

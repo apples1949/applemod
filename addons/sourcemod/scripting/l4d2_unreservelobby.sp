@@ -23,9 +23,9 @@ public Plugin myinfo = {
 
 public void OnPluginStart() {
 	SetConVarInt(FindConVar("sv_reservation_timeout"), 10);
-	CreateConVar("l4d_unreserve_version", PLUGIN_VERSION, "Version of the Lobby Unreserve plugin.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	cv_unreserveMode = CreateConVar("l4d_unreserve_mode", "1", "Unreserve Mode.\n0 = Disabled.\n1 = Automatically unreserve when full, and automatically restores the lobby reservation when there is a vacancy.\n2 = Automatically unreserve when full, and no longer automatically restores the lobby reservation.", FCVAR_SPONLY|FCVAR_NOTIFY);
-	cv_unreserveTrigger = CreateConVar("l4d_unreserve_trigger", "0", "Unreserve Trigger. When player number reaches the following number, the server unreserves.\n0 = Versus and Scavenge are 8, other gamemodes are 4.\n>0 = Any user-defined num greater than zero.", FCVAR_SPONLY|FCVAR_NOTIFY);
+	CreateConVar("l4d_unreserve_version", PLUGIN_VERSION, "Lobby Unreserve 插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	cv_unreserveMode = CreateConVar("l4d_unreserve_mode", "1", "取消保留模式。\n0 = 禁用。\n1 = 满员时自动取消保留，并在有空位时自动恢复大厅保留。\n2 = 满员时自动取消保留，不再自动恢复大厅保留。", FCVAR_SPONLY|FCVAR_NOTIFY);
+	cv_unreserveTrigger = CreateConVar("l4d_unreserve_trigger", "0", "取消保留触发条件。当玩家人数达到以下数值时，服务器取消保留。\n0 = 对抗和清道夫模式为 8 人，其它模式为 4 人。\n>0 = 任何大于零的自定义数值。", FCVAR_SPONLY|FCVAR_NOTIFY);
 
 	cv_unreserveMode.AddChangeHook(CvarChanged);
 	cv_unreserveTrigger.AddChangeHook(CvarChanged);

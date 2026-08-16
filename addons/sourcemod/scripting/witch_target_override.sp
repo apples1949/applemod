@@ -74,13 +74,13 @@ public void OnPluginStart()
 	g_hCvarAllow = CreateConVar("witch_target_override_on", "1", "1=插件启用 0=插件禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvarIncapOverride = CreateConVar("witch_target_override_incap", "1", "如果为1，则目标玩家倒地之后继续追杀其他生还者", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvarKillOverride = CreateConVar("witch_target_override_kill", "0", "如果为1，则目标玩家死亡之后继续追杀其他生还者", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvarIncapOverrideHealth = CreateConVar("witch_target_override_incap_health_add", "0", " 如果Witch在目标玩家倒地之后继续追杀其他生还者，增加数值血量. (0=关闭)", FCVAR_NOTIFY, true, 0.0, true, 9999.0);
-	g_hCvarKillOverrideHealth = CreateConVar("witch_target_override_kill_health_add", "0", "如果Witch在目标玩家死亡之后继续追杀其他生还者，增加数值血量. (0=关闭)", FCVAR_NOTIFY, true, 0.0, true, 9999.0);
-	g_hRequiredRange = CreateConVar("witch_target_override_range", "9999", "Witch准备追杀的另外一名生还者并须在这个范围之内 [1.0, 9999.0] (如果范围内没有生还者, 那Witch继续游戏预设行为)", FCVAR_NOTIFY, true, 1.0, true, 9999.0);
-	g_hCvarReCalculateBurnOverride = CreateConVar("witch_target_override_recalculate_burn_time", "0", "如果为1，当Witch身上着火并且准备转移目标之时，重新计算Witch烧伤的时间 (0=官方预设模式下Witch会在着火固定时间后死亡)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hWitchChanceFollowsurvivor = CreateConVar("witch_target_override_chance_followsurvivor", "100", "Witch会跟踪生还者的几率", FCVAR_NOTIFY, true, 0.0, true, 100.0);
-	g_hWitchFollowRange = CreateConVar("witch_target_override_followsurvivor_range", "500.0", "生还者距离Witch的一定可见范围内，Witch会跟踪生还者 [100.0, 9999.0] ", FCVAR_NOTIFY, true, 100.0, true, 9999.0);
-	g_hWitchFollowSpeed = CreateConVar("witch_target_override_followsurvivor_speed", "55.0", "Witch的跟踪速度", FCVAR_NOTIFY, true, 1.0);
+	g_hCvarIncapOverrideHealth = CreateConVar("witch_target_override_incap_health_add", "0", " 如果女巫在目标玩家倒地之后继续追杀其他生还者，增加数值血量. (0=关闭)", FCVAR_NOTIFY, true, 0.0, true, 9999.0);
+	g_hCvarKillOverrideHealth = CreateConVar("witch_target_override_kill_health_add", "0", "如果女巫在目标玩家死亡之后继续追杀其他生还者，增加数值血量. (0=关闭)", FCVAR_NOTIFY, true, 0.0, true, 9999.0);
+	g_hRequiredRange = CreateConVar("witch_target_override_range", "9999", "女巫准备追杀的另外一名生还者并须在这个范围之内 [1.0, 9999.0] (如果范围内没有生还者, 那女巫继续游戏预设行为)", FCVAR_NOTIFY, true, 1.0, true, 9999.0);
+	g_hCvarReCalculateBurnOverride = CreateConVar("witch_target_override_recalculate_burn_time", "0", "如果为1，当女巫身上着火并且准备转移目标之时，重新计算女巫烧伤的时间 (0=官方预设模式下女巫会在着火固定时间后死亡)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hWitchChanceFollowsurvivor = CreateConVar("witch_target_override_chance_followsurvivor", "100", "女巫会跟踪生还者的几率", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+	g_hWitchFollowRange = CreateConVar("witch_target_override_followsurvivor_range", "500.0", "生还者距离女巫的一定可见范围内，女巫会跟踪生还者 [100.0, 9999.0] ", FCVAR_NOTIFY, true, 100.0, true, 9999.0);
+	g_hWitchFollowSpeed = CreateConVar("witch_target_override_followsurvivor_speed", "55.0", "女巫的跟踪速度", FCVAR_NOTIFY, true, 1.0);
 
 	z_witch_burn_time = FindConVar("z_witch_burn_time");
 
@@ -111,7 +111,7 @@ public void OnPluginStart()
 	HookEvent("finale_vehicle_leaving", Event_RoundEnd,	EventHookMode_PostNoCopy); //救援載具離開之時  (沒有觸發round_end)
 
 	//Autoconfig for plugin
-	AutoExecConfig(true, "witch_target_override");
+	//AutoExecConfig(true, "witch_target_override");
 }
 
 public void OnPluginEnd()

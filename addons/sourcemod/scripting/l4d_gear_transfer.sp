@@ -737,30 +737,30 @@ public void OnPluginStart()
 	}
 
 	// Cvars
-	g_hCvarAllow =			CreateConVar(	"l4d_gear_transfer_allow",			"1",			"0=Plugin Off, 1=Plugin On.", CVAR_FLAGS);
-	g_hCvarModesBot =		CreateConVar(	"l4d_gear_transfer_modes_bot",		"",				"Disallow bots from auto give/grab in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesOn =		CreateConVar(	"l4d_gear_transfer_modes_on",		"",				"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
-	g_hCvarModesOff =		CreateConVar(	"l4d_gear_transfer_modes_off",		"",				"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesTog =		CreateConVar(	"l4d_gear_transfer_modes_tog",		"0",			"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	g_hCvarDistGive =		CreateConVar(	"l4d_gear_transfer_dist_give",		"150.0",		"How close you have to be to transfer an item. Also affects bots auto give range.", CVAR_FLAGS);
-	g_hCvarDistGrab =		CreateConVar(	"l4d_gear_transfer_dist_grab",		"150.0",		"How close the bots need to be for them to pick up an item.", CVAR_FLAGS);
-	g_hCvarDying =			CreateConVar(	"l4d_gear_transfer_dying",			"0",			"Bots only auto give when their receiver is black and white. 0=Ignored. 1=First Aid. 2=Pills or Adrenaline (game logic will give anyway, unless using Bot Healing plugin). 3=Both.", CVAR_FLAGS);
-	g_hCvarIdle =			CreateConVar(	"l4d_gear_transfer_idle",			"0",			"0=No, 1=Yes. Can items be transferred with idle players, players will be able to grab and switch items with idle players.", CVAR_FLAGS);
-	g_hCvarMethod =			CreateConVar(	"l4d_gear_transfer_method",			"3",			"0=Off. 1=Shove only, 2=Reload key only, 3=Shove and Reload key to transfer items.", CVAR_FLAGS);
-	g_hCvarNotifies =		CreateConVar(	"l4d_gear_transfer_notifies",		"7",			"Notify on these types of transfers: 1=Give, 2=Grab, 4=Switch, 7=All. Add numbers together.", CVAR_FLAGS);
-	g_hCvarNotify =			CreateConVar(	"l4d_gear_transfer_notify",			"1",			"0=Off, 1=Display transfers to everyone, 2=Also display when transferring pills/adrenaline via the games own system, 4=Display between recipients only. 8=Ignore printing pills/adrenaline and use game prompt only. Add numbers together.", CVAR_FLAGS);
-	g_hCvarSounds =			CreateConVar(	"l4d_gear_transfer_sounds",			"1",			"0=Off, 1=Play a sound to the person giving/receiving an item.", CVAR_FLAGS);
-	g_hCvarStart =			CreateConVar(	"l4d_gear_transfer_start",			"0.0",			"Block auto give and auto grab from round start for this many seconds.", CVAR_FLAGS);
-	g_hCvarTimerGive =		CreateConVar(	"l4d_gear_transfer_timer_give",		"1.0",			"0.0=Off. How often to check survivor bot positions to real clients for auto give.", CVAR_FLAGS, true, 0.0, true, 10.0);
-	g_hCvarTimerGrab =		CreateConVar(	"l4d_gear_transfer_timer_grab",		"0.5",			"0.0=Off. How often to check survivor bot positions to item positions for auto grab.", CVAR_FLAGS, true, 0.0, true, 10.0);
-	g_hCvarTimeout =		CreateConVar(	"l4d_gear_transfer_timeout",		"5.0",			"Timeout to stop bots returning an item after switching with a player. Timeout to prevent bots auto grabbing a recently dropped item.", CVAR_FLAGS, true, 1.0);
-	g_hCvarTraces =			CreateConVar(	"l4d_gear_transfer_traces",			"15",			"Maximum number of ray traces per frame for auto give/grab. This could be increased with minimal impact.", CVAR_FLAGS, true, 1.0, true, 120.0);
-	g_hCvarGive =			CreateConVar(	"l4d_gear_transfer_types_give",		"123456789",	"Which type can bots auto give. 0=Off. 1=Adrenaline, 2=Pain Pills, 3=Molotov, 4=Pipe Bomb, 5=Vomit Jar, 6=First Aid, 7=Explosive Rounds, 8=Incendiary Rounds, 9=Defibrillator. Any string combination.", CVAR_FLAGS);
-	g_hCvarGrab =			CreateConVar(	"l4d_gear_transfer_types_grab",		"123456789",	"Which type can bots auto grab. 0=Off. 1=Adrenaline, 2=Pain Pills, 3=Molotov, 4=Pipe Bomb, 5=Vomit Jar, 6=First Aid, 7=Explosive Rounds, 8=Incendiary Rounds, 9=Defibrillator. Any string combination.", CVAR_FLAGS);
-	g_hCvarTypes =			CreateConVar(	"l4d_gear_transfer_types_real",		"123456789",	"The types real players can transfer. 0=Off. 1=Adrenaline, 2=Pain Pills, 3=Molotov, 4=Pipe Bomb, 5=Vomit Jar, 6=First Aid, 7=Explosive Rounds, 8=Incendiary Rounds, 9=Defibrillator. Any string combination.", CVAR_FLAGS);
-	g_hCvarVocalize =		CreateConVar(	"l4d_gear_transfer_vocalize",		"1",			"0=Off. 1=Players vocalize when transferring items. Blocked for the first 60 seconds of a new round.", CVAR_FLAGS);
-	CreateConVar(							"l4d_gear_transfer_version",		PLUGIN_VERSION, "Gear Transfer plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,					"l4d_gear_transfer");
+	g_hCvarAllow =			CreateConVar(	"l4d_gear_transfer_allow",			"1",			"0=插件关闭, 1=插件开启.", CVAR_FLAGS);
+	g_hCvarModesBot =		CreateConVar(	"l4d_gear_transfer_modes_bot",		"",				"在这些游戏模式中禁止机器人自动给予/拾取, 用逗号分隔 (无空格). (留空 = 无).", CVAR_FLAGS );
+	g_hCvarModesOn =		CreateConVar(	"l4d_gear_transfer_modes_on",		"",				"在这些游戏模式中启用插件, 用逗号分隔 (无空格). (留空 = 全部).", CVAR_FLAGS );
+	g_hCvarModesOff =		CreateConVar(	"l4d_gear_transfer_modes_off",		"",				"在这些游戏模式中关闭插件, 用逗号分隔 (无空格). (留空 = 无).", CVAR_FLAGS );
+	g_hCvarModesTog =		CreateConVar(	"l4d_gear_transfer_modes_tog",		"0",			"在这些游戏模式中启用插件. 0=全部, 1=合作, 2=生存, 4=对抗, 8=清道夫. 把数字相加.", CVAR_FLAGS );
+	g_hCvarDistGive =		CreateConVar(	"l4d_gear_transfer_dist_give",		"150.0",		"你距离多近才能转移物品. 同时影响机器人自动给予的范围.", CVAR_FLAGS);
+	g_hCvarDistGrab =		CreateConVar(	"l4d_gear_transfer_dist_grab",		"150.0",		"机器人距离多近才能拾取物品.", CVAR_FLAGS);
+	g_hCvarDying =			CreateConVar(	"l4d_gear_transfer_dying",			"0",			"机器人仅在接收者处于黑白状态时自动给予. 0=忽略. 1=医疗包. 2=药丸或肾上腺素 (游戏逻辑无论如何都会给予, 除非使用 Bot Healing 插件). 3=两者.", CVAR_FLAGS);
+	g_hCvarIdle =			CreateConVar(	"l4d_gear_transfer_idle",			"0",			"0=否, 1=是. 物品是否可转移给闲置玩家, 玩家将能够与闲置玩家拾取和交换物品.", CVAR_FLAGS);
+	g_hCvarMethod =			CreateConVar(	"l4d_gear_transfer_method",			"3",			"0=关闭. 1=仅推击, 2=仅换弹键, 3=推击和换弹键均可转移物品.", CVAR_FLAGS);
+	g_hCvarNotifies =		CreateConVar(	"l4d_gear_transfer_notifies",		"7",			"在以下转移类型时提示: 1=给予, 2=拾取, 4=交换, 7=全部. 把数字相加.", CVAR_FLAGS);
+	g_hCvarNotify =			CreateConVar(	"l4d_gear_transfer_notify",			"1",			"0=关闭, 1=向所有人显示转移, 2=同时显示通过游戏自带系统转移药丸/肾上腺素, 4=仅在接收者之间显示. 8=不打印药丸/肾上腺素并使用游戏提示. 把数字相加.", CVAR_FLAGS);
+	g_hCvarSounds =			CreateConVar(	"l4d_gear_transfer_sounds",			"1",			"0=关闭, 1=向给予/接收物品的人播放音效.", CVAR_FLAGS);
+	g_hCvarStart =			CreateConVar(	"l4d_gear_transfer_start",			"0.0",			"从回合开始多少秒内阻止自动给予和自动拾取.", CVAR_FLAGS);
+	g_hCvarTimerGive =		CreateConVar(	"l4d_gear_transfer_timer_give",		"1.0",			"0.0=关闭. 多久检查一次生还者机器人与真实客户端的位置以自动给予.", CVAR_FLAGS, true, 0.0, true, 10.0);
+	g_hCvarTimerGrab =		CreateConVar(	"l4d_gear_transfer_timer_grab",		"0.5",			"0.0=关闭. 多久检查一次生还者机器人与物品的位置以自动拾取.", CVAR_FLAGS, true, 0.0, true, 10.0);
+	g_hCvarTimeout =		CreateConVar(	"l4d_gear_transfer_timeout",		"5.0",			"超时时间, 用于在与玩家交换后停止机器人归还物品. 超时时间, 用于防止机器人自动拾取刚丢弃的物品.", CVAR_FLAGS, true, 1.0);
+	g_hCvarTraces =			CreateConVar(	"l4d_gear_transfer_traces",			"15",			"自动给予/拾取每帧的最大射线检测次数. 可调高且影响很小.", CVAR_FLAGS, true, 1.0, true, 120.0);
+	g_hCvarGive =			CreateConVar(	"l4d_gear_transfer_types_give",		"123456789",	"机器人可自动给予哪些类型. 0=关闭. 1=肾上腺素, 2=止痛药, 3=燃烧瓶, 4=土制炸弹, 5=胆汁罐, 6=医疗包, 7=高爆弹, 8=燃烧弹, 9=除颤器. 任意字符串组合.", CVAR_FLAGS);
+	g_hCvarGrab =			CreateConVar(	"l4d_gear_transfer_types_grab",		"123456789",	"机器人可自动拾取哪些类型. 0=关闭. 1=肾上腺素, 2=止痛药, 3=燃烧瓶, 4=土制炸弹, 5=胆汁罐, 6=医疗包, 7=高爆弹, 8=燃烧弹, 9=除颤器. 任意字符串组合.", CVAR_FLAGS);
+	g_hCvarTypes =			CreateConVar(	"l4d_gear_transfer_types_real",		"123456789",	"真实玩家可转移的类型. 0=关闭. 1=肾上腺素, 2=止痛药, 3=燃烧瓶, 4=土制炸弹, 5=胆汁罐, 6=医疗包, 7=高爆弹, 8=燃烧弹, 9=除颤器. 任意字符串组合.", CVAR_FLAGS);
+	g_hCvarVocalize =		CreateConVar(	"l4d_gear_transfer_vocalize",		"1",			"0=关闭. 1=玩家转移物品时发出语音. 新回合的前 60 秒内禁用.", CVAR_FLAGS);
+	CreateConVar(							"l4d_gear_transfer_version",		PLUGIN_VERSION, "装备转移插件版本.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true,					"l4d_gear_transfer");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);

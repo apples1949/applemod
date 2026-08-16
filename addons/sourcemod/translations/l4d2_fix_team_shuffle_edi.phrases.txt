@@ -1,0 +1,17 @@
+"Phrases"
+{
+	"Vote Blocked"
+	{
+		"en"		"Voting is not enabled until team fix is completed"
+		"zho"		"直到隊伍修正程序結束之前不能投票"
+		"chi"		"直到队伍修正程序结束之前不能投票"
+		"ru"		"Голосования недоступны, пока не завершено восстановление команд"
+	}
+	"Fix Completed"
+	{
+		"en"		"Team fix completed. Change of team is allowed."
+		"zho"		"隊伍修正程序結束，可以切換隊伍"
+		"chi"		"队伍修正程序结束，可以切换队伍"
+		"ru"		"Восстановление команд завершено. Смена команд разрешена."
+	}
+}

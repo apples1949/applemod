@@ -42,7 +42,7 @@ public void OnPluginStart()
 	AddCommandListener(DoorIntercept, "choose_opendoor");
 	AddCommandListener(DoorIntercept, "choose_closedoor");
 	
-	AutoExecConfig(true, "l4d2_saferoomdoor");//生成指定文件名的CFG.
+	//AutoExecConfig(true, "l4d2_saferoomdoor");//生成指定文件名的CFG.
 }
 
 public void OnMapStart()

@@ -221,12 +221,12 @@ public void OnPluginStart()
 		g_hCvarMaxIncap.AddChangeHook(ConVarChanged_Cvars);
 	}
 
-	g_hCvarDieFirst = CreateConVar("l4d_bot_healing_die_first", "0", "0=Ignored. 1=Only allowing healing when self or target is black and white (requires \"Actions\" extension).", CVAR_FLAGS);
-	g_hCvarDiePills = CreateConVar("l4d_bot_healing_die_pills", "0", "0=Ignored. 1=Only allowing healing or giving pills when self or target is black and white (requires \"Actions\" extension).", CVAR_FLAGS);
-	g_hCvarFirst = CreateConVar("l4d_bot_healing_first", g_bLeft4Dead2 ? "30.0" : "40.0", "Allow bots to use First Aid when their health is below this value.", CVAR_FLAGS);
-	g_hCvarPills = CreateConVar("l4d_bot_healing_pills", g_bLeft4Dead2 ? "50.0" : "60.0", "Allow bots to use Pills or Adrenaline when their health is below this value.", CVAR_FLAGS);
-	CreateConVar("l4d_bot_healing_version", PLUGIN_VERSION, "Bot Healing Values plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true, "l4d_bot_healing");
+	g_hCvarDieFirst = CreateConVar("l4d_bot_healing_die_first", "0", "0=忽略。1=仅当自己或目标处于黑白状态时允许治疗（需要 \"Actions\" 扩展）。", CVAR_FLAGS);
+	g_hCvarDiePills = CreateConVar("l4d_bot_healing_die_pills", "0", "0=忽略。1=仅当自己或目标处于黑白状态时允许治疗或给予药丸（需要 \"Actions\" 扩展）。", CVAR_FLAGS);
+	g_hCvarFirst = CreateConVar("l4d_bot_healing_first", g_bLeft4Dead2 ? "30.0" : "40.0", "当机器人生命值低于此值时允许其使用急救包。", CVAR_FLAGS);
+	g_hCvarPills = CreateConVar("l4d_bot_healing_pills", g_bLeft4Dead2 ? "50.0" : "60.0", "当机器人生命值低于此值时允许其使用药丸或肾上腺素。", CVAR_FLAGS);
+	CreateConVar("l4d_bot_healing_version", PLUGIN_VERSION, "机器人治疗数值插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true, "l4d_bot_healing");
 
 	g_hCvarPainPillsDecay = FindConVar("pain_pills_decay_rate");
 	g_hCvarPainPillsDecay.AddChangeHook(ConVarChanged_Cvars);

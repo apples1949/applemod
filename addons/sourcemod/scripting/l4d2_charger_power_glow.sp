@@ -108,11 +108,11 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart()
 {
-	g_hCvarAllow =	CreateConVar(	"l4d2_charger_power_glow_allow",		"1",				"0=Plugin off, 1=Plugin on.", CVAR_FLAGS);
-	g_hCvarColor =	CreateConVar(	"l4d2_charger_power_glow_color",		"255 0 0",			"Three values between 0-255 separated by spaces. RGB Color255 - Red Green Blue.", CVAR_FLAGS);
-	g_hCvarRange =	CreateConVar(	"l4d2_charger_power_glow_range",		"500",				"How near to props do players need to be to enable their glow.", CVAR_FLAGS);
-	CreateConVar(					"l4d2_charger_power_glow_version",		PLUGIN_VERSION,		"Charger Power - Objects Glow plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,			"l4d2_charger_power_glow");
+	g_hCvarAllow =	CreateConVar(	"l4d2_charger_power_glow_allow",		"1",				"0=关闭插件，1=打开插件。", CVAR_FLAGS);
+	g_hCvarColor =	CreateConVar(	"l4d2_charger_power_glow_color",		"255 0 0",			"三个 0-255 之间的数值，用空格分隔。RGB 颜色 255 - 红 绿 蓝。", CVAR_FLAGS);
+	g_hCvarRange =	CreateConVar(	"l4d2_charger_power_glow_range",		"500",				"玩家需要距离道具多近才能启用其发光。", CVAR_FLAGS);
+	CreateConVar(					"l4d2_charger_power_glow_version",		PLUGIN_VERSION,		"冲锋者力量 - 物体发光插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true,			"l4d2_charger_power_glow");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);

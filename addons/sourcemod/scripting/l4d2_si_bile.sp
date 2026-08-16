@@ -5,7 +5,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.1.0"
 
 #define TEAM_SURVIVOR 2
 #define TEAM_INFECTED 3
@@ -24,6 +24,7 @@
 ConVar g_cvEnable;
 ConVar g_cvJarZoneRadius;
 ConVar g_cvHealPerSecond;
+ConVar g_cvBlockHorde;
 
 ConVar g_hVomitBlindTime;
 float  g_fBileDuration;
@@ -47,6 +48,8 @@ float g_fSIBileHeal[MAXPLAYERS + 1];
 
 bool  g_bSurvivorBiled[MAXPLAYERS + 1];
 
+float g_fSIBileMobBlockUntil;
+
 float g_fBoomerDeathPos[3];
 bool  g_bBoomerDeathValid;
 
@@ -68,6 +71,7 @@ public void OnPluginStart()
 	g_cvEnable = CreateConVar("l4d2_si_bile_enable", "1", "总开关", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_cvJarZoneRadius = CreateConVar("l4d2_si_bile_jar_zone_radius", "150.0", "投掷物胆汁罐爆炸后区域半径", FCVAR_NOTIFY, true, 0.0);
 	g_cvHealPerSecond = CreateConVar("l4d2_si_bile_heal_per_second", "60.0", "特感胆汁基础每秒回复量：坦克满额，非坦克减半，第 2 次胆汁再减半 (0=关)", FCVAR_NOTIFY, true, 0.0);
+	g_cvBlockHorde = CreateConVar("l4d2_si_bile_block_horde", "1", "特感被附着胆汁时是否阻止游戏刷新尸潮 (0=允许刷新, 1=阻止刷新)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hVomitBlindTime = FindConVar("sb_vomit_blind_time");
 	if (g_hVomitBlindTime == null)
@@ -95,7 +99,7 @@ public void OnPluginStart()
 	if (g_hVomitTargetDot != null)
 		g_hVomitTargetDot.AddChangeHook(OnVomitCvarChanged);
 
-	AutoExecConfig(true, "l4d2_si_bile");
+	//AutoExecConfig(true, "l4d2_si_bile");
 
 	HookEvent("player_death", Event_PlayerDeath);
 	HookEvent("boomer_exploded", Event_BoomerExploded);
@@ -112,6 +116,11 @@ public void OnPluginEnd()
 {
 	KillTimer(g_hHealTimer);
 	KillTimer(g_hZoneTimer);
+}
+
+public void OnMapEnd()
+{
+	g_fSIBileMobBlockUntil = 0.0;
 }
 
 public void OnVomitBlindTimeChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -158,13 +167,14 @@ void BileSpecialInfected(int victim, int attacker)
 	if (g_iSIBileCount[victim] >= 2)
 		return;
 
+	int zombieClass = GetEntProp(victim, Prop_Send, "m_zombieClass");
 	bool alreadyBiled = g_bSIBiled[victim];
 
 	if (!alreadyBiled)
 	{
 		g_iSIBileCount[victim]++;
 
-		float base = (GetEntProp(victim, Prop_Send, "m_zombieClass") == ZOMBIECLASS_TANK)
+		float base = (zombieClass == ZOMBIECLASS_TANK)
 			? g_cvHealPerSecond.FloatValue
 			: g_cvHealPerSecond.FloatValue * 0.5;
 
@@ -180,8 +190,64 @@ void BileSpecialInfected(int victim, int attacker)
 	}
 
 	L4D2_CTerrorPlayer_OnHitByVomitJar(victim, attacker);
+
 	g_bSIBiled[victim] = true;
 	g_fSIBileEnd[victim] = GetGameTime() + g_fBileDuration;
+}
+
+void ClearTankBileIT(int client)
+{
+	// OnITExpired 会同时清掉屏幕胆汁效果，记录并回写 m_vomitStart/m_vomitFadeStart 以保留视觉
+	float now = GetGameTime();
+	float vomitStart = GetEntPropFloat(client, Prop_Send, "m_vomitStart");
+	float vomitFadeStart = GetEntPropFloat(client, Prop_Send, "m_vomitFadeStart");
+
+	L4D_OnITExpired(client);
+
+	if (vomitStart <= 0.0)
+		vomitStart = now;
+	if (vomitFadeStart <= now)
+		vomitFadeStart = now + g_fBileDuration;
+
+	SetEntPropFloat(client, Prop_Send, "m_vomitStart", vomitStart);
+	SetEntPropFloat(client, Prop_Send, "m_vomitFadeStart", vomitFadeStart);
+}
+
+public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
+{
+	// 特感被胆汁罐命中时记录窗口，随后由 L4D_OnSpawnITMob 按 cvar 决定是否阻止 IT 尸潮
+	if (g_cvEnable.BoolValue && g_cvBlockHorde.BoolValue
+		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
+		&& GetClientTeam(victim) == TEAM_INFECTED)
+	{
+		g_fSIBileMobBlockUntil = GetGameTime() + 0.2;
+	}
+
+	return Plugin_Continue;
+}
+
+public void L4D2_OnHitByVomitJar_Post(int victim, int attacker)
+{
+	// Tank 被胆汁命中后立即结束 IT 状态，避免小僵尸转火攻击 Tank
+	if (g_cvEnable.BoolValue
+		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
+		&& GetClientTeam(victim) == TEAM_INFECTED
+		&& GetEntProp(victim, Prop_Send, "m_zombieClass") == ZOMBIECLASS_TANK)
+	{
+		ClearTankBileIT(victim);
+	}
+}
+
+public Action L4D_OnSpawnITMob(int &amount)
+{
+	// 只拦截特感胆汁紧随而来的 IT 尸潮，不影响生还者胆汁等正常尸潮
+	if (g_cvEnable.BoolValue && g_cvBlockHorde.BoolValue && g_fSIBileMobBlockUntil > GetGameTime())
+	{
+		g_fSIBileMobBlockUntil = 0.0;
+		return Plugin_Handled;
+	}
+
+	return Plugin_Continue;
 }
 
 public void Event_AbilityUse(Event event, const char[] name, bool dontBroadcast)

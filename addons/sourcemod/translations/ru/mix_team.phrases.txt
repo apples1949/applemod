@@ -1,68 +1,77 @@
 "Phrases"
 {
-	"BAD_ARGUMENT"
-	{
-		"#format"		"{1:s}"
-		"ru"			"Плохой аргумент {1} для микса. Используйте: {olive}!mix <type>"
-	}
-	
-	"NO_ARGUMENT"
-	{
-		"ru"			"Не выбран тип микса. Используйте: {olive}!mix <type>"
-	}
+    "TAG"
+    {
+        "ru"            "<{green}Mix Team{default}> "
+    }
 
-	"CANT_CHANGE_TEAM"
-	{
-		"ru"			"{olive}Нельзя {default}менять команду {olive}во время микса"
-	}
+    "CANT_CHANGE_TEAM"
+    {
+        "ru"            "Вы не можете сменить команду {olive}во время микса"
+    }
 
-	"BAD_TEAM_SIZE"
-	{
-		"#format"		"{1:d}"
-		"ru"			"В команде недостаточно игроков. {olive}Необходимо {1} игрока(ов)"
-	}
+    "VOTE_COULDOWN"
+    {
+        "#format"       "{1:d}"
+        "ru"            "Голосование сейчас невозможно, повторите попытку через {1} секунд"
+    }
 
-	"LEFT_READYUP"
-	{
-		"ru"			"Невозможно начать микс: {olive}доступно только во время ReadyUp"
-	}
+    "NOT_ENOUGH_PLAYERS"
+    {
+        "#format"       "{1:d}"
+        "ru"            "Недостаточно игроков в игре ({olive}Нужно {1} игроков{default})"
+    }
 
-	"VOTE_COULDOWN"
-	{
-		"#format"		"{1:d}"
-		"ru"			"Сейчас голосование недоступно. Подождите {olive}{1} сек"
-	}
-	
-	"SECOND_HALF_OF_ROUND"
-	{
-		"ru"			"Невозможно начать микс: {olive}сейчас идёт вторая часть раунда"
-	}
+    "SECOND_HALF_OF_ROUND"
+    {
+        "ru"            "Микс невозможен: идёт вторая половина раунда"
+    }
 
-	"ROUND_LIVE"
-	{
-		"ru"			"Невозможно начать микс: {olive}раунд уже начался"
-	}
+    "ROUND_STARTED"
+    {
+        "ru"            "Микс невозможен: раунд уже начался"
+    }
 
-	"CLIENT_LEAVE"
-	{
-		"#format"		"{1:N}"
-		"ru"			"Участник микса {olive}{1} {default}вышел. {olive}Откат микса"
-	}
+    "PLAYER_DISCONNECTED"
+    {
+        "ru"            "Откат микса: участник микса покинул игру"
+    }
 
-	"CANCEL_MIX_SUCCESS"
-	{
-		"#format"		"{1:N}"
-		"ru"			"Участник микса {olive}{1} {default}прервал микс"
-	}
+    "PLAYER_CHANGED_TEAM"
+    {
+        "#format"       "{1:N}"
+        "ru"            "Откат микса: участник {olive}{1}{default} сменил команду"
+    }
 
-	"CANCEL_MIX_FAIL"
-	{
-		"#format"		"{1:d}"
-		"ru"			"Сейчас прерывание микса. Подождите {olive}{1} сек"
-	}
-	
-	"ALREADY_IN_PROGRESS"
-	{
-		"ru"			"Микс уже идёт!"
-	}
+    "ABORT_MIX_SUCCESS"
+    {
+        "#format"       "{1:N}"
+        "ru"            "Откат микса: участник {olive}{1}{default} прервал микс"
+    }
+
+    "ABORT_MIX_FAIL"
+    {
+        "#format"       "{1:d}"
+        "ru"            "Прервать микс сейчас невозможно, повторите попытку через {1} секунд"
+    }
+
+    "ALREADY_IN_PROGRESS"
+    {
+        "ru"            "Сессия микса уже запущена!"
+    }
+
+    "MENU_TITLE"
+    {
+        "ru"            "Начать голосование за микс:\n "
+    }
+
+    "MENU_TITLE_FORCE"
+    {
+        "ru"            "Запустить микс:\n "
+    }
+
+    "MENU_ABORT"
+    {
+        "ru"            "Прервать микс\n "
+    }
 }

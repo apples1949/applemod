@@ -39,7 +39,7 @@ public void OnPluginStart()
 	g_hChangeRestartGame.AddChangeHook(ConVarChangedHook);
 	g_hChangeReturnTolobby.AddChangeHook(ConVarChangedHook);
 	
-	AutoExecConfig(true, "l4d2_callvote");//生成指定文件名的CFG.
+	//AutoExecConfig(true, "l4d2_callvote");//生成指定文件名的CFG.
 	AddCommandListener(Listener_CallVote, "callvote");
 }
 //地图开始.

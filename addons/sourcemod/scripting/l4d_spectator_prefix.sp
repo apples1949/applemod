@@ -46,11 +46,11 @@ Handle
 
 public void OnPluginStart()
 {
-	g_hCvarAllow 	= CreateConVar(	"l4d_spectator_prefix_allow",			"1",	"0=Plugin off, 1=Plugin on.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	g_hCvarModes 	= CreateConVar( "l4d_spectator_prefix_modes",			"",		"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
-	g_hCvarModesOff = CreateConVar( "l4d_spectator_prefix_modes_off",		"",		"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesTog = CreateConVar( "l4d_spectator_prefix_modes_tog",   	"0",	"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	g_hPrefixType 	= CreateConVar( "l4d_spectator_prefix_type", 			"(S)",  "Determine your preferred type of Spectator Prefix", CVAR_FLAGS);
+	g_hCvarAllow 	= CreateConVar(	"l4d_spectator_prefix_allow",			"1",	"0=插件关闭, 1=插件开启.", CVAR_FLAGS, true, 0.0, true, 1.0);
+	g_hCvarModes 	= CreateConVar( "l4d_spectator_prefix_modes",			"",		"在这些游戏模式中启用插件, 用逗号分隔 (无空格). (留空 = 全部).", CVAR_FLAGS );
+	g_hCvarModesOff = CreateConVar( "l4d_spectator_prefix_modes_off",		"",		"在这些游戏模式中关闭插件, 用逗号分隔 (无空格). (留空 = 无).", CVAR_FLAGS );
+	g_hCvarModesTog = CreateConVar( "l4d_spectator_prefix_modes_tog",   	"0",	"在这些游戏模式中启用插件. 0=全部, 1=合作, 2=生存, 4=对抗, 8=清道夫. 把数字相加.", CVAR_FLAGS );
+	g_hPrefixType 	= CreateConVar( "l4d_spectator_prefix_type", 			"(S)",  "选择你喜欢的旁观者前缀类型", CVAR_FLAGS);
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);
@@ -60,7 +60,7 @@ public void OnPluginStart()
 	g_hCvarModesTog.AddChangeHook(ConVarChanged_Allow);
 	g_hPrefixType.AddChangeHook(ConVarChanged_PrefixType);
 
-	AutoExecConfig(true, "l4d_spectator_prefix");
+	//AutoExecConfig(true, "l4d_spectator_prefix");
 
 	if(bLate)
 	{

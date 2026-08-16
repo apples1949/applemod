@@ -28,7 +28,7 @@ public void OnPluginStart()
 	g_hShowTips	= CreateConVar("l4d2_suicide_start_tips",	"7", "设置开局提示自杀指令的延迟显示时间/秒. 0=禁用.");
 	g_hSuicide.AddChangeHook(IsSuicideConVarChanged);
 	g_hShowTips.AddChangeHook(IsSuicideConVarChanged);
-	AutoExecConfig(true, "l4d2_player_suicide");
+	//AutoExecConfig(true, "l4d2_player_suicide");
 }
 
 public void OnConfigsExecuted()

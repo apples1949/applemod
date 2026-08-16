@@ -575,40 +575,89 @@ void doPrintTankDamage(int client) {
 		percentAdjust = 100 - damagePercent;
 
 	char playerName[MAX_NAME_LENGTH];
-	// 打印生还者对 Tank 的伤害：[666(%66)][拳:6(%6)][石:6(%6)][铁:6(%6)][承伤:666(%66)] 测试哥
+
+	/* 第一遍: 按排序后的顺序计算每人最终显示的百分比（含凑整修正），并统计各数值列的最大位数用于右对齐 */
+	int[] finalPercent = new int[index];
+	bool[] display = new bool[index];
+	int maxDamageWidth = 1,
+		maxPercentWidth = 1,
+		maxPunchWidth = 1,
+		maxRockWidth = 1,
+		maxIronWidth = 1,
+		maxGotDamageWidth = 1,
+		maxGotDamagePercentWidth = 1,
+		width;
+
 	for (i = 0; i < index; i++) {
 		// 获取到生还者索引和他对 Tank 的伤害
 		survivor = survivorDamage[i][0];
 		damage = survivorDamage[i][1];
 
+		finalPercent[i] = 0;
+		display[i] = false;
+
 		// 当前生还者无效, 跳过
 		if (!IsValidClient(survivor) || GetClientTeam(survivor) != TEAM_SURVIVOR)
 			continue;
 
-		damagePercent = getDamageAsPercent(damage, tankHealth[client]);
+		finalPercent[i] = getDamageAsPercent(damage, tankHealth[client]);
 		if (percentAdjust != 0 && damage > 0 && !isExactPercent(damage, tankHealth[client])) {
-			exactDamagePercent = damagePercent + percentAdjust;
+			exactDamagePercent = finalPercent[i] + percentAdjust;
 
 			if (exactDamagePercent <= lastPercent) {
-				damagePercent = exactDamagePercent;
+				finalPercent[i] = exactDamagePercent;
 				percentAdjust = 0;
 			}
 		}
 
 		// 允许显示零伤人员或不允许显示零伤人员但这个人的伤害大于 0，允许输出
-		if (g_hAllowPrintZeroDamage.BoolValue || (!g_hAllowPrintZeroDamage.BoolValue && damage > 0)) {
-			GetClientName(survivor, playerName, sizeof(playerName));
+		if (!(g_hAllowPrintZeroDamage.BoolValue || damage > 0))
+			continue;
 
-			debugAndInfoLog("%s: Tank %d, 生还索引: %d, 伤害 %d, 百分比 %d%%, 名字 %s", PLUGIN_PREFIX, client, survivor, damage, damagePercent, playerName);
+		display[i] = true;
+		// 统计各列最大位数, 数字列按最大位数补前导空格右对齐
+		width = digitCount(damage);
+		if (width > maxDamageWidth) maxDamageWidth = width;
+		width = digitCount(finalPercent[i]);
+		if (width > maxPercentWidth) maxPercentWidth = width;
+		width = digitCount(playerHurts[client][survivor].punch);
+		if (width > maxPunchWidth) maxPunchWidth = width;
+		width = digitCount(playerHurts[client][survivor].rock);
+		if (width > maxRockWidth) maxRockWidth = width;
+		width = digitCount(playerHurts[client][survivor].iron);
+		if (width > maxIronWidth) maxIronWidth = width;
+		width = digitCount(playerHurts[client][survivor].gotDamage);
+		if (width > maxGotDamageWidth) maxGotDamageWidth = width;
+		width = digitCount(totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
+		if (width > maxGotDamagePercentWidth) maxGotDamagePercentWidth = width;
+	}
 
-			CPrintToChatAll("{blue}[{default}%d{blue}({default}%d%%{blue})] [{green}拳:{default}%d] [{green}石:{default}%d] [{green}铁:{default}%d] [{green}承伤:{default}%d{blue}({default}%d%%{blue})] {green}%s",
-			damage, damagePercent,
+	/* 动态生成右对齐格式串: 每个数值列按该列最大位数补前导空格 */
+	char fmt[512];
+	FormatEx(fmt, sizeof(fmt), "{blue}[{default}%%%dd{blue}({default}%%%dd%%%%{blue})] [{green}拳:{default}%%%dd] [{green}石:{default}%%%dd] [{green}铁:{default}%%%dd] [{green}承伤:{default}%%%dd{blue}({default}%%%dd%%%%{blue})] {green}%%s",
+		maxDamageWidth, maxPercentWidth, maxPunchWidth, maxRockWidth, maxIronWidth, maxGotDamageWidth, maxGotDamagePercentWidth);
+
+	// 打印生还者对 Tank 的伤害：[666( 66%)][拳: 6][石: 6][铁: 6][承伤:666( 66%)] 测试哥（数值列全部右对齐）
+	int gotDamage, gotDamagePercent;
+	for (i = 0; i < index; i++) {
+		if (!display[i])
+			continue;
+
+		survivor = survivorDamage[i][0];
+		damage = survivorDamage[i][1];
+		GetClientName(survivor, playerName, sizeof(playerName));
+		gotDamage = playerHurts[client][survivor].gotDamage;
+		gotDamagePercent = totalGotDamage == 0 ? 0 : RoundToNearest(float(gotDamage) / float(totalGotDamage) * 100.0);
+
+		debugAndInfoLog("%s: Tank %d, 生还索引: %d, 伤害 %d, 百分比 %d%%, 名字 %s", PLUGIN_PREFIX, client, survivor, damage, finalPercent[i], playerName);
+
+		CPrintToChatAll(fmt,
+			damage, finalPercent[i],
 			playerHurts[client][survivor].punch,
 			playerHurts[client][survivor].rock,
 			playerHurts[client][survivor].iron,
-			playerHurts[client][survivor].gotDamage, totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0),
+			gotDamage, gotDamagePercent,
 			playerName);
-		}
 	}
 }
 
@@ -631,6 +680,16 @@ int getDamageAsPercent(int damage, int health) {
 bool isExactPercent(int damage, int health) {
 	float percent = (float(damage) / float(health)) * 100.0, difference = (getDamageAsPercent(damage, health)) - percent;
 	return FloatAbs(difference) < 0.001 ? true : false;
+}
+
+/* 计算非负整数的十进制位数（0 记为 1 位），用于伤害报告各数值列的右对齐 */
+int digitCount(int value) {
+	int digits = 1;
+	while (value > 9) {
+		value /= 10;
+		digits++;
+	}
+	return digits;
 }
 
 bool isSurvivorFailed() {

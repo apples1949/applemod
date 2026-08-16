@@ -89,19 +89,19 @@ public void OnPluginStart()
 	g_iOffsetAmmo = FindSendPropInfo("CTerrorPlayer", "m_iAmmo");
 	g_iPrimaryAmmoType = FindSendPropInfo("CBaseCombatWeapon", "m_iPrimaryAmmoType");
 
-	BlockSecondaryDropBits = CreateConVar("sm_drop_block_secondary_bits", "0", "Prevent players from dropping specific secondary weapons? (Bit flags: 1 = Single pistol, 2 = Dual pistols, 4 = Magnum, 8 = Melee weapons. Examples: 3 = block all pistols, 12 = block Magnum and Melee, 15 = block all secondaries. Bit 2 blocks dual pistols entirely and overrides sm_drop_dual_pistols.)", FCVAR_NOTIFY, true, 0.0, true, 15.0);
-	BlockDropMidAction = CreateConVar("sm_drop_block_mid_action", "1", "Prevent players from dropping objects in between actions? (Fixes throwable cloning.) 1 = All weapons. 2 = Only throwables.", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	BlockSecondaryDropBits = CreateConVar("sm_drop_block_secondary_bits", "0", "防止玩家丢弃特定副武器? (位标志: 1 = 单手枪, 2 = 双手枪, 4 = 马格南, 8 = 近战武器. 示例: 3 = 阻止所有手枪, 12 = 阻止马格南和近战, 15 = 阻止所有副武器. 位 2 完全阻止双手枪并覆盖 sm_drop_dual_pistols.)", FCVAR_NOTIFY, true, 0.0, true, 15.0);
+	BlockDropMidAction = CreateConVar("sm_drop_block_mid_action", "1", "防止玩家在动作间隙丢弃物品? (修复投掷物复制.) 1 = 所有武器. 2 = 仅投掷物.", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 	if (g_bL4D2Version)
 	{
-		BlockM60Drop = CreateConVar("sm_drop_block_m60", "0", "Prevent players from dropping the M60? (Allows for better compatibility with certain plugins.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hCvarDropSoundFile  = 	    CreateConVar(  "sm_drop_soundfile", 	"ui/gift_pickup.wav", 			"Drop - sound file (relative to to sound/, empty=disable)", FCVAR_NOTIFY);
+		BlockM60Drop = CreateConVar("sm_drop_block_m60", "0", "防止玩家丢弃 M60? (可与某些插件更好地兼容.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hCvarDropSoundFile  = 	    CreateConVar(  "sm_drop_soundfile", 	"ui/gift_pickup.wav", 			"丢弃 - 音效文件 (相对于 sound/ 目录, 留空=禁用)", FCVAR_NOTIFY);
 	}
 	else
 	{
-		g_hCvarDropSoundFile  = 	    CreateConVar(  "sm_drop_soundfile", 	"items/itempickup.wav", 		"Drop - sound file (relative to to sound/, empty=disable)", FCVAR_NOTIFY);
+		g_hCvarDropSoundFile  = 	    CreateConVar(  "sm_drop_soundfile", 	"items/itempickup.wav", 		"丢弃 - 音效文件 (相对于 sound/ 目录, 留空=禁用)", FCVAR_NOTIFY);
 	}
-	g_hCvarDropDualPistols = CreateConVar("sm_drop_dual_pistols", "0", "How to handle dropping dual pistols? 0 = Drop one pistol and keep the other (become single pistol). 1 = Drop both pistols at once. (Only applies when bit 2 of sm_drop_block_secondary_bits is not set, otherwise dual pistols cannot be dropped.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	CreateConVar("sm_drop_version", PLUGIN_VERSION, "Weapon Drop version.", FCVAR_NOTIFY|FCVAR_REPLICATED|FCVAR_DONTRECORD);
+	g_hCvarDropDualPistols = CreateConVar("sm_drop_dual_pistols", "0", "如何处理双手枪的丢弃? 0 = 丢下一把手枪并保留另一把 (变为单手枪). 1 = 同时丢下两把手枪. (仅在 sm_drop_block_secondary_bits 的位 2 未设置时适用, 否则无法丢弃双手枪.)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	CreateConVar("sm_drop_version", PLUGIN_VERSION, "武器丢弃插件版本.", FCVAR_NOTIFY|FCVAR_REPLICATED|FCVAR_DONTRECORD);
 
 	GetCvars();
 	BlockSecondaryDropBits.AddChangeHook(ConVarChanged_Cvars);
@@ -113,7 +113,7 @@ public void OnPluginStart()
 	g_hCvarDropSoundFile.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarDropDualPistols.AddChangeHook(ConVarChanged_Cvars);
 
-	AutoExecConfig(true, "l4d_drop");
+	//AutoExecConfig(true, "l4d_drop");
 	GetCvars();
 
 	RegConsoleCmd("sm_drop", Command_Drop);

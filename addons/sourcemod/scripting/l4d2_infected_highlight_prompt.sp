@@ -3,10 +3,12 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.1"
+#define PLUGIN_VERSION	"1.2"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
+#define EXPLODE_SAME_WINDOW_TIME	0.5	// 同一次爆炸事件的最大到达时间差(秒): 窗口开启超过此时长后到达的事件视为新一次爆炸
+#define EXPLODE_SCAN_INTERVAL	0.25	// 爆炸窗口结算扫描间隔(秒)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
 
 // ====================================================================================================
@@ -51,6 +53,7 @@ bool  g_bSprayVictim[MAXPLAYERS+1][MAXPLAYERS+1];
 // Boomer 爆炸糊人状态(按 boomer 玩家索引)
 // ====================================================================================================
 bool  g_bExplodeActive[MAXPLAYERS+1];	// 爆炸判定窗口是否开启
+float g_fExplodeStart[MAXPLAYERS+1];	// 爆炸判定窗口起始时间
 int   g_iExplodeCount[MAXPLAYERS+1];	// 被炸到的不重复生还者数
 bool  g_bExplodeVictim[MAXPLAYERS+1][MAXPLAYERS+1];
 char  g_sExplodeName[MAXPLAYERS+1][MAX_NAME_LENGTH];	// 开窗时记录的特感名(爆炸后 boomer 已死亡)
@@ -90,15 +93,15 @@ public void OnPluginStart()
 {
 	g_cvBoomerSprayMin		= CreateConVar("l4d2_infected_highlight_boomer_spray_min",
 											"2",
-											"Boomer存活状态下一口喷中多少个生还者时提示(>=2).",
+											"胖子存活状态下一口喷中多少个生还者时提示(>=2).",
 											FCVAR_NOTIFY, true, 2.0, true, 16.0);
 	g_cvBoomerExplodeMin	= CreateConVar("l4d2_infected_highlight_boomer_explode_min",
 											"2",
-											"Boomer死亡爆炸一次炸到多少个生还者时提示(>=2).",
+											"胖子死亡爆炸一次炸到多少个生还者时提示(>=2).",
 											FCVAR_NOTIFY, true, 2.0, true, 16.0);
 	g_cvChargerMin			= CreateConVar("l4d2_infected_highlight_charger_min",
 											"2",
-											"Charger一次冲撞连续撞中多少个生还者时提示(>=2).",
+											"冲锋者一次冲撞连续撞中多少个生还者时提示(>=2).",
 											FCVAR_NOTIFY, true, 2.0, true, 16.0);
 	g_cvPinnedMin			= CreateConVar("l4d2_infected_highlight_pinned_min",
 											"2",
@@ -125,6 +128,7 @@ public void OnPluginStart()
 	HookEvent("bot_player_replace",		Event_BotPlayerReplace);
 
 	CreateTimer(PINNED_CHECK_INTERVAL, Timer_CheckPinned, _, TIMER_REPEAT);
+	CreateTimer(EXPLODE_SCAN_INTERVAL, Timer_ScanExplode, _, TIMER_REPEAT);
 
 	//AutoExecConfig(true, "l4d2_infected_highlight_prompt");
 }
@@ -181,16 +185,18 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 	{
 		int boomer = attacker;
 
-		if (!IsBoomer(boomer))
+		if (!IsInfectedPlayer(boomer))
 		{
-			// 攻击者异常时的回退: 使用最近一次爆炸的 boomer(需在判定窗口时限内)
+			// 攻击者异常(如爆炸瞬间 boomer 已转入灵魂状态、类别被重置)时的回退:
+			// 使用最近一次 boomer_exploded 记录的 boomer(需在判定窗口时限内)
 			boomer = GetClientOfUserId(g_iLastExplodedBoomer);
 
-			if (!IsBoomer(boomer) || GetGameTime() - g_fLastExplodedTime > EXPLODE_WINDOW_TIME)
+			if (!IsInfectedPlayer(boomer) || GetGameTime() - g_fLastExplodedTime > EXPLODE_WINDOW_TIME)
 				return;
 		}
 
-		if (!g_bExplodeActive[boomer])
+		// 窗口未开, 或窗口属于上一次爆炸(boomer 极短时间复活再次被打爆): 开新窗结算
+		if (!g_bExplodeActive[boomer] || GetGameTime() - g_fExplodeStart[boomer] >= EXPLODE_SAME_WINDOW_TIME)
 			OpenExplodeWindow(boomer);
 
 		if (!g_bExplodeVictim[boomer][victim])
@@ -253,20 +259,28 @@ public void Event_BoomerExploded(Event event, const char[] name, bool dontBroadc
 {
 	int boomer = GetClientOfUserId(event.GetInt("userid"));
 
-	if (!IsBoomer(boomer))
+	// 爆炸瞬间 boomer 可能已转入灵魂状态(m_zombieClass 被重置), 不能按类别判断,
+	// 只按"感染者阵营且在游戏中"判断(事件本身已保证 userid 是爆炸的 boomer)
+	if (!IsInfectedPlayer(boomer))
 		return;
 
 	g_iLastExplodedBoomer = event.GetInt("userid");
 	g_fLastExplodedTime = GetGameTime();
 
-	// 若 player_now_it 已先到达并开窗, 则保留已计数, 不重置窗口
-	if (!g_bExplodeActive[boomer])
+	// 同一次爆炸的 player_now_it 已先到达开窗(时间差小于容差)则保留已计数;
+	// 时间差达到容差说明是 boomer 复活后的新一次爆炸, 重开窗口(会先结算上一次)
+	if (!g_bExplodeActive[boomer] || GetGameTime() - g_fExplodeStart[boomer] >= EXPLODE_SAME_WINDOW_TIME)
 		OpenExplodeWindow(boomer);
 }
 
 void OpenExplodeWindow(int boomer)
 {
+	// 上一次爆炸的窗口还未结算(boomer 极短时间复活再次被打爆): 先结算上一次再开新窗
+	if (g_bExplodeActive[boomer])
+		PrintExplode(boomer);
+
 	g_bExplodeActive[boomer] = true;
+	g_fExplodeStart[boomer] = GetGameTime();
 	g_iExplodeCount[boomer] = 0;
 
 	for (int i = 1; i <= MaxClients; i++)
@@ -274,24 +288,32 @@ void OpenExplodeWindow(int boomer)
 
 	// 爆炸后 boomer 立即死亡, 先记录名字, 结算时不再解析实体
 	GetActorName(boomer, g_sExplodeName[boomer], MAX_NAME_LENGTH);
-
-	CreateTimer(EXPLODE_WINDOW_TIME, Timer_EndExplode, GetClientUserId(boomer), TIMER_FLAG_NO_MAPCHANGE);
 }
 
-public Action Timer_EndExplode(Handle timer, int userid)
+// 周期扫描到期的爆炸窗口并结算(替代一次性结算计时器, 避免极短时间复活再次爆炸时新旧窗口/计时器错配)
+public Action Timer_ScanExplode(Handle timer)
 {
-	int boomer = GetClientOfUserId(userid);
+	float now = GetGameTime();
 
-	if (boomer > 0 && g_bExplodeActive[boomer] && g_iExplodeCount[boomer] >= g_iBoomerExplodeMin)
+	for (int i = 1; i <= MaxClients; i++)
 	{
-		PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%s\x05名生还者",
-			g_sExplodeName[boomer], g_NumberTextGe[g_iExplodeCount[boomer] - 2]);
+		if (g_bExplodeActive[i] && now - g_fExplodeStart[i] >= EXPLODE_WINDOW_TIME)
+		{
+			PrintExplode(i);
+			ResetExplode(i);
+		}
 	}
 
-	if (boomer > 0)
-		ResetExplode(boomer);
-
 	return Plugin_Continue;
+}
+
+void PrintExplode(int boomer)
+{
+	if (g_iExplodeCount[boomer] < g_iBoomerExplodeMin)
+		return;
+
+	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%s\x05名生还者",
+		g_sExplodeName[boomer], g_NumberTextGe[g_iExplodeCount[boomer] - 2]);
 }
 
 void ResetSpray(int boomer)
@@ -307,6 +329,7 @@ void ResetSpray(int boomer)
 void ResetExplode(int boomer)
 {
 	g_bExplodeActive[boomer] = false;
+	g_fExplodeStart[boomer] = 0.0;
 	g_iExplodeCount[boomer] = 0;
 
 	for (int i = 1; i <= MaxClients; i++)
@@ -576,6 +599,12 @@ bool IsBoomer(int client)
 			IsClientInGame(client) &&
 			GetClientTeam(client) == 3 &&
 			GetEntProp(client, Prop_Send, "m_zombieClass") == 2;
+}
+
+// 感染者阵营玩家(含已死亡/灵魂状态): 不依赖 m_zombieClass, 死亡瞬间类别会被重置
+bool IsInfectedPlayer(int client)
+{
+	return client > 0 && client <= MaxClients && IsClientInGame(client) && GetClientTeam(client) == 3;
 }
 
 bool IsCharger(int client)

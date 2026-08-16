@@ -100,19 +100,19 @@ public void OnPluginStart()
 		return;
 	}
 
-	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "Enable plugin?,0:disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																																		   //这个都看不懂建议别玩插件捏
-	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "What type of game duration is displayed to players? 1:hour and minute  2=Hours rounded to two decimal places", FCVAR_NOTIFY, true, 1.0, true, 2.0);															   //向玩家显示什么类型的游戏时长? 1:小时分钟 2=小时带两位小数
-	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "If for any possible reason it fails to get the player's real gametime, how many times should it be repeated to get the player's game time? 0:Disabled", FCVAR_NOTIFY, true, 0.0);							   //如果因可能的各种原因导致获取玩家的真实游戏时长失败,那么重复多少次获取玩家游戏时长? 0:禁用
-	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "If the player's real gametime is being acquired repeatedly. Does it move the player to spec? 0:disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);																	   //如果正在反复获取玩家的真实游戏时长的情况下。是否将玩家移动到旁观？0:禁用
-	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "How to deal with players if repeatedly getting player real playtime fails?0:disable, 1:kick 2=move to spec", FCVAR_NOTIFY, true, 0.0, true, 2.0);																   //如果反复获取玩家真实游戏时长失败，如何处理玩家？0:禁用，1:踢出 2=移动到旁观
-	c_LPLateload			 = CreateConVar("LPLateload", "1", "If LimitPlayer=1 and the plugin is not activated properly, does it cancel the behavior of various plugins that restrict the player due to real playertime?0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);	   //如果LimitPlayer=1且插件未正常启动的情况下，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用
-	c_LimitPlayer			 = CreateConVar("LimitPlayer", "1", "Are players who meet the gametime criteria prohibited from entering the server or entering the game? 0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);														   //是否禁止符合时长条件的玩家进入服务器或进入对局? 0:禁用 1:启用
-	c_LimitPlayerMinGametime = CreateConVar("LimitPlayerMinGametime", "1", "How long is the minimum prohibition for gametime players to enter the server or enter the game", FCVAR_NOTIFY, true, 1.0);																				   //最低禁止多少秒的玩家进入服务器或进入对局(小时乘3600)
-	c_LimitPlayerMaxGametime = CreateConVar("LimitPlayerMaxGametime", "36000", "How long is the maximum prohibition for gametime players to enter the server or enter the game", FCVAR_NOTIFY, true, 1.0);
-	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "If LimitPlayer is not 0, how will eligible players be processed? 1:kick out, 2=move to spec", FCVAR_NOTIFY, true, 1.0, true, 2.0);		 //如果LimitPlayer不为0,则如何处理符合时长区间的玩家? 1:踢出,2=移动到旁观
-	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "Show Player Lerp with gametime? 0:disable 1:enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否显示玩家的lerp值，0:禁用，1:启用
-	c_SPLMode				 = CreateConVar("SPLMode", "1", "Whether to display player real playtime and Lerp information by player team 0:Output in player order.", FCVAR_NOTIFY, true, 0.0, true, 1.0);	 //是否按照玩家阵营显示玩家真实玩家时长及Lerp信息 0:按照玩家顺序输出
-	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "Need Log Kick Auto Kick Player Message? 0:disable", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否记录踢出玩家的信息？
+	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "启用插件？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);																																		   //这个都看不懂建议别玩插件捏
+	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "向玩家显示什么类型的游戏时长？1:小时和分钟 2=四舍五入到两位小数的小时", FCVAR_NOTIFY, true, 1.0, true, 2.0);															   //向玩家显示什么类型的游戏时长? 1:小时分钟 2=小时带两位小数
+	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "如果由于任何可能的原因未能获取到玩家的真实游戏时长，应重复多少次以获取玩家的游戏时长？0:禁用", FCVAR_NOTIFY, true, 0.0);							   //如果因可能的各种原因导致获取玩家的真实游戏时长失败,那么重复多少次获取玩家游戏时长? 0:禁用
+	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "正在反复获取玩家的真实游戏时长时，是否将玩家移动到旁观？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);																	   //如果正在反复获取玩家的真实游戏时长的情况下。是否将玩家移动到旁观？0:禁用
+	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "反复获取玩家真实游戏时长失败时如何处理玩家？0:禁用，1:踢出 2=移动到旁观", FCVAR_NOTIFY, true, 0.0, true, 2.0);																   //如果反复获取玩家真实游戏时长失败，如何处理玩家？0:禁用，1:踢出 2=移动到旁观
+	c_LPLateload			 = CreateConVar("LPLateload", "1", "如果 LimitPlayer=1 且插件未正常启动，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);	   //如果LimitPlayer=1且插件未正常启动的情况下，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用
+	c_LimitPlayer			 = CreateConVar("LimitPlayer", "1", "是否禁止符合游戏时长条件的玩家进入服务器或进入游戏？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);														   //是否禁止符合时长条件的玩家进入服务器或进入对局? 0:禁用 1:启用
+	c_LimitPlayerMinGametime = CreateConVar("LimitPlayerMinGametime", "1", "符合游戏时长条件的玩家进入服务器或进入游戏的最低禁止时长", FCVAR_NOTIFY, true, 1.0);																				   //最低禁止多少秒的玩家进入服务器或进入对局(小时乘3600)
+	c_LimitPlayerMaxGametime = CreateConVar("LimitPlayerMaxGametime", "36000", "符合游戏时长条件的玩家进入服务器或进入游戏的最高禁止时长", FCVAR_NOTIFY, true, 1.0);
+	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "如果 LimitPlayer 不为 0，如何处理符合条件的玩家？1:踢出，2=移动到旁观", FCVAR_NOTIFY, true, 1.0, true, 2.0);		 //如果LimitPlayer不为0,则如何处理符合时长区间的玩家? 1:踢出,2=移动到旁观
+	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "显示玩家 Lerp 及游戏时长？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否显示玩家的lerp值，0:禁用，1:启用
+	c_SPLMode				 = CreateConVar("SPLMode", "1", "是否按玩家队伍显示玩家真实游戏时长和 Lerp 信息 0:按玩家顺序输出", FCVAR_NOTIFY, true, 0.0, true, 1.0);	 //是否按照玩家阵营显示玩家真实玩家时长及Lerp信息 0:按照玩家顺序输出
+	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "是否记录自动踢出玩家的消息？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否记录踢出玩家的信息？
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
 	g_cvMaxUpdateRate		 = FindConVar("sv_maxupdaterate");
@@ -138,7 +138,7 @@ public void OnPluginStart()
 
 	RegConsoleCmd("sm_playertime", cmdplayertime);
 
-	AutoExecConfig(true, "GetPlayerGametime");
+	//AutoExecConfig(true, "GetPlayerGametime");
 
 	if (CheckPluginLate)
 	{

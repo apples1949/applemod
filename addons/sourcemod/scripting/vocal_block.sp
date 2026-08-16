@@ -35,7 +35,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.2"
 
 int g_VocalCalled[MAXPLAYERS+1];
 float g_LastVocalTime[MAXPLAYERS+1];
@@ -48,7 +48,7 @@ ConVar cVocalDelay = null;
 public Plugin myinfo = 
 {
 	name = "L4D Vocalize Guard",
-	author = "Crimson - TeddyRuxpin, Harry",
+	author = "apples1949",
 	description = "Left 4 Dead Vocalize Spam Blocker",
 	version = PLUGIN_VERSION,
 	url = "http://www.sourcemod.net/"
@@ -79,10 +79,9 @@ public void OnPluginStart()
 	RegConsoleCmd("vocalize", Command_CallVocal);
 
 	cEnabled = CreateConVar("sm_vocalize_guard_enabled", "1", "启用/禁用插件 [0 = 禁用, 1 = 启用]", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cVocalLimit = CreateConVar("sm_vocalize_guard_vlimit", "9999", "最多允许几次语音表单", FCVAR_NOTIFY, true, 0.0);
-	cVocalDelay = CreateConVar("sm_vocalize_guard_vdelay", "5", "玩家使用语音表单频率 [0 = 关闭]", FCVAR_NOTIFY, true, 0.0);
+	cVocalLimit = CreateConVar("sm_vocalize_guard_vlimit", "1", "时间窗口内最多允许几次语音表单（窗口从第一次使用开始计算）", FCVAR_NOTIFY, true, 1.0);
+	cVocalDelay = CreateConVar("sm_vocalize_guard_vdelay", "5", "玩家使用语音表单的时间窗口（秒）[0 = 关闭]", FCVAR_NOTIFY, true, 0.0);
 	
-
 	//AutoExecConfig(true, "vocal_block");
 	HookEvent("player_disconnect", Event_PlayerDisconnect);
 }
@@ -99,6 +98,7 @@ public void OnMapStart()
 public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) 
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client == 0) return;
 	
 	g_VocalCalled[client] = 0;
 	g_LastVocalTime[client] = 0.0;
@@ -106,40 +106,33 @@ public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroa
 
 public Action Command_CallVocal(int client, int args)
 {
-	if(client == 0 || !IsClientInGame(client)) return Plugin_Continue;
+	if (client == 0 || !IsClientInGame(client) || !cEnabled.BoolValue) return Plugin_Continue;
 
-	int iMaxVotes = cVocalLimit.IntValue;
-	int flTimeDelay = cVocalDelay.IntValue;
-	
-	/* If this player hasnt called any votes */
-	if(g_VocalCalled[client] == 0)
+	float flTimeDelay = cVocalDelay.FloatValue;
+	if (flTimeDelay <= 0.0) return Plugin_Continue;
+
+	int iMaxCalls = cVocalLimit.IntValue;
+	float flNow = GetEngineTime();
+	float flElapsed = flNow - g_LastVocalTime[client];
+
+	/* 第一次使用，或上一个时间窗口已结束：开启新窗口并放行 */
+	if (g_VocalCalled[client] == 0 || flElapsed >= flTimeDelay)
 	{
-		g_LastVocalTime[client] = GetEngineTime();
+		g_LastVocalTime[client] = flNow;
+		g_VocalCalled[client] = 1;
+		return Plugin_Continue;
+	}
+
+	/* 窗口内还有剩余次数：放行并计数 */
+	if (g_VocalCalled[client] < iMaxCalls)
+	{
 		g_VocalCalled[client]++;
+		return Plugin_Continue;
 	}
-	else if(g_LastVocalTime[client] < (GetEngineTime() - flTimeDelay))
-	{
-		g_LastVocalTime[client] = GetEngineTime();
 
-		/* If the plugin is enabled */
-		if(cEnabled.BoolValue)
-		{
-			/*Warns Client upon reaching the Max Call Votes */
-			if(g_VocalCalled[client] == (iMaxVotes-1))
-			{
-				PrintToChat(client, "\x04[SM] \x01你已达到使用语音表单的最大数量");
-				
-				g_VocalCalled[client]++;
-			}
-		}
-	}
-	else
-	{
-		int iTimeLeft = RoundToNearest(flTimeDelay - (GetEngineTime() - g_LastVocalTime[client]));
-		PrintToChat(client, "\x04[SM] \x01你必须等待 %d 秒后再次使用语音表单", iTimeLeft);
-		
-		return Plugin_Handled;
-	}
+	/* 窗口内次数已用完：拦截 */
+	int iTimeLeft = RoundToCeil(flTimeDelay - flElapsed);
+	PrintToChat(client, "\x04[SM] \x01你已达到使用语音表单的最大数量，必须等待 %d 秒后再次使用", iTimeLeft);
 	
-	return Plugin_Continue;
+	return Plugin_Handled;
 }

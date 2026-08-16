@@ -12,6 +12,7 @@
 #include <multicolors>
 #define PLUGIN_VERSION "2.6-2025/2/12"
 #define AUTOSPEC_IDS_MAX 512
+#define AFK_BLIP_SOUND "buttons/blip1.wav"
 
 
 // For cvars
@@ -130,6 +131,12 @@ public void OnPluginEnd()
 {
 	ResetPlugin();
 	ResetTimer();
+}
+
+public void OnMapStart()
+{
+	// 缓存倒计时提示音，避免地图运行时才加载
+	PrecacheSound(AFK_BLIP_SOUND, true);
 }
 
 void ReadCvars()
@@ -438,6 +445,19 @@ void afkResetTimers (int client)
 	GetClientEyeAngles(client, afkPlayerLastEyes[client]);
 }
 
+void AFKPlayBlipSound(int client)
+{
+	if (client > 0 && client <= MaxClients && IsClientInGame(client))
+		EmitSoundToClient(client, AFK_BLIP_SOUND);
+}
+
+void AFKCountdownWarn(int client, const char[] phrase, int seconds)
+{
+	// 倒计时提示：Hint 文本 + 提示音
+	PrintHintText(client, "%T", phrase, client, seconds);
+	AFKPlayBlipSound(client);
+}
+
 int g_iLastTick;
 Action afkCheckThread(Handle timer)
 {
@@ -500,7 +520,7 @@ Action afkCheckThread(Handle timer)
 									afkPlayerTimeLeftAction[i] = afkSpecTime;
 									
 									// We warn the player ....
-									PrintHintText(i, "%T", "[AFK] Inactivity detected! 1", i, afkPlayerTimeLeftAction[i]);
+									AFKCountdownWarn(i, "[AFK] Inactivity detected! 1", afkPlayerTimeLeftAction[i]);
 								}
 							}
 							else // player warn timeout reached ...
@@ -522,7 +542,7 @@ Action afkCheckThread(Handle timer)
 									}
 								}
 								else // we just warn him ...
-									PrintHintText(i, "%T", "[AFK] Inactivity detected! 1", i, afkPlayerTimeLeftAction[i]);
+									AFKCountdownWarn(i, "[AFK] Inactivity detected! 1", afkPlayerTimeLeftAction[i]);
 								
 							}
 						} // player is not trapped
@@ -552,7 +572,7 @@ Action afkCheckThread(Handle timer)
 						if (afkPlayerTimeLeftWarn[i] <= 0)
 						{
 							// We warn the player ....
-							PrintHintText(i, "%T", "[AFK] Inactivity detected! 3", i, afkPlayerTimeLeftAction[i]);
+							AFKCountdownWarn(i, "[AFK] Inactivity detected! 3", afkPlayerTimeLeftAction[i]);
 						}
 					}
 					else // player warn timeout reached ...
@@ -567,7 +587,7 @@ Action afkCheckThread(Handle timer)
 							afkKickClient(i);
 						}
 						else // we just warn him ...
-							PrintHintText(i, "%T", "[AFK] Inactivity detected! 3", i, afkPlayerTimeLeftAction[i]);	
+							AFKCountdownWarn(i, "[AFK] Inactivity detected! 3", afkPlayerTimeLeftAction[i]);
 					}			
 				} // player is not admin
 			} // player is on spectators
@@ -578,6 +598,30 @@ Action afkCheckThread(Handle timer)
 	return Plugin_Continue;
 }
 
+
+void AFKPrintHint(int client, const char[] phrase)
+{
+	char sBuffer[256];
+	SetGlobalTransTarget(client);
+	Format(sBuffer, sizeof(sBuffer), "%T", phrase, client);
+	CRemoveTags(sBuffer, sizeof(sBuffer));
+	PrintHintText(client, "%s", sBuffer);
+}
+
+void AFKPrintHintToAll(const char[] phrase, const char[] name)
+{
+	char sBuffer[256];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && !IsFakeClient(i))
+		{
+			SetGlobalTransTarget(i);
+			Format(sBuffer, sizeof(sBuffer), "%T", phrase, i, name);
+			CRemoveTags(sBuffer, sizeof(sBuffer));
+			PrintHintText(i, "%s", sBuffer);
+		}
+	}
+}
 
 void afkForceSpectate (int client, bool advertise)
 {
@@ -590,7 +634,16 @@ void afkForceSpectate (int client, bool advertise)
 	// Print forced info
 	if (advertise)
 	{
+		char sName[MAX_NAME_LENGTH];
+		GetClientName(client, sName, sizeof(sName));
+
+		// 被强制旁观者：聊天框 + 中央 Hint
 		CPrintToChat(client, "%T", "afkForceSpectate", client);
+		AFKPrintHint(client, "afkForceSpectate");
+
+		// 所有人：聊天框 + 中央 Hint
+		CPrintToChatAll("%t", "[AFK] Inactivity detected! 5", sName);
+		AFKPrintHintToAll("[AFK] Inactivity detected! 5", sName);
 	}
 }
 
@@ -599,10 +652,13 @@ void afkKickClient (int client)
 	if (IsFakeClient(client))
 		return;
 	
-	KickClient(client, "[AFK] You've been kicked due to inactivity.");
+	// 踢出原因按被踢玩家的语言显示（KickClient 会以该玩家为翻译目标格式化）
+	KickClient(client, "%T", "kickplayer", client, afkKickTime);
 	
 	// Print forced info
-	CPrintToChatAll("%t", "have been kicked from server due to inactivity", client, afkKickTime);
+	char sName[MAX_NAME_LENGTH];
+	GetClientName(client, sName, sizeof(sName));
+	CPrintToChatAll("%t", "have been kicked from server due to inactivity", sName, afkKickTime);
 }
 
 Action PlayerLeftStart(Handle Timer)

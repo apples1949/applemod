@@ -77,7 +77,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart()
 {	
-	CreateConVar("l4d_cloud_damage_version", PLUGIN_VERSION, "Version of L4D Cloud Damage on this server ", CVAR_FLAGS|FCVAR_DONTRECORD);
+	CreateConVar("l4d_cloud_damage_version", PLUGIN_VERSION, "本服务器上的 L4D 毒烟伤害插件版本 ", CVAR_FLAGS|FCVAR_DONTRECORD);
 	
 	g_hCvarCloudEnabled = CreateConVar(			"l4d_cloud_damage_enabled", 	"1", 	"启用/禁用插件", CVAR_FLAGS);
 	g_hCvarModes =	CreateConVar(				"l4d_cloud_modes",				"",		"在这些游戏模式下启用插件，用逗号分隔（没有空格）（空=全部）", CVAR_FLAGS );
@@ -89,9 +89,9 @@ public void OnPluginStart()
 	g_hCvarCloudMeleeSlowEnabled = CreateConVar("l4d_cloud_meleeslow_enabled", 	"0", 	"启用/禁用毒烟近战缓慢效果", CVAR_FLAGS);
 	g_hCvarCloudShake = CreateConVar(			"l4d_cloud_shake_enabled", 		"1", 	"启用/禁用毒烟晃动屏幕", CVAR_FLAGS);
 	g_hCvarCloudBlocksRevive = CreateConVar(	"l4d_cloud_blocks_revive", 		"0", 	"启用/禁用毒烟暂停恢复", CVAR_FLAGS);
-	g_hCvarCloudDamageIngame = CreateConVar(	"l4d_cloud_damage_ingame", 		"0", 	"Damage client only when smoker still in-game当smoker还活着时持续伤害特感与生还 (usually ~ 5 sec after kill一般5秒后处死) (1 - Yes 启用, 0 - while cloud lifetime 禁用 仅限于毒烟持续时间)", CVAR_FLAGS);
+	g_hCvarCloudDamageIngame = CreateConVar(	"l4d_cloud_damage_ingame", 		"0", 	"仅当 Smoker 仍在游戏中时伤害客户端当smoker还活着时持续伤害特感与生还 (通常在击杀后约 5 秒一般5秒后处死) (1 - 是 启用, 0 - 毒烟持续期间 禁用 仅限于毒烟持续时间)", CVAR_FLAGS);
 	
-	AutoExecConfig(true, "l4d_cloud_damage");
+	//AutoExecConfig(true, "l4d_cloud_damage");
 	
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	

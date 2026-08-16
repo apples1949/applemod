@@ -185,11 +185,11 @@ public void OnPluginStart()
 	
 	CreateConVar("weaponhandling_version", PLUGIN_VERSION, "", FCVAR_DONTRECORD|FCVAR_NOTIFY);
 	
-	hCvar_DoublePistolCycle = CreateConVar("wh_double_pistol_cycle_rate", "0", "1 = (double pistol shoot at double speed of a single pistol 2~ shots persec slower than vanilla) 0 = (keeps vanilla cycle rate of 0.075) before being modified", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	hCvar_DoublePistolCycle = CreateConVar("wh_double_pistol_cycle_rate", "0", "1 = (双枪以单枪两倍的速度射击，比原版慢约 2 发/秒) 0 = (保持原版 0.075 的射击周期) 修改前", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	
-	hCvar_UseIncapCycle = CreateConVar("wh_use_incap_cycle_cvar", "1", "1 = (use \"survivor_incapacitated_cycle_time\" for incap shooting cycle rate) 0 = (ignores the cvar and uses weapon_*.txt cycle rates) before being modified", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	hCvar_UseIncapCycle = CreateConVar("wh_use_incap_cycle_cvar", "1", "1 = (倒地射击周期使用 \"survivor_incapacitated_cycle_time\") 0 = (忽略该 cvar 并使用 weapon_*.txt 中的射击周期) 修改前", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	
-	hCvar_DeploySetting = CreateConVar("wh_deploy_animation_speed", "1", "1 = (match deploy animation speed to the \"DeployDuration\" keyvalue in weapon_*.txt) 0 = (ignore \"DeployDuration\" keyvalue in weapon_*.txt and matches deploy speed to animation speed) before being modified -1(do nothing)", FCVAR_NOTIFY, true, -1.0, true, 1.0);
+	hCvar_DeploySetting = CreateConVar("wh_deploy_animation_speed", "1", "1 = (使切枪动画速度与 weapon_*.txt 中的 \"DeployDuration\" 键值匹配) 0 = (忽略 weapon_*.txt 中的 \"DeployDuration\" 键值，使切枪速度与动画速度匹配) 修改前 -1(不做任何操作)", FCVAR_NOTIFY, true, -1.0, true, 1.0);
 	
 	hCvar_IncapCycle = FindConVar("survivor_incapacitated_cycle_time");
 	if(hCvar_IncapCycle == null)
@@ -206,7 +206,7 @@ public void OnPluginStart()
 	hCvar_DeploySetting.AddChangeHook(eConvarChanged);
 	
 	CvarsChanged();
-	AutoExecConfig(true, "WeaponHandling");
+	//AutoExecConfig(true, "WeaponHandling");
 }
 
 public void eConvarChanged(Handle hCvar, const char[] sOldVal, const char[] sNewVal)

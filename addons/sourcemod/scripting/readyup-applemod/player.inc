@@ -99,7 +99,8 @@ void SetClientFrozen(int client, bool freeze)
 bool IsPlayer(int client)
 {
 	// 修复: 原源码残留 git 合并冲突标记, 会导致编译失败
-	if (!IsClientInGame(client))
+	// 修复: 服务器控制台 (client = 0) 或越界索引会触发 IsClientInGame 的 "Client index 0 is invalid" 异常
+	if (client < 1 || client > MaxClients || !IsClientInGame(client))
 		return false;
 
 	int team = GetClientTeam(client);

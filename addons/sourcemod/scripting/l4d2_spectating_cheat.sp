@@ -66,10 +66,10 @@ public Plugin myinfo =
 
 public void OnPluginStart()
 {
-	g_hCvarColorGhost =	CreateConVar(	"l4d2_specting_cheat_ghost_color",		"255 255 255",		"Ghost SI glow color, Three values between 0-255 separated by spaces. RGB Color255 - Red Green Blue.", FCVAR_NOTIFY);
-	g_hCvarColorAlive =	CreateConVar(	"l4d2_specting_cheat_alive_color",		"255 0 0",			"Alive SI glow color, Three values between 0-255 separated by spaces. RGB Color255 - Red Green Blue.", FCVAR_NOTIFY);
-	g_hCommandAccess = 	CreateConVar(	"l4d2_specting_cheat_use_command_flag", "z", 				"Players with these flags have access to use command to toggle Speatator watching cheat. (Empty = Everyone, -1: Nobody)", FCVAR_NOTIFY);
-	g_hDefaultValue = 	CreateConVar(	"l4d2_specting_cheat_default_value", 	"0", 				"By default, enable Speatator watching cheat for spectators? [1-Enable/0-Disable]", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvarColorGhost =	CreateConVar(	"l4d2_specting_cheat_ghost_color",		"255 255 255",		"灵魂特感发光颜色，三个值取值范围 0-255，用空格分隔。RGB 颜色 255 - 红 绿 蓝。", FCVAR_NOTIFY);
+	g_hCvarColorAlive =	CreateConVar(	"l4d2_specting_cheat_alive_color",		"255 0 0",			"存活特感发光颜色，三个值取值范围 0-255，用空格分隔。RGB 颜色 255 - 红 绿 蓝。", FCVAR_NOTIFY);
+	g_hCommandAccess = 	CreateConVar(	"l4d2_specting_cheat_use_command_flag", "z", 				"拥有这些标志的玩家可以使用命令切换旁观者透视作弊（留空 = 所有人，-1 = 无人）。", FCVAR_NOTIFY);
+	g_hDefaultValue = 	CreateConVar(	"l4d2_specting_cheat_default_value", 	"0", 				"默认是否为旁观者启用旁观者透视作弊？[1-启用/0-禁用]", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	GetCvars();
 	g_hCvarColorGhost.AddChangeHook(ConVarChanged_Glow_Ghost);
@@ -78,7 +78,7 @@ public void OnPluginStart()
 	g_hDefaultValue.AddChangeHook(ConVarChanged_Cvars);
 
 	//Autoconfig for plugin
-	AutoExecConfig(true, "l4d2_specting_cheat");
+	//AutoExecConfig(true, "l4d2_specting_cheat");
 
 	HookEvent("round_start",            Event_RoundStart, EventHookMode_PostNoCopy);
 	HookEvent("player_spawn", 			Event_PlayerSpawn);

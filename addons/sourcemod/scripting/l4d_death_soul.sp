@@ -177,10 +177,10 @@ public void OnPluginStart()
 	//RegAdminCmd("sm_b", CmdB, ADMFLAG_ROOT, "");
 	
 	// CVars
-	g_hCvarAllow = CreateConVar(		"l4d_death_soul_allow",			"1",			"0=Plugin off, 1=Plugin on.", CVAR_FLAGS );
+	g_hCvarAllow = CreateConVar(		"l4d_death_soul_allow",			"1",			"0=插件关闭，1=插件开启。", CVAR_FLAGS );
 	
-	CreateConVar(						"l4d_death_soul_version",			PLUGIN_VERSION,	"Dissolve Infected plugin version.", FCVAR_DONTRECORD);
-	AutoExecConfig(true,				"l4d_death_soul");
+	CreateConVar(						"l4d_death_soul_version",			PLUGIN_VERSION,	"溶解感染者插件版本。", FCVAR_DONTRECORD);
+	//AutoExecConfig(true,				"l4d_death_soul");
 	
 	if (g_bLate) OnAutoConfigsBuffered();
 	g_hCvarAllow.AddChangeHook(ConVarChanged_Cvars);

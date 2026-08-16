@@ -113,7 +113,7 @@ public void OnPluginStart()
 	AddCommandListener(CommandListener, "give");
 	
 	#if AUTO_EXEC
-	AutoExecConfig(true, "LMC_Black_and_White_Notifier");
+	//AutoExecConfig(true, "LMC_Black_and_White_Notifier");
 	#endif
 	CvarsChanged();
 	

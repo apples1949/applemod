@@ -45,10 +45,10 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
 	LoadTranslations("l4dffannounce.phrases");
-	g_hCvarEnable 			= CreateConVar( "l4dffannounce_enable",     "1",   	"0=Plugin off, 1=Plugin on.", CVAR_FLAGS, true, 0.0, true, 1.0);
-	g_hCvarAnnounceType 	= CreateConVar( "l4dffannounce_type", 		"1", 	"Changes how ff announce displays FF damage (0: Disable, 1:In chat; 2: In Hint Box; 3: In center text)",CVAR_FLAGS, true, 0.0, true, 3.0);
-	CreateConVar(                       	"l4dffannounce_version",     PLUGIN_VERSION, "l4dffannounce Plugin Version", CVAR_FLAGS_PLUGIN_VERSION);
-	AutoExecConfig(true,                	"l4dffannounce");
+	g_hCvarEnable 			= CreateConVar( "l4dffannounce_enable",     "1",   	"0=插件关闭，1=插件开启。", CVAR_FLAGS, true, 0.0, true, 1.0);
+	g_hCvarAnnounceType 	= CreateConVar( "l4dffannounce_type", 		"1", 	"更改友伤通告显示友军伤害的方式 (0: 关闭, 1: 聊天框; 2: 提示框; 3: 屏幕中央文字)",CVAR_FLAGS, true, 0.0, true, 3.0);
+	CreateConVar(                       	"l4dffannounce_version",     PLUGIN_VERSION, "l4dffannounce 插件版本", CVAR_FLAGS_PLUGIN_VERSION);
+	//AutoExecConfig(true,                	"l4dffannounce");
 
 	GetCvars();
 	g_hCvarEnable.AddChangeHook(ConVarChanged_Cvars);

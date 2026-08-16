@@ -50,7 +50,7 @@ public void OnPluginStart()
 	g_hFile           = CreateConVar("sm_advertisements_file",     "l4d2_advertisements.txt", "设置广告文本的文件名称(主机在控制台输入 sm_advertisements_reload 重新加载广告文本).");
 	g_hInterval       = CreateConVar("sm_advertisements_interval", "90",                 "设置播放广告的循环时间间隔/秒.");
 	HookConVarChange(g_hInterval, ConVarChange_Interval);
-	AutoExecConfig(true, "l4d2_advertisements");
+	//AutoExecConfig(true, "l4d2_advertisements");
 	RegServerCmd("sm_advertisements_reload", Command_ReloadAds, "Reload the advertisements");
 }
 

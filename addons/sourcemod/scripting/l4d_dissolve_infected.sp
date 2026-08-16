@@ -215,14 +215,14 @@ public void OnPluginStart()
 	g_hCvarAllow = CreateConVar(		"l4d_dissolve_allow",			"1",			"0=关闭插件, 1=启动插件.", CVAR_FLAGS );
 	g_hCvarModes = CreateConVar(		"l4d_dissolve_modes",			"",				"在这些游戏模式中启动插件（无空格）（全空则为全模式）", CVAR_FLAGS );
 	g_hCvarModesOff = CreateConVar(		"l4d_dissolve_modes_off",		"",				"在这些游戏模式中关闭插件（无空格）（全空则为无内容）", CVAR_FLAGS );
-	g_hCvarModesTog = CreateConVar(		"l4d_dissolve_modes_tog",		"0",			"在这些游戏模式中启动插件 0=全部模式, 1=战役, 2=生还者, 4=对抗, 8=清道夫. Add numbers together.", CVAR_FLAGS );
+	g_hCvarModesTog = CreateConVar(		"l4d_dissolve_modes_tog",		"0",			"在这些游戏模式中启动插件 0=全部模式, 1=战役, 2=生还者, 4=对抗, 8=清道夫. 将数字相加。", CVAR_FLAGS );
 	g_hCvarChance = CreateConVar(		"l4d_dissolve_chance",			"100",			"僵尸死亡时溶解的百分比 注意：触发后保持激活溶解状态0.5秒", CVAR_FLAGS, true, 0.0, true, 100.0 );
-	g_hCvarInfected = CreateConVar(		"l4d_dissolve_infected",		"511",			"这些敌人死亡可溶解: 1=Common, 2=Witch, 4=Smoker, 8=Boomer, 16=Hunter, 32=Spitter, 64=Jockey, 128=Charger, 256=Tank, 511=All.", CVAR_FLAGS );
+	g_hCvarInfected = CreateConVar(		"l4d_dissolve_infected",		"511",			"这些敌人死亡可溶解: 1=普通感染者, 2=女巫, 4=烟鬼, 8=呕吐者, 16=猎手, 32=喷射者, 64=骑师, 128=冲锋者, 256=坦克, 511=全部.", CVAR_FLAGS );
 	g_hCvarTime = CreateConVar(			"l4d_dissolve_time",			"0.2",			"溶解粒子停留的时间。最佳结果的建议值为0.0（最小粒子数）到0.8", CVAR_FLAGS, true, 0.0, true, 2.0 );
 	g_hCvarTimeMin = CreateConVar(		"l4d_dissolve_time_min",		"0.0",			"当time_min和time_max不为0.0时，溶解时间将随机设置为介于两者之间的值。", CVAR_FLAGS, true, 0.0, true, 2.0 );
 	g_hCvarTimeMax = CreateConVar(		"l4d_dissolve_time_max",		"0.0",			"当time_min和time_max不为0.0时，溶解时间将随机设置为介于两者之间的值。", CVAR_FLAGS, true, 0.0, true, 2.0 );
-	CreateConVar(						"l4d_dissolve_version",			PLUGIN_VERSION,	"Dissolve Infected plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,				"l4d_dissolve_infected");
+	CreateConVar(						"l4d_dissolve_version",			PLUGIN_VERSION,	"溶解感染者插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true,				"l4d_dissolve_infected");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarModesTog.AddChangeHook(ConVarChanged_Allow);

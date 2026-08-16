@@ -57,7 +57,7 @@ public void OnPluginStart()
 	g_hCvarHatEnable = 	CreateConVar( 		"show_mic_center_hat_enable", "1", 		"如果为1，则当玩家说话时将语音帽子显示在玩家头上", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvarAnnounceEnable = CreateConVar( 	"show_mic_center_text_enable", "1", 	"如果为1，则屏幕中心将显示哪个玩家在说话", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	CreateConVar(						 	"show_mic_version",		PLUGIN_VERSION,	"插件版本", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true, "show_mic");
+	//AutoExecConfig(true, "show_mic");
 
 	GetCvars();
 	g_hCvarHatEnable.AddChangeHook(ConVarChanged_Cvars);

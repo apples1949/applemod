@@ -1,0 +1,30 @@
+"Phrases"
+{
+	"VOTE_TITLE"
+	{
+		"chi"			"开始按玩家评分平衡队伍"
+	}
+
+	"MENU_ITEM"
+	{
+		"chi"			"智能平衡队伍（按评分）"
+	}
+
+	"PLAYER_UNKNOWN_RATING"
+	{
+		"#format"		"{1:N}"
+		"chi"			"无法继续：玩家 {olive}{1}{default} 没有有效的评分"
+	}
+
+	"PLAYER_NOW_SURVIVOR"
+	{
+		"#format"		"{1:N},{2:.1f}"
+		"chi"			"玩家 {olive}{1}{default}（{green}{2}{default} 分）现在是 {olive}生还者{default}"
+	}
+
+	"PLAYER_NOW_INFECTED"
+	{
+		"#format"		"{1:N},{2:.1f}"
+		"chi"			"玩家 {olive}{1}{default}（{green}{2}{default} 分）现在是 {olive}感染者{default}"
+	}
+}

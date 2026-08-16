@@ -18,8 +18,8 @@ ConVar g_CvarShowDisonnectionMsg = null;
 *****************************************************************/
 void SetupSuppress()
 {
-	g_CvarShowConnectionMsg = CreateConVar("sm_ca_showstandard", "0", "shows standard player connected message");
-	g_CvarShowDisonnectionMsg = CreateConVar("sm_ca_showstandarddisc", "0", "shows standard player discconnected message");
+	g_CvarShowConnectionMsg = CreateConVar("sm_ca_showstandard", "0", "显示标准玩家连接消息");
+	g_CvarShowDisonnectionMsg = CreateConVar("sm_ca_showstandarddisc", "0", "显示标准玩家断开连接消息");
 	
 	//player_connect_client replaced player_connect but the old event is still required for some older games. 
 	//lets try the new event first then fallback if it dont worky

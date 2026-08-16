@@ -53,7 +53,7 @@ public void OnPluginStart()
 
 	sc_record_detail = CreateConVar("sc_record_detail", "1", "记录玩家的STEAM32位ID和IP地址?  0=禁用, 1=启用.", FCVAR_NOTIFY);
 
-	AutoExecConfig(true, "l4d2_savechat");
+	//AutoExecConfig(true, "l4d2_savechat");
 
 	/* Say commands */
 	RegConsoleCmd("say", Command_Say);

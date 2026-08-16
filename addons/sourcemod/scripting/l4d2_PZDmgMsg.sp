@@ -27,7 +27,7 @@ public void OnPluginStart()
 	g_hDisconnect = CreateConVar("l4d2_player_disconnect", "1", "屏蔽游戏自带的玩家离开提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
 	g_hDefibrillator = CreateConVar("l4d2_defibrillator_used", "1", "屏蔽游戏自带的使用电击器提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
 
-	AutoExecConfig(true, "l4d2_PZDmgMsg");
+	//AutoExecConfig(true, "l4d2_PZDmgMsg");
 
 	g_hTextMsg.AddChangeHook(ConVarChanged);
 	g_hPZDmgMsg.AddChangeHook(ConVarChanged);

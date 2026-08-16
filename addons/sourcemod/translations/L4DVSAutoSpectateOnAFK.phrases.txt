@@ -52,9 +52,10 @@
 	}	
 	"afkForceSpectate"
 	{
-		"en"	"[AFK] You has been switched to {lightgreen}Spectators"
+		"en"	"[AFK] You have been switched to {lightgreen}Spectators"
 		"zho"	"[AFK] 你已被轉換到 {lightgreen}旁觀者"
 		"chi"	"[AFK] 你已被移动到 {lightgreen}旁观"
+		"hu"	"[AFK] Átkerültél a {lightgreen}nézők közé!"
 	}
 	"[AFK] Inactivity detected! 5"
 	{
@@ -62,12 +63,15 @@
 		"en"	"[AFK] {lightgreen}{1} is moved to the sidelines for no response at the corresponding time!"
 		"zho"	"[AFK] {lightgreen}{1} 在相對應的時間無反應而被移動到旁觀!"
 		"chi"	"[AFK] {lightgreen}{1} 在相对应的时间无反应而被移动到旁观!"
+		"hu"	"[AFK] {lightgreen}{1} nem reagált a megadott időben, ezért a nézők közé került!"
 	}
 	"kickplayer"
 	{
-		"en" 	"[AFK] You have been kicked for spectating and not joining the game for more than 15 seconds!"
-		"zho"	"[AFK] 你因旁觀不補位超過15秒而被踢出!"
-		"chi"	"[AFK] 你因旁观不补位超过15秒而被踢出!"
+		"#format"		"{1:d}"
+		"en" 	"[AFK] You have been kicked for spectating and not joining the game for more than {1} seconds!"
+		"zho"	"[AFK] 你因旁觀不補位超過{1}秒而被踢出!"
+		"chi"	"[AFK] 你因旁观不补位超过{1}秒而被踢出!"
+		"hu"	"[AFK] Kirúgtak a szerverről, mert több mint {1} másodpercig néző voltál, és nem csatlakoztál a játékhoz!"
 	}
 }
 

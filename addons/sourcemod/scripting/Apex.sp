@@ -47,9 +47,9 @@ public Plugin myinfo =
 public void
 	OnPluginStart()
 {
-	Apex[0] = CreateConVar("tank_block_claw", "1", "阻止坦克同时出拳和扔石头 0-不阻止 1-阻止");
-	Apex[1] = CreateConVar("tank_block_jump", "0", "阻止坦克同时跳跃和扔石块 0-不阻止 1-阻止");
-	Apex[2] = CreateConVar("tank_hp", "0", "坦克多少血量? 0=禁用");
+	Apex[0] = CreateConVar("l4d2_block_punch_rock", "1", "阻止坦克同时出拳和扔石头 0-不阻止 1-阻止");
+	Apex[1] = CreateConVar("l4d2_block_jump_rock", "0", "阻止坦克同时跳跃和扔石块 0-不阻止 1-阻止");
+	Apex[2] = CreateConVar("tank_hp", "0", "坦克设置为多少血量? 0=禁用");
 	Apex[3] = CreateConVar("tank_bohp_hp", "1500", "开启坦克连跳时扣血量.0为禁用");
 	Apex[4] = CreateConVar("tank_trac_hp", "1000", "开启石头追踪时扣血量.0为禁用");
 

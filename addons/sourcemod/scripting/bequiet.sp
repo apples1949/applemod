@@ -27,10 +27,10 @@ public void OnPluginStart()
     HookEvent("player_changename", Event_NameChange, EventHookMode_Pre);
 
     //Cvars
-    hCvarCvarChange = CreateConVar("bq_cvar_change_suppress", "1", "Silence Server Cvars being changed, this makes for a clean chat with no disturbances.");
-    hCvarNameChange = CreateConVar("bq_name_change_suppress", "1", "Silence Player name Changes.");
-    hCvarSpecNameChange = CreateConVar("bq_name_change_spec_suppress", "1", "Silence Spectating Player name Changes.");
-    hCvarSpecSeeChat = CreateConVar("bq_show_player_team_chat_spec", "1", "Show Spectators Survivors and Infected Team chat?");
+    hCvarCvarChange = CreateConVar("bq_cvar_change_suppress", "1", "静音服务器 Cvar 变更提示，让聊天栏保持干净无干扰。");
+    hCvarNameChange = CreateConVar("bq_name_change_suppress", "1", "静音玩家改名提示。");
+    hCvarSpecNameChange = CreateConVar("bq_name_change_spec_suppress", "1", "静音旁观玩家改名提示。");
+    hCvarSpecSeeChat = CreateConVar("bq_show_player_team_chat_spec", "1", "向旁观者显示生还者和感染者的队伍聊天？");
 
     bCvarChange = GetConVarBool(hCvarCvarChange);
     bNameChange = GetConVarBool(hCvarNameChange);
@@ -42,7 +42,7 @@ public void OnPluginStart()
     hCvarSpecNameChange.AddChangeHook(cvarChanged);
     hCvarSpecSeeChat.AddChangeHook(cvarChanged);
 
-    AutoExecConfig(true);
+    //AutoExecConfig(true);
     LoadTranslations("bequiet.phrases");
 }
 

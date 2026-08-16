@@ -1098,6 +1098,24 @@ void FillInfectedInfo(Panel hSpecHud)
 	}
 }
 
+stock void GetRockBlockStatus(char[] buffer, int maxlen)
+{
+	char szJump[8], szPunch[8];
+	ConVar cvar;
+
+	if ((cvar = FindConVar("l4d2_block_jump_rock")) != null)
+		strcopy(szJump, sizeof(szJump), cvar.BoolValue ? "关闭" : "开启");
+	else
+		strcopy(szJump, sizeof(szJump), "未知");
+
+	if ((cvar = FindConVar("l4d2_block_punch_rock")) != null)
+		strcopy(szPunch, sizeof(szPunch), cvar.BoolValue ? "关闭" : "开启");
+	else
+		strcopy(szPunch, sizeof(szPunch), "未知");
+
+	FormatEx(buffer, maxlen, "跳砖: %s | 拳砖: %s", szJump, szPunch);
+}
+
 bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 {
 	int tank = FindTankClient(-1);
@@ -1114,14 +1132,14 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		DrawPanelText(hSpecHud, info);
 
 		int len = strlen(info);
-		for (int i = 0; i < len; ++i) info[i] = '_';
+		for (int i = 0; i < len; ++i) info[i] = '-';
 		DrawPanelText(hSpecHud, info);
 
-		FormatEx(info, sizeof(info), " [拳 %i][石 %i][铁 %i][伤害 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage);
+		FormatEx(info, sizeof(info), " [拳 %i] [石 %i] [铁 %i] [伤害 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage);
 		DrawPanelText(hSpecHud, info);
 
 		int dlen = strlen(info);
-		for (int i = 0; i < dlen; ++i) info[i] = '_';
+		for (int i = 0; i < dlen; ++i) info[i] = '-';
 		DrawPanelText(hSpecHud, info);
 	}
 	else
@@ -1211,6 +1229,12 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 			FormatEx(info, sizeof(info), "指令!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
+
+		GetRockBlockStatus(info, sizeof(info));
+		DrawPanelText(hSpecHud, info);
+
+		FormatEx(info, sizeof(info), "开启后再次执行相同指令可关闭技能");
+		DrawPanelText(hSpecHud, info);
 	}
 
 	return true;

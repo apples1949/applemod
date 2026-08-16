@@ -99,13 +99,13 @@ public void OnPluginStart()
 {
 	// CVARS
 	g_hCvarAllow = CreateConVar(	"l4d_witch_damage_allow",			"1",					"0=关闭插件，1=打开插件", CVAR_FLAGS );
-	g_hCvarDamage = CreateConVar(	"l4d_witch_damage_damage",			"100",					"幸存者没倒地时witch伤害，可根据不同难度设置不同伤害", CVAR_FLAGS );
-	g_hCvarIncap = CreateConVar(	"l4d_witch_damage_incapped",		"30",					"幸存者倒地时witch伤害，可根据不同难度设置不同伤害", CVAR_FLAGS );
+	g_hCvarDamage = CreateConVar(	"l4d_witch_damage_damage",			"100",					"幸存者没倒地时女巫伤害，可根据不同难度设置不同伤害", CVAR_FLAGS );
+	g_hCvarIncap = CreateConVar(	"l4d_witch_damage_incapped",		"30",					"幸存者倒地时女巫伤害，可根据不同难度设置不同伤害", CVAR_FLAGS );
 	g_hCvarScale = CreateConVar(	"l4d_witch_damage_scale",			"100,100,100,100",		"根据游戏难度的不同，伤害的比例也不同，每个逗号分开:简单、普通、困难、专家", CVAR_FLAGS );
 	g_hCvarModes = CreateConVar(	"l4d_witch_damage_modes",			"",						"在这些游戏模式下打开插件，用逗号分隔（没有空格）（空=全部）", CVAR_FLAGS );
 	g_hCvarModesOff = CreateConVar(	"l4d_witch_damage_modes_off",		"",						"在这些游戏模式下关闭插件，用逗号分隔（没有空格）（空=无）", CVAR_FLAGS );
 	g_hCvarModesTog = CreateConVar(	"l4d_witch_damage_modes_tog",		"0",					"在这些游戏模式中打开插件。0=全部，1=战役，2=生还者，4=对抗，8=清道夫。将数字相加", CVAR_FLAGS );
-	CreateConVar(					"l4d_witch_damage_version",			PLUGIN_VERSION,			"Witch Damage plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	CreateConVar(					"l4d_witch_damage_version",			PLUGIN_VERSION,			"女巫伤害插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	//AutoExecConfig(true,			"l4d_witch_damage");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");

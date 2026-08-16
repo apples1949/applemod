@@ -1015,7 +1015,7 @@ public void OnPluginStart() {
 	HookConVarChange(g_hCVar_ChMapBroadcastInterval, CVarChange_ChMapBroadcastInterval);
 	HookConVarChange(g_hCVar_PreventEmptyServer, CVarChange_PreventEmptyServer);
 	
-	AutoExecConfig(true, "l4d2_acs");
+	//AutoExecConfig(true, "l4d2_acs");
 	
 	//Hook the game events
 	HookEvent("round_end", Event_RoundEnd);

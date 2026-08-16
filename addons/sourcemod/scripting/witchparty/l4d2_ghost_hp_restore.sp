@@ -14,7 +14,7 @@ along with this program.	If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <sourcemod>
-#include <left4downtown>
+#include <left4dhooks>
 
 #define 		ZOMBIECLASS_SMOKER				1
 #define 		ZOMBIECLASS_BOOMER				2
@@ -49,14 +49,14 @@ public OnPluginStart()
 	{
 		SetFailState("Plugin supports 'Left 4 Dead 2' only.");
 	}
-	H_RestoreEnabled[1] = CreateConVar("l4d2_ghost_hp_restore_smoker", "1", "Is smoker health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	H_RestoreEnabled[2] = CreateConVar("l4d2_ghost_hp_restore_boomer", "1", "Is boomer health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	H_RestoreEnabled[3] = CreateConVar("l4d2_ghost_hp_restore_hunter", "1", "Is huter health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	H_RestoreEnabled[4] = CreateConVar("l4d2_ghost_hp_restore_spitter", "1", "Is spitter health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	H_RestoreEnabled[5] = CreateConVar("l4d2_ghost_hp_restore_jockey", "1", "Is jockey health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	H_RestoreEnabled[6] = CreateConVar("l4d2_ghost_hp_restore_charger", "1", "Is charger health restore enabled", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
-	CreateConVar("l4d2_ghost_hp_restore_version", PLUGIN_VERSION, "Left 4 Dead 2 Ghost HP Restore version", FCVAR_PLUGIN|FCVAR_REPLICATED|FCVAR_DONTRECORD);
-	AutoExecConfig(true, "l4d2_ghost_hp_restore")
+	H_RestoreEnabled[1] = CreateConVar("l4d2_ghost_hp_restore_smoker", "1", "是否启用烟鬼生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	H_RestoreEnabled[2] = CreateConVar("l4d2_ghost_hp_restore_boomer", "1", "是否启用胖子生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	H_RestoreEnabled[3] = CreateConVar("l4d2_ghost_hp_restore_hunter", "1", "是否启用猎人生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	H_RestoreEnabled[4] = CreateConVar("l4d2_ghost_hp_restore_spitter", "1", "是否启用喷吐者生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	H_RestoreEnabled[5] = CreateConVar("l4d2_ghost_hp_restore_jockey", "1", "是否启用骑师生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	H_RestoreEnabled[6] = CreateConVar("l4d2_ghost_hp_restore_charger", "1", "是否启用冲锋者生命恢复", FCVAR_PLUGIN|FCVAR_NOTIFY,true,0.0,true,1.0);
+	CreateConVar("l4d2_ghost_hp_restore_version", PLUGIN_VERSION, "求生之路2 幽灵生命值恢复插件版本", FCVAR_PLUGIN|FCVAR_REPLICATED|FCVAR_DONTRECORD);
+	//AutoExecConfig(true, "l4d2_ghost_hp_restore")
 	H_SmokerHP = FindConVar("z_gas_health");
 	H_BoomerHP = FindConVar("z_exploding_health");
 	H_HunterHP = FindConVar("z_hunter_health");

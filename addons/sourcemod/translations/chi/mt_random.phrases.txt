@@ -1,7 +1,12 @@
 "Phrases"
 {
-	"VOTE_DISPLAY_MSG"
+	"VOTE_TITLE"
 	{
-		"chi"			"开始进行mix（随机分队）"
+		"chi"			"开始随机混队"
+	}
+
+	"MENU_ITEM"
+	{
+		"chi"			"随机混队"
 	}
 }

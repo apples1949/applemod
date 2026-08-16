@@ -107,8 +107,6 @@ void SM_OnMapStart()
 		return;
 	}
 
-	SM_fMapMulti = (!SM_hMapMulti.BoolValue) ? 1.00 : float(L4D_GetVersusMaxCompletionScore()) / 400.0;
-
 	SM_bModuleIsEnabled = SM_hEnable.BoolValue;
 
 	if (SM_bModuleIsEnabled && !SM_bHooked) {
@@ -119,14 +117,6 @@ void SM_OnMapStart()
 		SM_hTieBreaker.SetInt(0);
 	}
 
-	if (SM_bModuleIsEnabled && SM_hCustomMaxDistance.BoolValue && GetCustomMapMaxScore() > -1) {
-		L4D_SetVersusMaxCompletionScore(GetCustomMapMaxScore());
-		// to allow a distance score of 0 and a health bonus
-		if (GetCustomMapMaxScore() > 0) {
-			SM_fMapMulti = float(GetCustomMapMaxScore()) / 400.0;
-		}
-	}
-
 	SM_bIsFirstRoundOver = false;
 	SM_bIsSecondRoundStarted = false;
 	SM_bIsSecondRoundOver = false;
@@ -135,6 +125,28 @@ void SM_OnMapStart()
 	SM_fTempMulti[0] = SM_hTempMulti0.FloatValue;
 	SM_fTempMulti[1] = SM_hTempMulti1.FloatValue;
 	SM_fTempMulti[2] = SM_hTempMulti2.FloatValue;
+
+	// Left4DHooks marks these natives as not runnable until its own
+	// OnMapStart callback has completed. Depending on plugin load order,
+	// this OnMapStart can run first, so defer those calls by one frame.
+	RequestFrame(SM_OnMapStart_Deferred);
+}
+
+static void SM_OnMapStart_Deferred()
+{
+	if (!IsPluginEnabled()) {
+		return;
+	}
+
+	SM_fMapMulti = (!SM_hMapMulti.BoolValue) ? 1.00 : float(L4D_GetVersusMaxCompletionScore()) / 400.0;
+
+	if (SM_bModuleIsEnabled && SM_hCustomMaxDistance.BoolValue && GetCustomMapMaxScore() > -1) {
+		L4D_SetVersusMaxCompletionScore(GetCustomMapMaxScore());
+		// to allow a distance score of 0 and a health bonus
+		if (GetCustomMapMaxScore() > 0) {
+			SM_fMapMulti = float(GetCustomMapMaxScore()) / 400.0;
+		}
+	}
 }
 
 static void SM_ConVarChanged_Enable(ConVar hConVar, const char[] sOldValue, const char[] sNewValue)

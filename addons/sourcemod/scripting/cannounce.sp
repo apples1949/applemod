@@ -88,9 +88,9 @@ public void OnPluginStart()
 	LoadTranslations("common.phrases");
 	LoadTranslations("cannounce.phrases");
 	
-	CreateConVar("sm_cannounce_version", VERSION, "Connect announce replacement", FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	CreateConVar("sm_cannounce_version", VERSION, "连接公告替换插件", FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
-	g_CvarConnectDisplayType = CreateConVar("sm_ca_connectdisplaytype", "1", "[1|0] if 1 then displays connect message after admin check and allows the {PLAYERTYPE} placeholder. If 0 displays connect message on client auth (earlier) and disables the {PLAYERTYPE} placeholder");
+	g_CvarConnectDisplayType = CreateConVar("sm_ca_connectdisplaytype", "1", "[1|0] 如果为 1，则在管理员检查后显示连接消息，并允许 {PLAYERTYPE} 占位符。如果为 0，则在客户端授权时（更早）显示连接消息，并禁用 {PLAYERTYPE} 占位符");
 	
 	BuildPath(Path_SM, g_filesettings, 128, "data/cannounce_settings.txt");
 	
@@ -118,7 +118,7 @@ public void OnPluginStart()
 	}
 	
 	//create config file if not exists
-	AutoExecConfig(true, "cannounce");
+	//AutoExecConfig(true, "cannounce");
 }
 
 public void OnMapStart()

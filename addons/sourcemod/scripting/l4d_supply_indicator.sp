@@ -71,17 +71,17 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public void OnPluginStart() {
 
-	CreateConVar			(PLUGIN_NAME, PLUGIN_VERSION,					"Version of " ... PLUGIN_NAME_FULL, FCVAR_SPONLY|FCVAR_DONTRECORD|FCVAR_REPLICATED|FCVAR_NOTIFY);
-	cSupplies =		CreateConVar(PLUGIN_NAME ... "_supplies", "-1",			"supplies to indicate, 1=vomit jar 2=pipe bomb 4=molotov\n8=first aid 16=defibrillator 32=adrenaline 64=pain pills 128=laser -1=All \nadd numbers together you want.", FCVAR_NOTIFY);
-	cReports =		CreateConVar(PLUGIN_NAME ... "_reports", "-1",			"report event, 1=player join 2=item spawn 4=item picked 8=item pick broadcast -1=all, add numbers together you want.", FCVAR_NOTIFY);
-	cAccess =		CreateConVar(PLUGIN_NAME ... "_access", "n",			"admin flag to access command and receives query results,\nn=cheats, empty=everyone, see more in /configs/admin_levels.cfg", FCVAR_NOTIFY);
-	cAnnounce =		CreateConVar(PLUGIN_NAME ... "_announce", "18",			"announce types, 1=console 2=chat 4=center 8=hint 16=text included phrase 'MapLeft'", FCVAR_NOTIFY);
-	cGlow =			CreateConVar(PLUGIN_NAME ... "_glow", "1000",			"l4d2 only, apply glow to supplies, -1=disabled 1000=1000 units range 0=infinity range", FCVAR_NOTIFY);
-	cGlowFlash =	CreateConVar(PLUGIN_NAME ... "_glow_flash", "1",		"l4d2 only, does glow flashing", FCVAR_NOTIFY);
-	cPile =			CreateConVar(PLUGIN_NAME ... "_pile", "-1",				"how handle infinity supply pile, 1=count as 1 0=not count -1=count as infinity", FCVAR_NOTIFY);
-	cGlowSpecies =	CreateConVar(PLUGIN_NAME ... "_glow_species", "-1",		"l4d2 only, glow species, same as *_supplies", FCVAR_NOTIFY);
+	CreateConVar			(PLUGIN_NAME, PLUGIN_VERSION,					"版本: " ... PLUGIN_NAME_FULL, FCVAR_SPONLY|FCVAR_DONTRECORD|FCVAR_REPLICATED|FCVAR_NOTIFY);
+	cSupplies =		CreateConVar(PLUGIN_NAME ... "_supplies", "-1",			"要指示的补给品, 1=胆汁罐 2=土制炸弹 4=燃烧瓶\n8=医疗包 16=除颤器 32=肾上腺素 64=止痛药 128=激光 -1=全部 \n把你想要的数字相加.", FCVAR_NOTIFY);
+	cReports =		CreateConVar(PLUGIN_NAME ... "_reports", "-1",			"报告事件, 1=玩家加入 2=物品生成 4=物品被拾取 8=物品拾取广播 -1=全部, 把你想要的数字相加.", FCVAR_NOTIFY);
+	cAccess =		CreateConVar(PLUGIN_NAME ... "_access", "n",			"访问命令和接收查询结果的管理员标志,\nn=作弊, 留空=所有人, 详见 /configs/admin_levels.cfg", FCVAR_NOTIFY);
+	cAnnounce =		CreateConVar(PLUGIN_NAME ... "_announce", "18",			"公告类型, 1=控制台 2=聊天 4=中央文字 8=提示文字 16=包含短语 'MapLeft' 的文本", FCVAR_NOTIFY);
+	cGlow =			CreateConVar(PLUGIN_NAME ... "_glow", "1000",			"仅限 l4d2, 对补给品应用发光, -1=禁用 1000=1000 单位范围 0=无限范围", FCVAR_NOTIFY);
+	cGlowFlash =	CreateConVar(PLUGIN_NAME ... "_glow_flash", "1",		"仅限 l4d2, 使发光闪烁", FCVAR_NOTIFY);
+	cPile =			CreateConVar(PLUGIN_NAME ... "_pile", "-1",				"如何处理无限补给堆, 1=计为 1 0=不计入 -1=计为无限", FCVAR_NOTIFY);
+	cGlowSpecies =	CreateConVar(PLUGIN_NAME ... "_glow_species", "-1",		"仅限 l4d2, 发光种类, 与 *_supplies 相同", FCVAR_NOTIFY);
 
-	AutoExecConfig(true, PLUGIN_PREFIX ... PLUGIN_NAME);
+	//AutoExecConfig(true, PLUGIN_PREFIX ... PLUGIN_NAME);
 	// OnConfigsExecuted is async, must fetch manually
 	ApplyCvars();
 

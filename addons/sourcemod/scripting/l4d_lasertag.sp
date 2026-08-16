@@ -88,33 +88,33 @@ StringMap
 
 public void OnPluginStart()
 {	
-	cvar_enable = CreateConVar("l4d_lasertag_enable", "1", "Turnon Lasertagging. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
- 	cvar_vsenable = CreateConVar("l4d_lasertag_vs", "1", "Enable or Disable Lasertagging in Versus / Scavenge. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_realismenable = CreateConVar("l4d_lasertag_coop", "1", "Enable or Disable Lasertagging in Coop / Realism. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_bots = CreateConVar("l4d_lasertag_bots", "1", "Enable or Disable lasertagging for bots. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_enable = CreateConVar("l4d_lasertag_enable", "1", "开启激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+ 	cvar_vsenable = CreateConVar("l4d_lasertag_vs", "1", "在对抗/清道夫模式中启用或禁用激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_realismenable = CreateConVar("l4d_lasertag_coop", "1", "在合作/写实模式中启用或禁用激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_bots = CreateConVar("l4d_lasertag_bots", "1", "为机器人启用或禁用激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	
-	cvar_pistols = CreateConVar("l4d_lasertag_pistols", "1", "LaserTagging for Pistols. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_rifles = CreateConVar("l4d_lasertag_rifles", "1", "LaserTagging for Rifles. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_snipers = CreateConVar("l4d_lasertag_snipers", "1", "LaserTagging for Sniper Rifles. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_smgs = CreateConVar("l4d_lasertag_smgs", "1", "LaserTagging for SMGs. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_shotguns = CreateConVar("l4d_lasertag_shotguns", "1", "LaserTagging for Shotguns. 0=disable, 1=enable", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_pistols = CreateConVar("l4d_lasertag_pistols", "1", "手枪的激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_rifles = CreateConVar("l4d_lasertag_rifles", "1", "步枪的激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_snipers = CreateConVar("l4d_lasertag_snipers", "1", "狙击步枪的激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_smgs = CreateConVar("l4d_lasertag_smgs", "1", "冲锋枪的激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_shotguns = CreateConVar("l4d_lasertag_shotguns", "1", "霰弹枪的激光弹道. 0=禁用, 1=启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 		
-	cvar_laser_random = CreateConVar("l4d_lasertag_random", "1", "If 1, Enable Lasertagging Random Color.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_laser_rgb = CreateConVar("l4d_lasertag_rgb", "0 125 255", "Lasertagging Color. Three values between 0-255 separated by spaces. RGB: Red Green Blue.", FCVAR_NOTIFY);
-	cvar_laser_alpha = CreateConVar("l4d_lasertag_alpha", "100", "Transparency (Alpha) of Laser", FCVAR_NONE, true, 0.0, true, 255.0);
+	cvar_laser_random = CreateConVar("l4d_lasertag_random", "1", "如果为 1, 启用随机颜色的激光弹道.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_laser_rgb = CreateConVar("l4d_lasertag_rgb", "0 125 255", "激光弹道颜色. 三个 0-255 之间的数值, 用空格分隔. RGB: 红绿蓝.", FCVAR_NOTIFY);
+	cvar_laser_alpha = CreateConVar("l4d_lasertag_alpha", "100", "激光的透明度 (Alpha)", FCVAR_NONE, true, 0.0, true, 255.0);
 
-	cvar_bots_random = CreateConVar("l4d_lasertag_bots_random", "1", "If 1, Enable Random Color for Bot.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	cvar_bots_rgb = CreateConVar("l4d_lasertag_bots_rgb", "0 255 75", "Bots Laser - Color. Three values between 0-255 separated by spaces. RGB: Red Green Blue.", FCVAR_NOTIFY);
-	cvar_bots_alpha = CreateConVar("l4d_lasertag_bots_alpha", "70", "Bots Laser - Transparency (Alpha) of Laser", FCVAR_NONE, true, 0.0, true, 255.0);
+	cvar_bots_random = CreateConVar("l4d_lasertag_bots_random", "1", "如果为 1, 为机器人启用随机颜色.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_bots_rgb = CreateConVar("l4d_lasertag_bots_rgb", "0 255 75", "机器人的激光 - 颜色. 三个 0-255 之间的数值, 用空格分隔. RGB: 红绿蓝.", FCVAR_NOTIFY);
+	cvar_bots_alpha = CreateConVar("l4d_lasertag_bots_alpha", "70", "机器人的激光 - 透明度 (Alpha)", FCVAR_NONE, true, 0.0, true, 255.0);
 
-	cvar_laser_life = CreateConVar("l4d_lasertag_life", "0.80", "Seconds Laser will remain", FCVAR_NOTIFY, true, 0.1);
-	cvar_laser_width = CreateConVar("l4d_lasertag_width", "1.0", "Width of Laser", FCVAR_NOTIFY, true, 1.0);
-	cvar_laser_offset = CreateConVar("l4d_lasertag_offset", "36", "Lasertag Offset", FCVAR_NOTIFY);
-	g_hAccesslvl = 		CreateConVar("l4d_lasertag_access_flag", 	"", 	"Players with these flags have Lasertagging. (Empty = Everyone, -1: Nobody)", FCVAR_NOTIFY);
+	cvar_laser_life = CreateConVar("l4d_lasertag_life", "0.80", "激光存留的秒数", FCVAR_NOTIFY, true, 0.1);
+	cvar_laser_width = CreateConVar("l4d_lasertag_width", "1.0", "激光的宽度", FCVAR_NOTIFY, true, 1.0);
+	cvar_laser_offset = CreateConVar("l4d_lasertag_offset", "36", "激光弹道偏移", FCVAR_NOTIFY);
+	g_hAccesslvl = 		CreateConVar("l4d_lasertag_access_flag", 	"", 	"拥有这些标志的玩家启用激光弹道. (留空 = 所有人, -1: 无人)", FCVAR_NOTIFY);
 
-	CreateConVar("l4d_lasertag_version", PLUGIN_VERSION, "Lasertag Version", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	CreateConVar("l4d_lasertag_version", PLUGIN_VERSION, "激光弹道版本", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	
-	AutoExecConfig(true, "l4d_lasertag");
+	//AutoExecConfig(true, "l4d_lasertag");
 
 	HookEvent("bullet_impact", 		Event_BulletImpact);
 	HookEvent("player_spawn",		Event_PlayerSpawn,	EventHookMode_PostNoCopy);

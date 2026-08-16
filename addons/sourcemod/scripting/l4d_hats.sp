@@ -542,24 +542,24 @@ public void OnPluginStart()
 
 
 	// Cvars
-	g_hCvarAllow = CreateConVar(		"l4d_hats_allow",		"1",			"0=Plugin off, 1=Plugin on.", CVAR_FLAGS );
-	g_hCvarBots = CreateConVar(			"l4d_hats_bots",		"1",			"0=Disallow bots from spawning with Hats. 1=Allow bots to spawn with hats.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarChange = CreateConVar(		"l4d_hats_change",		"1.3",			"0=Off. Other value puts the player into thirdperson for this many seconds when selecting a hat.", CVAR_FLAGS );
-	g_hCvarDetect = CreateConVar(		"l4d_hats_detect",		"0.3",			"0.0=Off. How often to detect thirdperson view. Also uses ThirdPersonShoulder_Detect plugin if available.", CVAR_FLAGS );
-	g_hCvarMake = CreateConVar(			"l4d_hats_make",		"",				"Specify admin flags or blank to allow all players to spawn with a hat, requires the l4d_hats_random cvar to spawn.", CVAR_FLAGS );
-	g_hCvarMenu = CreateConVar(			"l4d_hats_menu",		"",				"Specify admin flags or blank to allow all players access to the hats menu.", CVAR_FLAGS );
-	g_hCvarModes = CreateConVar(		"l4d_hats_modes",		"",				"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
-	g_hCvarModesOff = CreateConVar(		"l4d_hats_modes_off",	"",				"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
-	g_hCvarModesTog = CreateConVar(		"l4d_hats_modes_tog",	"",				"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
-	g_hCvarNotify = CreateConVar(		"l4d_hats_notify",		"0", 			"0=Off. 1=Notify a player when their hat spawns or changes. Always shows when manually changing.", CVAR_FLAGS );
-	g_hCvarOpaq = CreateConVar(			"l4d_hats_opaque",		"255", 			"How transparent or solid should the hats appear. 0=Translucent, 255=Opaque.", CVAR_FLAGS, true, 0.0, true, 255.0 );
-	g_hCvarPrecache = CreateConVar(		"l4d_hats_precache",	"",				"Prevent pre-caching models on these maps, separate by commas (no spaces). Enabling plugin on these maps will crash the server.", CVAR_FLAGS );
-	g_hCvarRand = CreateConVar(			"l4d_hats_random",		"1", 			"Attach a random hat when survivors spawn. 0=Never. 1=On round start. 2=Only first spawn (keeps the same hat next round).", CVAR_FLAGS, true, 0.0, true, 2.0 );
-	g_hCvarSave = CreateConVar(			"l4d_hats_save",		"1", 			"0=Off, 1=Save the players selected hats and attach when they spawn or rejoin the server. Overrides the random setting.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarThird = CreateConVar(		"l4d_hats_third",		"1", 			"0=Off, 1=When a player is in third person view, display their hat. Hide when in first person view.", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	g_hCvarWall = CreateConVar(			"l4d_hats_wall",		"1",			"0=Show hats glowing through walls, 1=Hide hats glowing when behind walls (creates 1 extra entity per hat).", CVAR_FLAGS, true, 0.0, true, 1.0 );
-	CreateConVar(						"l4d_hats_version",		PLUGIN_VERSION,	"Hats plugin version.",	FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,				"l4d_hats");
+	g_hCvarAllow = CreateConVar(		"l4d_hats_allow",		"1",			"0=插件关闭, 1=插件开启.", CVAR_FLAGS );
+	g_hCvarBots = CreateConVar(			"l4d_hats_bots",		"1",			"0=禁止机器人生成时戴帽子. 1=允许机器人生成时戴帽子.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarChange = CreateConVar(		"l4d_hats_change",		"1.3",			"0=关闭. 其他数值表示玩家选择帽子时进入第三人称多少秒.", CVAR_FLAGS );
+	g_hCvarDetect = CreateConVar(		"l4d_hats_detect",		"0.3",			"0.0=关闭. 多久检测一次第三人称视角. 如果可用也会使用 ThirdPersonShoulder_Detect 插件.", CVAR_FLAGS );
+	g_hCvarMake = CreateConVar(			"l4d_hats_make",		"",				"指定管理员标志, 留空则允许所有玩家生成时戴帽子, 需要 l4d_hats_random cvar 才会生成.", CVAR_FLAGS );
+	g_hCvarMenu = CreateConVar(			"l4d_hats_menu",		"",				"指定管理员标志, 留空则允许所有玩家访问帽子菜单.", CVAR_FLAGS );
+	g_hCvarModes = CreateConVar(		"l4d_hats_modes",		"",				"在这些游戏模式中启用插件, 用逗号分隔 (无空格). (留空 = 全部).", CVAR_FLAGS );
+	g_hCvarModesOff = CreateConVar(		"l4d_hats_modes_off",	"",				"在这些游戏模式中关闭插件, 用逗号分隔 (无空格). (留空 = 无).", CVAR_FLAGS );
+	g_hCvarModesTog = CreateConVar(		"l4d_hats_modes_tog",	"",				"在这些游戏模式中启用插件. 0=全部, 1=合作, 2=生存, 4=对抗, 8=清道夫. 把数字相加.", CVAR_FLAGS );
+	g_hCvarNotify = CreateConVar(		"l4d_hats_notify",		"0", 			"0=关闭. 1=当玩家的帽子生成或更换时提示. 手动更换时始终显示.", CVAR_FLAGS );
+	g_hCvarOpaq = CreateConVar(			"l4d_hats_opaque",		"255", 			"帽子的透明度或实体程度. 0=半透明, 255=不透明.", CVAR_FLAGS, true, 0.0, true, 255.0 );
+	g_hCvarPrecache = CreateConVar(		"l4d_hats_precache",	"",				"在这些地图上阻止预缓存模型, 用逗号分隔 (无空格). 在这些地图上启用插件会导致服务器崩溃.", CVAR_FLAGS );
+	g_hCvarRand = CreateConVar(			"l4d_hats_random",		"1", 			"生还者生成时戴上随机帽子. 0=从不. 1=回合开始时. 2=仅首次生成 (下一回合保留相同帽子).", CVAR_FLAGS, true, 0.0, true, 2.0 );
+	g_hCvarSave = CreateConVar(			"l4d_hats_save",		"1", 			"0=关闭, 1=保存玩家选择的帽子并在其生成或重连服务器时戴上. 覆盖随机设置.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarThird = CreateConVar(		"l4d_hats_third",		"1", 			"0=关闭, 1=玩家处于第三人称视角时显示其帽子. 第一人称视角时隐藏.", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	g_hCvarWall = CreateConVar(			"l4d_hats_wall",		"1",			"0=显示帽子穿墙发光, 1=帽子在墙后时隐藏发光 (每顶帽子会多创建 1 个实体).", CVAR_FLAGS, true, 0.0, true, 1.0 );
+	CreateConVar(						"l4d_hats_version",		PLUGIN_VERSION,	"帽子插件版本.",	FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	//AutoExecConfig(true,				"l4d_hats");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);

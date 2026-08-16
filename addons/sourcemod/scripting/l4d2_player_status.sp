@@ -70,7 +70,7 @@ public void OnPluginStart()
 	g_hPlayerDeath.AddChangeHook(IsConVarChanged);
 	g_hPlayerDown.AddChangeHook(IsConVarChanged);
 	
-	AutoExecConfig(true, "l4d2_player_status");//生成指定文件名的CFG.
+	//AutoExecConfig(true, "l4d2_player_status");//生成指定文件名的CFG.
 }
 
 //地图开始.

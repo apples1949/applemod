@@ -102,7 +102,7 @@ public void OnPluginStart()
     g_hHSCEnable.AddChangeHook(ConVarChanged_LungePower);
     g_hHSCHuman.AddChangeHook(ConVarChanged_LungePower);
 
-    AutoExecConfig(true, "hunter_skyceil");
+    //AutoExecConfig(true, "hunter_skyceil");
     HookEvent("player_spawn", Event_PlayerSpawn);
 #if DEBUG_RAY
     CreateTimer(1.0, Timer_ShowRayCallTimes, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);

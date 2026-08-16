@@ -745,7 +745,7 @@ void GetHUD2_Text(char[] output, int size)
     char sTime[16];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
     FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
-    FormatEx(output, size, "%s(%d/%d/%d)\n%s 输入 sm_offhud 关闭你的HUD", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+    FormatEx(output, size, "%s(%d/%d/%d)\n%s !onhud/!offhud开关HUD", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
 }
 
 // ====================================================================================================

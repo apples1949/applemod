@@ -99,7 +99,9 @@ Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float &damag
 			// charger 例外: 冲锋撞击和压制拍打不算爪击
 			if (zclass == ZC_CHARGER)
 			{
-				if (GetEntProp(attacker, Prop_Send, "m_isCharging"))
+				// m_isCharging 在能力实体(ability_charge)上, 不在玩家身上
+				int ability = GetEntPropEnt(attacker, Prop_Send, "m_customAbility");
+				if (ability > 0 && IsValidEdict(ability) && GetEntProp(ability, Prop_Send, "m_isCharging"))
 					return Plugin_Continue;
 				if (GetEntPropEnt(attacker, Prop_Send, "m_pummelVictim") > 0)
 					return Plugin_Continue;

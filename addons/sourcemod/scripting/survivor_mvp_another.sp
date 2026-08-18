@@ -322,6 +322,42 @@ void roundEndPrint() {
 }
 
 /**
+* 将整数转为全角数字 (０-９) 并右对齐补全角空格到指定全角字符宽度
+* L4D2 聊天是比例字体: 半角空格与半角数字宽度不等, 而全角字符 (汉字/全角数字/全角空格) 固定等宽,
+* 因此表格数值必须用全角字符定宽, 各行列才能对齐
+* @param buffer 输出缓冲区
+* @param maxlen 缓冲区大小
+* @param value  数值 (负数按 0 处理)
+* @param width  全角字符宽度
+* @return void
+**/
+stock void FormatFullWidthNumber(char[] buffer, int maxlen, int value, int width)
+{
+	if (value < 0) { value = 0; }
+
+	char num[16];
+	IntToString(value, num, sizeof(num));
+	int digits = strlen(num);
+
+	int out = 0;
+	// 右对齐: 前面补全角空格 (U+3000 = E3 80 80)
+	for (int i = digits; i < width && out + 3 < maxlen; i++)
+	{
+		buffer[out++] = 0xE3;
+		buffer[out++] = 0x80;
+		buffer[out++] = 0x80;
+	}
+	// 全角数字 (０ U+FF10 = EF BC 90 .. ９ U+FF19 = EF BC 99)
+	for (int i = 0; i < digits && out + 3 < maxlen; i++)
+	{
+		buffer[out++] = 0xEF;
+		buffer[out++] = 0xBC;
+		buffer[out++] = 0x90 + (num[i] - '0');
+	}
+	buffer[out] = '\0';
+}
+
+/**
 * 显示主 MVP 信息 (特感击杀, 丧尸击杀, 总伤害, 黑枪/被黑, 爆头率)
 * @param client 需要显示的客户端索引
 * @return void
@@ -340,28 +376,35 @@ void printMvpStatus(int client)
 
 	PrintToChat(client, "\x03[生还者 MVP 统计]");
 
-	char buffer[128], toPrint[256];
+	char buffer[128], temp[64], toPrint[256];
 	for (i = 0; i < index; i++) {
-		// 格式化排序后一个玩家的 MVP 信息 (数值定宽, 保证每行列对齐)
+		// 格式化排序后一个玩家的 MVP 信息 (全角数字 + 全角空格定宽, 保证每行列对齐)
 		if (g_hAllowShowSi.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%3d ", playerInfos[players[i]].siCount);
+			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].siCount, 3);
+			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%s　", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%3d ", playerInfos[players[i]].ciCount);
+			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].ciCount, 3);
+			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%s　", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%6d ", playerInfos[players[i]].totalDamage);
+			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].totalDamage, 5);
+			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%s　", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%3d/%3d ", playerInfos[players[i]].ffCount, playerInfos[players[i]].gotFFCount);
+			char ffNum[16];
+			FormatFullWidthNumber(ffNum, sizeof(ffNum), playerInfos[players[i]].ffCount, 3);
+			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].gotFFCount, 3);
+			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%s／%s　", ffNum, temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
 			float accuracy = playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount == 0 ? 0.0 : float(playerInfos[players[i]].headShotCount) / float(playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount);
-			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%3.0f%% ", accuracy * 100.0);
+			FormatFullWidthNumber(temp, sizeof(temp), RoundToNearest(accuracy * 100.0), 3);
+			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%s％　", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		FormatEx(buffer, sizeof(buffer), "\x03%N", players[i]);

@@ -6,16 +6,21 @@
 #include <left4dhooks>
 #include <readyup-applemod>
 
-#define PLUGIN_VERSION "1.1.1"
+#define PLUGIN_VERSION "1.2.0"
 #define PLUGIN_TAG "[AppleMod 开局清尸]"
 
 #define TEAM_INFECTED      3
 #define ZOMBIE_CLASS_TANK  8
 
-// 0 = 全图清理，1 = 只清理“路程窗口”内的目标（默认），2 = readyup 进入倒计时后清理一轮。
-#define MODE_ALL               0
-#define MODE_FLOW              1
-#define MODE_READYUP_COUNTDOWN 2
+// mode：触发/行为方式；范围由 applemod_preclean_range 单独控制。
+// 0 = 安全区前循环清理（默认），1 = 循环清理（兼容旧配置，等同0），2 = readyup 倒计时清理一轮。
+#define MODE_LOOP               0
+#define MODE_LOOP_LEGACY        1
+#define MODE_READYUP_COUNTDOWN  2
+
+// range：0=全图清理（默认），1=路程清理（按 applemod_preclean_percent）。
+#define RANGE_ALL  0
+#define RANGE_FLOW 1
 
 enum ScanState
 {
@@ -27,6 +32,7 @@ enum ScanState
 ConVar
     g_hEnable = null,
     g_hMode = null,
+    g_hRange = null,
     g_hPercent = null,
     g_hCommons = null,
     g_hWitches = null,
@@ -54,7 +60,8 @@ bool
     g_bOneShot = false;
 
 int
-    g_iMode = MODE_FLOW,
+    g_iMode = MODE_LOOP,
+    g_iRange = RANGE_ALL,
     g_iChunk = 512, // 2048 / 4：每遍历 512 个实体槽位后休息 0.1 秒。
     g_iMaxEntities = 2048,
     g_iRoundSerial = 0,
@@ -72,7 +79,7 @@ public Plugin myinfo =
 {
     name = "Applemod Pre-Spawn Zombie Cleaner",
     author = "apples1949",
-    description = "玩家离开起点安全区域前分块循环清理地图僵尸，或 readyup 倒计时触发一轮清理；模式1/2均按当前路程前方 N% 过滤。AppleMod 配置专属。",
+    description = "玩家离开起点安全区域前分块循环清理地图僵尸，或 readyup 倒计时触发一轮清理；范围可选全图清理或按当前路程前方 N% 清理。AppleMod 配置专属。",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -98,9 +105,16 @@ public void OnPluginStart()
 
     g_hMode = CreateConVar( \
         "applemod_preclean_mode", \
-        "1", \
-        "清理范围模式：0=全图循环清理, 1=只清理路程窗口内目标并循环（默认，需要 Left4DHooks flow 支持）, 2=readyup 进入倒计时后清理一轮（同样按 applemod_preclean_percent 限定路程）。", \
+        "0", \
+        "清理触发方式：0=离开安全区前循环清理（默认）, 1=循环清理（兼容旧配置，等同0）, 2=readyup 进入倒计时后清理一轮。", \
         FCVAR_NOTIFY, true, 0.0, true, 2.0 \
+    );
+
+    g_hRange = CreateConVar( \
+        "applemod_preclean_range", \
+        "0", \
+        "清理范围：0=全图清理（默认）, 1=路程清理（按 applemod_preclean_percent 过滤）。", \
+        FCVAR_NOTIFY, true, 0.0, true, 1.0 \
     );
 
     g_hPercent = CreateConVar( \
@@ -161,6 +175,7 @@ public void OnPluginStart()
 
     g_hEnable.AddChangeHook(CvarChanged);
     g_hMode.AddChangeHook(CvarChanged);
+    g_hRange.AddChangeHook(CvarChanged);
     g_hPercent.AddChangeHook(CvarChanged);
     g_hCommons.AddChangeHook(CvarChanged);
     g_hWitches.AddChangeHook(CvarChanged);
@@ -249,6 +264,7 @@ void ReadCvars()
 {
     g_bEnabled = g_hEnable.BoolValue;
     g_iMode = g_hMode.IntValue;
+    g_iRange = g_hRange.IntValue;
     g_fPercent = g_hPercent.FloatValue;
     g_bCleanCommons = g_hCommons.BoolValue;
     g_bCleanWitches = g_hWitches.BoolValue;
@@ -258,8 +274,12 @@ void ReadCvars()
     g_fPause = g_hPause.FloatValue;
     g_bVerbose = g_hVerbose.BoolValue;
 
-    if (g_iMode != MODE_ALL && g_iMode != MODE_FLOW && g_iMode != MODE_READYUP_COUNTDOWN) {
-        g_iMode = MODE_FLOW;
+    if (g_iMode != MODE_LOOP && g_iMode != MODE_LOOP_LEGACY && g_iMode != MODE_READYUP_COUNTDOWN) {
+        g_iMode = MODE_LOOP;
+    }
+
+    if (g_iRange != RANGE_ALL && g_iRange != RANGE_FLOW) {
+        g_iRange = RANGE_ALL;
     }
 
     if (g_iChunk < 1) {
@@ -280,9 +300,9 @@ bool IsNativeAvailable(const char[] name)
     return GetFeatureStatus(FeatureType_Native, name) == FeatureStatus_Available;
 }
 
-bool IsFlowFilterMode()
+bool IsFlowRange()
 {
-    return (g_iMode == MODE_FLOW || g_iMode == MODE_READYUP_COUNTDOWN);
+    return (g_iRange == RANGE_FLOW);
 }
 
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -471,8 +491,8 @@ void RebuildFlowWindow()
     // < 0 = 不按路程过滤，即全图清理。
     g_fFlowLimit = -1.0;
 
-    // 模式 1/2 都使用路程窗口；0 才走全图。
-    if (!IsFlowFilterMode()) {
+    // 范围模式为“路程清理”时才需要建路程窗口；全图清理直接不过滤。
+    if (!IsFlowRange()) {
         return;
     }
 
@@ -622,7 +642,7 @@ void ProcessEntity(int entity)
 void TryCleanCommon(int entity)
 {
     // 普通僵尸有精确的 flow 路程接口：L4D_GetInfectedFlowDistance。
-    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
+    if (IsFlowRange() && g_fFlowLimit >= 0.0) {
         float flow = L4D_GetInfectedFlowDistance(entity);
         if (flow > g_fFlowLimit) {
             return;
@@ -635,7 +655,7 @@ void TryCleanCommon(int entity)
 
 void TryCleanWitch(int entity)
 {
-    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
+    if (IsFlowRange() && g_fFlowLimit >= 0.0) {
         // Witch 没有精确 flow 接口，用最近 nav area 的路程近似判断。
         float flow = GetEntityFlowByNavArea(entity);
         if (flow < 0.0 || flow > g_fFlowLimit) {
@@ -667,7 +687,7 @@ void TryCleanSpecialClient(int client)
         return;
     }
 
-    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
+    if (IsFlowRange() && g_fFlowLimit >= 0.0) {
         if (!g_bClientFlowAvailable) {
             return; // 无法判断该特感路程，宁可不清理。
         }

@@ -78,6 +78,9 @@ bool bTankifier;
 bool bStaticTank, bStaticWitch;
 
 bool bApex;
+
+// Tank Swap
+bool bTankSwap;
 int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 
 // Hud Toggle & Hint Message
@@ -211,6 +214,11 @@ void FindApex()
 	bApex = LibraryExists("Apex") || (GetFeatureStatus(FeatureType_Native, "Apex_IsBhopEnabled") != FeatureStatus_Unknown);
 }
 
+void FindTankSwap()
+{
+	bTankSwap = LibraryExists("l4d2_tank_swap");
+}
+
 // ======================================================================
 //  Dependency Monitor
 // ======================================================================
@@ -235,6 +243,7 @@ public void OnAllPluginsLoaded()
 	FindTankSelection();
 	FindTankifier();
 	FindApex();
+	FindTankSwap();
 }
 
 public void OnLibraryAdded(const char[] name)
@@ -243,6 +252,7 @@ public void OnLibraryAdded(const char[] name)
 	FillBossPercents();
 	FindTankifier();
 	FindApex();
+	FindTankSwap();
 }
 
 public void OnLibraryRemoved(const char[] name)
@@ -251,6 +261,7 @@ public void OnLibraryRemoved(const char[] name)
 	FillBossPercents();
 	FindTankifier();
 	FindApex();
+	FindTankSwap();
 }
 
 public void L4D_OnGameModeChange(int gamemode)
@@ -1238,6 +1249,12 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	{
 		int timeleft = RoundToCeil(healthPercent / 100.0 * fTankBurnDuration);
 		FormatEx(info, sizeof(info), "燃烧: %i秒", timeleft);
+		DrawPanelText(hSpecHud, info);
+	}
+
+	if (bTankHUD && bTankSwap)
+	{
+		FormatEx(info, sizeof(info), "指令!tankpass可以将坦克给他人游玩");
 		DrawPanelText(hSpecHud, info);
 	}
 

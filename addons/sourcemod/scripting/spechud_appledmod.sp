@@ -17,6 +17,7 @@
 #include <l4d2_health_temp_bonus>
 #include <l4d_tank_control_eq>
 #include <lerpmonitor>
+#include <Apex>
 #include <witch_and_tankifier>
 
 #define PLUGIN_VERSION "3.9.1"
@@ -76,7 +77,7 @@ bool bTankSelection;
 bool bTankifier;
 bool bStaticTank, bStaticWitch;
 
-bool bTankSkillHud;
+bool bApex;
 int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 
 // Hud Toggle & Hint Message
@@ -205,9 +206,9 @@ void FindTankifier()
 	bTankifier = LibraryExists("witch_and_tankifier");
 }
 
-void FindTankSkillHud()
+void FindApex()
 {
-	bTankSkillHud = LibraryExists("L4D_OnTraceRockCreated");
+	bApex = LibraryExists("Apex") || (GetFeatureStatus(FeatureType_Native, "Apex_IsBhopEnabled") != FeatureStatus_Unknown);
 }
 
 // ======================================================================
@@ -233,7 +234,7 @@ public void OnAllPluginsLoaded()
 
 	FindTankSelection();
 	FindTankifier();
-	FindTankSkillHud();
+	FindApex();
 }
 
 public void OnLibraryAdded(const char[] name)
@@ -241,7 +242,7 @@ public void OnLibraryAdded(const char[] name)
 	FindScoreMod();
 	FillBossPercents();
 	FindTankifier();
-	FindTankSkillHud();
+	FindApex();
 }
 
 public void OnLibraryRemoved(const char[] name)
@@ -249,7 +250,7 @@ public void OnLibraryRemoved(const char[] name)
 	FindScoreMod();
 	FillBossPercents();
 	FindTankifier();
-	FindTankSkillHud();
+	FindApex();
 }
 
 public void L4D_OnGameModeChange(int gamemode)
@@ -1116,6 +1117,21 @@ stock void GetRockBlockStatus(char[] buffer, int maxlen)
 	FormatEx(buffer, maxlen, "跳砖: %s | 拳砖: %s", szJump, szPunch);
 }
 
+stock void GetToggleStatus(bool enabled, char[] buffer, int maxlen)
+{
+	strcopy(buffer, maxlen, enabled ? "开启" : "关闭");
+}
+
+stock void GetApexSkillStatus(int client, char[] buffer, int maxlen)
+{
+	char szBhop[8], szTrac[8];
+
+	GetToggleStatus(Apex_IsBhopEnabled(client), szBhop, sizeof(szBhop));
+	GetToggleStatus(Apex_IsTracEnabled(client), szTrac, sizeof(szTrac));
+
+	FormatEx(buffer, maxlen, "连跳: %s | 跟踪石头: %s", szBhop, szTrac);
+}
+
 bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 {
 	int tank = FindTankClient(-1);
@@ -1137,6 +1153,15 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 
 		FormatEx(info, sizeof(info), " [拳 %i] [石 %i] [铁 %i] [伤害 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage);
 		DrawPanelText(hSpecHud, info);
+
+		GetRockBlockStatus(info, sizeof(info));
+		DrawPanelText(hSpecHud, info);
+
+		if (bApex)
+		{
+			GetApexSkillStatus(tank, info, sizeof(info));
+			DrawPanelText(hSpecHud, info);
+		}
 
 		int dlen = strlen(info);
 		for (int i = 0; i < dlen; ++i) info[i] = '-';
@@ -1216,9 +1241,10 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		DrawPanelText(hSpecHud, info);
 	}
 
-	if (bTankHUD && bTankSkillHud)
+	if (bTankHUD && bApex)
 	{
 		ConVar cvar;
+
 		if ((cvar = FindConVar("tank_bohp_hp")) != null)
 		{
 			FormatEx(info, sizeof(info), "指令!bhop开启自动连跳(扣%d血量)", cvar.IntValue);
@@ -1229,9 +1255,6 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 			FormatEx(info, sizeof(info), "指令!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
-
-		GetRockBlockStatus(info, sizeof(info));
-		DrawPanelText(hSpecHud, info);
 
 		FormatEx(info, sizeof(info), "开启后再次执行相同指令可关闭技能");
 		DrawPanelText(hSpecHud, info);

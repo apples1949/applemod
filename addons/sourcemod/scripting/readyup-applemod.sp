@@ -10,6 +10,8 @@
 #include <caster_system>
 #undef REQUIRE_PLUGIN
 #include <GetPlayerGametime>
+#undef REQUIRE_PLUGIN
+#include <confogl>
 
 #define PLUGIN_VERSION "10.2.10"
 

@@ -44,6 +44,32 @@ public Plugin myinfo =
 
 }
 
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+	RegPluginLibrary("Apex");
+	CreateNative("Apex_IsBhopEnabled", Native_IsBhopEnabled);
+	CreateNative("Apex_IsTracEnabled", Native_IsTracEnabled);
+	return APLRes_Success;
+}
+
+public int Native_IsBhopEnabled(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+
+	return IsBhop[client] ? 1 : 0;
+}
+
+public int Native_IsTracEnabled(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+
+	return IsTrac[client] ? 1 : 0;
+}
+
 public void
 	OnPluginStart()
 {

@@ -1,21 +1,3 @@
-// ============================================================================
-//  l4d2_fix_team_shuffle_edi.sp
-//
-//  在 l4d2_fix_team_shuffle 的基础上，按照 l4d_team_unscramble 1.2h 的完整
-//  流程重构：
-//    - 用 StringMap 按 SteamID 记录目标队伍（不再按 client index 记录）
-//    - 换图/回合结束后在新地图 OnMapStart 启动还原并锁队
-//    - 锁队期间拦截 jointeam，并可选择拦截 callvote / vote
-//    - 每个玩家一个 1 秒重试计时器 + 每人失败次数上限
-//    - 5 秒检查计时器 + time 秒超时兜底
-//    - 通过 L4D_SetHumanSpec / L4D_TakeOverBot 接管 Bot 还原幸存者
-//    - sm_fixteams_keep / sm_fixteams_start / sm_fixteams_abort 管理员命令
-//    - L4D2_FixTeamShuffle_Keep / Start / Abort / IsFixComplete Native
-//
-//  原插件的“胜方/负方”名单映射，在对抗模式下等价于：记录每个玩家的实际
-//  队伍，新地图 m_bAreTeamsFlipped 与旧值不同时把生还者/特感对调。
-// ============================================================================
-
 #include <sourcemod>
 #include <left4dhooks>
 
@@ -191,7 +173,7 @@ public void OnPluginStart()
 		"为 1 时上一回合的玩家若已不在服务器中，忽略该玩家立即继续修正，不等待其重新进入",
 		FCVAR_NONE, true, 0.0, true, 1.0);
 
-	AutoExecConfig(true, "l4d2_fix_team_shuffle_edi");
+	//AutoExecConfig(true, "l4d2_fix_team_shuffle_edi");
 
 	// 配置文件可能已覆盖默认值，重新读取并给这几个 ConVar 补挂变更钩子
 	GetCvars();

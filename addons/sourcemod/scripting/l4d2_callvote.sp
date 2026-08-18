@@ -79,7 +79,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangePlayerKick == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票踢出玩家已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -87,7 +87,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeReturnTolobby == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票返回大厅已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票返回大厅已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -95,7 +95,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeAlltalk == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的全局通话投票已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的全局通话投票已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -103,7 +103,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeRestartGame == 0)
 		{
-				PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用.");//聊天窗提示.
+				PrintToChat(client,"\x04[提示]\x05游戏自带的投票重新开始已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 				return Plugin_Handled;
 		}
 	}
@@ -111,7 +111,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeMission == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票开始新图已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -119,7 +119,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeChapter == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更换章节已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}
@@ -127,7 +127,7 @@ Action Listener_CallVote(int client, const char[] command, int args)
 	{
 		if (g_iChangeDifficulty == 0)
 		{
-			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.");//聊天窗提示.
+			PrintToChat(client,"\x04[提示]\x05游戏自带的投票更改难度已禁用.请用指令\x04!votes\x05投票.");//聊天窗提示.
 			return Plugin_Handled;
 		}
 	}

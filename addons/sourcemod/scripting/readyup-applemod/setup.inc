@@ -35,7 +35,7 @@ void SetupConVars()
 {
 	// basic
 	l4d_ready_enabled			= CreateConVar("l4d_ready_enabled", "1", "Enable this plugin. (Values: 0 = Disabled, 1 = Manual ready, 2 = Auto start, 3 = Team ready)", FCVAR_NOTIFY, true, 0.0, true, 3.0);
-	l4d_ready_cfg_name			= CreateConVar("l4d_ready_cfg_name", "", "Configname to display on the ready-up panel", FCVAR_NOTIFY|FCVAR_PRINTABLEONLY);
+	l4d_ready_cfg_name			= CreateConVar("l4d_ready_cfg_name", "", "Configname to display on the ready-up panel (支持中文)", FCVAR_NOTIFY);
 	l4d_ready_max_players		= CreateConVar("l4d_ready_max_players", "12", "Maximum number of players to show on the ready-up panel.", FCVAR_NOTIFY, true, 0.0, true, MAXPLAYERS+1.0);
 
 	// game

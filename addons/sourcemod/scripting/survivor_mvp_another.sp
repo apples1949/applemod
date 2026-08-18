@@ -4,9 +4,51 @@
 // 头文件
 #include <sourcemod>
 #include <sdktools>
-#include <left4dhooks>
-#include <colors_tailred>
-#include "treeutil\treeutil.sp"
+
+// 团队类型
+enum
+{
+	TEAM_SPECTATOR = 1,
+	TEAM_SURVIVOR,
+	TEAM_INFECTED
+}
+
+// 感染者类型
+enum
+{
+	ZC_SMOKER = 1,
+	ZC_BOOMER,
+	ZC_HUNTER,
+	ZC_SPITTER,
+	ZC_JOCKEY,
+	ZC_CHARGER,
+	ZC_WITCH,
+	ZC_TANK
+}
+
+// 判断是否有效玩家 id，有效返回 true，无效返回 false
+stock bool IsValidClient(int client)
+{
+	return client > 0 && client <= MaxClients && IsClientInGame(client);
+}
+
+// 判断生还者是否有效，有效返回 true，无效返回 false
+stock bool IsValidSurvivor(int client)
+{
+	return IsValidClient(client) && GetClientTeam(client) == view_as<int>(TEAM_SURVIVOR);
+}
+
+// 判断特感是否有效，有效返回 true，无效返回 false
+stock bool IsValidInfected(int client)
+{
+	return IsValidClient(client) && GetClientTeam(client) == TEAM_INFECTED;
+}
+
+// 获取特感类型，成功返回特感类型，失败返回 -1
+stock int GetInfectedClass(int client)
+{
+	return IsValidInfected(client) ? GetEntProp(client, Prop_Send, "m_zombieClass") : -1;
+}
 
 #define CVAR_FLAG FCVAR_NOTIFY
 
@@ -129,15 +171,15 @@ public Action showMvpHandler(int client, int args)
 	}
 
 	if (GetClientTeam(client) == TEAM_SPECTATOR && (g_hWhichTeamToShow.IntValue != 0 && g_hWhichTeamToShow.IntValue != 1)) {
-		CPrintToChat(client, "{B}[{W}MVP{B}]: {W}当前生还者 MVP 统计数据不允许向旁观者显示");
+		PrintToChat(client, "\x03[\x01MVP\x03]\x01: 当前生还者 MVP 统计数据不允许向旁观者显示");
 		return Plugin_Handled;
 	}
 	else if (GetClientTeam(client) == TEAM_SURVIVOR && (g_hWhichTeamToShow.IntValue != 0 && g_hWhichTeamToShow.IntValue != 2)) {
-		CPrintToChat(client, "{B}[{W}MVP{B}]: {W}当前生还者 MVP 统计数据不允许向生还者显示");
+		PrintToChat(client, "\x03[\x01MVP\x03]\x01: 当前生还者 MVP 统计数据不允许向生还者显示");
 		return Plugin_Handled;
 	}
 	else if (GetClientTeam(client) == TEAM_INFECTED && (g_hWhichTeamToShow.IntValue != 0 && g_hWhichTeamToShow.IntValue != 3)) {
-		CPrintToChat(client, "{B}[{W}MVP{B}]: {W}当前生还者 MVP 统计数据不允许向感染者显示");
+		PrintToChat(client, "\x03[\x01MVP\x03]\x01: 当前生还者 MVP 统计数据不允许向感染者显示");
 		return Plugin_Handled;
 	}
 	printMvpStatus(client);
@@ -207,7 +249,7 @@ public void roundStartHandler(Event event, const char[] name, bool dontBroadcast
 public void missionLostHandler(Event event, const char[] name, bool dontBroadcast)
 {
 	if (g_hAllowShowFailCount.BoolValue) {
-		CPrintToChatAll("{B}[{W}MVP{B}]: {W}这是你们第 {O}%d {W}次团灭，请继续努力哦 (*･ω< )", ++failCount);
+		PrintToChatAll("\x03[\x01MVP\x03]\x01: 这是你们第 \x04%d\x01 次团灭，请继续努力哦 (*･ω< )", ++failCount);
 	}
 
 	if (!g_hAllowShowMvp.BoolValue || g_bHasPrint) {
@@ -296,37 +338,37 @@ void printMvpStatus(int client)
 	}
 	SortCustom1D(players, index, sortByDamageFunction);
 
-	CPrintToChat(client, "{LG}[生还者 MVP 统计]");
+	PrintToChat(client, "\x03[生还者 MVP 统计]");
 
 	char buffer[128], toPrint[256];
 	for (i = 0; i < index; i++) {
-		// 格式化排序后一个玩家的 MVP 信息
+		// 格式化排序后一个玩家的 MVP 信息 (数值定宽, 保证每行列对齐)
 		if (g_hAllowShowSi.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "{LG}特感{O}%d ", playerInfos[players[i]].siCount);
+			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%3d ", playerInfos[players[i]].siCount);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "{LG}丧尸{O}%d ", playerInfos[players[i]].ciCount);
+			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%3d ", playerInfos[players[i]].ciCount);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "{LG}伤害{O}%d ", playerInfos[players[i]].totalDamage);
+			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%6d ", playerInfos[players[i]].totalDamage);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			FormatEx(buffer, sizeof(buffer), "{LG}黑/被黑{O}%d/%d ", playerInfos[players[i]].ffCount, playerInfos[players[i]].gotFFCount);
+			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%3d/%3d ", playerInfos[players[i]].ffCount, playerInfos[players[i]].gotFFCount);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
 			float accuracy = playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount == 0 ? 0.0 : float(playerInfos[players[i]].headShotCount) / float(playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount);
-			FormatEx(buffer, sizeof(buffer), "{LG}爆头率{O}%.0f%% ", accuracy * 100.0);
+			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%3.0f%% ", accuracy * 100.0);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
-		FormatEx(buffer, sizeof(buffer), "{LG}%N", players[i]);
+		FormatEx(buffer, sizeof(buffer), "\x03%N", players[i]);
 		StrCat(toPrint, sizeof(toPrint), buffer);
 
 		// 打印一个玩家的 MVP 信息
-		CPrintToChat(client, "%s", toPrint);
+		PrintToChat(client, "%s", toPrint);
 		FormatEx(toPrint, sizeof(toPrint), "");
 	}
 }
@@ -370,63 +412,63 @@ void printParticularMvp(int client) {
 	char clientName[MAX_NAME_LENGTH], buffer[512], temp[256];
 	// 允许显示 SI MVP
 	if (g_hAllowShowSi.BoolValue) {
-		FormatEx(buffer, sizeof(buffer), "{B}[{W}MVP{B}] SI: ");
+		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 SI: ");
 		if (!IsValidClient(siMvpClient) || siTotal <= 0) {
-			StrCat(buffer, sizeof(buffer), "{O}本局还没有击杀任何特感");
+			StrCat(buffer, sizeof(buffer), "\x04本局还没有击杀任何特感");
 		} else {
 
 			formatMvpClientName(siMvpClient, clientName, sizeof(clientName));
 
 			dmgPercent = RoundToNearest(float(playerInfos[siMvpClient].totalDamage) / float(dmgTotal) * 100.0);
 			killPercent = RoundToNearest(float(playerInfos[siMvpClient].siCount) / float(siTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "{G}%s {B}({W}%d {O}伤害 {B}[{W}%d%%{B}]{W}, %d {O}击杀 {B}[{W}%d%%{B}])", clientName, playerInfos[siMvpClient].totalDamage, dmgPercent, playerInfos[siMvpClient].siCount, killPercent);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", clientName, playerInfos[siMvpClient].totalDamage, dmgPercent, playerInfos[siMvpClient].siCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		CPrintToChat(client, "%s", buffer);
+		PrintToChat(client, "%s", buffer);
 	}
 	// 允许显示 CI MVP
 	if (g_hAllowShowCi.BoolValue) {
-		FormatEx(buffer, sizeof(buffer), "{B}[{W}MVP{B}] CI: ");
+		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 CI: ");
 		if (!IsValidClient(ciMvpClient) || ciTotal <= 0) {
-			StrCat(buffer, sizeof(buffer), "{O}本局还没有击杀任何丧尸");
+			StrCat(buffer, sizeof(buffer), "\x04本局还没有击杀任何丧尸");
 		} else {
 
 			formatMvpClientName(ciMvpClient, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[ciMvpClient].ciCount) / float(ciTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "{G}%s {B}({W}%d {O}丧尸 {B}[{W}%d%%{B}])", clientName, playerInfos[ciMvpClient].ciCount, killPercent);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04丧尸 \x03[\x01%d%%\x03])", clientName, playerInfos[ciMvpClient].ciCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		CPrintToChat(client, "%s", buffer);
+		PrintToChat(client, "%s", buffer);
 	}
 	// 允许显示 FF MVP
 	if (g_hAllowShowFF.BoolValue) {
-		FormatEx(buffer, sizeof(buffer), "{B}[{W}LVP{B}] FF: ");
+		FormatEx(buffer, sizeof(buffer), "\x03[\x01LVP\x03]\x01 FF: ");
 		if (!IsValidClient(ffMvpClient) || ffTotal <= 0) {
-			StrCat(buffer, sizeof(buffer), "{O}大家都没有黑枪");
+			StrCat(buffer, sizeof(buffer), "\x04大家都没有黑枪");
 		} else {
 
 			formatMvpClientName(ffMvpClient, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[ffMvpClient].ffCount) / float(ffTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "{G}%s {B}({W}%d {O}友伤 {B}[{W}%d%%{B}])", clientName, playerInfos[ffMvpClient].ffCount, killPercent);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04友伤 \x03[\x01%d%%\x03])", clientName, playerInfos[ffMvpClient].ffCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		CPrintToChat(client, "%s", buffer);
+		PrintToChat(client, "%s", buffer);
 
 		// 被黑 MVP
-		FormatEx(buffer, sizeof(buffer), "{B}[{W}MVP{B}] FF Receive: ");
+		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 FF Receive: ");
 		if (!IsValidClient(gotFFMvpClient) || gotFFTotal <= 0) {
-			StrCat(buffer, sizeof(buffer), "{O}暂时没有倒霉蛋被黑得最惨");
+			StrCat(buffer, sizeof(buffer), "\x04暂时没有倒霉蛋被黑得最惨");
 		} else {
 
 			formatMvpClientName(gotFFMvpClient, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[gotFFMvpClient].gotFFCount) / float(gotFFTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "{G}%s {B}({W}%d {O}被黑 {B}[{W}%d%%{B}])", clientName, playerInfos[gotFFMvpClient].gotFFCount, killPercent);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04被黑 \x03[\x01%d%%\x03])", clientName, playerInfos[gotFFMvpClient].gotFFCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		CPrintToChat(client, "%s", buffer);
+		PrintToChat(client, "%s", buffer);
 	}
 	// 允许显示你的排名
 	if (g_hAllowShowRank.BoolValue) {
@@ -466,7 +508,7 @@ void printParticularMvp(int client) {
 			}
 
 			killPercent = RoundToNearest(float(playerInfos[client].ciCount) / float(ciTotal) * 100.0);
-			FormatEx(buffer, sizeof(buffer), "{B}你的排名 {O}CI: {G}#%d {B}({W}%d {O}击杀 {B}[{W}%d%%{B}])", rank, playerInfos[client].ciCount, killPercent);
+			FormatEx(buffer, sizeof(buffer), "\x03你的排名 \x04CI: \x05#%d \x03(\x01%d \x04击杀 \x03[\x01%d%%\x03])", rank, playerInfos[client].ciCount, killPercent);
 		} else {
 			// 没有特感击杀, 不显示特感排名
 			if (siTotal <= 0) {
@@ -484,9 +526,9 @@ void printParticularMvp(int client) {
 
 			dmgPercent = RoundToNearest(float(playerInfos[client].totalDamage) / float(dmgTotal) * 100.0);
 			killPercent = RoundToNearest(float(playerInfos[client].siCount) / float(siTotal) * 100.0);
-			FormatEx(buffer, sizeof(buffer), "{B}你的排名 {O}SI: {G}#%d {B}({W}%d {O}伤害 {B}[{W}%d%%{B}]{W}, %d {O}击杀 {B}[{W}%d%%{B}])", rank, playerInfos[client].totalDamage, dmgPercent, playerInfos[client].siCount, killPercent);
+			FormatEx(buffer, sizeof(buffer), "\x03你的排名 \x04SI: \x05#%d \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", rank, playerInfos[client].totalDamage, dmgPercent, playerInfos[client].siCount, killPercent);
 		}
-		CPrintToChat(client, "%s", buffer);
+		PrintToChat(client, "%s", buffer);
 	}
 }
 
@@ -499,9 +541,9 @@ void printParticularMvp(int client) {
 **/
 void formatMvpClientName(int client, char[] str, int len) {
 	if (IsFakeClient(client)) {
-		FormatEx(str, len, "{G}%N {W}[BOT]", client);
+		FormatEx(str, len, "\x05%N \x01[BOT]", client);
 	} else {
-		FormatEx(str, len, "{G}%N", client);
+		FormatEx(str, len, "\x05%N", client);
 	}
 }
 

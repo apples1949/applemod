@@ -19,13 +19,13 @@ public Plugin myinfo =
 
 public void OnPluginStart()   
 {
-	g_hTextMsg = CreateConVar("l4d2_text_msg", "1", "屏蔽游戏自带的闲置提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
-	g_hPZDmgMsg = CreateConVar("l4d2_PZDmg_msg", "1", "屏蔽游戏自带的其它提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
+	g_hTextMsg = CreateConVar("l4d2_text_msg", "0", "屏蔽游戏自带的闲置提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
+	g_hPZDmgMsg = CreateConVar("l4d2_PZDmg_msg", "0", "屏蔽游戏自带的其它提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
 	g_hConVar = CreateConVar("l4d2_server_cvar", "1", "屏蔽游戏自带的ConVar更改提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
-	g_hDeath = CreateConVar("l4d2_player_death", "1", "屏蔽游戏自带的玩家死亡提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
-	g_hIncapacitated = CreateConVar("l4d2_player_incapacitated", "1", "屏蔽游戏自带的玩家倒下提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
+	g_hDeath = CreateConVar("l4d2_player_death", "0", "屏蔽游戏自带的玩家死亡提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
+	g_hIncapacitated = CreateConVar("l4d2_player_incapacitated", "0", "屏蔽游戏自带的玩家倒下提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
 	g_hDisconnect = CreateConVar("l4d2_player_disconnect", "1", "屏蔽游戏自带的玩家离开提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
-	g_hDefibrillator = CreateConVar("l4d2_defibrillator_used", "1", "屏蔽游戏自带的使用电击器提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
+	g_hDefibrillator = CreateConVar("l4d2_defibrillator_used", "0", "屏蔽游戏自带的使用电击器提示? 0=显示, 1=屏蔽.", CVAR_FLAGS);
 
 	//AutoExecConfig(true, "l4d2_PZDmgMsg");
 

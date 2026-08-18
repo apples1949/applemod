@@ -297,9 +297,15 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 	if (!isTank(victim))
 		return;
 
+	/* 数据已随控制权交接(L4D_OnReplaceTank 前置转移)给了新 Tank:
+	   这个"死亡"是换克过程中引擎处死旧克产生的, 该实例仍在由新克续命, 不结算不打印 */
+	if (!tankDataExists(victim))
+		return;
+
 	/* 当前 Tank 实例死亡, 重置跟踪（数据仍保留在 victim 索引上供 0.3s 后打印）。
-	   能走到这里的 victim 必是 Tank 实体, 无条件清零以保证下一个 Tank 正常初始化 */
-	g_iCurrentTank = 0;
+	   只有当前跟踪值就是 victim 时才清零, 防止换克后旧克的死亡事件把指向新克的跟踪值清掉 */
+	if (g_iCurrentTank == victim)
+		g_iCurrentTank = 0;
 
 	/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
 	   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
@@ -370,6 +376,41 @@ public Action printTankDamageHandler(Handle timer, int client) {
 
 	doPrintTankDamage(client);
 	return Plugin_Stop;
+}
+
+/**
+* Tank 控制权交接(前置): left4dhooks 在引擎执行 ZombieManager::ReplaceTank 之前调用。
+* 覆盖 l4d2_tank_swap 的 L4D_ReplaceTank 主动换克、喷胆汁等引擎内部换克等全部路径,
+* 且不依赖 player_death / player_now_it / player_bot_replace 的事件先后顺序。
+* 注意: 回调时新克职业可能尚未切换成 Tank, 不能按 isTank 判断, 直接信任 forward 参数。
+**/
+public void L4D_OnReplaceTank(int oldTank, int newTank)
+{
+	if (oldTank <= 0 || oldTank > MaxClients || newTank <= 0 || newTank > MaxClients)
+		return;
+	if (oldTank == newTank || !IsClientInGame(newTank))
+		return;
+
+	// 数据持有者以参数为准; 参数上无数据而当前跟踪值有数据(历史遗留不同步)时回退到跟踪值
+	int sourceTank = oldTank;
+	if (!tankDataExists(sourceTank)
+		&& g_iCurrentTank > 0
+		&& g_iCurrentTank != newTank
+		&& tankDataExists(g_iCurrentTank))
+	{
+		sourceTank = g_iCurrentTank;
+	}
+
+	if (!tankDataExists(sourceTank))
+	{
+		// 没有可转移的数据(如目标本就是新生成的 Tank 被再次交接), 只更新跟踪指针
+		g_iCurrentTank = newTank;
+		return;
+	}
+
+	debugAndInfoLog("%s: L4D_OnReplaceTank 前置转移, 由 %N(%d) 转到 %N(%d)", PLUGIN_PREFIX, sourceTank, sourceTank, newTank, newTank);
+	transferTankData(sourceTank, newTank);
+	g_iCurrentTank = newTank;
 }
 
 /**

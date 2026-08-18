@@ -205,7 +205,7 @@ public void OnPluginStart()
 	//cvarCooldown                     = CreateConVar("l4d2_karma_kill_cooldown", 				"0.0", 	"How long does it take for the next karma to freeze the entire map. Begins counting from the end of the previous freeze", CVAR_FLAGS, true, 0.0);
 	cvarAllowDefib                   = CreateConVar("l4d2_karma_kill_allow_defib", 				"0", 	"Allow karma victims to be revived with defibrillator? 0 - No, 1 - Yes.", CVAR_FLAGS, true, 0.0, true, 1.0);
 	CreateConVar("l4d2_karma_charge_version", PLUGIN_VERSION, " L4D2 Karma Charge Plugin Version ", CVAR_FLAGS_PLUGIN_VERSION);
-	AutoExecConfig(true, "l4d2_karma_kill");
+	//AutoExecConfig(true, "l4d2_karma_kill");
 
 	GetCvars();
 	cvarFatalFallDamage.AddChangeHook(ConVarChanged_Cvars);

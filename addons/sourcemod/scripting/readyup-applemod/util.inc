@@ -145,3 +145,76 @@ int GetTeamHumanCount(int team)
 	
 	return humans;
 }
+
+// ========================
+//  配置显示名 (l4d_ready_cfg_name) 中文支持
+// ========================
+// L4D2 引擎从 cfg 文件解析命令时会丢弃非 ASCII 字节, 导致 confogl.cfg 里写的中文
+// 配置名无法进入 l4d_ready_cfg_name 变量 (控制台手输可以, 因为绕过了文件解析)。
+// 因此这里直接以 UTF-8 读取当前 confogl 配置的 confogl.cfg 文件来取配置名,
+// 读不到时再回退到变量值 (兼容无 confogl / 控制台临时设置)。
+
+// 在 confogl.cfg 中解析 "l4d_ready_cfg_name "xxx"" (兼容 sm_cvar / confogl_addcvar 前缀)
+bool ReadCfgNameFromConfoglFile(char[] buffer, int maxlen)
+{
+	buffer[0] = '\0';
+	
+	if (!LibraryExists("confogl"))
+		return false;
+	if (GetFeatureStatus(FeatureType_Native, "LGO_GetConfigName") != FeatureStatus_Available)
+		return false;
+	
+	char configName[64];
+	LGO_GetConfigName(configName, sizeof(configName));
+	if (configName[0] == '\0')
+		return false;
+	
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, sizeof(path), "../../cfg/cfgogl/%s/confogl.cfg", configName);
+	
+	File f = OpenFile(path, "r");
+	if (f == null)
+		return false;
+	
+	const int NAME_LEN = 18; // strlen("l4d_ready_cfg_name")
+	bool found = false;
+	char line[512];
+	
+	while (!f.EndOfFile() && f.ReadLine(line, sizeof(line)))
+	{
+		int idx = StrContains(line, "l4d_ready_cfg_name");
+		if (idx == -1)
+			continue;
+		
+		char tail[512];
+		strcopy(tail, sizeof(tail), line[idx + NAME_LEN]);
+		
+		int q1 = FindCharInString(tail, '"');
+		if (q1 == -1)
+			continue;
+		
+		int q2 = FindCharInString(tail[q1 + 1], '"');
+		if (q2 == -1)
+			continue;
+		
+		if (q2 >= maxlen)
+			q2 = maxlen - 1;
+		
+		strcopy(buffer, maxlen, tail[q1 + 1]);
+		buffer[q2] = '\0';
+		found = true;
+		break;
+	}
+	
+	delete f;
+	return found;
+}
+
+// 取面板要显示的配置名: 优先 confogl.cfg 文件 (支持中文), 回退 l4d_ready_cfg_name 变量
+void GetReadyCfgName(char[] buffer, int maxlen)
+{
+	if (ReadCfgNameFromConfoglFile(buffer, maxlen) && !IsEmptyString(buffer, maxlen))
+		return;
+	
+	l4d_ready_cfg_name.GetString(buffer, maxlen);
+}

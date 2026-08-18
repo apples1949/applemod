@@ -2,6 +2,15 @@
 // ====================================================================================================
 Change Log:
 
+1.2.1
+    - Switched SendProxy integration to SendProxy(Crimson) API:
+      uses OnSendProxyPre + SendProxy.AddChangeCell to hide HUD per client.
+    - Fixed "Handle ... is invalid" error at CreateHUDTimer on map change:
+      removed TIMER_FLAG_NO_MAPCHANGE from the HUD repeat timer.
+    - Fixed per-player HUD hide not working: m_iScriptedHUDFlags is inside the nested
+      terror_gamerules_data datatable, so GetEntSendPropOffs must be called with actual=true
+      to get the absolute offset for SendProxy.AddChangeCell.
+
 1.2.0
     - Added per-player HUD control through the Left4SendProxy (SendProxy Manager) extension:
       "sm_offhud" / "sm_onhud" are available to ALL players and toggle their own HUD;
@@ -39,7 +48,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.2.0",
+    version     = "1.2.1",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -106,10 +115,10 @@ static bool   g_bhybridScoringAvailable;
 static ConVar g_hVsBossBuffer;
 static Handle g_hTimerHUD;
 
-// SendProxy 逐客户端 HUD 隐藏支持.
+// SendProxy (Crimson) 逐客户端 HUD 隐藏支持.
 static bool   g_bSendProxyAvailable;
-static bool   g_bHUDSendProxyHooked;
-static int    g_iHookHUDAttempts;
+static int    g_iHudGameRulesRef = INVALID_ENT_REFERENCE;
+static int    g_iHudFlagsOffset = -1;
 static bool   g_bHUDHidden[MAXPLAYERS + 1];
 
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
@@ -161,9 +170,9 @@ public void OnAllPluginsLoaded()
     g_bWitchAndTankSystemAvailable = LibraryExists("witch_and_tankifier");
     g_bhybridScoringAvailable = LibraryExists("l4d2_hybrid_scoremod");
 
-    g_bSendProxyAvailable = LibraryExists("sendproxy2");
+    g_bSendProxyAvailable = (GetFeatureStatus(FeatureType_Native, "SendProxy.AddChangeCell") == FeatureStatus_Available);
     if (g_bSendProxyAvailable)
-        TryHookHUDSendProxy();
+        FindHUDGameRules();
 }
 
 public void OnLibraryAdded(const char[] name)
@@ -172,11 +181,10 @@ public void OnLibraryAdded(const char[] name)
         g_bWitchAndTankSystemAvailable = true;
     else if (StrEqual(name, "l4d2_hybrid_scoremod"))
         g_bhybridScoringAvailable = true;
-    else if (StrEqual(name, "sendproxy2"))
+    else if (StrEqual(name, "sendproxy"))
     {
         g_bSendProxyAvailable = true;
-        g_iHookHUDAttempts = 0;
-        TryHookHUDSendProxy();
+        FindHUDGameRules();
     }
 
     UpdateHUD(); //可选插件就绪可能改变HUD1内容.
@@ -188,10 +196,11 @@ public void OnLibraryRemoved(const char[] name)
         g_bWitchAndTankSystemAvailable = false;
     else if (StrEqual(name, "l4d2_hybrid_scoremod"))
         g_bhybridScoringAvailable = false;
-    else if (StrEqual(name, "sendproxy2"))
+    else if (StrEqual(name, "sendproxy"))
     {
         g_bSendProxyAvailable = false;
-        g_bHUDSendProxyHooked = false; //扩展卸载时会清除其内部 hooks.
+        g_iHudGameRulesRef = INVALID_ENT_REFERENCE;
+        g_iHudFlagsOffset = -1;
 
         //扩展卸载后所有隐藏状态失效, 清空避免扩展重新加载后玩家被意外重新隐藏.
         for (int i = 1; i <= MaxClients; i++)
@@ -202,19 +211,18 @@ public void OnLibraryRemoved(const char[] name)
 }
 
 // ====================================================================================================
-// 每张地图重新注册 SendProxy 的 GameRules hooks（扩展在 map end 时会清空 hooks）.
+// 每张地图重新缓存 SendProxy 需要的 GameRules 实体引用和 HUD flags 偏移.
 // ====================================================================================================
 public void OnMapStart()
 {
     g_bHUDDirty = true;
-    g_bHUDSendProxyHooked = false;
-    g_iHookHUDAttempts = 0;
-    TryHookHUDSendProxy();
+    FindHUDGameRules();
 }
 
 public void OnMapEnd()
 {
-    g_bHUDSendProxyHooked = false;
+    g_iHudGameRulesRef = INVALID_ENT_REFERENCE;
+    g_iHudFlagsOffset = -1;
 }
 
 public void OnClientConnected(int client)
@@ -251,6 +259,8 @@ public void OnConfigsExecuted()
 // 事件触发: 重新计算并仅在内容变化时发包.
 public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
 {
+    // OnMapStart 时实体可能还没创建, 借事件再次缓存.
+    FindHUDGameRules();
     UpdateHUD();
 }
 
@@ -403,15 +413,15 @@ Action CommandSetHudTarget(int admin, bool bVisible)
 
 bool CheckHUDHookReady(int client)
 {
-    if (!g_bSendProxyAvailable)
+    if (GetFeatureStatus(FeatureType_Native, "SendProxy.AddChangeCell") != FeatureStatus_Available)
     {
-        ReplyToCommand(client, "\x04[提示]\x05此功能需要 SendProxy 扩展 (sendproxy.ext), 请先安装 Left4SendProxy.");
+        ReplyToCommand(client, "\x04[提示]\x05此功能需要 SendProxy 扩展 (sendproxy.ext), 请先安装 SendProxy(Crimson).");
         return false;
     }
 
-    if (!g_bHUDSendProxyHooked)
+    if (g_iHudGameRulesRef == INVALID_ENT_REFERENCE || g_iHudFlagsOffset == -1)
     {
-        ReplyToCommand(client, "\x04[提示]\x05SendProxy 的 HUD hook 尚未就绪, 请稍后再试.");
+        ReplyToCommand(client, "\x04[提示]\x05SendProxy 的 HUD 偏移尚未就绪, 请稍后再试.");
         return false;
     }
 
@@ -439,7 +449,9 @@ public void OnNextFrameClearHUD(any data)
 void CreateHUDTimer()
 {
     delete g_hTimerHUD;
-    g_hTimerHUD = CreateTimer(HUD_CHECK_INTERVAL, TimerUpdateHUD, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+    // 不能加 TIMER_FLAG_NO_MAPCHANGE: 换图时 SourceMod 会杀掉 timer 但 g_hTimerHUD 仍是旧 Handle,
+    // 下一张图 OnConfigsExecuted 再 delete 会报 "Handle is invalid". UpdateHUD 内部已有实体保护.
+    g_hTimerHUD = CreateTimer(HUD_CHECK_INTERVAL, TimerUpdateHUD, _, TIMER_REPEAT);
 }
 
 public Action TimerUpdateHUD(Handle timer)
@@ -462,65 +474,53 @@ void ClearHUD()
 }
 
 // ====================================================================================================
-// SendProxy 逐客户端 hook: 只给被标记的客户端发送 HUD_FLAG_NOTVISIBLE.
+// SendProxy (Crimson) 逐客户端 HUD 隐藏:
+//   OnSendProxyPre 每帧触发, 对隐藏玩家直接下发 NOTVISIBLE 的 flags 偏移修改.
 // ====================================================================================================
-public Action SendProxy_HUDFlagsChanged(const char[] prop, int &value, int element, int client)
+static int g_iHudLastFindTick;
+
+public void OnSendProxyPre()
 {
-    if (client >= 1 && client <= MaxClients && g_bHUDHidden[client])
+    if (g_iHudGameRulesRef == INVALID_ENT_REFERENCE || g_iHudFlagsOffset == -1)
     {
-        value = HUD_FLAG_NOTVISIBLE;
-        return Plugin_Changed;
-    }
+        g_bSendProxyAvailable = true; //能收到这个 forward 就说明扩展已加载.
 
-    return Plugin_Continue;
-}
-
-void TryHookHUDSendProxy()
-{
-    if (!g_bSendProxyAvailable || g_bHUDSendProxyHooked)
-        return;
-
-    // 扩展刚注册 library 时 natives 可能还没注册完, 稍后重试.
-    if (GetFeatureStatus(FeatureType_Native, "SendProxy_HookGameRules") != FeatureStatus_Available)
-    {
-        ScheduleHUDHookRetry();
+        int tick = GetGameTickCount();
+        if (tick >= g_iHudLastFindTick)
+        {
+            g_iHudLastFindTick = tick + 30; //约 0.5 秒重试一次, 避免每帧找实体.
+            FindHUDGameRules();
+        }
         return;
     }
 
-    // 防止扩展在 GameRules proxy 尚未创建时调用 native 报错.
-    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+    for (int i = 1; i <= MaxClients; i++)
     {
-        ScheduleHUDHookRetry();
-        return;
+        if (!g_bHUDHidden[i] || !IsClientInGame(i))
+            continue;
+
+        SendProxy.AddChangeCell(i, g_iHudGameRulesRef, g_iHudFlagsOffset + HUD1 * 4, HUD_FLAG_NOTVISIBLE);
+        SendProxy.AddChangeCell(i, g_iHudGameRulesRef, g_iHudFlagsOffset + HUD2 * 4, HUD_FLAG_NOTVISIBLE);
     }
-
-    bool bHooked1 = SendProxy_HookGameRules("m_iScriptedHUDFlags", Prop_Int, SendProxy_HUDFlagsChanged, HUD1);
-    bool bHooked2 = SendProxy_HookGameRules("m_iScriptedHUDFlags", Prop_Int, SendProxy_HUDFlagsChanged, HUD2);
-
-    if (bHooked1 && bHooked2)
-    {
-        g_bHUDSendProxyHooked = true;
-        return;
-    }
-
-    ScheduleHUDHookRetry();
 }
 
-void ScheduleHUDHookRetry()
+// 缓存 GameRules 实体引用和 m_iScriptedHUDFlags 的 sendprop 偏移.
+void FindHUDGameRules()
 {
-    if (g_iHookHUDAttempts++ >= 20)
+    g_iHudGameRulesRef = INVALID_ENT_REFERENCE;
+    g_iHudFlagsOffset = -1;
+
+    int entity = FindGameRulesEntity();
+    if (entity == INVALID_ENT_REFERENCE)
         return;
 
-    CreateTimer(1.0, Timer_RetryHookHUDSendProxy, _, TIMER_FLAG_NO_MAPCHANGE);
+    g_iHudGameRulesRef = EntIndexToEntRef(entity);
+    // 必须取 actual=true 的绝对偏移: m_iScriptedHUDFlags 在嵌套的 terror_gamerules_data datatable 里,
+    // 默认 GetEntSendPropOffs 只返回局部偏移, AddChangeCell 会改错位置.
+    g_iHudFlagsOffset = GetEntSendPropOffs(entity, "m_iScriptedHUDFlags", true);
 }
 
-public Action Timer_RetryHookHUDSendProxy(Handle timer)
-{
-    TryHookHUDSendProxy();
-    return Plugin_Stop;
-}
-
-// 找到 L4D2 的 CTerrorGameRulesProxy 实体（SendProxy 的 GameRules hook 需要它存在）.
+// 找到 L4D2 的 CTerrorGameRulesProxy 实体（SendProxy 的 GameRules 偏移需要它存在）.
 int FindGameRulesEntity()
 {
     int entity = FindEntityByClassname(-1, "terror_gamerules");
@@ -665,7 +665,7 @@ void GetHUD1_Text(char[] output, int size)
         float damageBonusPercent = float(SMPlus_GetDamageBonus()) / float(SMPlus_GetMaxDamageBonus()) * 100;
         float pillsBonus = float(SMPlus_GetPillsBonus());
         float pillsBpnusPercent = float(SMPlus_GetPillsBonus()) / float(SMPlus_GetMaxPillsBonus()) * 100;
-        Format(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 倒地分: %.0f%% | 药分: %.0f / %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
+        Format(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 虚血分: %.0f%% | 药分: %.0f / %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
     }
 }
 

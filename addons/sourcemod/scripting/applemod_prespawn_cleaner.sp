@@ -4,16 +4,18 @@
 #include <sourcemod>
 #include <sdktools>
 #include <left4dhooks>
+#include <readyup-applemod>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.1.1"
 #define PLUGIN_TAG "[AppleMod 开局清尸]"
 
 #define TEAM_INFECTED      3
 #define ZOMBIE_CLASS_TANK  8
 
-// 0 = 全图清理，1 = 只清理“路程窗口”内的目标（默认）。
-#define MODE_ALL  0
-#define MODE_FLOW 1
+// 0 = 全图清理，1 = 只清理“路程窗口”内的目标（默认），2 = readyup 进入倒计时后清理一轮。
+#define MODE_ALL               0
+#define MODE_FLOW              1
+#define MODE_READYUP_COUNTDOWN 2
 
 enum ScanState
 {
@@ -48,7 +50,8 @@ bool
     g_bFlowWindowAvailable = true,
     g_bClientFlowAvailable = true,
     g_bNavAreaFlowAvailable = true,
-    g_bFlowFallbackWarned = false;
+    g_bFlowFallbackWarned = false,
+    g_bOneShot = false;
 
 int
     g_iMode = MODE_FLOW,
@@ -69,7 +72,7 @@ public Plugin myinfo =
 {
     name = "Applemod Pre-Spawn Zombie Cleaner",
     author = "apples1949",
-    description = "玩家离开起点安全区域前，分块循环清理地图僵尸；默认只清理当前路程前方 5% 的普通僵尸。AppleMod 配置专属。",
+    description = "玩家离开起点安全区域前分块循环清理地图僵尸，或 readyup 倒计时触发一轮清理；模式1/2均按当前路程前方 N% 过滤。AppleMod 配置专属。",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -96,8 +99,8 @@ public void OnPluginStart()
     g_hMode = CreateConVar( \
         "applemod_preclean_mode", \
         "1", \
-        "清理范围模式：0=全图所有目标, 1=只清理路程窗口内目标（默认，需要 Left4DHooks flow 支持）。", \
-        FCVAR_NOTIFY, true, 0.0, true, 1.0 \
+        "清理范围模式：0=全图循环清理, 1=只清理路程窗口内目标并循环（默认，需要 Left4DHooks flow 支持）, 2=readyup 进入倒计时后清理一轮（同样按 applemod_preclean_percent 限定路程）。", \
+        FCVAR_NOTIFY, true, 0.0, true, 2.0 \
     );
 
     g_hPercent = CreateConVar( \
@@ -205,6 +208,7 @@ public void OnMapStart()
     g_bMapReady = false;
     g_bLeftSafeArea = false;
     g_eState = ScanState_Idle;
+    g_bOneShot = false;
     g_iNextEntity = 0;
     g_iSweepsCompleted = 0;
     g_iKilledThisSweep = 0;
@@ -254,7 +258,7 @@ void ReadCvars()
     g_fPause = g_hPause.FloatValue;
     g_bVerbose = g_hVerbose.BoolValue;
 
-    if (g_iMode != MODE_ALL && g_iMode != MODE_FLOW) {
+    if (g_iMode != MODE_ALL && g_iMode != MODE_FLOW && g_iMode != MODE_READYUP_COUNTDOWN) {
         g_iMode = MODE_FLOW;
     }
 
@@ -276,12 +280,18 @@ bool IsNativeAvailable(const char[] name)
     return GetFeatureStatus(FeatureType_Native, name) == FeatureStatus_Available;
 }
 
+bool IsFlowFilterMode()
+{
+    return (g_iMode == MODE_FLOW || g_iMode == MODE_READYUP_COUNTDOWN);
+}
+
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
     // 新回合：仅当引擎确认“还没有人离开起点安全区域”时才重新开始清理。
     g_iRoundSerial++;
     g_bFlowFallbackWarned = false;
     g_eState = ScanState_Idle;
+    g_bOneShot = false;
 
     if (g_bMapReady) {
         g_bLeftSafeArea = L4D_HasAnySurvivorLeftSafeArea();
@@ -386,6 +396,11 @@ void StartCleaning()
         return;
     }
 
+    // 模式 2 不走常规循环：由 readyup 倒计时触发 StartOneShotClean()。
+    if (g_iMode == MODE_READYUP_COUNTDOWN) {
+        return;
+    }
+
     if (L4D_HasAnySurvivorLeftSafeArea()) {
         MarkLeftSafeArea();
         return;
@@ -395,9 +410,60 @@ void StartCleaning()
 
     g_iNextEntity = 0;
     g_iKilledThisSweep = 0;
+    g_bOneShot = false;
     g_eState = ScanState_Sweeping;
 
     CreateTimer(g_fInterval, Timer_ScanChunk, g_iRoundSerial, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+void StartOneShotClean()
+{
+    if (!g_bEnabled || !g_bMapReady || g_bLeftSafeArea || g_eState != ScanState_Idle) {
+        return;
+    }
+
+    if (L4D_HasAnySurvivorLeftSafeArea()) {
+        MarkLeftSafeArea();
+        return;
+    }
+
+    RebuildFlowWindow();
+
+    g_iNextEntity = 0;
+    g_iKilledThisSweep = 0;
+    g_bOneShot = true;
+    g_eState = ScanState_Sweeping;
+
+    CreateTimer(g_fInterval, Timer_ScanChunk, g_iRoundSerial, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// readyup 进入倒计时：模式 2 下清理一轮。
+public void OnRoundLiveCountdown()
+{
+    if (!g_bEnabled || g_iMode != MODE_READYUP_COUNTDOWN) {
+        return;
+    }
+
+    StartOneShotClean();
+}
+
+// readyup 倒计时结束（回合 live）：如果还有没扫完的“一轮”，终止它。
+public void OnRoundIsLive()
+{
+    if (g_bOneShot || g_eState == ScanState_Sweeping) {
+        CancelOneShot();
+    }
+}
+
+void CancelOneShot()
+{
+    if (!g_bOneShot && g_eState != ScanState_Sweeping) {
+        return;
+    }
+
+    g_bOneShot = false;
+    g_eState = ScanState_Idle;
+    g_iRoundSerial++; // 使正在跑的扫描定时器失效。
 }
 
 void RebuildFlowWindow()
@@ -405,7 +471,8 @@ void RebuildFlowWindow()
     // < 0 = 不按路程过滤，即全图清理。
     g_fFlowLimit = -1.0;
 
-    if (g_iMode != MODE_FLOW) {
+    // 模式 1/2 都使用路程窗口；0 才走全图。
+    if (!IsFlowFilterMode()) {
         return;
     }
 
@@ -479,14 +546,27 @@ Action Timer_ScanChunk(Handle timer, int serial)
     g_iNextEntity = end;
 
     if (end >= g_iMaxEntities) {
-        // 完整遍历完一遍：统计、等待 g_fPause 秒后重新开始。
+        // 完整遍历完一遍。
         g_iSweepsCompleted++;
         if (g_bVerbose) {
-            LogMessage("%s 第 %d 遍遍历完成：扫描 %d 个实体槽位，清理 %d 个目标；%.1f 秒后开始下一遍。", \
-                PLUGIN_TAG, g_iSweepsCompleted, g_iMaxEntities, g_iKilledThisSweep, g_fPause);
+            if (g_bOneShot) {
+                LogMessage("%s readyup 倒计时清理轮完成：扫描 %d 个实体槽位，清理 %d 个目标。", \
+                    PLUGIN_TAG, g_iMaxEntities, g_iKilledThisSweep);
+            } else {
+                LogMessage("%s 第 %d 遍遍历完成：扫描 %d 个实体槽位，清理 %d 个目标；%.1f 秒后开始下一遍。", \
+                    PLUGIN_TAG, g_iSweepsCompleted, g_iMaxEntities, g_iKilledThisSweep, g_fPause);
+            }
         }
 
         g_iKilledThisSweep = 0;
+
+        // 模式 2：倒计时触发的一轮清理只执行一次，不进入重复循环。
+        if (g_bOneShot) {
+            g_bOneShot = false;
+            g_eState = ScanState_Idle;
+            return Plugin_Stop;
+        }
+
         g_eState = ScanState_Pausing;
         CreateTimer(g_fPause, Timer_RestartScan, serial, TIMER_FLAG_NO_MAPCHANGE);
         return Plugin_Stop;
@@ -542,7 +622,7 @@ void ProcessEntity(int entity)
 void TryCleanCommon(int entity)
 {
     // 普通僵尸有精确的 flow 路程接口：L4D_GetInfectedFlowDistance。
-    if (g_iMode == MODE_FLOW && g_fFlowLimit >= 0.0) {
+    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
         float flow = L4D_GetInfectedFlowDistance(entity);
         if (flow > g_fFlowLimit) {
             return;
@@ -555,7 +635,7 @@ void TryCleanCommon(int entity)
 
 void TryCleanWitch(int entity)
 {
-    if (g_iMode == MODE_FLOW && g_fFlowLimit >= 0.0) {
+    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
         // Witch 没有精确 flow 接口，用最近 nav area 的路程近似判断。
         float flow = GetEntityFlowByNavArea(entity);
         if (flow < 0.0 || flow > g_fFlowLimit) {
@@ -587,7 +667,7 @@ void TryCleanSpecialClient(int client)
         return;
     }
 
-    if (g_iMode == MODE_FLOW && g_fFlowLimit >= 0.0) {
+    if (IsFlowFilterMode() && g_fFlowLimit >= 0.0) {
         if (!g_bClientFlowAvailable) {
             return; // 无法判断该特感路程，宁可不清理。
         }

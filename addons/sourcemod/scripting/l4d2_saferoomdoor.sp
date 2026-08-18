@@ -18,7 +18,7 @@ float g_fDoorDelayTimes[MAXPLAYERS + 1];
 
 public void OnPluginStart()
 {
-	EnableHandle_a	= CreateConVar("l4d2_enabled_safeRoomDoor_a", "1", "启用幸存者开关安全门提示+开关安全门次数限制? 0=禁用, 1=启用, 2=禁用限制,只显示幸存者开关安全门.", FCVAR_NOTIFY);
+	EnableHandle_a	= CreateConVar("l4d2_enabled_safeRoomDoor_a", "2", "启用幸存者开关安全门提示+开关安全门次数限制? 0=禁用, 1=启用, 2=禁用限制,只显示幸存者开关安全门.", FCVAR_NOTIFY);
 	EnableHandle_b	= CreateConVar("l4d2_enabled_safeRoomDoor_b", "1", "设置玩门超过次数后的处理方式. 1=处死, 2=踢出, 3=封禁(由于盗版没有唯一的64位ID所以使用永久封禁是无效的).", FCVAR_NOTIFY);
 	EnableHandle_c	= CreateConVar("l4d2_enabled_safeRoomDoor_c", "5", "设置玩门达到次数的封禁时间/分钟. 0=永久封禁(删除文件  banned_user.cfg  里的对应玩家ID然后重启服务器即可解封).", FCVAR_NOTIFY);
 	EnableHandle_d	= CreateConVar("l4d2_enabled_safeRoomDoor_d", "1", "设置开局时延迟多久提示玩门的后果(秒).(必须大于1)", FCVAR_NOTIFY);

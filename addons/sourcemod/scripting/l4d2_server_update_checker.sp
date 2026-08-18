@@ -23,7 +23,7 @@ public void OnPluginStart()
 {
 	CreateConVar("l4d2_server_update_checker_version", VERSION, "version", FCVAR_NONE | FCVAR_DONTRECORD);
 	g_cvRestartTime = CreateConVar("l4d2_server_update_restart_time", "60.0", "How many time later the server will restart if there is an update (sec).", FCVAR_NONE);
-	AutoExecConfig(true, "l4d2_server_update_checker");
+	//AutoExecConfig(true, "l4d2_server_update_checker");
 }
 
 public void OnConfigsExecuted()

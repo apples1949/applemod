@@ -80,13 +80,15 @@ void UpdatePanel()
 	Panel menuPanel = new Panel();
 
 	char ServerBuffer[128];
-	char cfgName[32];
+	char cfgName[96];
 
 	bool isTeamReadyMode = readyUpMode == ReadyMode_TeamReady;
 	int survivorReady = IsTeamReady(L4D2Team_Survivor);
 	int infectedReady = IsTeamReady(L4D2Team_Infected);
 
-	l4d_ready_cfg_name.GetString(cfgName, sizeof(cfgName));
+	// 配置名: 优先直接读当前 confogl 配置的 confogl.cfg (UTF-8, 中文可用),
+	// 回退到 l4d_ready_cfg_name 变量 (引擎从 cfg 文件解析会丢弃中文字符)
+	GetReadyCfgName(cfgName, sizeof(cfgName));
 	FormatEx(ServerBuffer, sizeof(ServerBuffer), "▸ 配置: %s", cfgName);
 	menuPanel.DrawText(ServerBuffer);
 

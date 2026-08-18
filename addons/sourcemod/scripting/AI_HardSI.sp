@@ -117,7 +117,7 @@ public void OnPluginStart()
 	Tank_OnModuleStart();
 
 	//Autoconfig for plugin
-	AutoExecConfig(true, "AI_HardSI");
+	//AutoExecConfig(true, "AI_HardSI");
 
 	if(bLate)
 	{

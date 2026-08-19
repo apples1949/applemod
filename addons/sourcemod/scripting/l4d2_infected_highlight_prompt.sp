@@ -3,12 +3,13 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.2"
+#define PLUGIN_VERSION	"1.3"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
 #define EXPLODE_SAME_WINDOW_TIME	0.5	// 同一次爆炸事件的最大到达时间差(秒): 窗口开启超过此时长后到达的事件视为新一次爆炸
 #define EXPLODE_SCAN_INTERVAL	0.25	// 爆炸窗口结算扫描间隔(秒)
+#define TANK_HIT_WINDOW_TIME	0.5		// Tank 左键一爪/拍打移动物品的一次性判定窗口(秒)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
 
 // ====================================================================================================
@@ -19,7 +20,7 @@ public Plugin myinfo =
 {
 	name		= "l4d2_infected_highlight_prompt",
 	author		= "apples1949",
-	description	= "感染者阵营高光操作提示: 喷中多名/爆炸炸到多名/一撞多/多控达成.",
+	description	= "感染者阵营高光操作提示: 喷中多名/爆炸炸到多名/一撞多/多控达成/坦克一爪多中/坦克拍物多中.",
 	version		= PLUGIN_VERSION,
 	url			= "N/A"
 }
@@ -27,10 +28,17 @@ public Plugin myinfo =
 // ====================================================================================================
 // 中文数字表
 // ====================================================================================================
-// 多控/一撞多使用: 双控、三控、一撞双
+// 多控使用: 双控、三控
 char g_NumberText[15][8] =
 {
 	"双", "三", "四", "五", "六", "七", "八", "九", "十",
+	"十一", "十二", "十三", "十四", "十五", "十六"
+};
+
+// 一撞多单独使用: 一撞二、一撞三(与多控的"双控"区分)
+char g_NumberTextCharger[15][8] =
+{
+	"二", "三", "四", "五", "六", "七", "八", "九", "十",
 	"十一", "十二", "十三", "十四", "十五", "十六"
 };
 
@@ -68,6 +76,20 @@ int   g_iChargerCount[MAXPLAYERS+1];	// 本次冲撞撞到的不重复生还者�
 bool  g_bChargerHit[MAXPLAYERS+1][MAXPLAYERS+1];
 
 // ====================================================================================================
+// Tank 一爪多中 / 拍打移动物品一物多中状态(按 tank 玩家索引)
+// ====================================================================================================
+enum TankHitType
+{
+	TankHit_Claw,		// 左键爪子
+	TankHit_Prop		// 拍打移动物品
+}
+
+bool  g_bTankHitActive[TankHitType][MAXPLAYERS+1];	// 当前是否处于一次攻击窗口内
+float g_fTankHitStart[TankHitType][MAXPLAYERS+1];	// 本次攻击窗口起始时间
+int   g_iTankHitCount[TankHitType][MAXPLAYERS+1];	// 本次命中的不重复生还者数
+bool  g_bTankHitVictim[TankHitType][MAXPLAYERS+1][MAXPLAYERS+1];
+
+// ====================================================================================================
 // 多控达成状态
 // ====================================================================================================
 bool  g_bMultiPinnedAnnounced = false;	// 当前多控状态是否已提示
@@ -79,11 +101,14 @@ ConVar g_cvBoomerSprayMin;
 ConVar g_cvBoomerExplodeMin;
 ConVar g_cvChargerMin;
 ConVar g_cvPinnedMin;
+ConVar g_cvTankClawMin;
+ConVar g_cvTankPropMin;
 
 int g_iBoomerSprayMin;
 int g_iBoomerExplodeMin;
 int g_iChargerMin;
 int g_iPinnedMin;
+int g_iTankHitMin[TankHitType];
 
 // ====================================================================================================
 // Plugin Start
@@ -107,6 +132,14 @@ public void OnPluginStart()
 											"2",
 											"感染者阵营同时控住多少个生还者时提示(>=2).",
 											FCVAR_NOTIFY, true, 2.0, true, 4.0);
+	g_cvTankClawMin			= CreateConVar("l4d2_infected_highlight_tank_claw_min",
+											"2",
+											"Tank左键一爪同时拍中多少个生还者时提示(>=2).",
+											FCVAR_NOTIFY, true, 2.0, true, 16.0);
+	g_cvTankPropMin			= CreateConVar("l4d2_infected_highlight_tank_prop_min",
+											"2",
+											"Tank拍打移动物品一次同时命中多少个生还者时提示(>=2).",
+											FCVAR_NOTIFY, true, 2.0, true, 16.0);
 
 	GetCvars();
 
@@ -114,6 +147,8 @@ public void OnPluginStart()
 	g_cvBoomerExplodeMin.AddChangeHook(OnConVarChanged);
 	g_cvChargerMin.AddChangeHook(OnConVarChanged);
 	g_cvPinnedMin.AddChangeHook(OnConVarChanged);
+	g_cvTankClawMin.AddChangeHook(OnConVarChanged);
+	g_cvTankPropMin.AddChangeHook(OnConVarChanged);
 
 	HookEvent("player_now_it",			Event_PlayerNowIt);
 	HookEvent("boomer_exploded",		Event_BoomerExploded);
@@ -144,6 +179,8 @@ void GetCvars()
 	g_iBoomerExplodeMin	= g_cvBoomerExplodeMin.IntValue;
 	g_iChargerMin		= g_cvChargerMin.IntValue;
 	g_iPinnedMin		= g_cvPinnedMin.IntValue;
+	g_iTankHitMin[TankHit_Claw]	= g_cvTankClawMin.IntValue;
+	g_iTankHitMin[TankHit_Prop]	= g_cvTankPropMin.IntValue;
 }
 
 public void OnMapEnd()
@@ -153,6 +190,8 @@ public void OnMapEnd()
 		ResetSpray(i);
 		ResetExplode(i);
 		ResetCharger(i);
+		ResetTankHit(TankHit_Claw, i);
+		ResetTankHit(TankHit_Prop, i);
 	}
 
 	g_iLastExplodedBoomer = 0;
@@ -165,6 +204,8 @@ public void OnClientDisconnect(int client)
 	ResetSpray(client);
 	ResetExplode(client);
 	ResetCharger(client);
+	ResetTankHit(TankHit_Claw, client);
+	ResetTankHit(TankHit_Prop, client);
 }
 
 // ====================================================================================================
@@ -379,23 +420,41 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 
 	int attacker = GetClientOfUserId(event.GetInt("attacker"));
 
-	if (!IsCharger(attacker) || !IsPlayerAlive(attacker))
-		return;
-
-	if (!g_bChargerReady[attacker])
+	// Charger 一撞多
+	if (IsCharger(attacker) && IsPlayerAlive(attacker))
 	{
-		// 窗口未开: 只有真正处于冲锋状态才开窗计数(AI 特感可能没有 ability_use 事件)
-		if (!ChargerIsCharging(attacker))
+		if (!g_bChargerReady[attacker])
+		{
+			// 窗口未开: 只有真正处于冲锋状态才开窗计数(AI 特感可能没有 ability_use 事件)
+			if (!ChargerIsCharging(attacker))
+				return;
+
+			OpenChargerWindow(attacker);
+		}
+
+		if (g_bChargerHit[attacker][client] || event.GetInt("dmg_health") < 1)
 			return;
 
-		OpenChargerWindow(attacker);
+		g_bChargerHit[attacker][client] = true;
+		g_iChargerCount[attacker]++;
+		return;
 	}
 
-	if (g_bChargerHit[attacker][client] || event.GetInt("dmg_health") < 1)
+	// Tank 左键一爪 / 拍打移动物品
+	if (!IsTank(attacker) || !IsPlayerAlive(attacker) || event.GetInt("dmg_health") < 1)
 		return;
 
-	g_bChargerHit[attacker][client] = true;
-	g_iChargerCount[attacker]++;
+	char weapon[32];
+	event.GetString("weapon", weapon, sizeof(weapon));
+
+	if (strcmp(weapon, "tank_claw") == 0)
+	{
+		CountTankHit(TankHit_Claw, attacker, client);
+	}
+	else if (strncmp(weapon, "prop_", 5) == 0)
+	{
+		CountTankHit(TankHit_Prop, attacker, client);
+	}
 }
 
 public void Event_ChargerCarryStart(Event event, const char[] name, bool dontBroadcast)
@@ -541,7 +600,87 @@ void PrintCharger(int charger)
 	GetActorName(charger, name, sizeof(name));
 
 	PrintToInfectedTeam("\x04[\x03!\x04] \x05Charger(\x03%s\x05) \x01一撞\x04%s\x05",
-		name, g_NumberText[g_iChargerCount[charger] - 2]);
+		name, g_NumberTextCharger[g_iChargerCount[charger] - 2]);
+}
+
+// ====================================================================================================
+// Tank 一爪多中 / 拍打移动物品一物多中
+// ====================================================================================================
+
+void CountTankHit(TankHitType type, int tank, int victim)
+{
+	float now = GetGameTime();
+
+	if (!g_bTankHitActive[type][tank])
+	{
+		g_bTankHitActive[type][tank] = true;
+		g_fTankHitStart[type][tank] = now;
+		CreateTankHitTimer(type, tank);
+	}
+	else if (now - g_fTankHitStart[type][tank] > TANK_HIT_WINDOW_TIME)
+	{
+		// 窗口已过期但结算计时器尚未运行, 重新开窗
+		ResetTankHit(type, tank);
+		g_bTankHitActive[type][tank] = true;
+		g_fTankHitStart[type][tank] = now;
+		CreateTankHitTimer(type, tank);
+	}
+
+	if (!g_bTankHitVictim[type][tank][victim])
+	{
+		g_bTankHitVictim[type][tank][victim] = true;
+		g_iTankHitCount[type][tank]++;
+	}
+}
+
+void CreateTankHitTimer(TankHitType type, int tank)
+{
+	DataPack pack = new DataPack();
+	pack.WriteCell(view_as<int>(type));
+	pack.WriteCell(GetClientUserId(tank));
+	CreateTimer(TANK_HIT_WINDOW_TIME, Timer_EndTankHit, pack, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_EndTankHit(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	TankHitType type = view_as<TankHitType>(pack.ReadCell());
+	int userid = pack.ReadCell();
+	delete pack;
+
+	int tank = GetClientOfUserId(userid);
+
+	if (tank > 0 && g_bTankHitActive[type][tank] && g_iTankHitCount[type][tank] >= g_iTankHitMin[type])
+	{
+		char name[MAX_NAME_LENGTH];
+		GetActorName(tank, name, sizeof(name));
+
+		if (type == TankHit_Claw)
+		{
+			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍中\x04%s\x05名生还者",
+				name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+		}
+		else
+		{
+			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品命中\x04%s\x05名生还者",
+				name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+		}
+	}
+
+	if (tank > 0)
+		ResetTankHit(type, tank);
+
+	return Plugin_Continue;
+}
+
+void ResetTankHit(TankHitType type, int tank)
+{
+	g_bTankHitActive[type][tank] = false;
+	g_fTankHitStart[type][tank] = 0.0;
+	g_iTankHitCount[type][tank] = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_bTankHitVictim[type][tank][i] = false;
 }
 
 // ====================================================================================================
@@ -614,6 +753,15 @@ bool IsCharger(int client)
 			IsClientInGame(client) &&
 			GetClientTeam(client) == 3 &&
 			GetEntProp(client, Prop_Send, "m_zombieClass") == 6;
+}
+
+bool IsTank(int client)
+{
+	return client > 0 &&
+			client <= MaxClients &&
+			IsClientInGame(client) &&
+			GetClientTeam(client) == 3 &&
+			GetEntProp(client, Prop_Send, "m_zombieClass") == 8;
 }
 
 bool ChargerIsCharging(int charger)

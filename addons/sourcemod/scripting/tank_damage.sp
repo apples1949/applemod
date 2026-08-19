@@ -18,6 +18,8 @@
 
 #define SOUND_PATH "ui/pickup_secret01.wav"
 #define PLUGIN_PREFIX "[TankDamage]"
+/* 排名数据单元格字符串大小(参考插件 l4d2_tank_ranking 的 MAX_SIZE) */
+#define DATA_CELL_SIZE 32
 
 // 日志级别（与旧 logger.inc 行为一致: 按位相加, 1=禁用）
 #define LOG_LEVEL_OFF (1 << 0)
@@ -41,7 +43,7 @@ enum
 public Plugin myinfo =
 {
 	name 			= "Tank Damage Announce 3.0",
-	author 			= "夜羽真白",
+	author 			= "apples1949",
 	description 	= "Tank 伤害统计 3.0 版本: 数据跟随 Tank 实例, 控制权多次交接后死亡仍输出全部数据",
 	version 		= "2024/1/1",
 	url 			= "https://steamcommunity.com/id/saku_ra/"
@@ -61,7 +63,9 @@ ConVar
 int
 	tankHurt[MAXPLAYERS + 1][MAXPLAYERS + 1],
 	// Tank 血量记录（生成时的满血基准, 百分比分母）
-	tankHealth[MAXPLAYERS + 1];
+	tankHealth[MAXPLAYERS + 1],
+	// 击杀 Tank 的生还者索引（0=无击杀者, 用于排名行的 ● 击杀标记）
+	tankSlayer[MAXPLAYERS + 1];
 
 float
 	// 这个 Tank 的存活时间
@@ -307,16 +311,21 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 	if (g_iCurrentTank == victim)
 		g_iCurrentTank = 0;
 
-	/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
-	   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
-	   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
-	if (IsValidSurvivor(attacker) && IsPlayerAlive(attacker)) {
-		int recordedDamage = 0;
-		for (int i = 1; i <= MaxClients; i++)
-			recordedDamage += tankHurt[victim][i];
-		int remainDamage = tankHealth[victim] - recordedDamage;
-		if (remainDamage > 0)
-			tankHurt[victim][attacker] += remainDamage;
+	/* 标记击杀者(排名行的 ● 标记), 与参考插件一致: 攻击者是有效生还者即标记 */
+	if (IsValidSurvivor(attacker)) {
+		tankSlayer[victim] = attacker;
+
+		/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
+		   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
+		   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
+		if (IsPlayerAlive(attacker)) {
+			int recordedDamage = 0;
+			for (int i = 1; i <= MaxClients; i++)
+				recordedDamage += tankHurt[victim][i];
+			int remainDamage = tankHealth[victim] - recordedDamage;
+			if (remainDamage > 0)
+				tankHurt[victim][attacker] += remainDamage;
+		}
 	}
 	/* 计算 Tank 存活时间 */
 	tankLiveTime[victim] = GetGameTime() - tankLiveTime[victim];
@@ -328,7 +337,10 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 		return;
 
 	// 否则创建时钟准备显示 Tank 的伤害报告
-	CreateTimer(DAMAGE_DISPLAY_DELAY, printTankDamageHandler, victim);
+	DataPack pack = new DataPack();
+	pack.WriteCell(victim);
+	pack.WriteString("死亡");
+	CreateTimer(DAMAGE_DISPLAY_DELAY, printTankDamageHandler, pack);
 	hasPrintDamage[victim] = true;
 }
 
@@ -363,18 +375,27 @@ public void roundEndHandler(Event event, const char[] name, bool dontBroadcast) 
 			if (hasPrintDamage[i])
 				continue;
 
-			// 否则创建时钟延迟显示 Tank 伤害
-			CreateTimer(DAMAGE_DISPLAY_DELAY, printTankDamageHandler, i);
+			// 否则创建时钟延迟显示 Tank 伤害(回合结束, 坦克随回合消失)
+			DataPack pack = new DataPack();
+			pack.WriteCell(i);
+			pack.WriteString("消失");
+			CreateTimer(DAMAGE_DISPLAY_DELAY, printTankDamageHandler, pack);
 			hasPrintDamage[i] = true;
 		}
 	}
 }
 
-public Action printTankDamageHandler(Handle timer, int client) {
+public Action printTankDamageHandler(Handle timer, DataPack pack) {
+	pack.Reset();
+	int client = pack.ReadCell();
+	char reason[16];
+	pack.ReadString(reason, sizeof(reason));
+	delete pack;
+
 	if (!IsValidClient(client))
 		return Plugin_Stop;
 
-	doPrintTankDamage(client);
+	doPrintTankDamage(client, reason);
 	return Plugin_Stop;
 }
 
@@ -532,23 +553,26 @@ void transferTankData(int oldTank, int newTank)
 		playerHurts[newTank][i] = playerHurts[oldTank][i];
 		playerHurts[oldTank][i].init();
 	}
-	// 转移满血基准、存活时间与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
+	// 转移满血基准、存活时间、击杀标记与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
 	tankHealth[newTank] = tankHealth[oldTank];
 	tankLiveTime[newTank] = tankLiveTime[oldTank];
+	tankSlayer[newTank] = tankSlayer[oldTank];
 	hasPrintDamage[newTank] = hasPrintDamage[oldTank];
 
 	// 清空旧控制者的数据
 	tankHealth[oldTank] = 0;
 	tankLiveTime[oldTank] = 0.0;
+	tankSlayer[oldTank] = 0;
 	hasPrintDamage[oldTank] = false;
 }
 
 /**
-* 打印 Tank 伤害报告
+* 打印 Tank 伤害报告(输出格式对齐 l4d2_tank_ranking v1.5.9: 标题含总血量/总伤害, 排名行居中排列 + 击杀标记)
 * @param client 需要打印的 Tank 客户端索引
+* @param reason 坦克消失原因(死亡 / 消失), 用于标题行
 * @return void
 **/
-void doPrintTankDamage(int client) {
+void doPrintTankDamage(int client, const char[] reason = "死亡") {
 	if (!g_hAllowAnnounce.BoolValue)
 		return;
 	// 不是有效客户端索引, 返回, 必须要在 DAMAGE_DISPLAY_DELAY 时间后再踢出 Tank
@@ -558,148 +582,175 @@ void doPrintTankDamage(int client) {
 	if (tankHealth[client] < 1)
 		return;
 
-	// 显示标题
-	if (!IsFakeClient(client))
-		CPrintToChatAll("[{green}!{default}] {blue}生还者对 {green}Tank {default}({green}%N{default}) {blue}的伤害统计", client);
-	else
-		CPrintToChatAll("[{green}!{default}] {blue}生还者对 {green}Tank {default}({green}AI{default}) {blue}的伤害统计");
-
-	// 显示 Tank 存活时间
-	if (g_hAllowPrintLiveTime.BoolValue) {
-		if (!IsFakeClient(client))
-			CPrintToChatAll("[{green}!{default}] {green}%N {blue}存活时间：{green}%s", client, getTime(tankLiveTime[client]));
-		else
-			CPrintToChatAll("[{green}!{default}] {green}Tank {blue}存活时间：{green}%s", getTime(tankLiveTime[client]));
+	// 统计在场生还者数量, 汇总总伤害与总承伤
+	int i, index, totalDamage, totalGotDamage;
+	for (i = 1; i <= MaxClients; i++) {
+		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
+			continue;
+		index++;
+		totalDamage += tankHurt[client][i];
+		totalGotDamage += playerHurts[client][i].gotDamage;
 	}
+	// 没有生还者在场, 无需统计
+	if (index < 1)
+		return;
 
-	// 统计在场玩家数量
-	int i, count, index;
-	count = 0;
+	// 收集每个生还者的排名数据: 0=客户端索引, 1=对 Tank 的伤害
+	int[][] survivorDamage = new int[index][2];
 	index = 0;
 	for (i = 1; i <= MaxClients; i++) {
 		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
 			continue;
-		count++;
-	}
-	// 没有生还者在场, 无需统计
-	if (count < 1)
-		return;
-
-	int totalDamage, totalGotDamage, damagePercent;
-	int[][] survivorDamage = new int[count][2];
-
-	for (i = 1; i <= MaxClients; i++) {
-		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
-			continue;
-
-		totalDamage += tankHurt[client][i];
-		totalGotDamage += playerHurts[client][i].gotDamage;
-		damagePercent += getDamageAsPercent(tankHurt[client][i], tankHealth[client]);
-
 		survivorDamage[index][0] = i;
 		survivorDamage[index++][1] = tankHurt[client][i];
-
-		debugAndInfoLog("%s: %N 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, i, client, tankHurt[client][i], playerHurts[client][i].punch, playerHurts[client][i].rock, playerHurts[client][i].iron, playerHurts[client][i].gotDamage);
 	}
-
 	// 按照玩家对 Tank 的伤害降序排序
 	SortCustom2D(survivorDamage, index, sortByDamageDesc);
-	// 如果使用 getDamageAsPercent 获得的总伤害加起来小于 100 而大于 99.5，调整伤害百分比显示
-	int percentAdjust,
-		lastPercent,
-		exactDamagePercent,
-		survivor,
-		damage;
 
-	percentAdjust = 0, lastPercent = 100;
-	if (damagePercent < 100 && float(totalDamage) > (tankHealth[client] - (tankHealth[client] / 200.0)))
-		percentAdjust = 100 - damagePercent;
+	// 过滤不需要显示的行(零伤玩家由 ConVar 控制)
+	int displayCount = 0;
+	for (i = 0; i < index; i++)
+		if (g_hAllowPrintZeroDamage.BoolValue || survivorDamage[i][1] > 0)
+			displayCount++;
+	if (displayCount < 1)
+		return;
 
-	char playerName[MAX_NAME_LENGTH];
-
-	/* 第一遍: 按排序后的顺序计算每人最终显示的百分比（含凑整修正），并统计各数值列的最大位数用于右对齐 */
-	int[] finalPercent = new int[index];
-	bool[] display = new bool[index];
-	int maxDamageWidth = 1,
-		maxPercentWidth = 1,
-		maxPunchWidth = 1,
-		maxRockWidth = 1,
-		maxIronWidth = 1,
-		maxGotDamageWidth = 1,
-		maxGotDamagePercentWidth = 1,
-		width;
-
+	/* 预格式化每行数据(列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列):
+	   0=名次, 1=伤害百分比(1位小数), 2=伤害, 3=名字, 4=击杀标记(●/○), 5=拳, 6=石, 7=铁, 8=承伤, 9=承伤百分比 */
+	char[][][] sData = new char[displayCount][10][DATA_CELL_SIZE];
+	// 百分比分母: 总伤害超过满血基准(含致死一击补偿)时用总伤害, 与参考插件一致
+	int iTotalHealth = totalDamage > tankHealth[client] ? totalDamage : tankHealth[client];
+	int x = 0;
 	for (i = 0; i < index; i++) {
-		// 获取到生还者索引和他对 Tank 的伤害
-		survivor = survivorDamage[i][0];
-		damage = survivorDamage[i][1];
-
-		finalPercent[i] = 0;
-		display[i] = false;
-
-		// 当前生还者无效, 跳过
-		if (!IsValidClient(survivor) || GetClientTeam(survivor) != TEAM_SURVIVOR)
+		int survivor = survivorDamage[i][0];
+		int damage = survivorDamage[i][1];
+		if (damage < 1 && !g_hAllowPrintZeroDamage.BoolValue)
 			continue;
 
-		finalPercent[i] = getDamageAsPercent(damage, tankHealth[client]);
-		if (percentAdjust != 0 && damage > 0 && !isExactPercent(damage, tankHealth[client])) {
-			exactDamagePercent = finalPercent[i] + percentAdjust;
+		FormatEx(sData[x][0], DATA_CELL_SIZE, "%d", x + 1);
+		FormatEx(sData[x][1], DATA_CELL_SIZE, "%.1f", float(damage) / float(iTotalHealth) * 100.0);
+		FormatEx(sData[x][2], DATA_CELL_SIZE, "%d", damage);
+		GetClientName(survivor, sData[x][3], DATA_CELL_SIZE);
+		FormatEx(sData[x][4], DATA_CELL_SIZE, "%s", tankSlayer[client] == survivor ? "●" : "○");
+		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].punch);
+		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].rock);
+		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].iron);
+		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].gotDamage);
+		FormatEx(sData[x][9], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
 
-			if (exactDamagePercent <= lastPercent) {
-				finalPercent[i] = exactDamagePercent;
-				percentAdjust = 0;
-			}
-		}
-
-		// 允许显示零伤人员或不允许显示零伤人员但这个人的伤害大于 0，允许输出
-		if (!(g_hAllowPrintZeroDamage.BoolValue || damage > 0))
-			continue;
-
-		display[i] = true;
-		// 统计各列最大位数, 数字列按最大位数补前导空格右对齐
-		width = digitCount(damage);
-		if (width > maxDamageWidth) maxDamageWidth = width;
-		width = digitCount(finalPercent[i]);
-		if (width > maxPercentWidth) maxPercentWidth = width;
-		width = digitCount(playerHurts[client][survivor].punch);
-		if (width > maxPunchWidth) maxPunchWidth = width;
-		width = digitCount(playerHurts[client][survivor].rock);
-		if (width > maxRockWidth) maxRockWidth = width;
-		width = digitCount(playerHurts[client][survivor].iron);
-		if (width > maxIronWidth) maxIronWidth = width;
-		width = digitCount(playerHurts[client][survivor].gotDamage);
-		if (width > maxGotDamageWidth) maxGotDamageWidth = width;
-		width = digitCount(totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
-		if (width > maxGotDamagePercentWidth) maxGotDamagePercentWidth = width;
+		debugAndInfoLog("%s: %N 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, survivor, client, damage, playerHurts[client][survivor].punch, playerHurts[client][survivor].rock, playerHurts[client][survivor].iron, playerHurts[client][survivor].gotDamage);
+		x++;
 	}
 
-	/* 动态生成右对齐格式串: 每个数值列按该列最大位数补前导空格 */
-	char fmt[512];
-	FormatEx(fmt, sizeof(fmt), "{blue}[{default}%%%dd{blue}({default}%%%dd%%%%{blue})] [{green}拳:{default}%%%dd] [{green}石:{default}%%%dd] [{green}铁:{default}%%%dd] [{green}承伤:{default}%%%dd{blue}({default}%%%dd%%%%{blue})] {green}%%s",
-		maxDamageWidth, maxPercentWidth, maxPunchWidth, maxRockWidth, maxIronWidth, maxGotDamageWidth, maxGotDamagePercentWidth);
+	// 计算各数据列的最大宽度, 用于居中对齐(与参考插件一致: 左右各补 (最大宽度-本行宽度) 个空格)
+	int iMax[10];
+	for (int y = 0; y < 10; y++)
+		iMax[y] = strlen(sData[0][y]);
+	for (x = 1; x < displayCount; x++)
+		for (int y = 0; y < 10; y++)
+			if (strlen(sData[x][y]) > iMax[y])
+				iMax[y] = strlen(sData[x][y]);
 
-	// 打印生还者对 Tank 的伤害：[666( 66%)][拳: 6][石: 6][铁: 6][承伤:666( 66%)] 测试哥（数值列全部右对齐）
-	int gotDamage, gotDamagePercent;
-	for (i = 0; i < index; i++) {
-		if (!display[i])
-			continue;
-
-		survivor = survivorDamage[i][0];
-		damage = survivorDamage[i][1];
-		GetClientName(survivor, playerName, sizeof(playerName));
-		gotDamage = playerHurts[client][survivor].gotDamage;
-		gotDamagePercent = totalGotDamage == 0 ? 0 : RoundToNearest(float(gotDamage) / float(totalGotDamage) * 100.0);
-
-		debugAndInfoLog("%s: Tank %d, 生还索引: %d, 伤害 %d, 百分比 %d%%, 名字 %s", PLUGIN_PREFIX, client, survivor, damage, finalPercent[i], playerName);
-
-		CPrintToChatAll(fmt,
-			damage, finalPercent[i],
-			playerHurts[client][survivor].punch,
-			playerHurts[client][survivor].rock,
-			playerHurts[client][survivor].iron,
-			gotDamage, gotDamagePercent,
-			playerName);
+	// 坦克名字: AI 去掉名字里的 "Tank" 前缀, 人类玩家带队伍色, 与参考插件一致
+	char sIndex[32];
+	if (IsFakeClient(client)) {
+		GetClientName(client, sIndex, sizeof(sIndex));
+		SplitString(sIndex, "Tank", sIndex, sizeof(sIndex));
+	} else {
+		FormatEx(sIndex, sizeof(sIndex), "\x03%N", client);
 	}
+
+	// 标题行: 坦克{名}{原因},总血量:{血量}{+超额伤害}HP. 换行 显示伤害排名:(总伤害:{总数})
+	char sInfo[128], sTemp[2][64];
+	FormatEx(sTemp[0], sizeof(sTemp[]), "\x05总血量\x04:\x03%d", tankHealth[client]);
+	if (totalDamage > tankHealth[client])
+		FormatEx(sTemp[1], sizeof(sTemp[]), "\x04+\x03%d", totalDamage - tankHealth[client]);
+	ImplodeStrings(sTemp, sizeof(sTemp), "", sInfo, sizeof(sInfo));
+	PrintToChatAll("\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", sIndex, reason, sInfo, totalDamage);
+
+	// 显示 Tank 存活时间
+	if (g_hAllowPrintLiveTime.BoolValue) {
+		if (!IsFakeClient(client))
+			CPrintToChatAll("{green}%N {blue}存活时间：{green}%s", client, getTime(tankLiveTime[client]));
+		else
+			CPrintToChatAll("{green}Tank {blue}存活时间：{green}%s", getTime(tankLiveTime[client]));
+	}
+
+	// 逐行输出: 名次(居中):[击杀标记][伤害百分比(居中)%](伤害(居中))[拳(居中)][石(居中)][铁(居中)][承伤(居中)(承伤百分比(居中)%] 名字
+	char row[512], cell[64];
+	for (x = 0; x < displayCount; x++) {
+		row[0] = '\0';
+		// 名次(居中) + 冒号 + [击杀标记]
+		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
+		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][0]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
+		FormatEx(cell, sizeof(cell), "\x05:\x04[\x03%s\x04]\x03[", sData[x][4]);
+		StrCat(row, sizeof(row), cell);
+		// 伤害百分比(居中) + %
+		AppendPad(row, sizeof(row), iMax[1] - strlen(sData[x][1]));
+		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][1]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[1] - strlen(sData[x][1]));
+		FormatEx(cell, sizeof(cell), "\x04%%\x03]");
+		StrCat(row, sizeof(row), cell);
+		// (伤害(居中))
+		FormatEx(cell, sizeof(cell), "\x03(\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[2] - strlen(sData[x][2]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][2]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[2] - strlen(sData[x][2]));
+		FormatEx(cell, sizeof(cell), "\x03)");
+		StrCat(row, sizeof(row), cell);
+		// [拳(居中)] [石(居中)] [铁(居中)]
+		FormatEx(cell, sizeof(cell), "\x03[\x04拳\x03:\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][5]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
+		FormatEx(cell, sizeof(cell), "\x03][\x04石\x03:\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][6]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
+		FormatEx(cell, sizeof(cell), "\x03][\x04铁\x03:\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][7]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
+		// [承伤(居中)(承伤百分比(居中)%]
+		FormatEx(cell, sizeof(cell), "\x03][\x04承伤\x03:\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][8]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
+		FormatEx(cell, sizeof(cell), "\x03(\x04");
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[9] - strlen(sData[x][9]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][9]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[9] - strlen(sData[x][9]));
+		FormatEx(cell, sizeof(cell), "\x04%%\x03)]");
+		StrCat(row, sizeof(row), cell);
+		// 名字
+		FormatEx(cell, sizeof(cell), "\x05%s", sData[x][3]);
+		StrCat(row, sizeof(row), cell);
+
+		PrintToChatAll("%s", row);
+	}
+}
+
+/* 追加 N 个空格(居中对齐填充, 与参考插件 l4d2_tank_ranking 的 IsWritesData 行为一致) */
+void AppendPad(char[] buffer, int size, int count) {
+	if (count < 0)
+		count = 0;
+	for (int i = 0; i < count; i++)
+		StrCat(buffer, size, " ");
 }
 
 /* 按照伤害对 survivorDamage[][] 进行降序排序，伤害相同则按照玩家索引降序排序 */
@@ -710,27 +761,6 @@ int sortByDamageDesc(int[] elem1, int[] elem2, const int[][] array, Handle hndl)
 
 bool isTank(int client) {
 	return IsValidInfected(client) && GetEntProp(client, Prop_Send, "m_zombieClass") == ZC_TANK;
-}
-
-int getDamageAsPercent(int damage, int health) {
-	if (damage < 1)
-		return 0;
-	return RoundToNearest((float(damage) / float(health)) * 100.0);
-}
-
-bool isExactPercent(int damage, int health) {
-	float percent = (float(damage) / float(health)) * 100.0, difference = (getDamageAsPercent(damage, health)) - percent;
-	return FloatAbs(difference) < 0.001 ? true : false;
-}
-
-/* 计算非负整数的十进制位数（0 记为 1 位），用于伤害报告各数值列的右对齐 */
-int digitCount(int value) {
-	int digits = 1;
-	while (value > 9) {
-		value /= 10;
-		digits++;
-	}
-	return digits;
 }
 
 bool isSurvivorFailed() {
@@ -749,6 +779,7 @@ void clearTankDamage(int client) {
 	if (client != INVALID_CLIENT)
 	{
 		tankHealth[client] = 0;
+		tankSlayer[client] = 0;
 		for (i = 1; i <= MaxClients; i++)
 		{
 			tankHurt[client][i] = 0;
@@ -764,6 +795,7 @@ void clearTankDamage(int client) {
 			hasPrintDamage[i] = false;
 			tankHealth[i] = 0;
 			tankLiveTime[i] = 0.0;
+			tankSlayer[i] = 0;
 			for (j = 1; j <= MaxClients; j++)
 			{
 				tankHurt[i][j] = 0;

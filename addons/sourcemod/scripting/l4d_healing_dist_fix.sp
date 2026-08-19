@@ -2,6 +2,9 @@
 // ====================================================================================================
 Change Log:
 
+1.0.3 (19-Aug-2026)
+    - 生还者无法向手持医疗包或除颤器的玩家包扎；包扎过程中被打包者切换到医疗包/除颤器时立即停止包扎。
+
 1.0.2 (25-January-2023)
     - Changed the radius check to be based on player_use_radius cvar.
 
@@ -18,9 +21,9 @@ Change Log:
 // Plugin Info - define
 // ====================================================================================================
 #define PLUGIN_NAME                   "[L4D1 & L4D2] Healing Distance Exploit Fix"
-#define PLUGIN_AUTHOR                 "Mart"
-#define PLUGIN_DESCRIPTION            "Resets the healing progress bar when the healer distance exceeds the maximum allowed"
-#define PLUGIN_VERSION                "1.0.2"
+#define PLUGIN_AUTHOR                 "apples1949"
+#define PLUGIN_DESCRIPTION            "Resets the healing progress bar when the healer distance exceeds the maximum allowed, or when the heal target is holding a first aid kit/defibrillator"
+#define PLUGIN_VERSION                "1.0.3"
 #define PLUGIN_URL                    "https://forums.alliedmods.net/showthread.php?t=341128"
 
 // ====================================================================================================
@@ -183,6 +186,13 @@ void OnPlayerRunCmdPostL4D2(int client, int buttons)
     if (target == client) // Self healing
         return;
 
+    // 目标手持医疗包或除颤器时禁止包扎；包扎过程中目标切换时立即停止
+    if (IsValidClientIndex(target) && IsHoldingHealItem(target))
+    {
+        CancelL4D2HealAction(client, target);
+        return;
+    }
+
     float vPos[3];
     GetClientEyePosition(client, vPos);
 
@@ -191,20 +201,7 @@ void OnPlayerRunCmdPostL4D2(int client, int buttons)
 
     if (!ge_bValidRange[target])
     {
-        SetEntProp(client, Prop_Send, "m_useActionTarget", 0);
-        SetEntProp(client, Prop_Send, "m_useActionOwner", 0);
-        SetEntProp(client, Prop_Send, "m_iCurrentUseAction", 0);
-        SetEntPropFloat(client, Prop_Send, "m_flProgressBarDuration", 0.0);
-        SetEntPropFloat(client, Prop_Send, "m_flProgressBarStartTime", 0.0);
-
-        if (IsValidClientIndex(target))
-        {
-            SetEntProp(target, Prop_Send, "m_useActionTarget", 0);
-            SetEntProp(target, Prop_Send, "m_useActionOwner", 0);
-            SetEntProp(target, Prop_Send, "m_iCurrentUseAction", 0);
-            SetEntPropFloat(target, Prop_Send, "m_flProgressBarDuration", 0.0);
-            SetEntPropFloat(target, Prop_Send, "m_flProgressBarStartTime", 0.0);
-        }
+        CancelL4D2HealAction(client, target);
     }
     else
     {
@@ -225,6 +222,13 @@ void OnPlayerRunCmdPostL4D1(int client)
     if (target == client) // Self healing
         return;
 
+    // 目标手持医疗包或除颤器时禁止包扎；包扎过程中目标切换时立即停止
+    if (IsValidClientIndex(target) && IsHoldingHealItem(target))
+    {
+        CancelL4D1HealAction(client, target);
+        return;
+    }
+
     float vPos[3];
     GetClientEyePosition(client, vPos);
 
@@ -233,16 +237,7 @@ void OnPlayerRunCmdPostL4D1(int client)
 
     if (!ge_bValidRange[target])
     {
-        SetEntProp(client, Prop_Send, "m_healTarget", 0);
-        SetEntProp(client, Prop_Send, "m_iProgressBarDuration", 0);
-        SetEntPropFloat(client, Prop_Send, "m_flProgressBarStartTime", 0.0);
-
-        if (IsValidClientIndex(target))
-        {
-            SetEntProp(target, Prop_Send, "m_healOwner", 0);
-            SetEntProp(target, Prop_Send, "m_iProgressBarDuration", 0);
-            SetEntPropFloat(target, Prop_Send, "m_flProgressBarStartTime", 0.0);
-        }
+        CancelL4D1HealAction(client, target);
     }
     else
     {
@@ -294,4 +289,65 @@ Action CmdPrintCvars(int client, int args)
 bool IsValidClientIndex(int client)
 {
     return (1 <= client <= MaxClients);
+}
+
+/**
+ * Cancels the L4D2 healing use action on the healer and its target.
+ *
+ * @param client        Healer client index.
+ * @param target        Heal target client index.
+ */
+void CancelL4D2HealAction(int client, int target)
+{
+    SetEntProp(client, Prop_Send, "m_useActionTarget", 0);
+    SetEntProp(client, Prop_Send, "m_useActionOwner", 0);
+    SetEntProp(client, Prop_Send, "m_iCurrentUseAction", 0);
+    SetEntPropFloat(client, Prop_Send, "m_flProgressBarDuration", 0.0);
+    SetEntPropFloat(client, Prop_Send, "m_flProgressBarStartTime", 0.0);
+
+    if (IsValidClientIndex(target))
+    {
+        SetEntProp(target, Prop_Send, "m_useActionTarget", 0);
+        SetEntProp(target, Prop_Send, "m_useActionOwner", 0);
+        SetEntProp(target, Prop_Send, "m_iCurrentUseAction", 0);
+        SetEntPropFloat(target, Prop_Send, "m_flProgressBarDuration", 0.0);
+        SetEntPropFloat(target, Prop_Send, "m_flProgressBarStartTime", 0.0);
+    }
+}
+
+/**
+ * Cancels the L4D1 healing action on the healer and its target.
+ *
+ * @param client        Healer client index.
+ * @param target        Heal target client index.
+ */
+void CancelL4D1HealAction(int client, int target)
+{
+    SetEntProp(client, Prop_Send, "m_healTarget", 0);
+    SetEntProp(client, Prop_Send, "m_iProgressBarDuration", 0);
+    SetEntPropFloat(client, Prop_Send, "m_flProgressBarStartTime", 0.0);
+
+    if (IsValidClientIndex(target))
+    {
+        SetEntProp(target, Prop_Send, "m_healOwner", 0);
+        SetEntProp(target, Prop_Send, "m_iProgressBarDuration", 0);
+        SetEntPropFloat(target, Prop_Send, "m_flProgressBarStartTime", 0.0);
+    }
+}
+
+/**
+ * Checks if the client is currently holding a first aid kit or defibrillator in their hands.
+ *
+ * @param client        Client index.
+ * @return              True if holding a first aid kit or defibrillator, false otherwise.
+ */
+bool IsHoldingHealItem(int client)
+{
+    if (!IsClientInGame(client))
+        return false;
+
+    char sWeapon[32];
+    GetClientWeapon(client, sWeapon, sizeof(sWeapon));
+
+    return (strcmp(sWeapon, "weapon_first_aid_kit") == 0 || strcmp(sWeapon, "weapon_defibrillator") == 0);
 }

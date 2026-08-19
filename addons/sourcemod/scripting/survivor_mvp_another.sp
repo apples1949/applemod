@@ -322,39 +322,27 @@ void roundEndPrint() {
 }
 
 /**
-* 将整数转为全角数字 (０-９) 并右对齐补全角空格到指定全角字符宽度
-* L4D2 聊天是比例字体: 半角空格与半角数字宽度不等, 而全角字符 (汉字/全角数字/全角空格) 固定等宽,
-* 因此表格数值必须用全角字符定宽, 各行列才能对齐
-* @param buffer 输出缓冲区
+* 参考豆瓣酱 l4d2_tank_ranking 的对齐方式: 用空格对称补位, 把字符串居中到指定宽度
+* 用法: 先按列取所有行的最大长度, 每列用本函数补齐到 最大长度+2, 保证各列宽一致
+* @param output 输出缓冲区
 * @param maxlen 缓冲区大小
-* @param value  数值 (负数按 0 处理)
-* @param width  全角字符宽度
+* @param value  原字符串
+* @param width  目标总宽度 (含两侧空格)
 * @return void
 **/
-stock void FormatFullWidthNumber(char[] buffer, int maxlen, int value, int width)
+stock void CenterAlignString(char[] output, int maxlen, const char[] value, int width)
 {
-	if (value < 0) { value = 0; }
-
-	char num[16];
-	IntToString(value, num, sizeof(num));
-	int digits = strlen(num);
-
+	int len = strlen(value);
+	int padLeft = (width - len) / 2;
+	int padRight = width - len - padLeft;
 	int out = 0;
-	// 右对齐: 前面补全角空格 (U+3000 = E3 80 80)
-	for (int i = digits; i < width && out + 3 < maxlen; i++)
-	{
-		buffer[out++] = 0xE3;
-		buffer[out++] = 0x80;
-		buffer[out++] = 0x80;
-	}
-	// 全角数字 (０ U+FF10 = EF BC 90 .. ９ U+FF19 = EF BC 99)
-	for (int i = 0; i < digits && out + 3 < maxlen; i++)
-	{
-		buffer[out++] = 0xEF;
-		buffer[out++] = 0xBC;
-		buffer[out++] = 0x90 + (num[i] - '0');
-	}
-	buffer[out] = '\0';
+	for (int i = 0; i < padLeft && out < maxlen - 1; i++)
+		output[out++] = ' ';
+	for (int i = 0; i < len && out < maxlen - 1; i++)
+		output[out++] = value[i];
+	for (int i = 0; i < padRight && out < maxlen - 1; i++)
+		output[out++] = ' ';
+	output[out] = '\0';
 }
 
 /**
@@ -377,34 +365,60 @@ void printMvpStatus(int client)
 	PrintToChat(client, "\x03[生还者 MVP 统计]");
 
 	char buffer[128], temp[64], toPrint[256];
+	if (index < 1) { return; }	// 没有生还者不打印表格
+
+	// 参考豆瓣酱 tank_ranking 的对齐方式: ① 先收集所有行数据 ② 按列取最大长度 ③ 每列居中补空格到相同宽度再打印
+	char[][][] sData = new char[index][5][32];	// 5 列: 特感/丧尸/伤害/黑被黑/爆头率
+	int[] iTemp = new int[5];
+
+	// ① 收集每行的列数据
 	for (i = 0; i < index; i++) {
-		// 格式化排序后一个玩家的 MVP 信息 (全角数字 + 全角空格定宽, 保证每行列对齐)
+		if (g_hAllowShowSi.BoolValue)
+			FormatEx(sData[i][0], 32, "%d", playerInfos[players[i]].siCount);
+		if (g_hAllowShowCi.BoolValue)
+			FormatEx(sData[i][1], 32, "%d", playerInfos[players[i]].ciCount);
+		if (g_hAllowShowTotalDmg.BoolValue)
+			FormatEx(sData[i][2], 32, "%d", playerInfos[players[i]].totalDamage);
+		if (g_hAllowShowFF.BoolValue)
+			FormatEx(sData[i][3], 32, "%d/%d", playerInfos[players[i]].ffCount, playerInfos[players[i]].gotFFCount);
+		if (g_hAllowShowAccuracy.BoolValue) {
+			float accuracy = playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount == 0 ? 0.0 : float(playerInfos[players[i]].headShotCount) / float(playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount);
+			FormatEx(sData[i][4], 32, "%.0f%%", accuracy * 100.0);
+		}
+	}
+
+	// ② 计算每列的最大长度
+	for (i = 0; i < index; i++)
+		for (int y = 0; y < 5; y++)
+			if (strlen(sData[i][y]) > iTemp[y])
+				iTemp[y] = strlen(sData[i][y]);
+
+	// ③ 每列按 最大长度+2 居中补空格后逐行打印
+	for (i = 0; i < index; i++) {
+		FormatEx(toPrint, sizeof(toPrint), "");
 		if (g_hAllowShowSi.BoolValue) {
-			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].siCount, 3);
-			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%s　", temp);
+			CenterAlignString(temp, sizeof(temp), sData[i][0], iTemp[0] + 2);
+			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%s", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].ciCount, 3);
-			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%s　", temp);
+			CenterAlignString(temp, sizeof(temp), sData[i][1], iTemp[1] + 2);
+			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%s", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].totalDamage, 5);
-			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%s　", temp);
+			CenterAlignString(temp, sizeof(temp), sData[i][2], iTemp[2] + 2);
+			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%s", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			char ffNum[16];
-			FormatFullWidthNumber(ffNum, sizeof(ffNum), playerInfos[players[i]].ffCount, 3);
-			FormatFullWidthNumber(temp, sizeof(temp), playerInfos[players[i]].gotFFCount, 3);
-			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%s／%s　", ffNum, temp);
+			CenterAlignString(temp, sizeof(temp), sData[i][3], iTemp[3] + 2);
+			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%s", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
-			float accuracy = playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount == 0 ? 0.0 : float(playerInfos[players[i]].headShotCount) / float(playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount);
-			FormatFullWidthNumber(temp, sizeof(temp), RoundToNearest(accuracy * 100.0), 3);
-			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%s％　", temp);
+			CenterAlignString(temp, sizeof(temp), sData[i][4], iTemp[4] + 2);
+			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%s", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		FormatEx(buffer, sizeof(buffer), "\x03%N", players[i]);
@@ -412,7 +426,6 @@ void printMvpStatus(int client)
 
 		// 打印一个玩家的 MVP 信息
 		PrintToChat(client, "%s", toPrint);
-		FormatEx(toPrint, sizeof(toPrint), "");
 	}
 }
 

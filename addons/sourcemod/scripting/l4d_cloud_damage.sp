@@ -83,9 +83,9 @@ public void OnPluginStart()
 	g_hCvarModes =	CreateConVar(				"l4d_cloud_modes",				"",		"在这些游戏模式下启用插件，用逗号分隔（没有空格）（空=全部）", CVAR_FLAGS );
 	g_hCvarModesOff = CreateConVar(				"l4d_cloud_modes_off",			"",		"在这些游戏模式下禁用插件，用逗号分隔（没有空格）（空=无）", CVAR_FLAGS );
 	g_hCvarModesTog = CreateConVar(				"l4d_cloud_modes_tog",			"0",	"在这些游戏模式中启用插件。0=全部，1=战役，2=生还者，4=对抗，8=清道夫。将数字相加", CVAR_FLAGS );
-	g_hCvarCloudDamage = CreateConVar(			"l4d_cloud_damage_damage", 		"2.0", 	"毒烟每秒扣多少血", CVAR_FLAGS);
-	g_hCvarCloudDuration = CreateConVar(		"l4d_cloud_damage_time", 		"14.0", "毒烟持续多少伤害多少秒?", CVAR_FLAGS);
-	g_hCvarCloudRadius = CreateConVar(			"l4d_cloud_damage_radius", 		"175", 	"毒烟半径", CVAR_FLAGS);
+	g_hCvarCloudDamage = CreateConVar(			"l4d_cloud_damage_damage", 		"1.0", 	"毒烟每秒扣多少血", CVAR_FLAGS);
+	g_hCvarCloudDuration = CreateConVar(		"l4d_cloud_damage_time", 		"7.0", "毒烟持续多少伤害多少秒?", CVAR_FLAGS);
+	g_hCvarCloudRadius = CreateConVar(			"l4d_cloud_damage_radius", 		"150", 	"毒烟半径", CVAR_FLAGS);
 	g_hCvarCloudMeleeSlowEnabled = CreateConVar("l4d_cloud_meleeslow_enabled", 	"0", 	"启用/禁用毒烟近战缓慢效果", CVAR_FLAGS);
 	g_hCvarCloudShake = CreateConVar(			"l4d_cloud_shake_enabled", 		"1", 	"启用/禁用毒烟晃动屏幕", CVAR_FLAGS);
 	g_hCvarCloudBlocksRevive = CreateConVar(	"l4d_cloud_blocks_revive", 		"0", 	"启用/禁用毒烟暂停恢复", CVAR_FLAGS);

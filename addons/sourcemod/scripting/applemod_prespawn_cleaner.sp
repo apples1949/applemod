@@ -3,10 +3,10 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 #include <left4dhooks>
-#include <readyup-applemod>
 
-#define PLUGIN_VERSION "1.2.0"
+#define PLUGIN_VERSION "1.3.1"
 #define PLUGIN_TAG "[AppleMod 开局清尸]"
 
 #define TEAM_INFECTED      3
@@ -40,7 +40,8 @@ ConVar
     g_hChunk = null,
     g_hInterval = null,
     g_hPause = null,
-    g_hVerbose = null;
+    g_hVerbose = null,
+    g_hInstant = null;
 
 ScanState g_eState = ScanState_Idle;
 
@@ -57,7 +58,8 @@ bool
     g_bClientFlowAvailable = true,
     g_bNavAreaFlowAvailable = true,
     g_bFlowFallbackWarned = false,
-    g_bOneShot = false;
+    g_bOneShot = false,
+    g_bInstantCommons = true;
 
 int
     g_iMode = MODE_LOOP,
@@ -79,7 +81,7 @@ public Plugin myinfo =
 {
     name = "Applemod Pre-Spawn Zombie Cleaner",
     author = "apples1949",
-    description = "玩家离开起点安全区域前分块循环清理地图僵尸，或 readyup 倒计时触发一轮清理；范围可选全图清理或按当前路程前方 N% 清理。AppleMod 配置专属。",
+    description = "玩家离开起点安全区域前分块循环清理地图僵尸，或 readyup 倒计时触发一轮清理；支持参考脚本的普通僵尸即时删除（RemoveEntity），范围可选全图清理或按当前路程前方 N% 清理。AppleMod 配置专属。",
     version = PLUGIN_VERSION,
     url = ""
 };
@@ -105,7 +107,7 @@ public void OnPluginStart()
 
     g_hMode = CreateConVar( \
         "applemod_preclean_mode", \
-        "0", \
+        "2", \
         "清理触发方式：0=离开安全区前循环清理（默认）, 1=循环清理（兼容旧配置，等同0）, 2=readyup 进入倒计时后清理一轮。", \
         FCVAR_NOTIFY, true, 0.0, true, 2.0 \
     );
@@ -173,6 +175,13 @@ public void OnPluginStart()
         FCVAR_NOTIFY, true, 0.0, true, 1.0 \
     );
 
+    g_hInstant = CreateConVar( \
+        "applemod_preclean_instant", \
+        "0", \
+        "是否使用参考脚本的即时删尸方式：普通僵尸一生成就在 SpawnPost 用 RemoveEntity 删除（仍在清理阶段时）。0=否, 1=是。", \
+        FCVAR_NOTIFY, true, 0.0, true, 1.0 \
+    );
+
     g_hEnable.AddChangeHook(CvarChanged);
     g_hMode.AddChangeHook(CvarChanged);
     g_hRange.AddChangeHook(CvarChanged);
@@ -184,6 +193,7 @@ public void OnPluginStart()
     g_hInterval.AddChangeHook(CvarChanged);
     g_hPause.AddChangeHook(CvarChanged);
     g_hVerbose.AddChangeHook(CvarChanged);
+    g_hInstant.AddChangeHook(CvarChanged);
 
     ReadCvars();
 
@@ -273,6 +283,7 @@ void ReadCvars()
     g_fInterval = g_hInterval.FloatValue;
     g_fPause = g_hPause.FloatValue;
     g_bVerbose = g_hVerbose.BoolValue;
+    g_bInstantCommons = g_hInstant.BoolValue;
 
     if (g_iMode != MODE_LOOP && g_iMode != MODE_LOOP_LEGACY && g_iMode != MODE_READYUP_COUNTDOWN) {
         g_iMode = MODE_LOOP;
@@ -303,6 +314,71 @@ bool IsNativeAvailable(const char[] name)
 bool IsFlowRange()
 {
     return (g_iRange == RANGE_FLOW);
+}
+
+bool IsCleaningActive()
+{
+    if (!g_bEnabled || !g_bMapReady || g_bLeftSafeArea) {
+        return false;
+    }
+
+    // 倒计时一轮模式：只在触发的那一轮扫描期间视为“清理中”。
+    if (g_iMode == MODE_READYUP_COUNTDOWN) {
+        return (g_bOneShot || g_eState == ScanState_Sweeping);
+    }
+
+    // 循环模式：安全区前一直视为清理中（包括两遍之间的暂停）。
+    return true;
+}
+
+bool ShouldCleanCommonNow(int entity)
+{
+    if (g_iRange == RANGE_ALL) {
+        return true;
+    }
+
+    // flow 不可用时按原策略退回全图清理。
+    if (g_fFlowLimit < 0.0) {
+        return true;
+    }
+
+    float flow = L4D_GetInfectedFlowDistance(entity);
+    return (flow <= g_fFlowLimit);
+}
+
+// 参考 l4d2_remove_zombie.sp：普通僵尸一生成就在 SpawnPost 直接 RemoveEntity。
+public void OnEntityCreated(int entity, const char[] classname)
+{
+    if (!g_bInstantCommons || !g_bCleanCommons || !IsCleaningActive()) {
+        return;
+    }
+
+    if (StrEqual(classname, "infected", false) && IsValidEntity(entity)) {
+        SDKHook(entity, SDKHook_SpawnPost, OnInfectedSpawnPost);
+    }
+}
+
+public void OnInfectedSpawnPost(int entity)
+{
+    if (!IsValidEntity(entity) || entity <= MaxClients) {
+        return;
+    }
+
+    if (!g_bInstantCommons || !g_bCleanCommons || !IsCleaningActive()) {
+        return;
+    }
+
+    char classname[16];
+    if (!GetEntityClassname(entity, classname, sizeof(classname)) || !StrEqual(classname, "infected", false)) {
+        return;
+    }
+
+    if (!ShouldCleanCommonNow(entity)) {
+        return;
+    }
+
+    RemoveEntity(entity);
+    g_iKilledThisSweep++;
 }
 
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -649,7 +725,7 @@ void TryCleanCommon(int entity)
         }
     }
 
-    AcceptEntityInput(entity, "Kill");
+    RemoveEntity(entity);
     g_iKilledThisSweep++;
 }
 
@@ -663,7 +739,7 @@ void TryCleanWitch(int entity)
         }
     }
 
-    AcceptEntityInput(entity, "Kill");
+    RemoveEntity(entity);
     g_iKilledThisSweep++;
 }
 

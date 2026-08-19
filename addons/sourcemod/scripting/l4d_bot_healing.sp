@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.4"
+#define PLUGIN_VERSION 		"2.5"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,10 @@
 
 ========================================================================================
 	Change Log:
+
+2.5 (19-Aug-2026)
+	- 生还者无法向手持医疗包或除颤器的玩家包扎。
+	- 包扎他人过程中，若被打包者切换到医疗包或除颤器，立即停止包扎。
 
 2.4 (25-Jan-2026)
 	- Fixed rarely throwing errors for invalid clients.
@@ -107,7 +111,7 @@ native int Heartbeat_GetRevives(int client);
 public Plugin myinfo =
 {
 	name = "[L4D & L4D2] Bot Healing Values",
-	author = "SilverShot",
+	author = "apples1949",
 	description = "Set the health value bots require before using First Aid, Pain Pills or Adrenaline.",
 	version = PLUGIN_VERSION,
 	url = "https://forums.alliedmods.net/showthread.php?t=338889"
@@ -278,27 +282,35 @@ void GetCvars()
 // ====================================================================================================
 public void OnActionCreated(BehaviorAction action, int actor, const char[] name)
 {
-    // Validate allowed
-	if( !g_bCvarDieFirst && !g_bCvarDiePills )
-		return;
-
 	if( actor > 0 && actor <= MaxClients && strncmp(name, "Survivor", 8) == 0 )
 	{
 		/* Hooking self healing action (when bot wants to heal self) */
-		if( g_bCvarDieFirst && strcmp(name[8], "HealSelf") == 0 )
-			action.OnStart = OnSelfActionFirst;
+		if( strcmp(name[8], "HealSelf") == 0 )
+		{
+			if( g_bCvarDieFirst )
+				action.OnStart = OnSelfActionFirst;
+		}
 
 		/* Hooking friend healing action (when bot wants to heal someone) */
-		else if( g_bCvarDieFirst && strcmp(name[8], "HealFriend") == 0 )
+		else if( strcmp(name[8], "HealFriend") == 0 )
+		{
 			action.OnStartPost = OnFriendActionFirst;
+			action.UpdatePost = OnFriendActionUpdate;
+		}
 
 		/* Hooking take pills action (when bot wants to take pills) */
-		else if( g_bCvarDiePills && strcmp(name[8], "TakePills") == 0 )
-			action.OnStart = OnSelfActionPills;
+		else if( strcmp(name[8], "TakePills") == 0 )
+		{
+			if( g_bCvarDiePills )
+				action.OnStart = OnSelfActionPills;
+		}
 
 		/* Hooking give pills action (when bot wants to give pills) */
-		else if( g_bCvarDiePills && strcmp(name[8], "GivePillsToFriend") == 0 )
-			action.OnStartPost = OnFriendActionPills;
+		else if( strcmp(name[8], "GivePillsToFriend") == 0 )
+		{
+			if( g_bCvarDiePills )
+				action.OnStartPost = OnFriendActionPills;
+		}
 	}
 }
 
@@ -328,13 +340,42 @@ Action OnFriendActionFirst(BehaviorAction action, int actor, BehaviorAction prio
 {
 	int target = action.Get(0x34) & 0xFFF;
 
-	bool allow = g_bLeft4Dead2 ? GetEntProp(target, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(target) : GetEntProp(target, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
+	if( target < 1 || target > MaxClients || !IsClientInGame(target) )
+		return Plugin_Continue;
 
-	if( !g_bExtensionScramble && allow && GetClientHealth(target) + L4D_GetPlayerTempHealth(target) > g_fCvarFirst )
+	bool allow = true;
+
+	if( g_bCvarDieFirst )
+	{
+		allow = g_bLeft4Dead2 ? GetEntProp(target, Prop_Send, "m_bIsOnThirdStrike") == 1 : (g_bPluginHeartbeat ? Heartbeat_GetRevives(target) : GetEntProp(target, Prop_Send, "m_currentReviveCount")) >= g_iCvarMaxIncap;
+
+		if( !g_bExtensionScramble && allow && GetClientHealth(target) + L4D_GetPlayerTempHealth(target) > g_fCvarFirst )
+			allow = false;
+	}
+
+	/* 目标手持医疗包或除颤器时，禁止为其包扎 */
+	if( allow && L4D_IsHoldingHealItem(target) )
 		allow = false;
 
 	result.type = allow ? CONTINUE : DONE;
 	return Plugin_Changed;
+}
+
+/* 包扎过程中目标切换到医疗包或除颤器时，立即停止包扎 */
+Action OnFriendActionUpdate(BehaviorAction action, int actor, float interval, ActionResult result)
+{
+	int target = action.Get(0x34) & 0xFFF;
+
+	if( target < 1 || target > MaxClients || !IsClientInGame(target) )
+		return Plugin_Continue;
+
+	if( L4D_IsHoldingHealItem(target) )
+	{
+		result.type = DONE;
+		return Plugin_Changed;
+	}
+
+	return Plugin_Continue;
 }
 
 Action OnFriendActionPills(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
@@ -359,4 +400,16 @@ stock int L4D_GetPlayerTempHealth(int client)
 {
 	int tempHealth = RoundToCeil(GetEntPropFloat(client, Prop_Send, "m_healthBuffer") - ((GetGameTime() - GetEntPropFloat(client, Prop_Send, "m_healthBufferTime")) * g_fCvarPainPillsDecay)) - 1;
 	return tempHealth < 0 ? 0 : tempHealth;
+}
+
+/* 检查玩家当前是否手持医疗包或除颤器 */
+stock bool L4D_IsHoldingHealItem(int client)
+{
+	if( client < 1 || client > MaxClients || !IsClientInGame(client) )
+		return false;
+
+	char sWeapon[32];
+	GetClientWeapon(client, sWeapon, sizeof(sWeapon));
+
+	return strcmp(sWeapon, "weapon_first_aid_kit") == 0 || strcmp(sWeapon, "weapon_defibrillator") == 0;
 }

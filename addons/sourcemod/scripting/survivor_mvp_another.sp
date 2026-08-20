@@ -393,32 +393,32 @@ void printMvpStatus(int client)
 			if (strlen(sData[i][y]) > iTemp[y])
 				iTemp[y] = strlen(sData[i][y]);
 
-	// ③ 每列按 最大长度+2 居中补空格后逐行打印
+	// ③ 每列按 最大长度+2 居中补空格, 并用括号框住分隔 (参考豆瓣酱 tank_ranking 的 [ 数值 ] 风格), 逐行打印
 	for (i = 0; i < index; i++) {
 		FormatEx(toPrint, sizeof(toPrint), "");
 		if (g_hAllowShowSi.BoolValue) {
 			CenterAlignString(temp, sizeof(temp), sData[i][0], iTemp[0] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03特感\x04%s", temp);
+			FormatEx(buffer, sizeof(buffer), "\x03特感[\x04%s\x03] ", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowCi.BoolValue) {
 			CenterAlignString(temp, sizeof(temp), sData[i][1], iTemp[1] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03丧尸\x04%s", temp);
+			FormatEx(buffer, sizeof(buffer), "\x03丧尸[\x04%s\x03] ", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
 			CenterAlignString(temp, sizeof(temp), sData[i][2], iTemp[2] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03伤害\x04%s", temp);
+			FormatEx(buffer, sizeof(buffer), "\x03伤害[\x04%s\x03] ", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowFF.BoolValue) {
 			CenterAlignString(temp, sizeof(temp), sData[i][3], iTemp[3] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑\x04%s", temp);
+			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑[\x04%s\x03] ", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
 			CenterAlignString(temp, sizeof(temp), sData[i][4], iTemp[4] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03爆头率\x04%s", temp);
+			FormatEx(buffer, sizeof(buffer), "\x03爆头率[\x04%s\x03] ", temp);
 			StrCat(toPrint, sizeof(toPrint), buffer);
 		}
 		FormatEx(buffer, sizeof(buffer), "\x03%N", players[i]);

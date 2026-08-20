@@ -3,13 +3,14 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.3"
+#define PLUGIN_VERSION	"1.5"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
 #define EXPLODE_SAME_WINDOW_TIME	0.5	// 同一次爆炸事件的最大到达时间差(秒): 窗口开启超过此时长后到达的事件视为新一次爆炸
 #define EXPLODE_SCAN_INTERVAL	0.25	// 爆炸窗口结算扫描间隔(秒)
 #define TANK_HIT_WINDOW_TIME	0.5		// Tank 左键一爪/拍打移动物品的一次性判定窗口(秒)
+#define HIGHLIGHT_LOG_FILE	"l4d2_infected_highlight.log"	// 专门的检测记录日志(位于 addons/sourcemod/logs/)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
 
 // ====================================================================================================
@@ -83,6 +84,8 @@ enum TankHitType
 	TankHit_Claw,		// 左键爪子
 	TankHit_Prop		// 拍打移动物品
 }
+
+char g_sTankTypeName[TankHitType][8] = { "爪击", "拍物" };
 
 bool  g_bTankHitActive[TankHitType][MAXPLAYERS+1];	// 当前是否处于一次攻击窗口内
 float g_fTankHitStart[TankHitType][MAXPLAYERS+1];	// 本次攻击窗口起始时间
@@ -441,13 +444,25 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	}
 
 	// Tank 左键一爪 / 拍打移动物品
-	if (!IsTank(attacker) || !IsPlayerAlive(attacker) || event.GetInt("dmg_health") < 1)
+	if (!IsTank(attacker) || !IsPlayerAlive(attacker))
 		return;
 
 	char weapon[32];
 	event.GetString("weapon", weapon, sizeof(weapon));
+	int dmg = event.GetInt("dmg_health");
 
-	if (strcmp(weapon, "tank_claw") == 0)
+	// 专门的日志文件: 记录每次 Tank 造成伤害的原始事件数据, 用于排查提示不触发
+	char sTankName[MAX_NAME_LENGTH], sVictimName[MAX_NAME_LENGTH];
+	LogClientName(attacker, sTankName, sizeof(sTankName));
+	LogClientName(client, sVictimName, sizeof(sVictimName));
+
+	LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank检测] attacker=%d(%s) weapon=\"%s\" dmg=%d victim=%d(%s)",
+		attacker, sTankName, weapon, dmg, client, sVictimName);
+
+	if (dmg < 1)
+		return;
+
+	if (strcmp(weapon, "tank_claw") == 0 || strcmp(weapon, "weapon_tank_claw") == 0)
 	{
 		CountTankHit(TankHit_Claw, attacker, client);
 	}
@@ -616,6 +631,8 @@ void CountTankHit(TankHitType type, int tank, int victim)
 		g_bTankHitActive[type][tank] = true;
 		g_fTankHitStart[type][tank] = now;
 		CreateTankHitTimer(type, tank);
+
+		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank窗口] %s tank=%d 窗口开启", g_sTankTypeName[type], tank);
 	}
 	else if (now - g_fTankHitStart[type][tank] > TANK_HIT_WINDOW_TIME)
 	{
@@ -624,12 +641,16 @@ void CountTankHit(TankHitType type, int tank, int victim)
 		g_bTankHitActive[type][tank] = true;
 		g_fTankHitStart[type][tank] = now;
 		CreateTankHitTimer(type, tank);
+
+		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank窗口] %s tank=%d 窗口重开", g_sTankTypeName[type], tank);
 	}
 
 	if (!g_bTankHitVictim[type][tank][victim])
 	{
 		g_bTankHitVictim[type][tank][victim] = true;
 		g_iTankHitCount[type][tank]++;
+
+		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank计数] %s tank=%d count=%d", g_sTankTypeName[type], tank, g_iTankHitCount[type][tank]);
 	}
 }
 
@@ -650,20 +671,34 @@ public Action Timer_EndTankHit(Handle timer, DataPack pack)
 
 	int tank = GetClientOfUserId(userid);
 
-	if (tank > 0 && g_bTankHitActive[type][tank] && g_iTankHitCount[type][tank] >= g_iTankHitMin[type])
+	if (tank > 0 && g_bTankHitActive[type][tank])
 	{
-		char name[MAX_NAME_LENGTH];
-		GetActorName(tank, name, sizeof(name));
+		char sTankName[MAX_NAME_LENGTH];
+		LogClientName(tank, sTankName, sizeof(sTankName));
 
-		if (type == TankHit_Claw)
+		if (g_iTankHitCount[type][tank] >= g_iTankHitMin[type])
 		{
-			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍中\x04%s\x05名生还者",
-				name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+			LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank提示] %s tank=%d(%s) count=%d 达到阈值 → 输出提示",
+				g_sTankTypeName[type], tank, sTankName, g_iTankHitCount[type][tank]);
+
+			char name[MAX_NAME_LENGTH];
+			GetActorName(tank, name, sizeof(name));
+
+			if (type == TankHit_Claw)
+			{
+				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍中\x04%s\x05名生还者",
+					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+			}
+			else
+			{
+				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品命中\x04%s\x05名生还者",
+					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+			}
 		}
 		else
 		{
-			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品命中\x04%s\x05名生还者",
-				name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
+			LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank结算] %s tank=%d(%s) count=%d 低于阈值%d → 不输出",
+				g_sTankTypeName[type], tank, sTankName, g_iTankHitCount[type][tank], g_iTankHitMin[type]);
 		}
 	}
 
@@ -784,9 +819,23 @@ void PrintToInfectedTeam(const char[] format, any ...)
 	char buffer[256];
 	VFormat(buffer, sizeof(buffer), format, 2);
 
+	int count = 0;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i) && GetClientTeam(i) != 2 && !IsFakeClient(i))
+		{
 			PrintToChat(i, buffer);
+			count++;
+		}
 	}
+
+	LogToFileEx(HIGHLIGHT_LOG_FILE, "[提示输出] 发送给%d名玩家: %s", count, buffer);
+}
+
+void LogClientName(int client, char[] buffer, int maxlen)
+{
+	if (client > 0 && client <= MaxClients && IsClientInGame(client))
+		GetClientName(client, buffer, maxlen);
+	else
+		strcopy(buffer, maxlen, "?");
 }

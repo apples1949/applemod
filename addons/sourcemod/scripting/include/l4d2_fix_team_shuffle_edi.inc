@@ -7,8 +7,6 @@
  * 当队伍还原流程结束（全部还原成功、5 秒检查通过、超时或主动中止且允许
  * 触发前向）时触发。
  *
- * 注意：与 l4d_team_unscramble 的 R2comp_OnUnscrambleEnd 一致，此前向在
- * 记录表清空、换队锁定解除之前触发；回调执行期间
  * L4D2_FixTeamShuffle_IsFixComplete 仍返回 false。若回调中需要切换队伍，
  * 请在前向返回后延迟到下一帧执行。
  */

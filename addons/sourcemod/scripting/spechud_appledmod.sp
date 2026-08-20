@@ -1139,7 +1139,7 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	if (tank == -1 || !IsPlayerAlive(tank))
 		return false;
 
-	static char info[64];
+	static char info[96];
 	static char name[MAX_NAME_LENGTH];
 
 	if (bTankHUD)
@@ -1242,9 +1242,9 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		DrawPanelText(hSpecHud, info);
 	}
 
-	if (bTankHUD && FindConVar("l4d_tankswap_timelimit") != null)
+	if (bTankHUD)
 	{
-		FormatEx(info, sizeof(info), "指令!tankpass可以将坦克给他人游玩");
+		FormatEx(info, sizeof(info), "!tankpass给克(匹配才能用)");
 		DrawPanelText(hSpecHud, info);
 	}
 
@@ -1254,12 +1254,12 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 
 		if ((cvar = FindConVar("tank_bohp_hp")) != null)
 		{
-			FormatEx(info, sizeof(info), "指令!bhop开启自动连跳(扣%d血量)", cvar.IntValue);
+			FormatEx(info, sizeof(info), "!bhop开启自动连跳(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
 		if ((cvar = FindConVar("tank_trac_hp")) != null)
 		{
-			FormatEx(info, sizeof(info), "指令!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
+			FormatEx(info, sizeof(info), "!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
 

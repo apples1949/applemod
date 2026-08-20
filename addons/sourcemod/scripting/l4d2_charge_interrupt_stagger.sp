@@ -22,7 +22,7 @@ bool g_bLevelInvuln;
 public void OnPluginStart()
 {
 	CreateConVarHook("charge_interrupt_stagger_time",
-				"0.5",
+				"1.0",
 				"Amount of time to stagger carry victims for.",
 				FCVAR_NONE,
 				true, 0.0, false, 0.0,

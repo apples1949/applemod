@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.2.8",
+    version     = "1.3.0",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -20,6 +20,7 @@ public Plugin myinfo =
 #undef REQUIRE_PLUGIN
 #include <witch_and_tankifier>
 #include <l4d2_hybrid_scoremod>
+#include <l4d2_fix_team_shuffle_edi>
 
 #undef REQUIRE_EXTENSIONS
 #include <sendproxy> //core.inc 已定义 AUTOLOAD_EXTENSIONS; 这里让扩展成为可选依赖, 缺失时插件仍可加载.
@@ -35,6 +36,7 @@ public Plugin myinfo =
 // ====================================================================================================
 #define HUD1                          0
 #define HUD2                          1
+#define HUD_TICKER                    6
 
 // ====================================================================================================
 // HUD flags (same bit values used by the L4D2 scripted HUD system)
@@ -61,6 +63,20 @@ public Plugin myinfo =
 #define HUD_HEIGHT                    0.026
 #define HUD_CHECK_INTERVAL            1.0    //按需更新: 低频检查是否有变化, 没变化不发包; 关键事件即时刷新.
 
+// 修复队伍 HUD_TICKER 布局 (带背景: 不设置 HUD_FLAG_NOBG).
+#define FIX_HUD_X                      0.25
+#define FIX_HUD_Y                      0.08
+#define FIX_HUD_WIDTH                  0.5
+#define FIX_HUD_HEIGHT                 0.05
+#define FIX_HUD_FLAGS                  (HUD_FLAG_TEXT | HUD_FLAG_ALIGN_LEFT)
+
+// 修正中/完成提示文字与动画参数.
+#define FIX_MSG_BASE                   "正在修正队伍 非上一轮游戏的玩家请等待位置修正完成再加入游戏"
+#define FIX_MSG_DONE                   "队伍修正完成 可以加入游戏了"
+#define FIX_MSG_MAX_DOTS               6
+#define FIX_ANIM_INTERVAL              0.5
+#define FIX_DONE_HIDE_TIME             5.0
+
 #define TEAM_INFECTED                 3
 #define L4D2_ZOMBIECLASS_TANK         8
 
@@ -78,6 +94,14 @@ static bool   g_bSendProxyAvailable;
 static bool   g_bHUDSendProxyHooked;
 static int    g_iHookHUDAttempts;
 static bool   g_bHUDHidden[MAXPLAYERS + 1];
+
+// l4d2_fix_team_shuffle_edi 修复队伍 HUD_TICKER 状态.
+static bool   g_bFixTeamShuffleAvailable;
+static bool   g_bFixTeamShuffleInProgress;
+static bool   g_bFixHUDVisible;
+static Handle g_hFixAnimTimer;
+static Handle g_hFixDoneTimer;
+static int    g_iFixDotCount;
 
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
@@ -133,6 +157,9 @@ public void OnAllPluginsLoaded()
     g_bSendProxyAvailable = LibraryExists("sendproxy2");
     if (g_bSendProxyAvailable)
         TryHookHUDSendProxy();
+
+    g_bFixTeamShuffleAvailable = LibraryExists("l4d2_fix_team_shuffle_edi");
+    UpdateFixTeamShuffleHUD();
 }
 
 public void OnLibraryAdded(const char[] name)
@@ -146,6 +173,11 @@ public void OnLibraryAdded(const char[] name)
         g_bSendProxyAvailable = true;
         g_iHookHUDAttempts = 0;
         TryHookHUDSendProxy();
+    }
+    else if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
+    {
+        g_bFixTeamShuffleAvailable = true;
+        UpdateFixTeamShuffleHUD();
     }
 
     UpdateHUD(); //可选插件就绪可能改变HUD1内容.
@@ -166,6 +198,12 @@ public void OnLibraryRemoved(const char[] name)
         for (int i = 1; i <= MaxClients; i++)
             g_bHUDHidden[i] = false;
     }
+    else if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
+    {
+        g_bFixTeamShuffleAvailable = false;
+        g_bFixTeamShuffleInProgress = false;
+        HideFixHUD();
+    }
 
     UpdateHUD(); //可选插件卸载可能改变HUD1内容.
 }
@@ -184,6 +222,7 @@ public void OnMapStart()
 public void OnMapEnd()
 {
     g_bHUDSendProxyHooked = false;
+    HideFixHUD();
 }
 
 public void OnClientConnected(int client)
@@ -222,6 +261,7 @@ public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
 {
     // OnMapStart 时实体可能还没创建, 借事件再次尝试 hook.
     TryHookHUDSendProxy();
+    UpdateFixTeamShuffleHUD();
     UpdateHUD();
 }
 
@@ -452,6 +492,7 @@ void CreateHUDTimer()
 
 public Action TimerUpdateHUD(Handle timer)
 {
+    UpdateFixTeamShuffleHUD();
     UpdateHUD();
     return Plugin_Continue;
 }
@@ -553,6 +594,132 @@ int FindGameRulesEntity()
         return entity;
 
     return INVALID_ENT_REFERENCE;
+}
+
+// ====================================================================================================
+// l4d2_fix_team_shuffle_edi 修复队伍 HUD_TICKER (槽位6, 带背景)
+// ====================================================================================================
+void UpdateFixTeamShuffleHUD()
+{
+    if (!g_bFixTeamShuffleAvailable)
+    {
+        if (g_bFixHUDVisible)
+            HideFixHUD();
+        return;
+    }
+
+    if (GetFeatureStatus(FeatureType_Native, "L4D2_FixTeamShuffle_IsFixComplete") != FeatureStatus_Available)
+        return;
+
+    bool bInProgress = !L4D2_FixTeamShuffle_IsFixComplete();
+
+    if (bInProgress && !g_bFixTeamShuffleInProgress)
+    {
+        StartFixHUD();
+    }
+    else if (!bInProgress && g_bFixTeamShuffleInProgress)
+    {
+        CompleteFixHUD();
+    }
+}
+
+void StartFixHUD()
+{
+    g_bFixTeamShuffleInProgress = true;
+    g_iFixDotCount = 0;
+    ShowFixHUDText(FIX_MSG_BASE);
+
+    delete g_hFixAnimTimer;
+    g_hFixAnimTimer = null;
+    g_hFixAnimTimer = CreateTimer(FIX_ANIM_INTERVAL, Timer_FixAnim, _, TIMER_REPEAT);
+
+    delete g_hFixDoneTimer;
+    g_hFixDoneTimer = null;
+}
+
+public Action Timer_FixAnim(Handle timer)
+{
+    if (!g_bFixTeamShuffleInProgress)
+        return Plugin_Stop;
+
+    g_iFixDotCount++;
+    if (g_iFixDotCount > FIX_MSG_MAX_DOTS)
+        g_iFixDotCount = 0;
+
+    char sMsg[512];
+    strcopy(sMsg, sizeof(sMsg), FIX_MSG_BASE);
+    for (int i = 0; i < g_iFixDotCount; i++)
+        StrCat(sMsg, sizeof(sMsg), ".");
+
+    ShowFixHUDText(sMsg);
+    return Plugin_Continue;
+}
+
+void ShowFixHUDText(const char[] sText)
+{
+    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+        return;
+
+    GameRules_SetProp("m_iScriptedHUDFlags", FIX_HUD_FLAGS, _, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDPosX", FIX_HUD_X, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDPosY", FIX_HUD_Y, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDWidth", FIX_HUD_WIDTH, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDHeight", FIX_HUD_HEIGHT, HUD_TICKER);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", sText, _, HUD_TICKER);
+    g_bFixHUDVisible = true;
+}
+
+void CompleteFixHUD()
+{
+    g_bFixTeamShuffleInProgress = false;
+
+    delete g_hFixAnimTimer;
+    g_hFixAnimTimer = null;
+
+    ShowFixHUDText(FIX_MSG_DONE);
+
+    delete g_hFixDoneTimer;
+    g_hFixDoneTimer = null;
+    g_hFixDoneTimer = CreateTimer(FIX_DONE_HIDE_TIME, Timer_HideFixHUD);
+}
+
+public Action Timer_HideFixHUD(Handle timer)
+{
+    // 不能在回调里 delete 自己; 只清空句柄和 HUD 槽位.
+    g_hFixDoneTimer = null;
+    ClearFixHUDSlot();
+    return Plugin_Stop;
+}
+
+void HideFixHUD()
+{
+    delete g_hFixAnimTimer;
+    g_hFixAnimTimer = null;
+    delete g_hFixDoneTimer;
+    g_hFixDoneTimer = null;
+
+    ClearFixHUDSlot();
+}
+
+void ClearFixHUDSlot()
+{
+    g_bFixTeamShuffleInProgress = false;
+    g_iFixDotCount = 0;
+
+    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+    {
+        g_bFixHUDVisible = false;
+        return;
+    }
+
+    GameRules_SetProp("m_iScriptedHUDFlags", HUD_FLAG_NOTVISIBLE, _, HUD_TICKER);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", "", _, HUD_TICKER);
+    g_bFixHUDVisible = false;
+}
+
+public void L4D2_FixTeamShuffle_OnFixComplete()
+{
+    CompleteFixHUD();
 }
 
 // ====================================================================================================

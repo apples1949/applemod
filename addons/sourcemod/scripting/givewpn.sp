@@ -2,6 +2,7 @@
 #pragma newdecls required
 
 #include <sourcemod>
+#include <left4dhooks>
 #include <colors>
 
 #define TAG	  "{olive}[{lightred}!{olive}]{orange}"
@@ -22,32 +23,32 @@ public Plugin myinfo =
 	name		= "give weapon in safe area",
 	author		= "apples1949,游而戏之",
 	description = "none",
-	version		= "1.1",
+	version		= "1.2",
 	url			= "none",
 }
 
 int	 Select[MAXPLAYERS + 1]		   = { -1, ... };
 bool PlayerHaveWpn[MAXPLAYERS + 1] = { false, ... };
-bool PlayerInSafeArea[MAXPLAYERS + 1] = { false, ... };
 
 public void OnPluginStart()
 {
 	HookEvent("round_start", ResetAll);
 	HookEvent("map_transition", ResetAll);
-	HookEvent("player_spawn", Event_PlayerSpawn);
-	HookEvent("player_entered_start_area", Event_SafeArea);
-	HookEvent("player_left_start_area", Event_SafeArea);
-	HookEvent("player_entered_checkpoint", Event_SafeArea);
-	HookEvent("player_left_checkpoint", Event_SafeArea);
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Post);
 
 	RegConsoleCmd("sm_wpn", cmdwpn);
 }
 
+// 实时位置检测, 不依赖区域事件状态(那些事件在 L4D2 不可靠, 会导致离开安全区后走回来无法重新判定为安全区)
+bool IsClientInSafeArea(int client)
+{
+	return L4D_IsInFirstCheckpoint(client) || L4D_IsInLastCheckpoint(client);
+}
+
 public Action cmdwpn(int client, int args)
 {
 #if DEBUG
-	PrintToChatAll("IsFakeClient:%d GetClientTeam:%d PlayerHaveWpn:%d PlayerInSafeArea:%d", IsFakeClient(client), GetClientTeam(client), PlayerHaveWpn[client], PlayerInSafeArea[client]);
+	PrintToChatAll("IsFakeClient:%d GetClientTeam:%d PlayerHaveWpn:%d InSafeArea:%d", IsFakeClient(client), GetClientTeam(client), PlayerHaveWpn[client], IsClientInSafeArea(client));
 #endif
 	if (IsFakeClient(client) || GetClientTeam(client) != 2) return Plugin_Handled;
 	if (!IsPlayerAlive(client))
@@ -60,7 +61,7 @@ public Action cmdwpn(int client, int args)
 		CPrintToChat(client, "%s你已获取过武器!", TAG);
 		return Plugin_Handled;
 	}
-	if (!PlayerInSafeArea[client])
+	if (!IsClientInSafeArea(client))
 	{
 		CPrintToChat(client, "%s请回到安全区域后再获取武器!", TAG);
 		return Plugin_Handled;
@@ -86,7 +87,7 @@ public int givewpn(Menu menu, MenuAction action, int client, int param2)
 				CPrintToChat(client, "%s你已死亡,无法获取武器!", TAG);
 				return 0;
 			}
-			if (!PlayerInSafeArea[client])
+			if (!IsClientInSafeArea(client))
 			{
 				CPrintToChat(client, "%s你已离开安全区域,无法获取武器!", TAG);
 				return 0;
@@ -108,27 +109,6 @@ public int givewpn(Menu menu, MenuAction action, int client, int param2)
 void ResetAll(Event event, const char[] name, bool dontBroadcast)
 {
 	for (int i = 1; i <= MaxClients; i++) Reset(i);
-}
-
-void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
-{
-	int client = GetClientOfUserId(event.GetInt("userid"));
-
-	if (client > 0 && client <= MaxClients && IsClientInGame(client))
-		PlayerInSafeArea[client] = true; // 出生点通常位于安全区域(开局安全屋/检查点)
-}
-
-void Event_SafeArea(Event event, const char[] name, bool dontBroadcast)
-{
-	int client = GetClientOfUserId(event.GetInt("userid"));
-
-	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
-		return;
-
-	if (StrEqual(name, "player_entered_start_area") || StrEqual(name, "player_entered_checkpoint"))
-		PlayerInSafeArea[client] = true;
-	else
-		PlayerInSafeArea[client] = false;
 }
 
 void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
@@ -168,12 +148,11 @@ stock void CheatCommand(int client, const char[] command, const char[] arguments
 void Reset(int client)
 {
 #if DEBUG
-	PrintToChatAll("before Reset Select:%d PlayerHaveWpn:%d PlayerInSafeArea:%d", Select[client], PlayerHaveWpn[client], PlayerInSafeArea[client]);
+	PrintToChatAll("before Reset Select:%d PlayerHaveWpn:%d", Select[client], PlayerHaveWpn[client]);
 #endif
-	Select[client]			 = -1;
-	PlayerHaveWpn[client]	 = false;
-	PlayerInSafeArea[client] = false;
+	Select[client]		 = -1;
+	PlayerHaveWpn[client] = false;
 #if DEBUG
-	PrintToChatAll("After Reset Select:%d PlayerHaveWpn:%d PlayerInSafeArea:%d", Select[client], PlayerHaveWpn[client], PlayerInSafeArea[client]);
+	PrintToChatAll("After Reset Select:%d PlayerHaveWpn:%d", Select[client], PlayerHaveWpn[client]);
 #endif
 }

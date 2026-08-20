@@ -63,9 +63,7 @@ ConVar
 int
 	tankHurt[MAXPLAYERS + 1][MAXPLAYERS + 1],
 	// Tank 血量记录（生成时的满血基准, 百分比分母）
-	tankHealth[MAXPLAYERS + 1],
-	// 击杀 Tank 的生还者索引（0=无击杀者, 用于排名行的 ● 击杀标记）
-	tankSlayer[MAXPLAYERS + 1];
+	tankHealth[MAXPLAYERS + 1];
 
 float
 	// 这个 Tank 的存活时间
@@ -311,21 +309,16 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 	if (g_iCurrentTank == victim)
 		g_iCurrentTank = 0;
 
-	/* 标记击杀者(排名行的 ● 标记), 与参考插件一致: 攻击者是有效生还者即标记 */
-	if (IsValidSurvivor(attacker)) {
-		tankSlayer[victim] = attacker;
-
-		/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
-		   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
-		   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
-		if (IsPlayerAlive(attacker)) {
-			int recordedDamage = 0;
-			for (int i = 1; i <= MaxClients; i++)
-				recordedDamage += tankHurt[victim][i];
-			int remainDamage = tankHealth[victim] - recordedDamage;
-			if (remainDamage > 0)
-				tankHurt[victim][attacker] += remainDamage;
-		}
+	/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
+	   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
+	   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
+	if (IsValidSurvivor(attacker) && IsPlayerAlive(attacker)) {
+		int recordedDamage = 0;
+		for (int i = 1; i <= MaxClients; i++)
+			recordedDamage += tankHurt[victim][i];
+		int remainDamage = tankHealth[victim] - recordedDamage;
+		if (remainDamage > 0)
+			tankHurt[victim][attacker] += remainDamage;
 	}
 	/* 计算 Tank 存活时间 */
 	tankLiveTime[victim] = GetGameTime() - tankLiveTime[victim];
@@ -553,21 +546,19 @@ void transferTankData(int oldTank, int newTank)
 		playerHurts[newTank][i] = playerHurts[oldTank][i];
 		playerHurts[oldTank][i].init();
 	}
-	// 转移满血基准、存活时间、击杀标记与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
+	// 转移满血基准、存活时间与打印标记（存活时间沿用最初生成时刻, 保证统计的是整个 Tank 实例的存活时长）
 	tankHealth[newTank] = tankHealth[oldTank];
 	tankLiveTime[newTank] = tankLiveTime[oldTank];
-	tankSlayer[newTank] = tankSlayer[oldTank];
 	hasPrintDamage[newTank] = hasPrintDamage[oldTank];
 
 	// 清空旧控制者的数据
 	tankHealth[oldTank] = 0;
 	tankLiveTime[oldTank] = 0.0;
-	tankSlayer[oldTank] = 0;
 	hasPrintDamage[oldTank] = false;
 }
 
 /**
-* 打印 Tank 伤害报告(输出格式对齐 l4d2_tank_ranking v1.5.9: 标题含总血量/总伤害, 排名行居中排列 + 击杀标记)
+* 打印 Tank 伤害报告(输出格式对齐 l4d2_tank_ranking v1.5.9: 标题含总血量/总伤害, 排名行居中排列)
 * @param client 需要打印的 Tank 客户端索引
 * @param reason 坦克消失原因(死亡 / 消失), 用于标题行
 * @return void
@@ -616,8 +607,8 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		return;
 
 	/* 预格式化每行数据(列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列):
-	   0=名次, 1=伤害百分比(1位小数), 2=伤害, 3=名字, 4=击杀标记(●/○), 5=拳, 6=石, 7=铁, 8=承伤, 9=承伤百分比 */
-	char[][][] sData = new char[displayCount][10][DATA_CELL_SIZE];
+	   0=名次, 1=伤害百分比(1位小数), 2=伤害, 3=名字, 4=拳, 5=石, 6=铁, 7=承伤, 8=承伤百分比 */
+	char[][][] sData = new char[displayCount][9][DATA_CELL_SIZE];
 	// 百分比分母: 总伤害超过满血基准(含致死一击补偿)时用总伤害, 与参考插件一致
 	int iTotalHealth = totalDamage > tankHealth[client] ? totalDamage : tankHealth[client];
 	int x = 0;
@@ -631,23 +622,22 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		FormatEx(sData[x][1], DATA_CELL_SIZE, "%.1f", float(damage) / float(iTotalHealth) * 100.0);
 		FormatEx(sData[x][2], DATA_CELL_SIZE, "%d", damage);
 		GetClientName(survivor, sData[x][3], DATA_CELL_SIZE);
-		FormatEx(sData[x][4], DATA_CELL_SIZE, "%s", tankSlayer[client] == survivor ? "●" : "○");
-		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].punch);
-		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].rock);
-		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].iron);
-		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].gotDamage);
-		FormatEx(sData[x][9], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
+		FormatEx(sData[x][4], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].punch);
+		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].rock);
+		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].iron);
+		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].gotDamage);
+		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
 
 		debugAndInfoLog("%s: %N 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, survivor, client, damage, playerHurts[client][survivor].punch, playerHurts[client][survivor].rock, playerHurts[client][survivor].iron, playerHurts[client][survivor].gotDamage);
 		x++;
 	}
 
 	// 计算各数据列的最大宽度, 用于居中对齐(与参考插件一致: 左右各补 (最大宽度-本行宽度) 个空格)
-	int iMax[10];
-	for (int y = 0; y < 10; y++)
+	int iMax[9];
+	for (int y = 0; y < 9; y++)
 		iMax[y] = strlen(sData[0][y]);
 	for (x = 1; x < displayCount; x++)
-		for (int y = 0; y < 10; y++)
+		for (int y = 0; y < 9; y++)
 			if (strlen(sData[x][y]) > iMax[y])
 				iMax[y] = strlen(sData[x][y]);
 
@@ -676,18 +666,17 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 			CPrintToChatAll("{green}Tank {blue}存活时间：{green}%s", getTime(tankLiveTime[client]));
 	}
 
-	// 逐行输出: 名次(居中):[击杀标记][伤害百分比(居中)%](伤害(居中))[拳(居中)][石(居中)][铁(居中)][承伤(居中)(承伤百分比(居中)%] 名字
+	// 逐行输出: 名次(居中):[伤害百分比(居中)%](伤害(居中))[拳(居中)][石(居中)][铁(居中)][承伤(居中)(承伤百分比(居中)%] 名字
 	char row[512], cell[64];
 	for (x = 0; x < displayCount; x++) {
 		row[0] = '\0';
-		// 名次(居中) + 冒号 + [击杀标记]
+		// 名次(居中) + 冒号 + [伤害百分比(居中)%]
 		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
 		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][0]);
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
-		FormatEx(cell, sizeof(cell), "\x05:\x04[\x03%s\x04]\x03[", sData[x][4]);
+		FormatEx(cell, sizeof(cell), "\x05:\x03[");
 		StrCat(row, sizeof(row), cell);
-		// 伤害百分比(居中) + %
 		AppendPad(row, sizeof(row), iMax[1] - strlen(sData[x][1]));
 		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][1]);
 		StrCat(row, sizeof(row), cell);
@@ -706,35 +695,35 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		// [拳(居中)] [石(居中)] [铁(居中)]
 		FormatEx(cell, sizeof(cell), "\x03[\x04拳\x03:\x04");
 		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[4] - strlen(sData[x][4]));
+		FormatEx(cell, sizeof(cell), "%s", sData[x][4]);
+		StrCat(row, sizeof(row), cell);
+		AppendPad(row, sizeof(row), iMax[4] - strlen(sData[x][4]));
+		FormatEx(cell, sizeof(cell), "\x03][\x04石\x03:\x04");
+		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
 		FormatEx(cell, sizeof(cell), "%s", sData[x][5]);
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
-		FormatEx(cell, sizeof(cell), "\x03][\x04石\x03:\x04");
+		FormatEx(cell, sizeof(cell), "\x03][\x04铁\x03:\x04");
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
 		FormatEx(cell, sizeof(cell), "%s", sData[x][6]);
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
-		FormatEx(cell, sizeof(cell), "\x03][\x04铁\x03:\x04");
+		// [承伤(居中)(承伤百分比(居中)%]
+		FormatEx(cell, sizeof(cell), "\x03][\x04承伤\x03:\x04");
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
 		FormatEx(cell, sizeof(cell), "%s", sData[x][7]);
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
-		// [承伤(居中)(承伤百分比(居中)%]
-		FormatEx(cell, sizeof(cell), "\x03][\x04承伤\x03:\x04");
+		FormatEx(cell, sizeof(cell), "\x03(\x04");
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
 		FormatEx(cell, sizeof(cell), "%s", sData[x][8]);
 		StrCat(row, sizeof(row), cell);
 		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
-		FormatEx(cell, sizeof(cell), "\x03(\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[9] - strlen(sData[x][9]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][9]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[9] - strlen(sData[x][9]));
 		FormatEx(cell, sizeof(cell), "\x04%%\x03)]");
 		StrCat(row, sizeof(row), cell);
 		// 名字
@@ -779,7 +768,6 @@ void clearTankDamage(int client) {
 	if (client != INVALID_CLIENT)
 	{
 		tankHealth[client] = 0;
-		tankSlayer[client] = 0;
 		for (i = 1; i <= MaxClients; i++)
 		{
 			tankHurt[client][i] = 0;
@@ -795,7 +783,6 @@ void clearTankDamage(int client) {
 			hasPrintDamage[i] = false;
 			tankHealth[i] = 0;
 			tankLiveTime[i] = 0.0;
-			tankSlayer[i] = 0;
 			for (j = 1; j <= MaxClients; j++)
 			{
 				tankHurt[i][j] = 0;

@@ -10,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.6-2025/2/12"
+#define PLUGIN_VERSION "2.7-2026/8/20"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
 
@@ -278,6 +278,18 @@ bool TeamsHaveOpenSlots()
 	return false;
 }
 
+bool IsPlayerConnecting()
+{
+	// 是否存在正在连接中（已连接但尚未进入游戏，如仍在加载地图）的真人玩家
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientConnected(i) && !IsFakeClient(i) && !IsClientInGame(i))
+			return true;
+	}
+
+	return false;
+}
+
 Action Command_Say(int client, int args)
 {
 	if(!g_bSayResetTime) return Plugin_Continue;
@@ -466,6 +478,8 @@ Action afkCheckThread(Handle timer)
 	g_iLastTick = GetGameTickCount();
 
 	bool bTeamsOpen = TeamsHaveOpenSlots(); // 本次检测时对抗双方队伍是否有空位（仅当有空位时才检测旁观闲置）
+	// 补位检测跳过：幸存者未离开安全区域且有玩家正在连接中时，不检测/踢出旁观AFK（连接中的玩家即将补位）
+	bool bSkipFillDetection = !g_bLeftSafeRoom && IsPlayerConnecting();
 
 	float pos[3];
 	float eyes[3];
@@ -557,7 +571,7 @@ Action afkCheckThread(Handle timer)
 					}
 				} // player is alive or is infected
 			} // player is not on spectators ...
-			else if (afkKickEnabled && bTeamsOpen) // 旁观检测：仅当对抗双方队伍有空位时触发（生还者有AI机器人 / 感染者有空位）
+			else if (afkKickEnabled && bTeamsOpen && !bSkipFillDetection) // 旁观检测：仅当对抗双方队伍有空位且不处于"未离开安全区域+有人连接中"时才触发（生还者有AI机器人 / 感染者有空位）
 			{
 				// If the player is not registered ...
 				if (HasAccess(i, g_sAccesslvl) == false && !IsAutoSpecPlayer(i) && !IsImmuneName(i)) // 有权限、符合自动旁观 cvar 或名称匹配免疫列表的玩家不警告不踢出

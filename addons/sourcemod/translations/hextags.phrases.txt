@@ -8,9 +8,17 @@
 	{
 		"en"		"*SPECTATOR* "
 	}
-	"HexTags_ChatDead"
+	"HexTags_TeamSpectator"
 	{
-		"en"		"*DEAD* "
+		"en"		"(SPECTATOR) "
+	}
+	"HexTags_TeamSurvivor"
+	{
+		"en"		"(SURVIVOR) "
+	}
+	"HexTags_TeamInfected"
+	{
+		"en"		"(INFECTED) "
 	}
 	"HexTags_ChatSurvivor"
 	{

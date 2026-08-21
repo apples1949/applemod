@@ -5,7 +5,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.2.0"
 
 #define TEAM_SURVIVOR 2
 #define TEAM_INFECTED 3
@@ -104,7 +104,7 @@ public void OnPluginStart()
 	HookEvent("player_death", Event_PlayerDeath);
 	HookEvent("boomer_exploded", Event_BoomerExploded);
 	HookEvent("ability_use", Event_AbilityUse);
-	HookEvent("player_now_it", Event_PlayerNowIt);
+	HookEvent("player_now_it", Event_PlayerNowIt, EventHookMode_Pre);
 	HookEvent("player_no_longer_it", Event_PlayerNoLongerIt);
 	HookEvent("player_team", Event_PlayerTeam);
 
@@ -189,28 +189,26 @@ void BileSpecialInfected(int victim, int attacker)
 		return;
 	}
 
+	// 阻止本次胆汁紧随而来的 IT 尸潮（须在施加胆汁前设窗，覆盖同步触发的 SpawnITMob）
+	if (g_cvBlockHorde.BoolValue)
+		g_fSIBileMobBlockUntil = GetGameTime() + 0.2;
+
 	L4D2_CTerrorPlayer_OnHitByVomitJar(victim, attacker);
+
+	// 特感不保留胆汁负面效果：立即移除屏幕模糊并结束 IT 状态（小僵尸不再被吸引围攻）
+	ClearSIBileEffect(victim);
 
 	g_bSIBiled[victim] = true;
 	g_fSIBileEnd[victim] = GetGameTime() + g_fBileDuration;
 }
 
-void ClearTankBileIT(int client)
+void ClearSIBileEffect(int victim)
 {
-	// OnITExpired 会同时清掉屏幕胆汁效果，记录并回写 m_vomitStart/m_vomitFadeStart 以保留视觉
-	float now = GetGameTime();
-	float vomitStart = GetEntPropFloat(client, Prop_Send, "m_vomitStart");
-	float vomitFadeStart = GetEntPropFloat(client, Prop_Send, "m_vomitFadeStart");
-
-	L4D_OnITExpired(client);
-
-	if (vomitStart <= 0.0)
-		vomitStart = now;
-	if (vomitFadeStart <= now)
-		vomitFadeStart = now + g_fBileDuration;
-
-	SetEntPropFloat(client, Prop_Send, "m_vomitStart", vomitStart);
-	SetEntPropFloat(client, Prop_Send, "m_vomitFadeStart", vomitFadeStart);
+	// L4D_OnITExpired 会同时清掉屏幕胆汁效果与 IT 状态（小僵尸不再被吸引围攻），
+	// 再显式清零 m_vomitStart/m_vomitFadeStart，确保模糊效果立即消失
+	L4D_OnITExpired(victim);
+	SetEntPropFloat(victim, Prop_Send, "m_vomitStart", 0.0);
+	SetEntPropFloat(victim, Prop_Send, "m_vomitFadeStart", 0.0);
 }
 
 public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
@@ -228,14 +226,26 @@ public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
 
 public void L4D2_OnHitByVomitJar_Post(int victim, int attacker)
 {
-	// Tank 被胆汁命中后立即结束 IT 状态，避免小僵尸转火攻击 Tank
+	// 任何特感（含 Tank）被胆汁罐直接命中后：立即移除屏幕模糊并结束 IT 状态（不吸引小僵尸）
 	if (g_cvEnable.BoolValue
 		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
-		&& GetClientTeam(victim) == TEAM_INFECTED
-		&& GetEntProp(victim, Prop_Send, "m_zombieClass") == ZOMBIECLASS_TANK)
+		&& GetClientTeam(victim) == TEAM_INFECTED)
 	{
-		ClearTankBileIT(victim);
+		ClearSIBileEffect(victim);
 	}
+}
+
+public Action L4D_OnVomitedUpon(int victim, int &attacker, bool &boomerExplosion)
+{
+	// Boomer 喷吐/爆炸让特感"成为 it"时直接阻止：不给屏幕模糊、不触发 IT 尸潮、不吸引小僵尸
+	if (g_cvEnable.BoolValue
+		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
+		&& GetClientTeam(victim) == TEAM_INFECTED)
+	{
+		return Plugin_Handled;
+	}
+
+	return Plugin_Continue;
 }
 
 public Action L4D_OnSpawnITMob(int &amount)
@@ -529,11 +539,24 @@ public Action Timer_ZoneTick(Handle timer)
 	return Plugin_Continue;
 }
 
-public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast)
+public Action Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (client > 0 && client <= MaxClients && IsClientInGame(client))
+	{
+		if (GetClientTeam(client) == TEAM_INFECTED)
+		{
+			// 特感成为 it（无论来源）→ 立刻移除屏幕模糊并结束 IT 状态，不吸引小僵尸
+			if (g_cvEnable.BoolValue)
+			{
+				ClearSIBileEffect(client);
+				return Plugin_Handled;
+			}
+			return Plugin_Continue;
+		}
 		g_bSurvivorBiled[client] = true;
+	}
+	return Plugin_Continue;
 }
 
 public void Event_PlayerNoLongerIt(Event event, const char[] name, bool dontBroadcast)

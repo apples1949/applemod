@@ -8,9 +8,17 @@
 	{
 		"chi"		"*旁观者* "
 	}
-	"HexTags_ChatDead"
+	"HexTags_TeamSpectator"
 	{
-		"chi"		"*死亡* "
+		"chi"		"(旁观者) "
+	}
+	"HexTags_TeamSurvivor"
+	{
+		"chi"		"(生还者) "
+	}
+	"HexTags_TeamInfected"
+	{
+		"chi"		"(感染者) "
 	}
 	"HexTags_ChatSurvivor"
 	{

@@ -8,9 +8,17 @@
 	{
 		"zho"		"*旁觀者* "
 	}
-	"HexTags_ChatDead"
+	"HexTags_TeamSpectator"
 	{
-		"zho"		"*死亡* "
+		"zho"		"(旁觀者) "
+	}
+	"HexTags_TeamSurvivor"
+	{
+		"zho"		"(生還者) "
+	}
+	"HexTags_TeamInfected"
+	{
+		"zho"		"(感染者) "
 	}
 	"HexTags_ChatSurvivor"
 	{

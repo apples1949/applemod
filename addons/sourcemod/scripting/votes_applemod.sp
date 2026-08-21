@@ -554,17 +554,18 @@ public void VoteResultHandler(Handle vote, int num_votes, int num_clients, const
 	g_votedelay = ivotedelay_time;
 	CreateTimer(1.0, Timer_VoteDelay, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-	float percent = (num_votes > 0) ? (float(iYesVotes) / float(num_votes)) : 0.0;
+	// 未投票的玩家视作反对, 分母为全部可投票人数(num_clients), 而非实际投票人数(num_votes)
+	float percent = (num_clients > 0) ? (float(iYesVotes) / float(num_clients)) : 0.0;
 
-	if (num_votes > 0 && FloatCompare(percent, g_fLimit) >= 0)
+	if (num_clients > 0 && FloatCompare(percent, g_fLimit) >= 0)
 	{
-		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票通过 {default}(同意：{green}%d%%{default}, 投票人数：{green}%i{default})", RoundToNearest(100.0 * percent), num_votes);
+		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票通过 {default}(同意：{green}%d%%{default}, 同意票：{green}%i/%i{default})", RoundToNearest(100.0 * percent), iYesVotes, num_clients);
 		DisplayBuiltinVotePass(vote, g_sVotePassText);
 		CreateTimer(3.0, COLD_DOWN, _);
 	}
 	else
 	{
-		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票未通过 {default}至少需要{green}%d%%{default}的玩家同意。(同意： {green}%d%%{default}, 投票人数： {green}%i {default})", RoundToNearest(100.0 * g_fLimit), RoundToNearest(100.0 * percent), num_votes);
+		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票未通过 {default}至少需要{green}%d%%{default}的玩家同意。(同意： {green}%d%%{default}, 同意票： {green}%i/%i {default})", RoundToNearest(100.0 * g_fLimit), RoundToNearest(100.0 * percent), iYesVotes, num_clients);
 		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Loses);
 	}
 }

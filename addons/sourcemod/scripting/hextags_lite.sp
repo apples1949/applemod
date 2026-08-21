@@ -6,7 +6,7 @@
 #include <clientprefs>
 #include <hextags>
 
-#define PLUGIN_VERSION "1.1.1"
+#define PLUGIN_VERSION "1.2.0"
 
 // ===== 全局变量 =====
 CustomTags g_PlayerTags[MAXPLAYERS + 1];
@@ -166,8 +166,10 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
 }
 
 void PrintTaggedChatMessage(int client, const char[] command, const char[] message) {
+    // 玩家名字与消息里的颜色标签先剥离，防止注入/叠加
     char sName[MAXLENGTH_NAME];
     GetClientName(client, sName, sizeof(sName));
+    StripColorTags(sName, sizeof(sName));
 
     char sFullName[MAXLENGTH_NAME];
     FormatEx(sFullName, sizeof(sFullName), "%s%s%s",
@@ -175,14 +177,22 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
         g_PlayerTags[client].NameColor,
         sName);
 
+    char sCleanMessage[MAXLENGTH_MESSAGE];
+    strcopy(sCleanMessage, sizeof(sCleanMessage), message);
+    StripColorTags(sCleanMessage, sizeof(sCleanMessage));
+
     char sFullMessage[MAXLENGTH_MESSAGE];
     FormatEx(sFullMessage, sizeof(sFullMessage), "%s%s",
         g_PlayerTags[client].ChatColor,
-        message);
+        sCleanMessage);
+
+    // 配置里的 SayText2 标签（{lightgreen}/{red}/{blue}）预解析为 \x03，
+    // 避免与 {teamcolor} 叠加触发 "two team colors" 崩溃；\x03 最终按发言人队伍着色
+    ResolveTeamColorTags(sFullName, sizeof(sFullName));
+    ResolveTeamColorTags(sFullMessage, sizeof(sFullMessage));
 
     int team = GetClientTeam(client);
     bool teamChat = StrEqual(command, "say_team");
-    bool speakerDead = (team != 1 && !IsPlayerAlive(client));
 
     for (int i = 1; i <= MaxClients; i++) {
         if (!IsClientInGame(i)) continue;
@@ -192,32 +202,56 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
         // 队内聊天接收者：同队 + 旁观者（本服规则：旁观者可看两队队内聊天）
         if (teamChat && iTeam != team && iTeam != 1) continue;
 
+        // 队伍前缀：公共聊天 *队伍名*，队内聊天 (队伍名)，不论有无称号都显示
         char sStatus[32];
         sStatus[0] = '\0';
-
         if (teamChat) {
-            if (iTeam == 1) {
-                // 旁观者接收队内聊天：标注发言队伍
-                if (team == 2) {
-                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSurvivor", i);
-                } else if (team == 3) {
-                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatInfected", i);
-                }
-            } else if (speakerDead && iTeam == team && IsPlayerAlive(i)) {
-                // 队内聊天：死亡标记只给同队活人看
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatDead", i);
+            if (team == 1) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSpectator", i);
+            } else if (team == 2) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSurvivor", i);
+            } else if (team == 3) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamInfected", i);
             }
-        } else if (team == 1) {
-            // 公共聊天：旁观者标记
-            FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
-        } else if (speakerDead) {
-            // 公共聊天：死亡标记
-            FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatDead", i);
+        } else {
+            if (team == 1) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
+            } else if (team == 2) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSurvivor", i);
+            } else if (team == 3) {
+                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatInfected", i);
+            }
         }
 
-        // CPrintToChatEx: author=发言人，{teamcolor} 按发言人队伍着色
-        CPrintToChatEx(i, client, "{default}%s%s{default} : %s", sStatus, sFullName, sFullMessage);
+        // CPrintToChatEx(author=发言人)：{teamcolor} 按发言人队伍给前缀着色。
+        // 配置的 SayText2 标签已被 ResolveTeamColorTags 解析掉，不会触发
+        // "two team colors" 崩溃
+        CPrintToChatEx(i, client, "{teamcolor}%s{default}%s{default} : %s", sStatus, sFullName, sFullMessage);
     }
+}
+
+// 移除颜色标签（colors.inc 会把它们解析成颜色码）。玩家消息/名字里若包含
+// {lightgreen}/{red}/{blue}/{teamcolor} 等标签，可能与称号颜色叠加成
+// "两个队伍色" 导致 CFormat 抛异常，这里统一剥离，颜色只由配置控制。
+void StripColorTags(char[] buffer, int maxlength) {
+    static const char sColorTags[][] = {
+        "{default}", "{darkred}", "{green}", "{lightgreen}", "{red}", "{blue}",
+        "{olive}", "{lime}", "{lightred}", "{purple}", "{grey}", "{orange}", "{teamcolor}"
+    };
+
+    for (int i = 0; i < sizeof(sColorTags); i++) {
+        ReplaceString(buffer, maxlength, sColorTags[i], "", false);
+    }
+}
+
+// 把配置中的 SayText2 队伍色标签（{lightgreen}/{red}/{blue}）解析成 \x03。
+// colors.inc 中这些标签需要 SayText2 author 才能着色，且同一条消息里与
+// {teamcolor} 共存会抛 "two team colors" 异常；统一转成 \x03 后，
+// 由 CPrintToChatEx 的 author（发言人）决定最终队伍色。
+void ResolveTeamColorTags(char[] buffer, int maxlength) {
+    ReplaceString(buffer, maxlength, "{lightgreen}", "\x03", false);
+    ReplaceString(buffer, maxlength, "{red}", "\x03", false);
+    ReplaceString(buffer, maxlength, "{blue}", "\x03", false);
 }
 
 // ===== 配置加载 =====

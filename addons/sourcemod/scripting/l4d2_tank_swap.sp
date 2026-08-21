@@ -22,12 +22,14 @@ Handle surrenderMenu                  = null;
 Handle notifyTimer                    = null;
 Handle autoMenuTimer                  = null;
 Handle timeLimitTimer                 = null;
+Handle g_hForwardTankPassed           = null;
 
 bool withinTimeLimit                  = false;
 int primaryTankPlayer                 = -1;
 int tankAttemptsFailed                = 0;
 bool g_bIsTankAlive                   = false;
 int currentTank                       = 0;
+int tankNoTargetRetries               = 0;
 
 public Plugin myinfo =
 {
@@ -46,6 +48,8 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		return APLRes_SilentFailure;
 	}
 
+	RegPluginLibrary("l4d2_tank_swap");
+
 	return APLRes_Success;
 }
 
@@ -62,7 +66,12 @@ public void OnPluginStart()
 	LoadTranslations("common.phrases");
 	LoadTranslations("l4d2_tank_swap.phrases");
 
+	// 换克成功后的主动告知 forward, 供 tank_damage 等插件接收（双保险, 与引擎 forward 幂等）
+	g_hForwardTankPassed = CreateForward(ET_Ignore, Param_Cell, Param_Cell);
+
 	HookEvent("tank_spawn", TC_ev_TankSpawn);
+	HookEvent("player_now_it", TC_ev_PlayerNowIt);
+	HookEvent("bot_player_replace", TC_ev_BotPlayerReplace);
 	HookEvent("round_start", TC_ev_RoundStart);
 	HookEvent("entity_killed", TC_ev_EntityKilled);
 
@@ -150,6 +159,7 @@ void ResetRoundState()
 	withinTimeLimit = false;
 	primaryTankPlayer = -1;
 	tankAttemptsFailed = 0;
+	tankNoTargetRetries = 0;
 }
 
 public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -192,6 +202,7 @@ public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast
 	withinTimeLimit = false;
 	primaryTankPlayer = -1;
 	tankAttemptsFailed = 0;
+	tankNoTargetRetries = 0;
 
 	float PlayerControlDelay = 0.0;
 	if (cvar_TankLotteryTime != null)
@@ -217,6 +228,110 @@ public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast
 	}
 
 	return Plugin_Continue;
+}
+
+/* 玩家通过"接管 AI Tank"或"被喷胆汁"成为 Tank 时, 不一定有新 tank_spawn
+   （同一 Tank 实例换控制者, 或 tank_spawn 被 tankid==currentTank 去重吞掉）。
+   只靠 tank_spawn 的一次性定时器会错过面板, 这里直接用接管事件触发。 */
+public Action TC_ev_BotPlayerReplace(Event event, const char[] name, bool dontBroadcast)
+{
+	int bot = GetClientOfUserId(event.GetInt("bot"));
+	int player = GetClientOfUserId(event.GetInt("player"));
+
+	// 被接管的 bot 就是当前 Tank（双条件兜住 currentTank 可能的失同步）
+	if (bot != currentTank && !IsPlayerTank(bot))
+		return Plugin_Continue;
+
+	if (IsHumanTank(player))
+		ScheduleTakeoverMenu(player);
+	else
+	{
+		// 职业可能尚未切换完成, 延迟复查
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientUserId(player));
+		CreateTimer(CONTROL_RETRY_DELAY, TS_TakeoverRecheck, pack);
+	}
+
+	return Plugin_Continue;
+}
+
+public Action TC_ev_PlayerNowIt(Event event, const char[] name, bool dontBroadcast)
+{
+	int player = GetClientOfUserId(event.GetInt("userid"));
+
+	// 生还者被喷也会触发 player_now_it, 只处理感染者（被喷即变 Tank 的路径）
+	if (!IsValidClient(player) || GetClientTeam(player) != TEAM_INFECTED)
+		return Plugin_Continue;
+
+	if (IsHumanTank(player))
+		ScheduleTakeoverMenu(player);
+	else
+	{
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientUserId(player));
+		CreateTimer(CONTROL_RETRY_DELAY, TS_TakeoverRecheck, pack);
+	}
+
+	return Plugin_Continue;
+}
+
+public Action TS_TakeoverRecheck(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	int player = GetClientOfUserId(pack.ReadCell());
+	delete pack;
+
+	if (IsHumanTank(player))
+		ScheduleTakeoverMenu(player);
+
+	return Plugin_Stop;
+}
+
+/* 人类成为 Tank 的接管路径: 重新调度让克面板/通知。
+   与 TC_ev_TankSpawn 同时触发时相互覆盖, 幂等无害。 */
+void ScheduleTakeoverMenu(int player)
+{
+	if (cvar_SurrenderChoiceType.IntValue == 0)
+		return;
+
+	if (autoMenuTimer != null)
+	{
+		KillTimer(autoMenuTimer);
+		autoMenuTimer = null;
+	}
+
+	if (surrenderMenu != null)
+	{
+		CancelMenu(surrenderMenu);
+		surrenderMenu = null;
+	}
+
+	primaryTankPlayer = player;
+	currentTank = player;
+	g_bIsTankAlive = true;
+	withinTimeLimit = false;
+	tankAttemptsFailed = 0;
+	tankNoTargetRetries = 0;
+
+	int userid = GetClientUserId(player);
+	if (cvar_SurrenderChoiceType.IntValue == 1)
+		notifyTimer = CreateTimer(CONTROL_DELAY_SAFETY, TS_DisplayNotificationToTank, userid);
+	else
+		autoMenuTimer = CreateTimer(CONTROL_DELAY_SAFETY, TS_Display_Auto_MenuToTank, userid);
+}
+
+/* 除指定玩家外, 是否还有其它人类感染者在场（可能很快变成可移交的 ghost） */
+bool HasOtherHumanInfected(int exclude)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == exclude)
+			continue;
+		if (IsValidClient(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_INFECTED)
+			return true;
+	}
+
+	return false;
 }
 
 public Action TS_DisplayNotificationToTank(Handle timer, int clientid)
@@ -344,6 +459,7 @@ public Action CallSurrenderMenu(int client, int args)
 	{
 		CloseHandle(surrenderMenu);
 		surrenderMenu = null;
+		CPrintToChat(client, "%t", "No_Target");
 	}
 
 	return Plugin_Handled;
@@ -452,11 +568,22 @@ public Action TS_Display_Auto_MenuToTank(Handle timer, int clientid)
 			CloseHandle(surrenderMenu);
 			surrenderMenu = null;
 		}
+		tankNoTargetRetries = 0;
 	}
 	else
 	{
 		CloseHandle(surrenderMenu);
 		surrenderMenu = null;
+
+		// 其它人类感染者可能马上变成可移交的 ghost → 短暂重试; 否则明确提示
+		if (tankNoTargetRetries < MAX_TANK_ATTEMPTS && HasOtherHumanInfected(primaryTankPlayer))
+		{
+			tankNoTargetRetries++;
+			autoMenuTimer = CreateTimer(CONTROL_RETRY_DELAY, TS_Display_Auto_MenuToTank, GetClientUserId(primaryTankPlayer));
+			return Plugin_Stop;
+		}
+
+		CPrintToChat(primaryTankPlayer, "%t", "No_Target");
 	}
 
 	return Plugin_Stop;
@@ -565,6 +692,7 @@ public Action FindAnyTank(Handle timer, int client)
 		g_bIsTankAlive = false;
 		currentTank = 0;
 		tankAttemptsFailed = 0;
+		tankNoTargetRetries = 0;
 		withinTimeLimit = false;
 
 		if (notifyTimer != null)
@@ -654,6 +782,13 @@ bool PerformTankSwap(int oldTank, int newTank)
 		ForcePlayerSuicide(newTank);
 
 	L4D_ReplaceTank(oldTank, newTank);
+
+	// 主动告知其它插件(如 tank_damage)换克已发生: 与引擎 forward 双保险, 幂等
+	LogToFileEx("l4d2_tank_swap.log", "[TankSwap] Tank 控制权转让: %N(%d) -> %N(%d)", oldTank, oldTank, newTank, newTank);
+	Call_StartForward(g_hForwardTankPassed);
+	Call_PushCell(oldTank);
+	Call_PushCell(newTank);
+	Call_Finish();
 
 	primaryTankPlayer = newTank;
 	currentTank = newTank;

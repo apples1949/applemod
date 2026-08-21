@@ -792,7 +792,7 @@ stock void CShowActivity(int client, const char[] format, any ...)
 		bool is_root = GetAdminFlag(id, Admin_Root, Access_Effective);
 
 		if ((value & 4) || (value & 8) || ((value & 16) && is_root)) {
-			char newsign[MAX_NAME_LENGTH]
+			char newsign[MAX_NAME_LENGTH];
 
 			newsign = sign;
 			if ((value & 8) || ((value & 16) && is_root) || (i == client)) {

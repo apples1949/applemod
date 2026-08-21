@@ -12,4 +12,12 @@
 	{
 		"en"		"*DEAD* "
 	}
+	"HexTags_ChatSurvivor"
+	{
+		"en"		"*SURVIVOR* "
+	}
+	"HexTags_ChatInfected"
+	{
+		"en"		"*INFECTED* "
+	}
 }

@@ -45,7 +45,7 @@ public Plugin myinfo =
 	name 			= "Tank Damage Announce 3.0",
 	author 			= "apples1949",
 	description 	= "Tank 伤害统计 3.0 版本: 数据跟随 Tank 实例, 控制权多次交接后死亡仍输出全部数据",
-	version 		= "2024/1/1",
+	version 		= "3.1",
 	url 			= "https://steamcommunity.com/id/saku_ra/"
 }
 
@@ -115,8 +115,8 @@ public void OnPluginStart()
 	g_hMissionFailedAnnounce = CreateConVar("tank_damage_failed_announce", "1", "生还者团灭时在场还有 Tank 是否显示生还者对 Tank 的伤害统计", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowPrintZeroDamage = CreateConVar("tank_damage_print_zero", "1", "是否允许显示对 Tank 零伤的玩家", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowSound = CreateConVar("tank_damage_allow_sound", "1", "Tank 生成时是否播放声音", CVAR_FLAG, true, 0.0, true, 1.0);
-	// 日志记录
-	g_hLogLevel = CreateConVar("tank_damage_log_level", "1", "插件日志记录级别 (1: 禁用, 2: DEBUG, 4: INFO, 8: MESSAGE, 16: SERVER, 32: ERROR) 数字相加", CVAR_FLAG, true, 1.0);
+	// 日志记录（默认 62 = 全部级别: DEBUG+INFO+MESSAGE+SERVER+ERROR）
+	g_hLogLevel = CreateConVar("tank_damage_log_level", "62", "插件日志记录级别 (1: 禁用, 2: DEBUG, 4: INFO, 8: MESSAGE, 16: SERVER, 32: ERROR) 数字相加 (62: 全部)", CVAR_FLAG, true, 1.0);
 
 	// HookEvents
 	HookEvent("round_start", roundStartHandler);
@@ -149,6 +149,8 @@ public void OnAllPluginsLoaded() {
 		LogMessage	("\n==========\n本插件需要前置插件 \"[L4D & L4D2] Left 4 DHooks Direct\" 方可运行\n==========\n");
 		SetFailState("\n==========\n本插件需要前置插件 \"[L4D & L4D2] Left 4 DHooks Direct\" 方可运行\n==========\n");
 	}
+	if (LibraryExists("l4d2_tank_swap"))
+		LogMessage("已检测到 l4d2_tank_swap: 换克主动告知 forward 已就绪");
 }
 
 public void OnClientPutInServer(int client) {
@@ -159,7 +161,7 @@ public void OnMapStart() {
 	PrecacheSound(SOUND_PATH);
 }
 
-/* 替代 logger.inc 的 Logger.debugAndInfo: OFF 位(1)置位时静默, DEBUG 位(2)输出到所有控制台, INFO 位(4)写入日志 */
+/* 替代 logger.inc 的 Logger.debugAndInfo: OFF 位(1)置位时静默, DEBUG 位(2)输出到所有控制台, INFO 位(4)写入专属日志文件 tank_damage.log */
 void debugAndInfoLog(const char[] message, any ...) {
 	int level = g_hLogLevel.IntValue;
 	if (level & LOG_LEVEL_OFF)
@@ -169,7 +171,7 @@ void debugAndInfoLog(const char[] message, any ...) {
 	if (level & LOG_LEVEL_DEBUG)
 		PrintToConsoleAll(buffer);
 	if (level & LOG_LEVEL_INFO)
-		LogMessage(buffer);
+		LogToFileEx("tank_damage.log", buffer);
 }
 
 /* 检测生还者是否吃铁: 生还者被 Tank 抛掷的可砸物体(带 m_hasTankGlow)击中 */
@@ -400,6 +402,27 @@ public Action printTankDamageHandler(Handle timer, DataPack pack) {
 **/
 public void L4D_OnReplaceTank(int oldTank, int newTank)
 {
+	handleTankPass(oldTank, newTank, "L4D_OnReplaceTank 前置转移");
+}
+
+/**
+* l4d2_tank_swap 换克成功后的主动告知（双保险, 与引擎 forward 幂等）:
+* 引擎 forward 已转移时这里为空操作; 引擎 forward 缺失/未触发时兜底转移。
+**/
+public void L4D2_TankSwap_OnTankPassed(int oldTank, int newTank)
+{
+	handleTankPass(oldTank, newTank, "tankswap 主动告知");
+}
+
+/**
+* 换克数据处理公共入口: 校验参数 → 确定数据持有者 → 转移数据 → 更新跟踪指针。
+* 幂等: 数据已被转移(旧索引已清空)时不会重复转移, 只同步跟踪指针。
+* @param oldTank 旧 Tank 客户端索引
+* @param newTank 新 Tank 客户端索引
+* @param logTag  日志来源标识(引擎 forward / tankswap 主动告知)
+**/
+void handleTankPass(int oldTank, int newTank, const char[] logTag)
+{
 	if (oldTank <= 0 || oldTank > MaxClients || newTank <= 0 || newTank > MaxClients)
 		return;
 	if (oldTank == newTank || !IsClientInGame(newTank))
@@ -422,7 +445,7 @@ public void L4D_OnReplaceTank(int oldTank, int newTank)
 		return;
 	}
 
-	debugAndInfoLog("%s: L4D_OnReplaceTank 前置转移, 由 %N(%d) 转到 %N(%d)", PLUGIN_PREFIX, sourceTank, sourceTank, newTank, newTank);
+	debugAndInfoLog("%s: %s, 由 %N(%d) 转到 %N(%d)", PLUGIN_PREFIX, logTag, sourceTank, sourceTank, newTank, newTank);
 	transferTankData(sourceTank, newTank);
 	g_iCurrentTank = newTank;
 }

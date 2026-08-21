@@ -3,7 +3,7 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.5"
+#define PLUGIN_VERSION	"1.6"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
@@ -167,6 +167,14 @@ public void OnPluginStart()
 
 	CreateTimer(PINNED_CHECK_INTERVAL, Timer_CheckPinned, _, TIMER_REPEAT);
 	CreateTimer(EXPLODE_SCAN_INTERVAL, Timer_ScanExplode, _, TIMER_REPEAT);
+
+	// 专门的日志: 确保 logs 目录存在, 加载即写入一条含绝对路径的记录, 便于确认加载与定位日志
+	char sLogDir[PLATFORM_MAX_PATH], sLogPath[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, sLogDir, sizeof(sLogDir), "logs");
+	if (!DirExists(sLogDir))
+		CreateDirectory(sLogDir, 0);
+	BuildPath(Path_SM, sLogPath, sizeof(sLogPath), "logs/%s", HIGHLIGHT_LOG_FILE);
+	LogToFileEx(HIGHLIGHT_LOG_FILE, "[插件] l4d2_infected_highlight_prompt v%s 已加载, 日志路径: %s", PLUGIN_VERSION, sLogPath);
 
 	//AutoExecConfig(true, "l4d2_infected_highlight_prompt");
 }

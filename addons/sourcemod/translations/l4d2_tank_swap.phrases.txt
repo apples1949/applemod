@@ -41,4 +41,10 @@
 		"en"	"{olive}<TankSwap>{default} Tank Control was surrendered to: {orange}%N"
 		"chi"	"{olive}<TankSwap>{default} Tank控制权被转让给：{orange}%N"
 	}
+
+	"No_Target"
+	{
+		"en"	" {olive}<TankSwap>{default} There is no infected teammate to surrender the Tank to right now."
+		"chi"	"{olive}<TankSwap>{default} 当前没有可以移交 Tank 的感染者队友。"
+	}
 }

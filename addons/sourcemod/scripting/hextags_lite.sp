@@ -6,7 +6,7 @@
 #include <clientprefs>
 #include <hextags>
 
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.1.1"
 
 // ===== 全局变量 =====
 CustomTags g_PlayerTags[MAXPLAYERS + 1];
@@ -182,22 +182,41 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
 
     int team = GetClientTeam(client);
     bool teamChat = StrEqual(command, "say_team");
+    bool speakerDead = (team != 1 && !IsPlayerAlive(client));
 
     for (int i = 1; i <= MaxClients; i++) {
         if (!IsClientInGame(i)) continue;
-        if (teamChat && GetClientTeam(i) != team) continue;
+
+        int iTeam = GetClientTeam(i);
+
+        // 队内聊天接收者：同队 + 旁观者（本服规则：旁观者可看两队队内聊天）
+        if (teamChat && iTeam != team && iTeam != 1) continue;
 
         char sStatus[32];
         sStatus[0] = '\0';
-        if (!teamChat) {
-            if (team == 1) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
-            } else if (!IsPlayerAlive(client)) {
+
+        if (teamChat) {
+            if (iTeam == 1) {
+                // 旁观者接收队内聊天：标注发言队伍
+                if (team == 2) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSurvivor", i);
+                } else if (team == 3) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatInfected", i);
+                }
+            } else if (speakerDead && iTeam == team && IsPlayerAlive(i)) {
+                // 队内聊天：死亡标记只给同队活人看
                 FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatDead", i);
             }
+        } else if (team == 1) {
+            // 公共聊天：旁观者标记
+            FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
+        } else if (speakerDead) {
+            // 公共聊天：死亡标记
+            FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatDead", i);
         }
 
-        CPrintToChat(i, "{default}%s%s{default} : %s", sStatus, sFullName, sFullMessage);
+        // CPrintToChatEx: author=发言人，{teamcolor} 按发言人队伍着色
+        CPrintToChatEx(i, client, "{default}%s%s{default} : %s", sStatus, sFullName, sFullMessage);
     }
 }
 

@@ -12,4 +12,12 @@
 	{
 		"chi"		"*死亡* "
 	}
+	"HexTags_ChatSurvivor"
+	{
+		"chi"		"*生还者* "
+	}
+	"HexTags_ChatInfected"
+	{
+		"chi"		"*感染者* "
+	}
 }

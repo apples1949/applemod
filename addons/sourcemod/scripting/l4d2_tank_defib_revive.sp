@@ -18,8 +18,9 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.3"
+#define PLUGIN_VERSION		"1.4"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -27,6 +28,9 @@
 
 #define MODEL_DEFIB			"models/w_models/weapons/w_eq_defibrillator.mdl"
 #define CLASS_DEFIB_SPAWN	"weapon_defibrillator_spawn"
+
+#define GLOW_COLOR_BLUE		16711680	// 0 0 255
+#define GLOW_RANGE			800
 
 ConVar g_cvEnable;
 ConVar g_cvGiveMode;
@@ -61,6 +65,12 @@ int g_iHealingCount;
 // 生还者死亡位置（坦克死亡时用于计算最近生还者）
 float g_vDeathPos[MAXPLAYERS + 1][3];
 bool g_bHasDeathPos[MAXPLAYERS + 1];
+
+// 换克时旧坦克死亡不应触发除颤器掉落
+bool g_bSwappedTank[MAXPLAYERS + 1];
+
+// 本插件复活后给黑白生还者加的蓝色轮廓
+bool g_bBWOutline[MAXPLAYERS + 1];
 
 public Plugin myinfo =
 {
@@ -119,6 +129,15 @@ public void OnPluginStart()
 	HookEvent("heal_begin", Event_HealBegin);
 	HookEvent("player_incapacitated", Event_PlayerIncapacitated);
 	HookEvent("round_start", Event_RoundStart);
+	HookEvent("tank_spawn", Event_TankSpawn);
+
+	// 黑白轮廓：外部把黑白移除时同步移除轮廓
+	HookEvent("heal_success", Event_HealSuccess);
+	HookEvent("pills_used", Event_PillsUsed);
+	HookEvent("adrenaline_used", Event_AdrenalineUsed);
+	HookEvent("revive_success", Event_ReviveSuccess);
+	HookEvent("player_spawn", Event_PlayerSpawn);
+	HookEvent("player_team", Event_PlayerTeam);
 
 	//AutoExecConfig(true, "l4d2_tank_defib_revive");
 }
@@ -134,6 +153,8 @@ public void OnMapEnd()
 	{
 		ClearHealingState(i);
 		g_bHasDeathPos[i] = false;
+		g_bSwappedTank[i] = false;
+		ResetBWOutline(i);
 	}
 }
 
@@ -160,6 +181,8 @@ public void OnClientDisconnect(int client)
 {
 	ClearHealingState(client);
 	g_bHasDeathPos[client] = false;
+	g_bSwappedTank[client] = false;
+	ResetBWOutline(client);
 }
 
 public void CvarFeatureChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -190,12 +213,125 @@ void StopAllHealing()
 	}
 }
 
+// 换克（tank pass）前置：旧坦克即将被替换，标记其死亡不应发放除颤器
+public void L4D_OnReplaceTank(int tank, int newTank)
+{
+	if (tank > 0 && tank <= MaxClients && IsClientInGame(tank))
+	{
+		g_bSwappedTank[tank] = true;
+	}
+}
+
+public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+	int tank = GetClientOfUserId(event.GetInt("userid"));
+	if (tank > 0 && tank <= MaxClients)
+	{
+		// 如果旧克之后又重新成为坦克，清除残留标记，按正常坦克死亡处理
+		g_bSwappedTank[tank] = false;
+	}
+}
+
+// =============================
+// 黑白蓝色轮廓（参考 LMC_Black_and_White_Notifier）
+// =============================
+void SetBlackWhiteOutline(int client, bool enable)
+{
+	if (!IsValidSurvivor(client) || !IsPlayerAlive(client))
+	{
+		return;
+	}
+
+	if (enable == g_bBWOutline[client])
+	{
+		return;
+	}
+
+	g_bBWOutline[client] = enable;
+
+	if (enable)
+	{
+		SetEntProp(client, Prop_Send, "m_iGlowType", 3);
+		SetEntProp(client, Prop_Send, "m_glowColorOverride", GLOW_COLOR_BLUE);
+		SetEntProp(client, Prop_Send, "m_nGlowRange", GLOW_RANGE);
+	}
+	else
+	{
+		SetEntProp(client, Prop_Send, "m_iGlowType", 0);
+		SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
+		SetEntProp(client, Prop_Send, "m_nGlowRange", 0);
+	}
+}
+
+void ResetBWOutline(int client)
+{
+	g_bBWOutline[client] = false;
+	if (client > 0 && client <= MaxClients && IsClientInGame(client) && IsPlayerAlive(client))
+	{
+		SetEntProp(client, Prop_Send, "m_iGlowType", 0);
+		SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
+		SetEntProp(client, Prop_Send, "m_nGlowRange", 0);
+	}
+}
+
+void RemoveBWOutlineIfNeeded(int client)
+{
+	if (!g_bBWOutline[client])
+	{
+		return;
+	}
+
+	if (!IsValidSurvivor(client) || !IsPlayerAlive(client)
+		|| GetEntProp(client, Prop_Send, "m_bIsOnThirdStrike") == 0)
+	{
+		SetBlackWhiteOutline(client, false);
+	}
+}
+
+public void Event_HealSuccess(Event event, const char[] name, bool dontBroadcast)
+{
+	int subject = GetClientOfUserId(event.GetInt("subject"));
+	RemoveBWOutlineIfNeeded(subject);
+}
+
+public void Event_PillsUsed(Event event, const char[] name, bool dontBroadcast)
+{
+	int userid = GetClientOfUserId(event.GetInt("userid"));
+	RemoveBWOutlineIfNeeded(userid);
+}
+
+public void Event_AdrenalineUsed(Event event, const char[] name, bool dontBroadcast)
+{
+	int userid = GetClientOfUserId(event.GetInt("userid"));
+	RemoveBWOutlineIfNeeded(userid);
+}
+
+public void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadcast)
+{
+	int subject = GetClientOfUserId(event.GetInt("subject"));
+	RemoveBWOutlineIfNeeded(subject);
+}
+
+public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+	int userid = GetClientOfUserId(event.GetInt("userid"));
+	ResetBWOutline(userid);
+}
+
+public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
+{
+	int userid = GetClientOfUserId(event.GetInt("userid"));
+	ResetBWOutline(userid);
+}
+
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		ClearHealingState(i);
 		g_bHasDeathPos[i] = false;
+		g_bSwappedTank[i] = false;
+		ResetBWOutline(i);
 	}
 }
 
@@ -218,6 +354,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 		g_vDeathPos[victim] = pos;
 		g_bHasDeathPos[victim] = true;
 
+		ResetBWOutline(victim);
 		ClearHealingState(victim);
 		return;
 	}
@@ -229,6 +366,13 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 
 	if (GetEntProp(victim, Prop_Send, "m_zombieClass") != ZC_TANK)
 	{
+		return;
+	}
+
+	// 换克产生的旧坦克死亡不是真正的坦克击杀，不发放除颤器
+	if (g_bSwappedTank[victim])
+	{
+		g_bSwappedTank[victim] = false;
 		return;
 	}
 
@@ -358,6 +502,7 @@ public Action Timer_HealTick(Handle timer, int userid)
 		}
 		SetEntProp(client, Prop_Send, "m_currentReviveCount", reviveCountSet);
 		SetEntProp(client, Prop_Send, "m_bIsOnThirdStrike", maxIncap > 0 && reviveCountSet >= maxIncap ? 1 : 0);
+		SetBlackWhiteOutline(client, maxIncap > 0 && reviveCountSet >= maxIncap);
 		g_bReviveCountApplied[client] = true;
 	}
 
@@ -574,6 +719,7 @@ void StartHealing(int client)
 	// 倒地次数 + 黑白状态（倒地次数达到最大倒地次数时为黑白）
 	SetEntProp(client, Prop_Send, "m_currentReviveCount", initialReviveCount);
 	SetEntProp(client, Prop_Send, "m_bIsOnThirdStrike", maxIncap > 0 && initialReviveCount >= maxIncap ? 1 : 0);
+	SetBlackWhiteOutline(client, maxIncap > 0 && initialReviveCount >= maxIncap);
 
 	if (!g_bHealing[client])
 	{
@@ -594,6 +740,7 @@ void StartHealing(int client)
 		// 0 次回血后立即设置
 		SetEntProp(client, Prop_Send, "m_currentReviveCount", reviveCountSet);
 		SetEntProp(client, Prop_Send, "m_bIsOnThirdStrike", maxIncap > 0 && reviveCountSet >= maxIncap ? 1 : 0);
+		SetBlackWhiteOutline(client, maxIncap > 0 && reviveCountSet >= maxIncap);
 	}
 
 	if (g_iHealTotal[client] <= 0)
@@ -643,6 +790,7 @@ void FinishHealing(int client)
 {
 	// 回满：去掉黑白，不再回血，虚血恢复自然流失
 	SetEntProp(client, Prop_Send, "m_bIsOnThirdStrike", 0);
+	SetBlackWhiteOutline(client, false);
 	SetEntPropFloat(client, Prop_Send, "m_healthBufferTime", GetGameTime());
 	ClearHealingState(client);
 }

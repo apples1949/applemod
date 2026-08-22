@@ -1,0 +1,27 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"chi"		"<{olive}尸潮{default}>"
+	}
+	"TankPlay"
+	{
+		"chi"		"由于坦克在场，尸潮已 {blue}暂停{default}！推进 {blue}%0.1f%%{default} 将触发尸潮。"
+	}
+	"UntilHordeStarts"
+	{
+		"chi"		"距离尸潮开始还剩 {blue}%0.1f%%{default}..."
+	}
+	"HordeResumed"
+	{
+		"chi"		"尸潮已 {blue}恢复{default}，强度 {green}%i%%{default}，继续推进将增强尸潮。"
+	}
+	"HordeStrength"
+	{
+		"chi"		"尸潮强度 {green}%i%%{default}..."
+	}
+	"HordeVeryStrength"
+	{
+		"chi"		"{red}生还者推进过远{default}，尸潮强度已达 {green}100%%{default}！"
+	}
+}

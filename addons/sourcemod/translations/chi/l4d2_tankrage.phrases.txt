@@ -1,0 +1,11 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"chi"		"{red}[{default}坦克怒气{red}]{default}"
+	}
+	"SurvivorsRunBack"
+	{
+		"chi"		"生还者每跑回 {olive}%i{green}%% {default}，坦克怒气将冻结 {olive}%0.1f {green}秒{default}。"
+	}
+}

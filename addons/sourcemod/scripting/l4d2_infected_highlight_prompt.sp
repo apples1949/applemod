@@ -3,7 +3,7 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.6"
+#define PLUGIN_VERSION	"1.7"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
@@ -95,7 +95,7 @@ bool  g_bTankHitVictim[TankHitType][MAXPLAYERS+1][MAXPLAYERS+1];
 // ====================================================================================================
 // 多控达成状态
 // ====================================================================================================
-bool  g_bMultiPinnedAnnounced = false;	// 当前多控状态是否已提示
+int   g_iMultiPinnedAnnounced = 0;		// 上次已提示的控住生还者人数(0=未提示)
 
 // ====================================================================================================
 // ConVar
@@ -207,7 +207,7 @@ public void OnMapEnd()
 
 	g_iLastExplodedBoomer = 0;
 	g_fLastExplodedTime = 0.0;
-	g_bMultiPinnedAnnounced = false;
+	g_iMultiPinnedAnnounced = 0;
 }
 
 public void OnClientDisconnect(int client)
@@ -751,15 +751,16 @@ public Action Timer_CheckPinned(Handle timer)
 
 	if (pinned >= g_iPinnedMin)
 	{
-		if (!g_bMultiPinnedAnnounced)
+		// 控住人数上升到新档位时逐级提示: 双控 → 三控 → 四控 ...
+		if (pinned > g_iMultiPinnedAnnounced)
 		{
 			PrintToInfectedTeam("\x04[\x03!\x04] \x03%s控\x05 \x01达成.", g_NumberText[pinned - 2]);
-			g_bMultiPinnedAnnounced = true;
+			g_iMultiPinnedAnnounced = pinned;
 		}
 	}
 	else
 	{
-		g_bMultiPinnedAnnounced = false;
+		g_iMultiPinnedAnnounced = 0;
 	}
 
 	return Plugin_Continue;

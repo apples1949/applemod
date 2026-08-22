@@ -189,19 +189,19 @@ public void OnPluginStart()
 	g_iZombieClass = FindSendPropInfo("CTerrorPlayer", "m_zombieClass");
 
 	g_hItemCvarCMD					= CreateConVar("l4d2_item_hint_cmd", 							"1", 			"如果为 1，生还者可以输入 !mark 来标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hHintTransType				= CreateConVar("l4d2_item_hint_instructorhint_translate", 		"0", 			"教练提示语言。0=服务器语言（英语），1=呼叫者语言", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hHintTransType				= CreateConVar("l4d2_item_hint_instructorhint_translate", 		"1", 			"教练提示语言。0=服务器语言（英语），1=呼叫者语言", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hItemCvarButtons				= CreateConVar("l4d2_item_hint_buttons", 						"131104", 		"生还者按哪些按键来标记目标，131072=Shift，4=Ctrl，32=使用，8192=换弹，524288=鼠标中键\n你可以把数字相加，例如 131104=Shift + 使用（0=关闭）", FCVAR_NOTIFY, true, 0.0);
 	g_hItemCvarVocalize 			= CreateConVar("l4d2_item_hint_vocalize", 						"1", 			"如果为 1，生还者可以使用语音指令 \"Look\" 来标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCappedMark					= CreateConVar("l4d2_item_hint_mark_capped", 					"0", 			"如果为 1，被控住的生还者仍可标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hHaningMark					= CreateConVar("l4d2_item_hint_mark_hanging", 					"0", 			"如果为 1，悬挂中的生还者仍可标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hDeadMark						= CreateConVar("l4d2_item_hint_mark_dead", 						"0", 			"如果为 1，已死亡的生还者仍可标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorTeamMarkSI			= CreateConVar("l4d2_survivor_team_mark_si",					"1",			"如果为 1，生还者玩家可以标记特感", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorTeamMarkSurvivor		= CreateConVar("l4d2_survivor_team_mark_survivor",				"1",			"如果为 1，生还者玩家可以标记生还者", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorTeamMarkSI			= CreateConVar("l4d2_survivor_team_mark_si",					"0",			"如果为 1，生还者玩家可以标记特感", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorTeamMarkSurvivor		= CreateConVar("l4d2_survivor_team_mark_survivor",				"0",			"如果为 1，生还者玩家可以标记生还者", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSurvivorTeamMarkItem			= CreateConVar("l4d2_survivor_team_mark_item",					"1",			"如果为 1，生还者玩家可以标记物品/武器", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSurvivorTeamMarkSpot			= CreateConVar("l4d2_survivor_team_mark_spot",					"1",			"如果为 1，生还者玩家可以标记点位", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	
 	g_hItemCvarColor				= CreateConVar("l4d2_item_marker_glow_color", 					"0 255 255", 			"物品标记发光颜色（RGB，空格分隔）。留空 = 移除发光", FCVAR_NOTIFY);
-	g_hItemHintCoolDown				= CreateConVar("l4d2_item_marker_cooldown_time", 				"1.0", 					"标记物品之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hItemHintCoolDown				= CreateConVar("l4d2_item_marker_cooldown_time", 				"3.0", 					"标记物品之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
 	g_hItemUseHintRange				= CreateConVar("l4d2_item_marker_use_range", 					"150", 					"标记物品的最大距离", FCVAR_NOTIFY, true, 1.0);
 	g_hItemUseSound					= CreateConVar("l4d2_item_marker_use_sound", 					"buttons/blip1.wav", 	"标记物品时播放的声音。（相对于 sound/ 目录，留空 = 关闭）", FCVAR_NOTIFY);
 	g_hItemAnnounceType				= CreateConVar("l4d2_item_marker_announce_type", 				"1", 					"物品标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
@@ -212,7 +212,7 @@ public void OnPluginStart()
 	g_hItemInstructorIcon			= CreateConVar("l4d2_item_marker_instructorhint_icon", 			"icon_interact", 		"教练提示图标。（更多图标：https://developer.valvesoftware.com/wiki/Env_instructor_hint）", FCVAR_NOTIFY);
 
 	g_hSpotMarkCvarColor			= CreateConVar("l4d2_spot_marker_color", 						"200 200 200", 			"点位标记颜色（RGB，空格分隔）。留空 = 移除圆圈标记", FCVAR_NOTIFY);
-	g_hSpotMarkCoolDown				= CreateConVar("l4d2_spot_marker_cooldown_time", 				"2.5", 					"点位标记之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkCoolDown				= CreateConVar("l4d2_spot_marker_cooldown_time", 				"5", 					"点位标记之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
 	g_hSpotMarkUseRange     		= CreateConVar("l4d2_spot_marker_use_range", 					"1800", 				"放置点位标记的最大距离", FCVAR_NOTIFY, true, 1.0);
 	g_hSpotMarkUseSound     		= CreateConVar("l4d2_spot_marker_use_sound", 					"buttons/blip1.wav", 	"放置点位标记时播放的声音。（相对于 sound/ 目录，留空 = 关闭）", FCVAR_NOTIFY);
 	g_hSpotMarkAnnounceType			= CreateConVar("l4d2_spot_marker_announce_type", 				"1", 					"点位标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
@@ -225,7 +225,7 @@ public void OnPluginStart()
 	g_hSpotMarkRingStartRadius		= CreateConVar("l4d2_spot_marker_ring_start_radius", 			"35.0", 				"点位标记光束环起始半径", FCVAR_NOTIFY, true, 1.0);
 	g_hSpotMarkRingEndRadius		= CreateConVar("l4d2_spot_marker_ring_end_radius", 				"50.0", 				"点位标记光束环结束半径", FCVAR_NOTIFY, true, 1.0);
 	g_hSpotMarkRingWidth			= CreateConVar("l4d2_spot_marker_ring_width", 					"2.0", 					"点位标记光束环宽度", FCVAR_NOTIFY, true, 0.0);
-	g_hSpotMarkParticle				= CreateConVar("l4d2_spot_marker_particle", 					"sline_sparks", 		"点位标记上的粒子效果。（留空 = 移除粒子，更多：https://forums.alliedmods.net/showthread.php?t=127111）", FCVAR_NOTIFY);
+	g_hSpotMarkParticle				= CreateConVar("l4d2_spot_marker_particle", 					"", 		"点位标记上的粒子效果。（留空 = 移除粒子，更多：https://forums.alliedmods.net/showthread.php?t=127111）", FCVAR_NOTIFY);
 
 	g_hInfectedMarkCvarColor   		= CreateConVar("l4d2_infected_marker_glow_color", 				"255 120 203",			"特感标记发光颜色（RGB，空格分隔）。留空 = 移除发光。", FCVAR_NOTIFY);
 	g_hInfectedMarkCoolDown			= CreateConVar("l4d2_infected_marker_cooldown_time", 			"0.25", 				"生还者标记特感的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
@@ -234,7 +234,7 @@ public void OnPluginStart()
 	g_hInfectedMarkAnnounceType		= CreateConVar("l4d2_infected_marker_announce_type",			"1", 					"特感标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	g_hInfectedMarkGlowTimer   		= CreateConVar("l4d2_infected_marker_glow_timer", 				"10.0", 				"被生还者标记后特感发光持续时间（秒）", FCVAR_NOTIFY, true, 0.0);
 	g_hInfectedMarkGlowRange   		= CreateConVar("l4d2_infected_marker_glow_range", 				"2500", 				"被生还者标记后特感发光可见范围", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedMarkSI    			= CreateConVar("l4d2_infected_marker_si_flag", 					"127", 					"生还者可以标记哪些特感？1=烟鬼，2=胖子，4=猎人，8=喷吐者，16=骑师，32=冲锋者，64=坦克。将数字相加（127=全部）", FCVAR_NOTIFY, true, 0.0, true, 127.0);
+	g_hInfectedMarkSI    			= CreateConVar("l4d2_infected_marker_si_flag", 					"0", 					"生还者可以标记哪些特感？1=烟鬼，2=胖子，4=猎人，8=喷吐者，16=骑师，32=冲锋者，64=坦克。将数字相加（127=全部）", FCVAR_NOTIFY, true, 0.0, true, 127.0);
 	g_hInfectedMarkInstructorHint	= CreateConVar("l4d2_infected_marker_instructorhint_enable", 	"1", 					"如果为 1，在被生还者标记的特感上显示教练提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hInfectedMarkInstructorColor	= CreateConVar("l4d2_infected_marker_instructorhint_color", 	"255 0 0", 				"特感上教练提示的颜色。（留空 = 隐藏特感名称）", FCVAR_NOTIFY);
 	g_hInfectedMarkInstructorIcon	= CreateConVar("l4d2_infected_marker_instructorhint_icon", 		"icon_skull", 			"点位标记上的教练提示图标", FCVAR_NOTIFY);
@@ -242,8 +242,8 @@ public void OnPluginStart()
 	g_hInfectedMarkSIFov			= CreateConVar("l4d2_infected_marker_si_fov", 					"15.0", 				"检测生还者是否看向特感的 FOV 角度（0=仅准星）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
 	g_hInfectedMarkWitchFov			= CreateConVar("l4d2_infected_marker_witch_fov", 				"15.0", 				"检测生还者是否看向女巫的 FOV 角度（0=仅准星）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
 
-	g_hSurvivorMarkCvarColor   		= CreateConVar("l4d2_survivor_marker_glow_color", 				"0 200 0", 					"生还者标记发光颜色（RGB，空格分隔）。留空 = 关闭。", FCVAR_NOTIFY);
-	g_hSurvivorMarkCoolDown			= CreateConVar("l4d2_survivor_marker_cooldown_time", 			"1.0", 						"标记生还者之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkCvarColor   		= CreateConVar("l4d2_survivor_marker_glow_color", 				"255 255 255", 					"生还者标记发光颜色（RGB，空格分隔）。留空 = 关闭。", FCVAR_NOTIFY);
+	g_hSurvivorMarkCoolDown			= CreateConVar("l4d2_survivor_marker_cooldown_time", 			"5.0", 						"标记生还者之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
 	g_hSurvivorMarkUseRange     	= CreateConVar("l4d2_survivor_marker_use_range", 				"1000", 					"标记生还者的最大距离", FCVAR_NOTIFY, true, 1.0);
 	g_hSurvivorMarkUseSound			= CreateConVar("l4d2_survivor_marker_use_sound", 				"player/suit_denydevice.wav",  "标记生还者时播放的声音。（相对于 sound/ 目录，留空 = 关闭）", FCVAR_NOTIFY);
 	g_hSurvivorMarkAnnounceType		= CreateConVar("l4d2_survivor_marker_announce_type", 			"1", 						"标记生还者时的公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
@@ -253,14 +253,14 @@ public void OnPluginStart()
 	g_hSurvivorMarkInstructorColor	= CreateConVar("l4d2_survivor_marker_instructorhint_color", 	"0 200 0", 					"生还者上教练提示的颜色。（留空 = 隐藏名称）", FCVAR_NOTIFY);
 	g_hSurvivorMarkInstructorIcon	= CreateConVar("l4d2_survivor_marker_instructorhint_icon", 		"icon_alert", 				"点位标记上的教练提示图标", FCVAR_NOTIFY);
 	g_hSurvivorMarkFov				= CreateConVar("l4d2_survivor_marker_fov", 						"15.0", 					"检测玩家是否看向生还者的 FOV 角度（0=仅准星）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
-	g_hSurvivorMarkInfectedNotify	= CreateConVar("l4d2_survivor_marker_infected_notify",			"1",						"如果为 1，当目标被感染者标记时通知该目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkInfectedNotify	= CreateConVar("l4d2_survivor_marker_infected_notify",			"0",						"如果为 1，当目标被感染者标记时通知该目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hInfectedTeamMarkEnable		= CreateConVar("l4d2_infected_team_mark_enable",					"1",			"如果为 1，感染者玩家可以使用标记", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hInfectedTeamMarkSurvivor		= CreateConVar("l4d2_infected_team_mark_survivor",					"1",			"如果为 1，感染者玩家可以标记生还者", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hInfectedTeamMarkItem			= CreateConVar("l4d2_infected_team_mark_item",						"1",			"如果为 1，感染者玩家可以标记物品/武器", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedTeamMarkItem			= CreateConVar("l4d2_infected_team_mark_item",						"0",			"如果为 1，感染者玩家可以标记物品/武器", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hInfectedTeamMarkSpot			= CreateConVar("l4d2_infected_team_mark_spot",						"1",			"如果为 1，感染者玩家可以标记点位", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hInfectedTeamButtons			= CreateConVar("l4d2_infected_team_buttons", 						"131072", 		"感染者玩家按哪些按键来标记目标，131072=Shift，4=Ctrl，32=使用，8192=换弹，524288=鼠标中键\n你可以把数字相加，例如 131104=Shift + 使用（0=关闭）", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedTeamDeadMark			= CreateConVar("l4d2_infected_team_dead", 							"0", 			"如果为 1，已死亡的感染者玩家可以标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedTeamDeadMark			= CreateConVar("l4d2_infected_team_dead", 							"1", 			"如果为 1，已死亡的感染者玩家可以标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hInfectedTeamGhostMark		= CreateConVar("l4d2_infected_team_ghost", 							"1", 			"如果为 1，幽灵状态的感染者玩家可以标记目标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	//AutoExecConfig(true, "l4d2_item_hint");

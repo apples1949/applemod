@@ -64,14 +64,14 @@ enum
 };
 
 char karmaNames[KarmaType_MAX][] = {
-	"Charge",
-	"Impact",
-	"Jockey",
-	"Slap",
-	"Punch",
-	"Smoke",
-	"Stagger",
-	"Jump",
+	"冲锋",
+	"撞击",
+	"猴子",
+	"巴掌",
+	"拳头",
+	"烟袭",
+	"硬直",
+	"跳跃",
 };
 
 // I'll probably eventually add a logger for karma jumps and add "lastDistance" to this enum struct that dictates the closest special infected if maybe something messed up.
@@ -133,8 +133,8 @@ float fLogHeight[MAXPLAYERS + 1] = { -1.0, ... };
 
 public Plugin myinfo =
 {
-	name        = "L4D2 Karma Kill System",
-	author      = "AtomicStryker, heavy edit by Eyal282, Harry",
+	name        = "L4D2 Karma Kill System (tranchi)",
+	author      = "apples1949",
 	description = "Very Very loudly announces the predicted event of a player leaving the map and or life through height or drown.",
 	version     = PLUGIN_VERSION,
 	url         = "https://github.com/fbef0102/L4D1_2-Plugins/tree/master/l4d2_karma_kill"
@@ -1603,11 +1603,11 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 
 		if (type == KT_Jump)
 		{
-			CPrintToChatAll("[{olive}TS{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}, for great justice!!", LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "Bird" : "Karma", KarmaName, victim);
+			CPrintToChatAll("[{olive}TS{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}，正义执行！！", LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "小鸟" : "报应", KarmaName, victim);
 		}
 		else
 		{
-			CPrintToChatAll("[{olive}TS{default}] {green}%s{default} %s %s {olive}%N{default}, for great justice!!", LastKarma[victim][type].artistName, bBird ? "Bird" : "Karma", KarmaName, victim);
+			CPrintToChatAll("[{olive}TS{default}] {green}%s{default} %s %s {olive}%N{default}，正义执行！！", LastKarma[victim][type].artistName, bBird ? "小鸟" : "报应", KarmaName, victim);
 		}
 	}
 

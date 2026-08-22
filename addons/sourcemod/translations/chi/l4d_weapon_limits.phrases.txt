@@ -1,0 +1,11 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"chi"		"{default}[{olive}武器限制{default}]"
+	}
+	"Full"
+	{
+		"chi"		"该武器组已达上限 {green}%d{default}！"
+	}
+}

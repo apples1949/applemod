@@ -19,20 +19,15 @@
 		"max_distance"		"400"
 		"tank_ban_flow"
 		{
-//			"Before elevator exit"
-//			{
-//				"min"		"38"
-//				"max"		"79"
-//			}
-//			"Early spawns"
-//			{
-//				"min"		"0"
-//				"max"		"24"
-//			}
-			"可怜不会走路的"
+			"Before elevator exit"
+			{
+				"min"		"38"
+				"max"		"79"
+			}
+			"Early spawns"
 			{
 				"min"		"0"
-				"max"		"79"
+				"max"		"24"
 			}
 			"After kitchen"
 			{
@@ -153,7 +148,7 @@
 		"start_dist"		"50.000000"
 		"start_extra_dist"	"200.000000"
 		"end_dist"			"150.000000"
-		"horde_limit"		"480"//真有人把僵尸打完再走改多些
+		"horde_limit"		"420"//真有人把僵尸打完再走改多些
 		"tank_ban_flow"
 		{
 			"One way drop"
@@ -184,7 +179,7 @@
 		"start_extra_dist"	"150.000000"
 		"end_dist"			"250.000000"
 		"max_distance"		"500"
-		"horde_limit"		"150"
+		"horde_limit"		"210"//加多点
 		"witch_ban_flow"
 		{
 			"Event 2nd stage"

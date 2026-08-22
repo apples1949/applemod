@@ -1,0 +1,46 @@
+"Phrases"
+{
+	"TagRage"
+	{
+		"chi"		"{red}<{default}坦克怒气{red}>"
+	}
+	"Refilled"
+	{
+		"chi"		"{default}({green}%N{default}) {olive}怒气值 {red}已回满"
+	}
+	"RefilledBot"
+	{
+		"chi"		"{olive}怒气值 {red}已回满"
+	}
+
+    "TagSelection"
+	{
+		"chi"		"{red}<{default}坦克选择{red}>"
+	}
+    "YouBecomeTank"
+	{
+		"chi"		"{green}你 {default}将成为 {red}坦克{default}！"
+	}
+   "BecomeTank"
+	{
+		"chi"		"{olive}%N {default}将成为 {red}坦克！"
+	}
+
+    "TagControl"
+	{
+		"chi"		"{green}[{olive}坦克控制{green}]"
+	}
+   "InvalidTarget"
+	{
+		"chi"		"{default}无效目标，无法给克"
+	}
+   "NoInfected"
+	{
+		"chi"		"{olive}%N {default}不在感染者队伍，无法给克"
+	}
+
+    "HintText"
+	{
+		"chi"		"怒气值已回满"
+	}
+}

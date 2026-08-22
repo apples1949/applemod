@@ -94,9 +94,9 @@ public void OnPluginStart()
 	HookConVarChange(hCvarPermanentHealthProportion, CvarChanged);
 
 	HookEvent("round_start", RoundStartEvent, EventHookMode_PostNoCopy);
-	HookEvent("heal_begin", OnHealBegin, EventHookMode_PostNoCopy);
-	HookEvent("heal_success", OnHealSuccess, EventHookMode_PostNoCopy);
-	HookEvent("heal_interrupted", OnHealInterrupted, EventHookMode_PostNoCopy);
+	HookEvent("heal_begin", OnHealBegin, EventHookMode_Post);
+	HookEvent("heal_success", OnHealSuccess, EventHookMode_Post);
+	HookEvent("heal_interrupted", OnHealInterrupted, EventHookMode_Post);
 	HookEvent("player_ledge_grab", OnPlayerLedgeGrab);
 	HookEvent("player_incapacitated", OnPlayerIncapped);
 	HookEvent("player_hurt", OnPlayerHurt);
@@ -143,8 +143,8 @@ public void OnConfigsExecuted()
 	fPermHpWorth = fMapBonus / iTeamSize / 100 * fPermHealthProportion;
 	fTempHpWorth = fMapBonus * fTempHealthProportion / fMapTempHealthBonus; // this should be almost equal to the perm hp worth, but for accuracy we'll keep it separate
 	iPillWorth = L4D2Util_Clamp(RoundToNearest(50 * (fPermHpWorth / GetConVarFloat(hCvarPillsHpFactor)) / 5) * 5, 5, GetConVarInt(hCvarPillsMaxBonus)); // make it pretty
-	// 规则2/3：每名玩家药分满分 = 医疗包2倍 + 胆汁1/5（投掷物加成独立于药品）
-	iMaxPillScore = 2 * iPillWorth + RoundToFloor(float(iPillWorth) / 5.0);
+	// 规则2/3：每名玩家药分满分 = 医疗包2倍 + 雷1/10（显示上限按携带雷计；携带胆汁时百分比可超过100%）
+	iMaxPillScore = 2 * iPillWorth + RoundToFloor(float(iPillWorth) / 10.0);
 #if SM2_DEBUG
 	PrintToChatAll("\x01Map health bonus: \x05%.1f\x01, temp health bonus: \x05%.1f\x01, perm hp worth: \x03%.1f\x01, temp hp worth: \x03%.1f\x01, pill worth: \x03%i\x01", fMapBonus, fMapTempHealthBonus, fPermHpWorth, fTempHpWorth, iPillWorth);
 #endif

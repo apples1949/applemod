@@ -694,12 +694,12 @@ public Action Timer_EndTankHit(Handle timer, DataPack pack)
 
 			if (type == TankHit_Claw)
 			{
-				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍中\x04%s\x05名生还者",
+				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) 一次性\x01拍中\x04%s\x05名生还者",
 					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
 			}
 			else
 			{
-				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品命中\x04%s\x05名生还者",
+				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品连续命中\x04%s\x05名生还者",
 					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
 			}
 		}

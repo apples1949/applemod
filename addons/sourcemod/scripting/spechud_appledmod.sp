@@ -70,6 +70,9 @@ bool bRoundHasFlowTank, bRoundHasFlowWitch, bFlowTankActive, bCustomBossSys;
 bool bScoremod, bHybridScoremod, bNextScoremod;
 int iMaxDistance;
 
+// l4d2_scripted_hud 自带奖励分显示, 开启时本插件不再重复显示奖励分
+bool bScriptedHud;
+
 // Tank Control EQ
 bool bTankSelection;
 
@@ -195,6 +198,7 @@ void FindScoreMod()
 	bScoremod = LibraryExists("l4d2_scoremod");
 	bHybridScoremod = LibraryExists("l4d2_hybrid_scoremod") || LibraryExists("l4d2_hybrid_scoremod_zone");
 	bNextScoremod = LibraryExists("l4d2_health_temp_bonus");
+	bScriptedHud = LibraryExists("l4d2_scripted_hud");
 }
 
 void FindTankSelection()
@@ -887,7 +891,16 @@ void FillScoreInfo(Panel hSpecHud)
 		
 		case GAMEMODE_VERSUS:
 		{
-			if (bHybridScoremod)
+			if (bScriptedHud)
+			{
+				// l4d2_scripted_hud 已显示奖励分, 这里不再重复, 只保留距离
+				DrawPanelText(hSpecHud, " ");
+				
+				FormatEx(info, sizeof(info), "> 距离: %i", iMaxDistance);
+				DrawPanelText(hSpecHud, info);
+			}
+			
+			else if (bHybridScoremod)
 			{
 				int healthBonus	= SMPlus_GetHealthBonus(),	maxHealthBonus	= SMPlus_GetMaxHealthBonus();
 				int damageBonus	= SMPlus_GetDamageBonus(),	maxDamageBonus	= SMPlus_GetMaxDamageBonus();

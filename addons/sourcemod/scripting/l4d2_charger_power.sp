@@ -62,7 +62,7 @@ enum struct PluginCvars
 	{
 		CreateConVar("charger_power_version", PLUGIN_VERSION, "冲锋者力量插件版本", CVAR_FLAGS|FCVAR_DONTRECORD);
 		this.g_h_CvarChargerPowerPluginOn = CreateConVar("l4d2_charger_power_on", "1", "启用/禁用插件", CVAR_FLAGS, true, 0.0, true, 1.0);
-		this.g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "100.0", "冲锋者撞击物体的力度", CVAR_FLAGS, true, 0.0, true, 5000.0);
+		this.g_h_CvarChargerPower = CreateConVar("l4d2_charger_power", "150.0", "冲锋者撞击物体的力度", CVAR_FLAGS, true, 0.0, true, 5000.0);
 		this.g_h_CvarChargerCarry = CreateConVar("l4d2_charger_power_carry", "1", "冲锋者携带幸存者时是否可推动物体", CVAR_FLAGS, true, 0.0, true, 1.0);
 		this.g_h_CvarObjects = CreateConVar("l4d2_charger_power_objects", "7", "可推动的物体类型（1 - 汽车，2 - 报警汽车，4 - 集装箱，8 - 卡车）", CVAR_FLAGS, true, 1.0, true, 15.0);
 		this.g_h_CvarPushLimit = CreateConVar("l4d2_charger_power_push_limit", "2", "物体最多可被推动的次数", CVAR_FLAGS, true, 1.0, true, 100.0);

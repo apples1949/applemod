@@ -137,6 +137,8 @@ public void OnPluginStart()
 	HookEvent("player_team", Event_PlayerTeam);
 
 	RegConsoleCmd("sm_playertime", cmdplayertime);
+	RegConsoleCmd("sm_time", cmdplayertime);
+	RegConsoleCmd("sm_pt", cmdplayertime);
 
 	//AutoExecConfig(true, "GetPlayerGametime");
 

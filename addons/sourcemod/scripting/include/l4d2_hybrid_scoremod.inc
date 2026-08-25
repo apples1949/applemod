@@ -13,7 +13,7 @@ native int SMPlus_GetMaxPillsBonus();
 public SharedPlugin __pl_l4d2_hybrid_scoremod =
 {
 	name = "l4d2_hybrid_scoremod",
-	file = "l4d2_hybrid_scoremod.smx",
+	file = "l4d2_hybrid_scoremod_zone.smx",
 #if defined REQUIRE_PLUGIN
 	required = 1,
 #else

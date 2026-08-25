@@ -86,6 +86,8 @@ public void
 
 	RegConsoleCmd("sm_trac", Call_Trac);
 	RegConsoleCmd("sm_bhop", Call_Bohp);
+	RegConsoleCmd("sm_gz", Call_Trac);
+	RegConsoleCmd("sm_lt", Call_Bohp);
 }
 
 public void OnAllPluginsLoaded()

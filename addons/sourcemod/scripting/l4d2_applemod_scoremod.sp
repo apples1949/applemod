@@ -69,6 +69,14 @@ public Plugin myinfo =
 
 public APLRes AskPluginLoad2(Handle plugin, bool late, char[] error, int err_max)
 {
+	// 同一份 SMPlus_* native 只允许一个提供者注册。若已有其他 scoremod 提供者
+	// （例如 plugins/optional/ 里还留着旧的 l4d2_hybrid_scoremod*.smx），
+	// 直接干净地拒绝加载，而不是让 CreateNative 抛 "name is probably already in use" 异常。
+	if (GetFeatureStatus(FeatureType_Native, "SMPlus_GetHealthBonus") == FeatureStatus_Available)
+	{
+		Format(error, err_max, "SMPlus natives already provided by another scoremod plugin; only one provider may run (remove the other l4d2_hybrid_scoremod*.smx)");
+		return APLRes_Failure;
+	}
 	CreateNative("SMPlus_GetHealthBonus", Native_GetHealthBonus);
 	CreateNative("SMPlus_GetDamageBonus", Native_GetDamageBonus);
 	CreateNative("SMPlus_GetPillsBonus", Native_GetPillsBonus);

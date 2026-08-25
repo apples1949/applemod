@@ -56,6 +56,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
 	RegConsoleCmd("sm_tankpass", CallSurrenderMenu, "Shows who is becoming the tank.");
+	RegConsoleCmd("sm_gk", CallSurrenderMenu, "Shows who is becoming the tank.");
+	RegConsoleCmd("sm_rk", CallSurrenderMenu, "Shows who is becoming the tank.");
+	RegConsoleCmd("sm_pass", CallSurrenderMenu, "Shows who is becoming the tank.");
 
 	cvar_SurrenderTimeLimit = CreateConVar("l4d_tankswap_timelimit", "15", " 主控坦克玩家可移交控制权的秒数 ", FCVAR_NOTIFY, true, 1.0);
 	cvar_SurrenderChoiceType = CreateConVar("l4d_tankswap_choicetype", "2", " 0 - 禁用；1 - 输入 !tankpass 按钮呼出菜单；2 - 每位坦克玩家都会弹出菜单 ", FCVAR_NOTIFY, true, 0.0, true, 2.0);

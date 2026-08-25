@@ -60,6 +60,15 @@ public Plugin:myinfo =
 
 public APLRes:AskPluginLoad2(Handle:plugin, bool:late, String:error[], errMax)
 {
+    // The SMPlus_* natives may only be registered by one provider plugin.
+    // If another scoremod provider already owns them (e.g. the old
+    // l4d2_hybrid_scoremod.smx left in plugins/optional/), refuse to load
+    // cleanly instead of throwing "name is probably already in use".
+    if (GetFeatureStatus(FeatureType_Native, "SMPlus_GetHealthBonus") == FeatureStatus_Available)
+    {
+        Format(error, errMax, "SMPlus natives already provided by another scoremod plugin; only one provider may run (remove the other l4d2_hybrid_scoremod*.smx)");
+        return APLRes_Failure;
+    }
     CreateNative("SMPlus_GetHealthBonus", Native_GetHealthBonus);
     CreateNative("SMPlus_GetDamageBonus", Native_GetDamageBonus);
     CreateNative("SMPlus_GetPillsBonus", Native_GetPillsBonus);

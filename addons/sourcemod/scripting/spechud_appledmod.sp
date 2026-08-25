@@ -1257,7 +1257,7 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 
 	if (bTankHUD)
 	{
-		FormatEx(info, sizeof(info), "!tankpass给克(匹配才能用)");
+		FormatEx(info, sizeof(info), "!gk/!tankpass给克(匹配才能用)");
 		DrawPanelText(hSpecHud, info);
 	}
 
@@ -1267,12 +1267,12 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 
 		if ((cvar = FindConVar("tank_bohp_hp")) != null)
 		{
-			FormatEx(info, sizeof(info), "!bhop开启自动连跳(扣%d血量)", cvar.IntValue);
+			FormatEx(info, sizeof(info), "!lt/!bhop开启自动连跳(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
 		if ((cvar = FindConVar("tank_trac_hp")) != null)
 		{
-			FormatEx(info, sizeof(info), "!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
+			FormatEx(info, sizeof(info), "!gz/!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
 

@@ -34,7 +34,7 @@ void InitPanel()
 		cmdFooter.Add("!swapto 1/2/3/4 灵魂特感切换到相当于路程哪个玩家位置");
 		cmdFooter.Add("!tankhud 坦克在场时开关坦克状态hud");
 		cmdFooter.Add("!spechud 旁观hud开关");
-		cmdFooter.Add("!playertime 查看所有玩家的真实时长及lerp值");
+		cmdFooter.Add("!time 查看所有玩家的真实时长及lerp值");
 	}
 
 	curCmd = 0;

@@ -1427,7 +1427,7 @@ Action Cmd_StatsDisplayGeneral(int client, int args)
 				bMy = true;
 			} else {
 				if (IS_VALID_INGAME(client)) {
-					PrintToChat(client, "Stats command: unknown argument: '%s'. Type '/stats help' for possible arguments.", sArg);
+					PrintToChat(client, "\x01统计命令: 未知参数: '\x04%s\x01'。输入 '\x04/stats help\x01' 查看可用参数。", sArg);
 				}
 			}
 		}
@@ -1493,7 +1493,7 @@ Action Cmd_StatsDisplayGeneral(int client, int args)
 Action Cmd_StatsReset(int client, int args)
 {
 	ResetStats(false, -1);
-	PrintToChatAll("Player statistics reset.");
+	PrintToChatAll("\x01玩家统计数据已重置。");
 	return Plugin_Handled;
 }
 
@@ -1548,97 +1548,97 @@ Action Cmd_Cookie_SetPrintFlags(int client, int args)
 		int part = 0;
 
 		if (iFlags & AUTO_MVPCHAT_ROUND) {
-			strcopy(tmpStr[part], 24, "mvp/chat(round)");
+			strcopy(tmpStr[part], 24, "MVP/聊天(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCHAT_GAME) {
-			strcopy(tmpStr[part], 24, "mvp/chat(game)");
+			strcopy(tmpStr[part], 24, "MVP/聊天(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCON_ROUND) {
-			strcopy(tmpStr[part], 24, "mvp(round)");
+			strcopy(tmpStr[part], 24, "MVP(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCON_GAME) {
-			strcopy(tmpStr[part], 24, "mvp(game)");
+			strcopy(tmpStr[part], 24, "MVP(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCON_MORE_ROUND) {
-			strcopy(tmpStr[part], 24, "mvp/more(round)");
+			strcopy(tmpStr[part], 24, "MVP/更多(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCON_MORE_GAME) {
-			strcopy(tmpStr[part], 24, "mvp/more(game)");
+			strcopy(tmpStr[part], 24, "MVP/更多(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_MVPCON_TANK) {
-			strcopy(tmpStr[part], 24, "mvp/tankfight");
+			strcopy(tmpStr[part], 24, "MVP/坦克战");
 			part++;
 		}
 		
 		if (iFlags & AUTO_SKILLCON_ROUND) {
-			strcopy(tmpStr[part], 24, "skill/special(round)");
+			strcopy(tmpStr[part], 24, "技能(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_SKILLCON_GAME) {
-			strcopy(tmpStr[part], 24, "skill/special(game)");
+			strcopy(tmpStr[part], 24, "技能(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_FFCON_ROUND) {
-			strcopy(tmpStr[part], 24, "ff(round)");
+			strcopy(tmpStr[part], 24, "友伤(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_FFCON_GAME) {
-			strcopy(tmpStr[part], 24, "ff(game)");
+			strcopy(tmpStr[part], 24, "友伤(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_ACCCON_ROUND) {
-			strcopy(tmpStr[part], 24, "accuracy(round)");
+			strcopy(tmpStr[part], 24, "命中率(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_ACCCON_GAME) {
-			strcopy(tmpStr[part], 24, "accuracy(game)");
+			strcopy(tmpStr[part], 24, "命中率(全场)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_ACCCON_MORE_ROUND) {
-			strcopy(tmpStr[part], 24, "acc/more(round)");
+			strcopy(tmpStr[part], 24, "命中详情(回合)");
 			part++;
 		}
 		
 		if (iFlags & AUTO_ACCCON_MORE_GAME) {
-			strcopy(tmpStr[part], 24, "acc/more(game)");
+			strcopy(tmpStr[part], 24, "命中详情(全场)");
 			part++;
 		}
 
-		PrintToChat(client, "\x01统计设置: 已设置的标志:", tmpStr);
+		PrintToChat(client, "\x01统计设置: 已设置的标志:");
 		
 		// print all parts
 		int tmpCnt = 0;
 		for (int i = 0; i < part; i++) {
-			Format(tmpPrint, sizeof(tmpPrint), "%s%s%s", tmpPrint, (tmpCnt) ? ", " : "", tmpStr[i]);
+			Format(tmpPrint, sizeof(tmpPrint), "%s%s%s", tmpPrint, (tmpCnt) ? "、" : "", tmpStr[i]);
 			tmpCnt++;
 
 			// print each chunk of 6
 			if (tmpCnt >= 6 || i == part - 1) {
-				PrintToChat(client, "\x04%s%s\x01", tmpPrint, (i < part - 1) ? "," : "");
+				PrintToChat(client, "\x04%s%s\x01", tmpPrint, (i < part - 1) ? "、" : "");
 				tmpCnt = 0;
 				tmpPrint = "";
 			}
 		}
 		
-		PrintToChat(client, "\x01Use \x04/stats_auto test\x01 to get a report preview.");
+		PrintToChat(client, "\x01使用 \x04/stats_auto test\x01 预览报告。");
 	}
 
 	g_iCookieValue[client] = iFlags;
@@ -1648,7 +1648,7 @@ Action Cmd_Cookie_SetPrintFlags(int client, int args)
 		IntToString(iFlags, sCookieValue, sizeof(sCookieValue));
 		SetClientCookie(client, g_hCookiePrint, sCookieValue);
 	} else {
-		PrintToChat(client, "Stats Pref.: Error: cookie not cached yet (try again in a bit).");
+		PrintToChat(client, "\x01统计偏好: 错误: cookie 尚未缓存(请稍后再试)。");
 	}
 
 	return Plugin_Handled;
@@ -3427,15 +3427,15 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 
 			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
 				if (iBrevityFlags & BREV_PERCENT) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - SI: #\x03%d \x01(\x05%d \x01dmg,\x05 %d \x01kills)",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害,\x05 %d \x01击杀)",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
 							(bRound) ? g_strRoundPlayerData[index][team][plySIKilled] : g_strPlayerData[index][plySIKilled]
 					  );
 				} else if (iBrevityFlags & BREV_ABSOLUTE) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - SI: #\x03%d \x01(dmg \x04%i%%\x01, kills \x04%i%%\x01)",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(伤害 \x04%i%%\x01, 击杀 \x04%i%%\x01)",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							RoundFloat((bRound) ?
 									((float(g_strRoundPlayerData[index][team][plySIDamage]) / float(g_strRoundData[g_iRound][team][rndSIDamage])) * 100) :
@@ -3446,8 +3446,8 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 									((float(g_strPlayerData[index][plySIKilled]) / float(g_strAllRoundData[team][rndSIKilled])) * 100))
 							);
 				} else {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - SI: #\x03%d \x01(\x05%d \x01dmg [\x04%i%%\x01],\x05 %d \x01kills [\x04%i%%\x01])",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害 [\x04%i%%\x01],\x05 %d \x01击杀 [\x04%i%%\x01])",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
 							RoundFloat((bRound) ?
@@ -3505,14 +3505,14 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 
 			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
 				if (iBrevityFlags & BREV_PERCENT) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - CI: #\x03%d \x01(\x05 %d \x01kills)",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只)",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon]
 					);
 				} else if (iBrevityFlags & BREV_ABSOLUTE) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - CI: #\x03%d \x01(kills \x04%i%%\x01)",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(击杀 \x04%i%%\x01)",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							RoundFloat((bRound) ?
 									((float(g_strRoundPlayerData[index][team][plyCommon]) / float(g_strRoundData[g_iRound][team][rndCommon])) * 100) :
@@ -3520,8 +3520,8 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 							)
 					);
 				} else {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] Your rank - CI: #\x03%d \x01(\x05 %d \x01kills [\x04%i%%\x01])",
-							(bRound) ? "" : " - Game",
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只 [\x04%i%%\x01])",
+							(bRound) ? "" : " - 全场",
 							(i + 1),
 							(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon],
 							RoundFloat((bRound) ?
@@ -3574,8 +3574,8 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 			}
 
 			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
-				FormatEx(tmpBuffer, sizeof(tmpBuffer), "[LVP%s] Your rank - FF: #\x03%d \x01(\x05%d \x01dmg)",
-						(bRound) ? "" : " - Game",
+				FormatEx(tmpBuffer, sizeof(tmpBuffer), "[LVP%s] 你的排名 - 友伤: #\x03%d \x01(\x05%d \x01伤害)",
+						(bRound) ? "" : " - 全场",
 						(i + 1),
 						(bRound) ? g_strRoundPlayerData[index][team][plyFFGiven] : g_strPlayerData[index][plyFFGiven]
 				);
@@ -4114,6 +4114,8 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 		if (bInf) {
 			if (bRound && bTeam) {
 				value = g_strRoundPlayerInfData[highest][team][iproperty];
+			} else if (!bRound) {
+				value = g_strPlayerInfData[highest][iproperty];
 			} else {
 				if (g_strRoundPlayerInfData[highest][LTEAM_A][iproperty] > g_strRoundPlayerInfData[highest][LTEAM_B][iproperty]) {
 					value = g_strRoundPlayerInfData[highest][LTEAM_A][iproperty];
@@ -4126,6 +4128,8 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 		} else {
 			if (bRound && bTeam) {
 				value = g_strRoundPlayerData[highest][team][iproperty];
+			} else if (!bRound) {
+				value = g_strPlayerData[highest][iproperty];
 			} else {
 				if (g_strRoundPlayerData[highest][LTEAM_A][iproperty] > g_strRoundPlayerData[highest][LTEAM_B][iproperty]) {
 					value = g_strRoundPlayerData[highest][LTEAM_A][iproperty];
@@ -4167,116 +4171,114 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 	switch (wPick)
 	{
 		case FFACT_TYPE_CROWN: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01crowned \x05%d \x01witches.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01皇冠击杀了 \x05%d \x01只 witch。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_DRAWCROWN: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01draw-crowned \x05%d \x01witches.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01惊动皇冠击杀了 \x05%d \x01只 witch。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_SKEETS: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01skeeted \x05%d \x01hunters.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01空中击杀了 \x05%d \x01只 hunter。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_MELEESKEETS: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01skeeted \x05%d \x01hunter%s with a melee weapon.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用近战武器空中击杀了 \x05%d \x01只 hunter。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick],
-				(wTypeHighVal[wPick] == 1) ? "" : "s"
+				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_M2: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01shoved \x05%d \x01special infected.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01推开了 \x05%d \x01只特感。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_MELEETANK: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01got \x05%d \x01melee swings on the tank.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01对 tank 挥出了 \x05%d \x01次近战攻击。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_CUT: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01cut \x05%d \x01tongue cuts.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01切断了 \x05%d \x01次 smoker 的舌头。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_POP: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01popped \x05%d \x01boomers.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01点爆了 \x05%d \x01只 boomer。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_DEADSTOP: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01deadstopped \x05%d \x01hunters.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01空中推停了 \x05%d \x01只 hunter。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_LEVELS: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01fully leveled \x05%d \x01chargers.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01被 charger 满级撞击了 \x05%d \x01次。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		// infected
 		case FFACT_TYPE_HUNTERDP: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01landed \x05%d \x01highpounces with hunters.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用 hunter 打出了 \x05%d \x01次高扑。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_JOCKEYDP: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01landed \x05%d \x01highpounces with jockeys.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用 jockey 打出了 \x05%d \x01次高扑。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_DCHARGE: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01death-charged \x05%d \x01 survivor%s.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01死亡冲锋了 \x05%d \x01名生还者。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick],
-				(wTypeHighVal[wPick] == 1) ? "" : "s"
+				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_SCRATCH: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01did a total of \x05%d \x01damage by scratching (standing) survivors.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01抓伤(站立)生还者共造成 \x05%d \x01伤害。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_BOOMDMG: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01got a total of \x05%d \x01damage by common hits on boomed (standing) survivors.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01喷吐后小僵尸补刀共造成 \x05%d \x01伤害。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
 		}
 		case FFACT_TYPE_SPITDMG: {
-			FormatEx(printBuffer, iLen, "[%s fact] \x04%s \x01did a total of \x05%d \x01spit-damage on (standing) survivors.\n",
-				(bRound) ? "Round" : "Game",
+			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01对(站立)生还者共造成 \x05%d \x01酸液伤害。\n",
+				(bRound) ? "本回合" : "全场",
 				g_sPlayerName[ wTypeHighPly[wPick] ],
 				wTypeHighVal[wPick]
 			);
@@ -6028,7 +6030,7 @@ void BuildConsoleBufferFriendlyFireTaken (bool bRound = true, bool bTeam = true,
 			strcopy(strPrint[FFTYPE_TOTAL], s_len, "       "); 
 		}
 		
-		if (!bRound && g_strPlayerData[i][plyFFTakenPellet] || !bRound && g_strRoundPlayerData[i][team][plyFFTakenPellet]) {
+		if (!bRound && g_strPlayerData[i][plyFFTakenPellet] || bRound && g_strRoundPlayerData[i][team][plyFFTakenPellet]) {
 			FormatEx(strPrint[FFTYPE_PELLET], s_len, "%7d", (!bRound) ? g_strPlayerData[i][plyFFTakenPellet] : g_strRoundPlayerData[i][team][plyFFTakenPellet]);
 		} else {
 			strcopy(strPrint[FFTYPE_PELLET], s_len, "       ");
@@ -6065,7 +6067,7 @@ void BuildConsoleBufferFriendlyFireTaken (bool bRound = true, bool bTeam = true,
 		}
 		
 		if (!bRound && g_strPlayerData[i][plyFallDamage] || bRound && g_strRoundPlayerData[i][team][plyFallDamage]) {
-			FormatEx(strPrint[FFTYPE_SELF], s_len, "%7d", (!bRound) ? g_strRoundPlayerData[i][team][plyFallDamage] : g_strPlayerData[i][plyFallDamage]);
+			FormatEx(strPrint[FFTYPE_SELF], s_len, "%7d", (!bRound) ? g_strPlayerData[i][plyFallDamage] : g_strRoundPlayerData[i][team][plyFallDamage]);
 		} else {
 			strcopy(strPrint[FFTYPE_SELF], s_len, "       "); 
 		}

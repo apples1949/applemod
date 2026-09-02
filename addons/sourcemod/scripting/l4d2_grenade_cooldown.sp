@@ -4,7 +4,7 @@
 #include <left4dhooks>
 #include <colors>
 
-#define PLUGIN_VERSION "1.1.0"
+#define PLUGIN_VERSION "1.1.1"
 
 public Plugin myinfo = {
     name        = "L4D2 Pipe Bomb Cooldown",
@@ -173,29 +173,50 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
     if (GetClientTeam(client) != 2 || !IsPlayerAlive(client))
         return Plugin_Continue;
 
-    if (!(buttons & IN_ATTACK))
+    // The pipe bomb can be detected in two places:
+    //   1. m_hActiveWeapon  - the weapon the server currently considers active.
+    //   2. weapon parameter - the weapon the client is switching to right now
+    //      (usercmd.weaponselect).
+    // The server's active weapon lags behind the client's selection, so a player
+    // who switches to the pipe bomb slot and throws in the same tick would slip
+    // through a check that only looks at m_hActiveWeapon.
+    bool bHasPipeBomb = IsPipeBomb(GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon"));
+    if (!bHasPipeBomb && weapon > 0 && IsValidEntity(weapon))
+        bHasPipeBomb = IsPipeBomb(weapon);
+
+    if (!bHasPipeBomb)
         return Plugin_Continue;
 
-    int activeWeapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-    if (activeWeapon == -1 || !IsValidEntity(activeWeapon))
-        return Plugin_Continue;
+    bool bThrowing = (buttons & IN_ATTACK) != 0;
 
-    char classname[64];
-    GetEdictClassname(activeWeapon, classname, sizeof(classname));
+    // Cancel the pending switch so the pipe bomb can't even be equipped.
+    if (weapon > 0 && IsPipeBomb(weapon))
+        weapon = 0;
 
-    if (StrEqual(classname, "weapon_pipe_bomb")) {
+    // Strip the throw itself.
+    if (bThrowing)
         buttons &= ~IN_ATTACK;
 
-        float currentTime = GetGameTime();
-        if (currentTime - g_fLastHintTime[client] > 2.0) {
-            g_fLastHintTime[client] = currentTime;
+    float currentTime = GetGameTime();
+    if (currentTime - g_fLastHintTime[client] > 2.0) {
+        g_fLastHintTime[client] = currentTime;
+        if (bThrowing)
             CPrintToChat(client, "{green}[土雷冷却] {default}请等待冷却结束再扔土雷！");
-        }
-
-        return Plugin_Changed;
+        else
+            CPrintToChat(client, "{green}[土雷冷却] {default}冷却中，无法切换土制炸弹！");
     }
 
-    return Plugin_Continue;
+    return Plugin_Changed;
+}
+
+bool IsPipeBomb(int entity)
+{
+    if (entity <= 0 || !IsValidEntity(entity))
+        return false;
+
+    char classname[64];
+    GetEdictClassname(entity, classname, sizeof(classname));
+    return StrEqual(classname, "weapon_pipe_bomb");
 }
 
 // ============================================================================

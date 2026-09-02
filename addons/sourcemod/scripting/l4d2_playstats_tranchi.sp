@@ -4782,6 +4782,15 @@ void DisplayStatsFriendlyFire(int client, bool bRound = true, bool bTeam = true,
 	}
 }
 
+// advance to the next console-buffer chunk, without ever writing past the last allocated chunk
+void NextConsoleBufferChunk()
+{
+	if (g_iConsoleBufChunks < MAXCHUNKS - 1) {
+		g_iConsoleBufChunks++;
+		g_sConsoleBuf[g_iConsoleBufChunks] = "";
+	}
+}
+
 void BuildConsoleBufferGeneral(bool bTeam = true, int iTeam = -1)
 {
 	g_iConsoleBufChunks = 0;
@@ -4878,8 +4887,7 @@ void BuildConsoleBufferGeneral(bool bTeam = true, int iTeam = -1)
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
 			line = -1;
-			g_iConsoleBufChunks++;
-			g_sConsoleBuf[g_iConsoleBufChunks] = "";
+			NextConsoleBufferChunk();
 		} else if (line > 0) {
 			Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 		}
@@ -5007,8 +5015,7 @@ void BuildConsoleBufferSpecial(bool bRound = false, bool bTeam = true, int iTeam
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
 			line = -1;
-			g_iConsoleBufChunks++;
-			g_sConsoleBuf[g_iConsoleBufChunks] = "";
+			NextConsoleBufferChunk();
 		} else if (line > 0) {
 			Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 		}
@@ -5148,8 +5155,7 @@ void BuildConsoleBufferInfected(bool bRound = false, bool bTeam = true, int iTea
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
 			line = -1;
-			g_iConsoleBufChunks++;
-			g_sConsoleBuf[g_iConsoleBufChunks] = "";
+			NextConsoleBufferChunk();
 		} else if (line > 0) {
 			Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 		}
@@ -5286,8 +5292,7 @@ void BuildConsoleBufferAccuracy(bool details = false, bool bRound = false, bool 
 			if (line >= MAXLINESPERCHUNK) {
 				bDivider = true;
 				line = -1;
-				g_iConsoleBufChunks++;
-				g_sConsoleBuf[g_iConsoleBufChunks] = "";
+				NextConsoleBufferChunk();
 			} else if (line > 0) {
 				Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 			}
@@ -5442,8 +5447,7 @@ void BuildConsoleBufferAccuracy(bool details = false, bool bRound = false, bool 
 			if (line >= MAXLINESPERCHUNK) {
 				bDivider = true;
 				line = -1;
-				g_iConsoleBufChunks++;
-				g_sConsoleBuf[g_iConsoleBufChunks] = "";
+				NextConsoleBufferChunk();
 			} else if (line > 0) {
 				Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 			}
@@ -5550,8 +5554,7 @@ void BuildConsoleBufferMVP(bool bTank = false, bool bMore = false, bool bRound =
 			if (line >= MAXLINESPERCHUNK) {
 				bDivider = true;
 				line = -1;
-				g_iConsoleBufChunks++;
-				g_sConsoleBuf[g_iConsoleBufChunks] = "";
+				NextConsoleBufferChunk();
 			} else if (line > 0) {
 				Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 			}
@@ -5686,8 +5689,7 @@ void BuildConsoleBufferMVP(bool bTank = false, bool bMore = false, bool bRound =
 			if (line >= MAXLINESPERCHUNK) {
 				bDivider = true;
 				line = -1;
-				g_iConsoleBufChunks++;
-				g_sConsoleBuf[g_iConsoleBufChunks] = "";
+				NextConsoleBufferChunk();
 			} else if (line > 0) {
 				Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 			}
@@ -5840,8 +5842,7 @@ void BuildConsoleBufferMVP(bool bTank = false, bool bMore = false, bool bRound =
 			if (line >= MAXLINESPERCHUNK) {
 				bDivider = true;
 				line = -1;
-				g_iConsoleBufChunks++;
-				g_sConsoleBuf[g_iConsoleBufChunks] = "";
+				NextConsoleBufferChunk();
 			} else if (line > 0) {
 				Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 			}
@@ -5958,8 +5959,7 @@ void BuildConsoleBufferFriendlyFireGiven(bool bRound = true, bool bTeam = true, 
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
 			line = -1;
-			g_iConsoleBufChunks++;
-			g_sConsoleBuf[g_iConsoleBufChunks] = "";
+			NextConsoleBufferChunk();
 		} else if (line > 0) {
 			Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 		}
@@ -6076,8 +6076,7 @@ void BuildConsoleBufferFriendlyFireTaken (bool bRound = true, bool bTeam = true,
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
 			line = -1;
-			g_iConsoleBufChunks++;
-			g_sConsoleBuf[g_iConsoleBufChunks] = "";
+			NextConsoleBufferChunk();
 		} else if (line > 0) {
 			Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE, "%s\n", g_sConsoleBuf[g_iConsoleBufChunks]);
 		}

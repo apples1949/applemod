@@ -103,6 +103,10 @@ static Handle g_hFixAnimTimer;
 static Handle g_hFixDoneTimer;
 static int    g_iFixDotCount;
 
+// 局末趣文 HUD_TICKER (复用"修复队伍"槽位) 状态.
+static bool   g_bFunFactHUDVisible;
+static Handle g_hFunFactHideTimer;
+
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
 static char   g_sHUD_LastTextArray[2][256];
@@ -122,6 +126,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
         strcopy(error, err_max, "This plugin only runs in \"Left 4 Dead 2\" game");
         return APLRes_SilentFailure;
     }
+
+    CreateNative("ScriptedHud_ShowRoundFunFact", Native_ShowRoundFunFact);
+    RegPluginLibrary("l4d2_scripted_hud");
 
     return APLRes_Success;
 }
@@ -223,6 +230,11 @@ public void OnMapEnd()
 {
     g_bHUDSendProxyHooked = false;
     HideFixHUD();
+
+    // 局末趣文 timer 未加 NO_MAPCHANGE: 换图时清掉并复位状态, 避免句柄悬垂.
+    delete g_hFunFactHideTimer;
+    g_hFunFactHideTimer = null;
+    g_bFunFactHUDVisible = false;
 }
 
 public void OnClientConnected(int client)
@@ -627,6 +639,15 @@ void StartFixHUD()
 {
     g_bFixTeamShuffleInProgress = true;
     g_iFixDotCount = 0;
+
+    // 修复队伍开始, 取消仍在展示的局末趣文.
+    if (g_bFunFactHUDVisible)
+    {
+        delete g_hFunFactHideTimer;
+        g_hFunFactHideTimer = null;
+        g_bFunFactHUDVisible = false;
+    }
+
     ShowFixHUDText(FIX_MSG_BASE);
 
     delete g_hFixAnimTimer;
@@ -720,6 +741,92 @@ void ClearFixHUDSlot()
 public void L4D2_FixTeamShuffle_OnFixComplete()
 {
     CompleteFixHUD();
+}
+
+// ====================================================================================================
+// 局末趣文 HUD_TICKER (复用"修复队伍"的槽位/位置)
+//    由 l4d2_playstats_tranchi 在回合结束时调用, 把随机趣文展示在"修复队伍"显示的位置.
+//    展示 hideTime 秒后自动隐藏; 若期间修复队伍流程开始, 趣文被修复提示覆盖.
+// ====================================================================================================
+public int Native_ShowRoundFunFact(Handle plugin, int numParams)
+{
+    if (numParams < 2)
+        return 0;
+
+    int textLen;
+    GetNativeStringLength(1, textLen);
+    if (textLen <= 0)
+        return 0;
+
+    char[] sText = new char[textLen + 1];
+    GetNativeString(1, sText, textLen + 1);
+    float fHideTime = GetNativeCell(2);
+
+    // 修复队伍进行中时, 趣文跳过(修复提示优先).
+    if (g_bFixTeamShuffleInProgress)
+        return 0;
+
+    ShowFunFactHUDText(sText);
+
+    delete g_hFunFactHideTimer;
+    g_hFunFactHideTimer = null;
+    g_hFunFactHideTimer = CreateTimer((fHideTime > 0.0) ? fHideTime : FIX_DONE_HIDE_TIME, Timer_HideFunFactHUD);
+
+    return 1;
+}
+
+void ShowFunFactHUDText(const char[] sText)
+{
+    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+        return;
+
+    GameRules_SetProp("m_iScriptedHUDFlags", FIX_HUD_FLAGS, _, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDPosX", FIX_HUD_X, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDPosY", FIX_HUD_Y, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDWidth", FIX_HUD_WIDTH, HUD_TICKER);
+    GameRules_SetPropFloat("m_fScriptedHUDHeight", FIX_HUD_HEIGHT, HUD_TICKER);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", sText, _, HUD_TICKER);
+    g_bFunFactHUDVisible = true;
+}
+
+public Action Timer_HideFunFactHUD(Handle timer)
+{
+    g_hFunFactHideTimer = null;
+    HideFunFactHUD();
+    return Plugin_Stop;
+}
+
+void HideFunFactHUD()
+{
+    g_bFunFactHUDVisible = false;
+
+    delete g_hFunFactHideTimer;
+    g_hFunFactHideTimer = null;
+
+    // 趣文结束后优先把 HUD 还给修复队伍流程.
+    if (g_bFixTeamShuffleInProgress)
+    {
+        if (g_hFixAnimTimer != null)
+            ShowFixHUDText(FIX_MSG_BASE);
+        else
+            ShowFixHUDText(FIX_MSG_DONE);
+        return;
+    }
+
+    ClearFunFactHUDSlot();
+}
+
+void ClearFunFactHUDSlot()
+{
+    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+    {
+        g_bFunFactHUDVisible = false;
+        return;
+    }
+
+    GameRules_SetProp("m_iScriptedHUDFlags", HUD_FLAG_NOTVISIBLE, _, HUD_TICKER);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", "", _, HUD_TICKER);
+    g_bFunFactHUDVisible = false;
 }
 
 // ====================================================================================================
@@ -838,9 +945,8 @@ void GetHUD1_Text(char[] output, int size)
         float maxBouns = float(SMPlus_GetHealthBonus()) + float(SMPlus_GetDamageBonus()) + float(SMPlus_GetPillsBonus());
         float healthBonusPercent = float(SMPlus_GetHealthBonus()) / float(SMPlus_GetMaxHealthBonus()) * 100;
         float damageBonusPercent = float(SMPlus_GetDamageBonus()) / float(SMPlus_GetMaxDamageBonus()) * 100;
-        float pillsBonus = float(SMPlus_GetPillsBonus());
         float pillsBpnusPercent = float(SMPlus_GetPillsBonus()) / float(SMPlus_GetMaxPillsBonus()) * 100;
-        Format(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 虚血分: %.0f%% | 药分: %.0f / %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBonus, pillsBpnusPercent);
+        Format(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 虚血分: %.0f%% | 药分: %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBpnusPercent);
     }
 }
 

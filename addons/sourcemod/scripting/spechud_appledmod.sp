@@ -88,6 +88,10 @@ int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 bool bSpecHudActive[MAXPLAYERS+1], bTankHudActive[MAXPLAYERS+1];
 bool bSpecHudHintShown[MAXPLAYERS+1], bTankHudHintShown[MAXPLAYERS+1];
 
+// Tank real-time alive tracking
+float g_fTankAliveTimestamp = 0.0;	// game time when that tank became alive
+bool g_bTankTimerInitialized = false;	// whether the alive-timer has been started for the current tank
+
 /**********************************************************************************************/
 
 // ======================================================================
@@ -322,6 +326,18 @@ public void OnClientDisconnect(int client)
 	bTankHudHintShown[client] = false;
 }
 
+// 传卡/换人控制坦克时的存活计时处理：
+//  - 换给真人玩家 -> 清零，重新计新控制者的存活时间
+//  - 变成 AI 坦克  -> 不清零（仍是同一只坦克实体，只是无人控制）
+public void L4D_OnReplaceTank(int tank, int newtank)
+{
+	if (IsFakeClient(newtank))
+		return;
+
+	g_fTankAliveTimestamp = 0.0;
+	g_bTankTimerInitialized = false;
+}
+
 Action Timer_RespectateSpecs(Handle hTimer)
 {
 	for (int i = 1; i <= MaxClients; i++)
@@ -413,6 +429,9 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	g_iTankRock = 0;
 	g_iTankHittable = 0;
 	g_iTankDamage = 0;
+
+	g_fTankAliveTimestamp = 0.0;
+	g_bTankTimerInitialized = false;
 }
 
 void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -429,6 +448,9 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 	{
 		if (iTankCount > 0) iTankCount--;
 		if (!RoundHasFlowTank()) bFlowTankActive = false;
+
+		g_fTankAliveTimestamp = 0.0;
+		g_bTankTimerInitialized = false;
 	}
 }
 
@@ -1113,6 +1135,24 @@ void FillInfectedInfo(Panel hSpecHud)
 	}
 }
 
+float GetTankAliveTime()
+{
+	// 只在计时器未初始化/被清零点复位后重新起表；
+	// 控制权在真人和 AI 之间切换（client index 变化）不会重置存活时间。
+	if (!g_bTankTimerInitialized)
+	{
+		g_fTankAliveTimestamp = GetGameTime();
+		g_bTankTimerInitialized = true;
+	}
+	return GetGameTime() - g_fTankAliveTimestamp;
+}
+
+stock void FormatTankAliveTime(float fSeconds, char[] buffer, int maxlen)
+{
+	int iTotal = RoundToFloor(fSeconds);
+	FormatEx(buffer, maxlen, "%d分%02d秒", iTotal / 60, iTotal % 60);
+}
+
 stock void GetRockBlockStatus(char[] buffer, int maxlen)
 {
 	char szJump[8], szPunch[8];
@@ -1198,14 +1238,17 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		default: FormatEx(info, sizeof(info), "第%i次", passCount);
 	}
 
+	char sAlive[32];
+	FormatTankAliveTime(GetTankAliveTime(), sAlive, sizeof(sAlive));
+
 	if (!IsFakeClient(tank))
 	{
 		GetClientFixedName(tank, name, sizeof(name));
-		Format(info, sizeof(info), "控制: %s (%s)", name, info);
+		Format(info, sizeof(info), "控制: %s (%s) [%s]", name, info, sAlive);
 	}
 	else
 	{
-		Format(info, sizeof(info), "控制: 电脑 (%s)", info);
+		Format(info, sizeof(info), "控制: 电脑 (%s) [%s]", info, sAlive);
 	}
 	DrawPanelText(hSpecHud, info);
 

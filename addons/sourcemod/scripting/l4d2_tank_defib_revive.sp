@@ -20,7 +20,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.4"
+#define PLUGIN_VERSION		"1.5"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -237,7 +237,13 @@ public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 // =============================
 void SetBlackWhiteOutline(int client, bool enable)
 {
-	if (!IsValidSurvivor(client) || !IsPlayerAlive(client))
+	if (!IsValidSurvivor(client))
+	{
+		return;
+	}
+
+	// 只在存活时开启轮廓；死亡时允许强制关闭
+	if (enable && !IsPlayerAlive(client))
 	{
 		return;
 	}
@@ -266,11 +272,22 @@ void SetBlackWhiteOutline(int client, bool enable)
 void ResetBWOutline(int client)
 {
 	g_bBWOutline[client] = false;
-	if (client > 0 && client <= MaxClients && IsClientInGame(client) && IsPlayerAlive(client))
+	// 死亡瞬间也要清轮廓，不能依赖 IsPlayerAlive
+	if (client > 0 && client <= MaxClients && IsClientInGame(client))
 	{
 		SetEntProp(client, Prop_Send, "m_iGlowType", 0);
 		SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
 		SetEntProp(client, Prop_Send, "m_nGlowRange", 0);
+
+		// 死亡后可见模型可能是 ragdoll，一并清除轮廓
+		int ragdoll = GetEntPropEnt(client, Prop_Send, "m_hRagdoll");
+		if (ragdoll > MaxClients && IsValidEntity(ragdoll)
+			&& HasEntProp(ragdoll, Prop_Send, "m_iGlowType"))
+		{
+			SetEntProp(ragdoll, Prop_Send, "m_iGlowType", 0);
+			SetEntProp(ragdoll, Prop_Send, "m_glowColorOverride", 0);
+			SetEntProp(ragdoll, Prop_Send, "m_nGlowRange", 0);
+		}
 	}
 }
 

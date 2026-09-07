@@ -1,32 +1,54 @@
 /*
+	[DONE-CHECK]
+	------------
+	fix / build items below have been resolved where feasible:
+
+	[DONE] end of round MVP chat prints: now shows each (surviving, ranked)
+	       player their own rank, including the MVP/subject (rank #1) own.
+	[DONE] full game stats no longer depend on "only-finished-rounds" timing;
+	       GetFullRoundTime(game) now counts from gmStartTime, so stats show
+	       before first round ends and report the full-game duration.
+	[DONE] skill: clears / instaclears are now collected (new plyInstaClears
+	       field, <100ms) and shown in the Special table, together with the
+	       average clear time (in seconds).
+	[DONE] round-end fun fact is pushed to l4d2_scripted_hud's "team fix"
+	       HUD slot (AUTO_FUNFACT_ROUND).
+
+	[HELD / by decision] CMT + teamswap: current g_bCMTSwapped approach kept.
+	       Writing m_bAreTeamsFlipped directly would need serious on-server
+	       versus-scoring testing before it can be trusted; kept conservative.
+	[HELD / idea] shotgun pellets as "average multiplier" per hitgroup: not
+	       implemented yet (would require reworking hit/accuracy counters).
+
 	todo
 	----
 
-		fix:
-		------
-		- the current CMT + forwards for teamswaps solution is kinda bad.
-			- would be nicer to fix CMT so the normal gamerules swapped
-			  check is correct -- so: test whether "m_bAreTeamsFlipped"
-			  can be unproblematically written to (yes, I was afraid to
-			  just try this without doing some serious testing with it
-			  first).
+	fix:
+	------
+	- the current CMT + forwards for teamswaps solution is kinda bad.
+		- would be nicer to fix CMT so the normal gamerules swapped
+		  check is correct -- so: test whether "m_bAreTeamsFlipped"
+		  can be unproblematically written to (yes, I was afraid to
+		  just try this without doing some serious testing with it
+		  first).   [HELD: conservative, needs on-server testing]
 
-		- end of round MVP chat prints: doesn't show your rank
+	- end of round MVP chat prints: doesn't show your rank  [DONE]
 
-		- full game stats don't show before round is live
-		- full game stat: shows last round time, instead of full game time
+	- full game stats don't show before round is live  [DONE]
+	- full game stat: shows last round time, instead of full game time  [DONE]
 
 
-		build:
-		------
-		- skill
-			- clears / instaclears (show in stats)
-			- show average clear time (for all survivors?)
+	build:
+	------
+	- skill
+		- clears / instaclears (show in stats)  [DONE]
+		- show average clear time (for all survivors?)  [DONE - Special table]
 
 	ideas
 	-----
 	- instead of hits/shots, display average multiplier for shotgun pellets
 		(can just do that per hitgroup, if we use what we know about the SI)
+		[HELD: idea - not implemented]
 */
 
 #pragma semicolon 1
@@ -40,6 +62,7 @@
 #undef REQUIRE_PLUGIN
 #include <readyup>
 #include <confogl>
+#include <l4d2_scripted_hud>
 
 #define IS_VALID_CLIENT(%1) (%1 > 0 && %1 <= MaxClients)
 #define IS_VALID_INGAME(%1) (IS_VALID_CLIENT(%1) && IsClientInGame(%1))
@@ -349,6 +372,7 @@ enum /*strPlayerData*/
 	plyFFTakenTotal,
 	plyClears,												// amount of clears (under a min)
 	plyAvgClearTime,										// 70 average time it takes to clear someone (* 1000 so it doesn't have to be a float)
+	plyInstaClears,											// very fast clears (< 100ms)
 	plyTimeStartPresent,									// time present (on the team)
 	plyTimeStopPresent,										// if stoptime is 0, then it's NOW, ongoing
 	plyTimeStartAlive,
@@ -359,7 +383,7 @@ enum /*strPlayerData*/
 	plyMaxSize
 };
 
-#define MAXPLYSTATS				76
+#define MAXPLYSTATS				77
 
 // information per infected player (during other team's survivor round)
 enum /*strInfData*/
@@ -417,6 +441,7 @@ bool
 	g_bReadyUpAvailable = false,
 	g_bPauseAvailable = false,
 	g_bSkillDetectLoaded = false,
+	g_bScriptedHudAvailable = false,							// whether l4d2_scripted_hud is loaded
 	g_bCMTActive = false,										// whether custom map transitions is running a mapset
 	g_bCMTSwapped = false,										// whether A/B teams have been swapped
 	g_bModeCampaign = false,
@@ -688,6 +713,7 @@ public void OnAllPluginsLoaded()
 	g_bReadyUpAvailable = LibraryExists("readyup");
 	g_bPauseAvailable = LibraryExists("pause");
 	g_bSkillDetectLoaded = LibraryExists("skill_detect");
+	g_bScriptedHudAvailable = LibraryExists("l4d2_scripted_hud");
 }
 
 public void OnLibraryRemoved(const char[] LibName)
@@ -710,6 +736,8 @@ void CheckLib(const char[] LibName, bool state)
 		g_bPauseAvailable = state;
 	} else if (strcmp(LibName, "skill_detect") == 0) {
 		g_bSkillDetectLoaded = state;
+	} else if (strcmp(LibName, "l4d2_scripted_hud") == 0) {
+		g_bScriptedHudAvailable = state;
 	}
 }
 
@@ -820,8 +848,15 @@ public void OnMapEnd()
 	g_bInRound = false;
 	g_iRound++;
 
-	// if this was a finale, (and CMT is not loaded), end of game
-	if (!g_bCMTActive && !g_bModeCampaign && IsMissionFinalMap()) {
+	// keep the round counter inside the stats arrays: on long-lived servers the
+	// counter is only reset at a fresh game start, so wrap it into a new game
+	// before it can index past the last round slot.
+	if (g_iRound >= MAXROUNDS) {
+		PrintDebug(2, "OnMapEnd: round counter reached the limit, resetting stats");
+		g_iRound = 0;
+		ResetStats(false, -1);
+	} else if (!g_bCMTActive && !g_bModeCampaign && IsMissionFinalMap()) {
+		// if this was a finale, (and CMT is not loaded), end of game
 		HandleGameEnd();
 	}
 }
@@ -2826,6 +2861,11 @@ public void OnSpecialClear(int clearer, int pinner, int pinvictim, int zombieCla
 	);
 	
 	g_strRoundPlayerData[index][g_iCurTeam][plyClears]++;
+
+	// instaclear: 100ms 内完成解救
+	if (fClearTime * 1000.0 < 100.0) {
+		g_strRoundPlayerData[index][g_iCurTeam][plyInstaClears]++;
+	}
 }
 
 /*
@@ -3349,6 +3389,116 @@ void DisplayStats(int client = -1, int round = -1, bool bTeam = true, int iTeam 
 	}
 }
 
+// 向某类别(sorted)上榜且在线的幸存者广播自己的真实名次(含 MVP 本人第1名).
+// sortCol: SORT_SI / SORT_CI / SORT_FF
+// bRequireFF: FF(LVP) 段需要玩家确有友伤才上榜.
+void PrintSurvivorRanks(int client, bool bRound, bool bTeam, int team, int sortCol, bool bRequireFF)
+{
+	int iBrevityFlags = GetConVarInt(g_hCvarMVPBrevityFlags);
+	char tmpBuffer[512];
+
+	// 名次从 MVP(第1名) 开始, 只对(上榜且在队内且在线)的玩家连续递增.
+	int rank = 0;
+	for (int i = 0; i < g_iTeamSize && i < g_iPlayers; i++) {
+		int index = g_iPlayerIndexSorted[sortCol][i];
+
+		if (index == -1) {
+			break;
+		}
+
+		// 只对该队的幸存者计名次/发消息.
+		if (bTeam && g_iPlayerRoundTeam[team][index] != team) {
+			continue;
+		}
+
+		// FF 段: 只统计确有友伤的玩家.
+		if (bRequireFF && ((bRound) ? g_strRoundPlayerData[index][team][plyFFGiven] : g_strPlayerData[index][plyFFGiven]) <= 0) {
+			continue;
+		}
+
+		// 非 FF 段: 该类别必须有数据才上榜 (降序, 遇到无数据即止).
+		if (!bRequireFF) {
+			int hasVal = (sortCol == SORT_SI)
+				? ((bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage])
+				: ((bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon]);
+			if (hasVal <= 0) {
+				break;
+			}
+		}
+
+		rank++;
+
+		// 找到该 index 对应的在线 client.
+		int found = -1;
+		for (int x = 1; x <= MaxClients; x++) {
+			if (IsClientInGame(x) && index == GetPlayerIndexForClient(x)) {
+				found = x;
+				break;
+			}
+		}
+
+		if (found == -1) {
+			continue;
+		}
+
+		if ((client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
+			if (sortCol == SORT_SI) {
+				if (iBrevityFlags & BREV_PERCENT) {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害,\x05 %d \x01击杀)",
+						(bRound) ? "" : " - 全场", rank,
+						(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
+						(bRound) ? g_strRoundPlayerData[index][team][plySIKilled] : g_strPlayerData[index][plySIKilled]);
+				} else if (iBrevityFlags & BREV_ABSOLUTE) {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(伤害 \x04%i%%\x01, 击杀 \x04%i%%\x01)",
+						(bRound) ? "" : " - 全场", rank,
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plySIDamage]) / float(g_strRoundData[g_iRound][team][rndSIDamage]) * 100.0)
+							: (float(g_strPlayerData[index][plySIDamage]) / float(g_strAllRoundData[team][rndSIDamage]) * 100.0)),
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plySIKilled]) / float(g_strRoundData[g_iRound][team][rndSIKilled]) * 100.0)
+							: (float(g_strPlayerData[index][plySIKilled]) / float(g_strAllRoundData[team][rndSIKilled]) * 100.0)));
+				} else {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害 [\x04%i%%\x01],\x05 %d \x01击杀 [\x04%i%%\x01])",
+						(bRound) ? "" : " - 全场", rank,
+						(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plySIDamage]) / float(g_strRoundData[g_iRound][team][rndSIDamage]) * 100.0)
+							: (float(g_strPlayerData[index][plySIDamage]) / float(g_strAllRoundData[team][rndSIDamage]) * 100.0)),
+						(bRound) ? g_strRoundPlayerData[index][team][plySIKilled] : g_strPlayerData[index][plySIKilled],
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plySIKilled]) / float(g_strRoundData[g_iRound][team][rndSIKilled]) * 100.0)
+							: (float(g_strPlayerData[index][plySIKilled]) / float(g_strAllRoundData[team][rndSIKilled]) * 100.0)));
+				}
+			} else if (sortCol == SORT_CI) {
+				if (iBrevityFlags & BREV_PERCENT) {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只)",
+						(bRound) ? "" : " - 全场", rank,
+						(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon]);
+				} else if (iBrevityFlags & BREV_ABSOLUTE) {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(击杀 \x04%i%%\x01)",
+						(bRound) ? "" : " - 全场", rank,
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plyCommon]) / float(g_strRoundData[g_iRound][team][rndCommon]) * 100.0)
+							: (float(g_strPlayerData[index][plyCommon]) / float(g_strAllRoundData[team][rndCommon]) * 100.0)));
+				} else {
+					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只 [\x04%i%%\x01])",
+						(bRound) ? "" : " - 全场", rank,
+						(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon],
+						RoundFloat((bRound)
+							? (float(g_strRoundPlayerData[index][team][plyCommon]) / float(g_strRoundData[g_iRound][team][rndCommon]) * 100.0)
+							: (float(g_strPlayerData[index][plyCommon]) / float(g_strAllRoundData[team][rndCommon]) * 100.0)));
+				}
+			} else { // SORT_FF -> LVP
+				FormatEx(tmpBuffer, sizeof(tmpBuffer), "[LVP%s] 你的排名 - 友伤: #\x03%d \x01(\x05%d \x01伤害)",
+					(bRound) ? "" : " - 全场", rank,
+					(bRound) ? g_strRoundPlayerData[index][team][plyFFGiven] : g_strPlayerData[index][plyFFGiven]);
+			}
+
+			PrintToChat(found, "\x01%s", tmpBuffer);
+		}
+	}
+}
+
 // display mvp stats
 void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int iTeam = -1)
 {
@@ -3357,8 +3507,8 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 	}
 	// make sure the MVP stats itself is called first, so the players are already sorted
 
-	char printBuffer[1024], tmpBuffer[512], strLines[8][192];
-	int i, j, x;
+	char printBuffer[1024], strLines[8][192];
+	int i, j;
 
 	GetMVPChatString(printBuffer, sizeof(printBuffer), bRound, bTeam, iTeam);
 
@@ -3388,202 +3538,20 @@ void DisplayStatsMVPChat(int client, bool bRound = true, bool bTeam = true, int 
 		team = (team) ? 0 : 1; 
 	}
 
-	// find index for this client
-	int index = -1, found = -1, listNumber = 0;
-
-	// also find the three non-mvp survivors and tell them they sucked
-	// tell them they sucked with SI
-	if ((bRound && g_strRoundData[g_iRound][team][rndSIDamage] > 0 || !bRound && g_strAllRoundData[team][rndSIDamage] > 0)
-		&& !(iBrevityFlags & BREV_RANK) && !(iBrevityFlags & BREV_SI)
-	) {
-		// skip 0, since that is the MVP
-		for (i = 1; i < g_iTeamSize && i < g_iPlayers; i++) {
-			index = g_iPlayerIndexSorted[SORT_SI][i];
-
-			if (index == -1) { 
-				break; 
-			}
-			
-			found = -1;
-			
-			for (x = 1; x <= MaxClients; x++) {
-				if (!IsClientInGame(x)) {
-					continue;
-				}
-		
-				if (index == GetPlayerIndexForClient(x)) { 
-					found = x; break; 
-				}
-			}
-			
-			if (found == -1) { 
-				continue; 
-			}
-
-			// only count survivors for the round in question
-			if (bRound && bTeam && g_iPlayerRoundTeam[team][i] != team) { 
-				continue; 
-			}
-
-			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
-				if (iBrevityFlags & BREV_PERCENT) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害,\x05 %d \x01击杀)",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
-							(bRound) ? g_strRoundPlayerData[index][team][plySIKilled] : g_strPlayerData[index][plySIKilled]
-					  );
-				} else if (iBrevityFlags & BREV_ABSOLUTE) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(伤害 \x04%i%%\x01, 击杀 \x04%i%%\x01)",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plySIDamage]) / float(g_strRoundData[g_iRound][team][rndSIDamage])) * 100) :
-									((float(g_strPlayerData[index][plySIDamage]) / float(g_strAllRoundData[team][rndSIDamage])) * 100)
-							),
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plySIKilled]) / float(g_strRoundData[g_iRound][team][rndSIKilled])) * 100) :
-									((float(g_strPlayerData[index][plySIKilled]) / float(g_strAllRoundData[team][rndSIKilled])) * 100))
-							);
-				} else {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 特感: #\x03%d \x01(\x05%d \x01伤害 [\x04%i%%\x01],\x05 %d \x01击杀 [\x04%i%%\x01])",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							(bRound) ? g_strRoundPlayerData[index][team][plySIDamage] : g_strPlayerData[index][plySIDamage],
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plySIDamage]) / float(g_strRoundData[g_iRound][team][rndSIDamage])) * 100) :
-									((float(g_strPlayerData[index][plySIDamage]) / float(g_strAllRoundData[team][rndSIDamage])) * 100)
-							),
-							(bRound) ? g_strRoundPlayerData[index][team][plySIKilled] : g_strPlayerData[index][plySIKilled],
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plySIKilled]) / float(g_strRoundData[g_iRound][team][rndSIKilled])) * 100) :
-									((float(g_strPlayerData[index][plySIKilled]) / float(g_strAllRoundData[team][rndSIKilled])) * 100)
-							)
-					);
-				}
-				PrintToChat(found, "\x01%s", tmpBuffer);
-			}
-
-			listNumber++;
+	// 修复: 让 MVP chat 显示每位上榜玩家(含 MVP 本人第1名)的真实名次.
+	if (!(iBrevityFlags & BREV_RANK)) {
+		bool bHasSI = (bRound) ? (g_strRoundData[g_iRound][team][rndSIDamage] > 0) : (g_strAllRoundData[team][rndSIDamage] > 0);
+		if (bHasSI && !(iBrevityFlags & BREV_SI)) {
+			PrintSurvivorRanks(client, bRound, bTeam, team, SORT_SI, false);
 		}
-	}
 
-	// tell them they sucked with Common
-	listNumber = 0;
-	if ((bRound && g_strRoundData[g_iRound][team][rndCommon] || !bRound && g_strAllRoundData[team][rndCommon])
-		&& !(iBrevityFlags & BREV_RANK) && !(iBrevityFlags & BREV_CI)
-	) {
-
-		// skip 0, since that is the MVP
-		for (i = 1; i < g_iTeamSize && i < g_iPlayers; i++) {
-			index = g_iPlayerIndexSorted[SORT_CI][i];
-
-			if (index == -1) { 
-				break; 
-			}
-			
-			found = -1;
-			for (x = 1; x <= MaxClients; x++) {
-				if (!IsClientInGame(x)) {
-					continue;
-				}
-
-				if (index == GetPlayerIndexForClient(x)) { 
-					found = x; 
-					break; 
-				}
-			}
-			
-			if (found == -1) { 
-				continue; 
-			}
-
-			// only count survivors for the round in question
-			if (bRound && bTeam && g_iPlayerRoundTeam[team][i] != team) { 
-				continue; 
-			}
-
-			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
-				if (iBrevityFlags & BREV_PERCENT) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只)",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon]
-					);
-				} else if (iBrevityFlags & BREV_ABSOLUTE) {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(击杀 \x04%i%%\x01)",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plyCommon]) / float(g_strRoundData[g_iRound][team][rndCommon])) * 100) :
-									((float(g_strPlayerData[index][plyCommon]) / float(g_strAllRoundData[team][rndCommon])) * 100)
-							)
-					);
-				} else {
-					FormatEx(tmpBuffer, sizeof(tmpBuffer), "[MVP%s] 你的排名 - 小僵尸: #\x03%d \x01(\x05 %d \x01只 [\x04%i%%\x01])",
-							(bRound) ? "" : " - 全场",
-							(i + 1),
-							(bRound) ? g_strRoundPlayerData[index][team][plyCommon] : g_strPlayerData[index][plyCommon],
-							RoundFloat((bRound) ?
-									((float(g_strRoundPlayerData[index][team][plyCommon]) / float(g_strRoundData[g_iRound][team][rndCommon])) * 100) :
-									((float(g_strPlayerData[index][plyCommon]) / float(g_strAllRoundData[team][rndCommon])) * 100)
-							)
-					);
-				}
-				PrintToChat(found, "\x01%s", tmpBuffer);
-			}
-
-			listNumber++;
+		bool bHasCI = (bRound) ? (g_strRoundData[g_iRound][team][rndCommon] > 0) : (g_strAllRoundData[team][rndCommon] > 0);
+		if (bHasCI && !(iBrevityFlags & BREV_CI)) {
+			PrintSurvivorRanks(client, bRound, bTeam, team, SORT_CI, false);
 		}
-	}
 
-	// tell them they were better with FF
-	listNumber = 0;
-	if (!(iBrevityFlags & BREV_RANK) && !(iBrevityFlags & BREV_FF)) {
-		// skip 0, since that is the LVP
-		for (i = 1; i < g_iTeamSize && i < g_iPlayers; i++) {
-			index = g_iPlayerIndexSorted[SORT_FF][i];
-
-			if (index == -1) { 
-				break; 
-			}
-			
-			found = -1;
-			for (x = 1; x <= MaxClients; x++) {
-				if (!IsClientInGame(x)) {
-					continue;
-				}
-
-				if (index == GetPlayerIndexForClient(x)) { 
-					found = x; 
-					break; 
-				}
-			}
-			
-			if (found == -1) { 
-				continue; 
-			}
-
-			// only count survivors for the round in question
-			if (bRound && bTeam && g_iPlayerRoundTeam[team][i] != team) { 
-				continue; 
-			}
-
-			if (bRound && !g_strRoundPlayerData[index][team][plyFFGiven] || !bRound && !g_strPlayerData[index][plyFFGiven]) { 
-				continue; 
-			}
-
-			if (listNumber && (client == -1 || client == found) && IS_VALID_CLIENT(found) && !IsFakeClient(found) && g_iCookieValue[found] != -1) {
-				FormatEx(tmpBuffer, sizeof(tmpBuffer), "[LVP%s] 你的排名 - 友伤: #\x03%d \x01(\x05%d \x01伤害)",
-						(bRound) ? "" : " - 全场",
-						(i + 1),
-						(bRound) ? g_strRoundPlayerData[index][team][plyFFGiven] : g_strPlayerData[index][plyFFGiven]
-				);
-
-				PrintToChat(found, "\x01%s", tmpBuffer);
-			}
-
-			listNumber++;
+		if (!(iBrevityFlags & BREV_FF)) {
+			PrintSurvivorRanks(client, bRound, bTeam, team, SORT_FF, true);
 		}
 	}
 }
@@ -4432,9 +4400,9 @@ void DisplayStatsSpecial(int client, bool bRound = true, bool bTeam = true, bool
 	}
 	
 	//															 #### / ### / ###   ### / ###	### / ###   ### / ###   ####   #### / ####
-	Format(bufBasicHeader, CONBUFSIZE, "%s|---------------------------------------------------------------------------------------------------|\n", bufBasicHeader);
-	Format(bufBasicHeader, CONBUFSIZE, "%s| Name                 | Skeets  fl/ht/ml | Levels    | Crowns    | Pops | Cuts / Self | DSs / M2s  |\n", bufBasicHeader);
-	Format(bufBasicHeader, CONBUFSIZE, "%s|----------------------|------------------|-----------|-----------|------|-------------|------------|", bufBasicHeader);
+	Format(bufBasicHeader, CONBUFSIZE, "%s|---------------------------------------------------------------------------------------------------------------------------------|\n", bufBasicHeader);
+	Format(bufBasicHeader, CONBUFSIZE, "%s| Name                 | Skeets  fl/ht/ml | Levels    | Crowns    | Pops | Cuts / Self | DSs / M2s  | Clrs/Inst | Avg(s)     |\n", bufBasicHeader);
+	Format(bufBasicHeader, CONBUFSIZE, "%s|----------------------|------------------|-----------|-----------|------|-------------|------------|-----------|------------|", bufBasicHeader);
 
 	if (!strlen(g_sConsoleBuf[g_iConsoleBufChunks])) { 
 		g_iConsoleBufChunks--; 
@@ -4442,14 +4410,14 @@ void DisplayStatsSpecial(int client, bool bRound = true, bool bTeam = true, bool
 	
 	if (g_iConsoleBufChunks > -1) {
 		Format(g_sConsoleBuf[g_iConsoleBufChunks], CONBUFSIZELARGE,
-				"%s\n|---------------------------------------------------------------------------------------------------|",
+				"%s\n|---------------------------------------------------------------------------------------------------------------------------------|",
 				g_sConsoleBuf[g_iConsoleBufChunks]
 		);
 	} else {
 		Format(bufBasicHeader, CONBUFSIZE,
-				"%s\n| (nothing to display)                                                                              |%s",
+				"%s\n| (nothing to display)                                                                          |%s",
 				bufBasicHeader,
-				"\n|---------------------------------------------------------------------------------------------------|"
+				"\n|---------------------------------------------------------------------------------------------------------------------------------|"
 		);
 	}
 
@@ -4917,7 +4885,7 @@ void BuildConsoleBufferSpecial(bool bRound = false, bool bTeam = true, int iTeam
 	g_sConsoleBuf[0] = "";
 
 	const int s_len = 24;
-	char strTmp[6][s_len];
+	char strTmp[8][s_len], strTmpA[s_len];
 	int i, x, line;
 	bool bDivider = false;
 
@@ -5011,6 +4979,30 @@ void BuildConsoleBufferSpecial(bool bRound = false, bool bTeam = true, int iTeam
 			strcopy(strTmp[5], s_len, "          ");
 		}
 
+		// clears / instaclears
+		if (bRound && (g_strRoundPlayerData[i][team][plyClears]) ||
+			!bRound && (g_strPlayerData[i][plyClears])
+		) {
+			FormatEx(strTmp[6], s_len, "%5d /%5d",
+					((bRound) ? g_strRoundPlayerData[i][team][plyClears] : g_strPlayerData[i][plyClears]),
+					((bRound) ? g_strRoundPlayerData[i][team][plyInstaClears] : g_strPlayerData[i][plyInstaClears])
+			);
+		} else {
+			strcopy(strTmp[6], s_len, "            ");
+		}
+
+		// average clear time (in seconds)
+		if (bRound && g_strRoundPlayerData[i][team][plyAvgClearTime] ||
+			!bRound && g_strPlayerData[i][plyAvgClearTime]
+		) {
+			int avgMs = (bRound) ? g_strRoundPlayerData[i][team][plyAvgClearTime] : g_strPlayerData[i][plyAvgClearTime];
+			FormatEx(strTmpA, s_len, "%.1fs", float(avgMs) / 1000.0);
+			RightPadString(strTmpA, s_len, 10);
+			strcopy(strTmp[7], s_len, strTmpA);
+		} else {
+			strcopy(strTmp[7], s_len, "          ");
+		}
+
 		// cut into chunks:
 		if (line >= MAXLINESPERCHUNK) {
 			bDivider = true;
@@ -5023,12 +5015,12 @@ void BuildConsoleBufferSpecial(bool bRound = false, bool bTeam = true, int iTeam
 		// Format the basic stats
 		Format(g_sConsoleBuf[g_iConsoleBufChunks],
 				CONBUFSIZELARGE,
-				"%s%s| %20s | %16s | %9s | %9s | %4s | %11s | %10s |",
+				"%s%s| %20s | %16s | %9s | %9s | %4s | %11s | %10s | %12s | %10s |",
 				g_sConsoleBuf[g_iConsoleBufChunks],
-				(bDivider) ? "| -------------------- | ---------------- | --------- | --------- | ---- | ----------- | ---------- |\n" : "",
+				(bDivider) ? "| -------------------- | ---------------- | --------- | --------- | ---- | ----------- | ---------- | ------------ | ---------- |\n" : "",
 				g_sPlayerNameSafe[i],
 				strTmp[0], strTmp[1], strTmp[2],
-				strTmp[3], strTmp[4], strTmp[5]
+				strTmp[3], strTmp[4], strTmp[5], strTmp[6], strTmp[7]
 		);
 
 		line++;
@@ -6461,11 +6453,22 @@ int GetFullRoundTime(int bRound, int bTeam, int team, bool bTank = false)
 			}
 		}
 	} else {
-		if (bTeam) {
+		// 全场(game)统计的时长 = 自游戏真正开始时刻(gmStartTime)起算,
+		// 而不是依赖只累加"已完成回合"的 g_strAllRoundData —— 修复"开赛前不显示"
+		// 和"中途只显示最后一回合时长(而非整场)"两个 bug. 坦克时长仍按逐回合累计.
+		if (!bTank) {
+			if (g_bGameStarted && g_strGameData[gmStartTime]) {
+				fullTime = time - g_strGameData[gmStartTime];
+				// 暂停不影响全场计时(仅当前队伍正在打时扣).
+				if (g_bPaused && (team == g_iCurTeam || !bTeam)) {
+					fullTime -= time - g_iPauseStart;
+				}
+			}
+		} else if (bTeam) {
 			if (g_strAllRoundData[team][start]) {
 				fullTime = ((g_strAllRoundData[team][stop]) ? g_strAllRoundData[team][stop] : time) - g_strAllRoundData[team][start];
 				if (g_bPaused && team == g_iCurTeam) {
-					if (!bTank || g_bTankInGame) {
+					if (g_bTankInGame) {
 						fullTime -= time - g_iPauseStart;
 					}
 				}
@@ -6474,7 +6477,7 @@ int GetFullRoundTime(int bRound, int bTeam, int team, bool bTank = false)
 			if (g_strAllRoundData[LTEAM_A][start]) {
 				fullTime = ((g_strAllRoundData[LTEAM_A][stop]) ? g_strAllRoundData[LTEAM_A][stop] : time) - g_strAllRoundData[LTEAM_A][start];
 				if (g_bPaused && LTEAM_A == g_iCurTeam) {
-					if (!bTank || g_bTankInGame) {
+					if (g_bTankInGame) {
 						fullTime -= time - g_iPauseStart;
 					}
 				}
@@ -6483,7 +6486,7 @@ int GetFullRoundTime(int bRound, int bTeam, int team, bool bTank = false)
 			if (g_strAllRoundData[LTEAM_B][start]) {
 				fullTime += ((g_strAllRoundData[LTEAM_B][stop]) ? g_strAllRoundData[LTEAM_B][stop] : time) - g_strAllRoundData[LTEAM_B][start];
 				if (g_bPaused && LTEAM_B == g_iCurTeam) {
-					if (!bTank || g_bTankInGame) {
+					if (g_bTankInGame) {
 						fullTime -= time - g_iPauseStart;
 					}
 				}
@@ -6618,6 +6621,11 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 {
 	int iFlags = GetConVarInt((g_bModeCampaign) ? g_hCvarAutoPrintCoop : g_hCvarAutoPrintVs);
 
+	// 把局末趣文推送到 scripted_hud 的"修复队伍"HUD 槽位(全局广播一次), 仅当回合级趣文标志开启.
+	if (iFlags & AUTO_FUNFACT_ROUND) {
+		DisplayFunFactHUD();
+	}
+
 	// do automatic prints (only for clients that don't have cookie flags set)
 	AutomaticPrintPerClient(iFlags, -1);
 
@@ -6631,6 +6639,31 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	}
 
 	return Plugin_Stop;
+}
+
+// 局末趣文: 复用在"修复队伍"HUD 槽位显示随机趣闻, 全局广播给所有人.
+void DisplayFunFactHUD(bool bRound = true, bool bTeam = true, int iTeam = -1)
+{
+	if (!g_bScriptedHudAvailable) {
+		return;
+	}
+	if (GetFeatureStatus(FeatureType_Native, "ScriptedHud_ShowRoundFunFact") != FeatureStatus_Available) {
+		return;
+	}
+
+	char printBuffer[1024];
+	GetFunFactChatString(printBuffer, sizeof(printBuffer), bRound, bTeam, iTeam);
+	if (!strlen(printBuffer)) {
+		return;
+	}
+
+	// 去掉末尾换行, 便于 HUD 紧凑显示.
+	int len = strlen(printBuffer);
+	while (len > 0 && (printBuffer[len - 1] == '\n' || printBuffer[len - 1] == '\r')) {
+		printBuffer[--len] = '\0';
+	}
+
+	ScriptedHud_ShowRoundFunFact(printBuffer, 8.0);
 }
 
 // set iTeam to -2 to force printing for all players (where possible) (-1 = current team) - setting client to -2 prints to file (and never needs a delay)

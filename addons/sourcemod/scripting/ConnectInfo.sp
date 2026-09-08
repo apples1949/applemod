@@ -19,6 +19,10 @@
 #define GEO_METHOD_VORE    (1 << 0)  // 1: VORE-API (api.vore.top) 优先
 #define GEO_METHOD_GEOIP   (1 << 2)  // 4: geoip 本地库（GeoIP.ext + GeoLite2）
 
+// VORE-API 熔断：连续失败 N 次后暂停调用该 API，期间直接走 geoip
+#define VORE_FAIL_THRESHOLD   3
+#define VORE_COOLDOWN_SECONDS 300
+
 // ============ 内置消息模板（原 cannounce_settings.txt 文案硬编码） ============
 // 加入：2=国家+地区/城市，1=仅有国家，0=无地理信息
 #define JOIN_MSG_FULL "来自{GREEN}{PLAYERCOUNTRY}{DEFAULT}({LIGHTGREEN}{PLAYERCOUNTRYSHORT3}{DEFAULT} ){LIGHTGREEN}{PLAYERREGION} {PLAYERCITY}的{DEFAULT}[{GREEN}{PLAYERNAME}{DEFAULT}] 加入游戏，IP：[{GREEN}{PLAYERIP}{DEFAULT}]"
@@ -29,6 +33,10 @@
 #define DISC_MSG_NOGEO "[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
 
 ConVar g_hGeoMethods;
+
+// VORE-API 熔断状态
+int g_iVoreFailCount;
+bool g_bVoreCoolingDown;
 
 // 英->中 地理名称映射表（data/connectinfo_geoname_cn.txt）
 Handle g_hGeoNameKV = null;
@@ -110,8 +118,8 @@ public void OnClientPutInServer(int client) {
     
     int methods = GetGeoMethods();
     
-    // 按位掩码决定获取方式：优先 VORE-API（无需 key）
-    if (methods & GEO_METHOD_VORE) {
+    // 按位掩码决定获取方式：优先 VORE-API（无需 key）；熔断冷却期内跳过 VORE
+    if ((methods & GEO_METHOD_VORE) && !g_bVoreCoolingDown) {
         char url[512];
         Format(url, sizeof(url), "/api/IPdata?ip=%s", ipAddress);
 
@@ -120,7 +128,7 @@ public void OnClientPutInServer(int client) {
 
         clientObj.Get(url, VoreRequestCallback, client);
     } else if (methods & GEO_METHOD_GEOIP) {
-        // 未启用 VORE：直接用 geoip 库
+        // 未启用 VORE（或处于熔断冷却期）：直接用 geoip 库
         LookupGeoipFallback(client);
         PrintJoinMessage(client);
     } else {
@@ -148,12 +156,20 @@ public void OnClientPostAdminCheck(int client) {
 
 // VORE-API 归属地回调（返回中文：ipdata.info1=省/市, info2=区/县; adcode.p=省, adcode.c=市）
 public void VoreRequestCallback(HTTPResponse response, int client) {
-    // API 失败或未启用 VORE：回退 geoip 库
+    // API 请求失败：回退 geoip 库
     if (response.Status != HTTPStatus_OK) {
-        if (GetGeoMethods() & GEO_METHOD_GEOIP) {
-            LookupGeoipFallback(client);
-        }
-        PrintJoinMessage(client);
+        LogError("[ConnectInfo] VORE-API 请求失败 (HTTP %d)，改用 geoip 兜底", view_as<int>(response.Status));
+        FallbackGeoipAndPrint(client);
+        return;
+    }
+    
+    // response.Data 的 getter 会直接解析 JSON，遇到非 JSON 响应（运营商劫持页/防护页 HTML 等）会抛异常，
+    // 所以必须先按 Content-Type 判断响应类型，非 JSON 直接兜底
+    char contentType[64];
+    if (!response.GetHeader("Content-Type", contentType, sizeof(contentType))
+        || StrContains(contentType, "json", false) == -1) {
+        LogError("[ConnectInfo] VORE-API 返回非 JSON 响应 (Content-Type: \"%s\")，改用 geoip 兜底", contentType);
+        FallbackGeoipAndPrint(client);
         return;
     }
     
@@ -163,22 +179,19 @@ public void VoreRequestCallback(HTTPResponse response, int client) {
     JSONObject jsonObject = JSONObject.FromString(responseBody);
     if (jsonObject == null) {
         // 响应解析失败：回退 geoip 库
-        if (GetGeoMethods() & GEO_METHOD_GEOIP) {
-            LookupGeoipFallback(client);
-        }
-        PrintJoinMessage(client);
+        FallbackGeoipAndPrint(client);
         return;
     }
     
     // code != 200 视为失败
     if (jsonObject.GetInt("code") != 200) {
         delete jsonObject;
-        if (GetGeoMethods() & GEO_METHOD_GEOIP) {
-            LookupGeoipFallback(client);
-        }
-        PrintJoinMessage(client);
+        FallbackGeoipAndPrint(client);
         return;
     }
+    
+    // 请求成功：重置熔断计数
+    g_iVoreFailCount = 0;
     
     bool cnip = false;
     char info1[64], info2[64], info3[64];
@@ -239,6 +252,35 @@ public void VoreRequestCallback(HTTPResponse response, int client) {
     }
     
     PrintJoinMessage(client);
+}
+
+// VORE-API 不可用时的统一兜底：记录失败（触发熔断）→ 按位掩码用 geoip 库 → 打印加入消息
+void FallbackGeoipAndPrint(int client) {
+    MarkVoreFailure();
+    
+    if (GetGeoMethods() & GEO_METHOD_GEOIP) {
+        LookupGeoipFallback(client);
+    }
+    PrintJoinMessage(client);
+}
+
+// 记录 VORE-API 失败；连续失败达到阈值时进入冷却期，期间不再调用该 API
+void MarkVoreFailure() {
+    g_iVoreFailCount++;
+    
+    if (g_iVoreFailCount >= VORE_FAIL_THRESHOLD && !g_bVoreCoolingDown) {
+        g_bVoreCoolingDown = true;
+        LogError("[ConnectInfo] VORE-API 连续失败 %d 次，暂停调用 %d 秒，期间改用 geoip 本地库", g_iVoreFailCount, VORE_COOLDOWN_SECONDS);
+        CreateTimer(float(VORE_COOLDOWN_SECONDS), Timer_VoreCooldownEnd);
+    }
+}
+
+// VORE-API 冷却结束，恢复使用
+public Action Timer_VoreCooldownEnd(Handle timer) {
+    g_bVoreCoolingDown = false;
+    g_iVoreFailCount = 0;
+    LogMessage("[ConnectInfo] VORE-API 冷却结束，恢复调用");
+    return Plugin_Handled;
 }
 
 public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {

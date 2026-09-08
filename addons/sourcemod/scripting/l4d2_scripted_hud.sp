@@ -902,7 +902,7 @@ void GetHUD1_Text(char[] output, int size)
     if (g_bWitchAndTankSystemAvailable)
     {
         cv = FindConVar("sm_tank_can_spawn");
-        if (cv.IntValue)
+        if (cv != null && cv.IntValue)
         {
             if (IsStaticTankMap())
                 IsStaticTank = false;
@@ -910,7 +910,7 @@ void GetHUD1_Text(char[] output, int size)
                 IsStaticTank = true;
         }
         cv = FindConVar("sm_witch_can_spawn");
-        if (cv.IntValue)
+        if (cv != null && cv.IntValue)
         {
             if (IsStaticWitchMap())
                 IsStaticWitch = false;
@@ -919,27 +919,45 @@ void GetHUD1_Text(char[] output, int size)
         }
     }
     FormatEx(output, size, "\0");
-    int boss_proximity = RoundToNearest(GetBossProximity() * 100.0);
-    int g_fWitchPercent, g_fTankPercent;
-    g_fTankPercent = RoundToNearest(GetTankFlow(0) * 100.0);
-    g_fWitchPercent = RoundToNearest(GetWitchFlow(0) * 100.0);
-    FormatEx(output, size, "进度: [ %d%% ]", boss_proximity);
-    if (IsStaticTank || (!g_bWitchAndTankSystemAvailable && g_fTankPercent))
+
+    // left4dhooks 卸载/重载瞬间其 native 会解绑, 调用前必须确认可用, 否则报 "Native is not bound".
+    bool bL4DReady = LibraryExists("left4dhooks")
+        && GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetTerrorNavArea") == FeatureStatus_Available;
+
+    if (bL4DReady)
     {
-        Format(output, size, "%s    坦克: [ %d%% ]", output, g_fTankPercent);
+        int boss_proximity = RoundToNearest(GetBossProximity() * 100.0);
+        int g_fWitchPercent, g_fTankPercent;
+        g_fTankPercent = RoundToNearest(GetTankFlow(0) * 100.0);
+        g_fWitchPercent = RoundToNearest(GetWitchFlow(0) * 100.0);
+        FormatEx(output, size, "进度: [ %d%% ]", boss_proximity);
+        if (IsStaticTank || (!g_bWitchAndTankSystemAvailable && g_fTankPercent))
+        {
+            Format(output, size, "%s    坦克: [ %d%% ]", output, g_fTankPercent);
+        }
+        else if (!IsStaticTank)
+        {
+            Format(output, size, "%s    坦克: [ 固定 ]", output);
+        }
+        if (IsStaticWitch || (!g_bWitchAndTankSystemAvailable && g_fWitchPercent))
+        {
+            Format(output, size, "%s    女巫: [ %d%% ]", output, g_fWitchPercent);
+        }
+        else if (!IsStaticWitch)
+        {
+            Format(output, size, "%s    女巫: [ 固定 ]", output);
+        }
     }
-    else if (!IsStaticTank)
+    else
     {
-        Format(output, size, "%s    坦克: [ 固定 ]", output);
+        // left4dhooks 暂不可用: 进度无法计算, 显示占位; 静态 boss 信息仍可来自 witch_and_tankifier.
+        FormatEx(output, size, "进度: [ -- ]");
+        if (IsStaticTank)
+            Format(output, size, "%s    坦克: [ 固定 ]", output);
+        if (IsStaticWitch)
+            Format(output, size, "%s    女巫: [ 固定 ]", output);
     }
-    if (IsStaticWitch || (!g_bWitchAndTankSystemAvailable && g_fWitchPercent))
-    {
-        Format(output, size, "%s    女巫: [ %d%% ]", output, g_fWitchPercent);
-    }
-    else if (!IsStaticWitch)
-    {
-        Format(output, size, "%s    女巫: [ 固定 ]", output);
-    }
+
     if (g_bhybridScoringAvailable)
     {
         float maxBouns = float(SMPlus_GetHealthBonus()) + float(SMPlus_GetDamageBonus()) + float(SMPlus_GetPillsBonus());

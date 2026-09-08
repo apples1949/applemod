@@ -25,6 +25,9 @@ ConVar g_cvEnable;
 ConVar g_cvJarZoneRadius;
 ConVar g_cvHealPerSecond;
 ConVar g_cvBlockHorde;
+ConVar g_cvGlow;
+ConVar g_cvGlowColor;
+int    g_iGlowColor;
 
 ConVar g_hVomitBlindTime;
 float  g_fBileDuration;
@@ -50,6 +53,12 @@ bool  g_bSurvivorBiled[MAXPLAYERS + 1];
 
 float g_fSIBileMobBlockUntil;
 
+float g_fSIGlowEnd[MAXPLAYERS + 1];
+bool  g_bSIGlowApplied[MAXPLAYERS + 1];
+int   g_iSIGlowPrevType[MAXPLAYERS + 1];
+int   g_iSIGlowPrevColor[MAXPLAYERS + 1];
+int   g_iSIGlowUsedColor[MAXPLAYERS + 1];
+
 float g_fBoomerDeathPos[3];
 bool  g_bBoomerDeathValid;
 
@@ -72,6 +81,11 @@ public void OnPluginStart()
 	g_cvJarZoneRadius = CreateConVar("l4d2_si_bile_jar_zone_radius", "150.0", "投掷物胆汁罐爆炸后区域半径", FCVAR_NOTIFY, true, 0.0);
 	g_cvHealPerSecond = CreateConVar("l4d2_si_bile_heal_per_second", "60.0", "特感胆汁基础每秒回复量：坦克满额，非坦克减半，第 2 次胆汁再减半 (0=关)", FCVAR_NOTIFY, true, 0.0);
 	g_cvBlockHorde = CreateConVar("l4d2_si_bile_block_horde", "1", "特感被附着胆汁时是否阻止游戏刷新尸潮 (0=允许刷新, 1=阻止刷新)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvGlow = CreateConVar("l4d2_si_bile_glow", "1", "特感胆汁期间是否手动显示胆汁轮廓 (0=关, 1=开)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvGlowColor = CreateConVar("l4d2_si_bile_glow_color", "201 18 184", "特感胆汁轮廓颜色 (RGB, 空格分隔；游戏原版胆汁轮廓为紫色 201 18 184)", FCVAR_NOTIFY);
+	g_iGlowColor = ParseGlowColor(g_cvGlowColor);
+	g_cvGlow.AddChangeHook(OnGlowChanged);
+	g_cvGlowColor.AddChangeHook(OnGlowColorChanged);
 
 	g_hVomitBlindTime = FindConVar("sb_vomit_blind_time");
 	if (g_hVomitBlindTime == null)
@@ -116,11 +130,67 @@ public void OnPluginEnd()
 {
 	KillTimer(g_hHealTimer);
 	KillTimer(g_hZoneTimer);
+
+	for (int i = 1; i <= MaxClients; i++)
+		ClearSIBileGlow(i);
 }
 
 public void OnMapEnd()
 {
 	g_fSIBileMobBlockUntil = 0.0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_bSIGlowApplied[i] = false;
+		g_fSIGlowEnd[i] = 0.0;
+	}
+}
+
+public void OnGlowChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (!convar.BoolValue)
+	{
+		for (int i = 1; i <= MaxClients; i++)
+			ClearSIBileGlow(i);
+	}
+}
+
+public void OnGlowColorChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	g_iGlowColor = ParseGlowColor(convar);
+
+	if (g_iGlowColor == 0)
+	{
+		for (int i = 1; i <= MaxClients; i++)
+			ClearSIBileGlow(i);
+		return;
+	}
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_bSIGlowApplied[i] && IsClientInGame(i))
+		{
+			SetEntProp(i, Prop_Send, "m_glowColorOverride", g_iGlowColor);
+			g_iSIGlowUsedColor[i] = g_iGlowColor;
+		}
+	}
+}
+
+int ParseGlowColor(ConVar convar)
+{
+	char sColor[32];
+	char sParts[3][8];
+	convar.GetString(sColor, sizeof(sColor));
+	ExplodeString(sColor, " ", sParts, 3, 8);
+
+	int red = StringToInt(sParts[0]);
+	int green = StringToInt(sParts[1]);
+	int blue = StringToInt(sParts[2]);
+
+	if (red == 0 && green == 0 && blue == 0)
+		return 0;
+
+	return red | (green << 8) | (blue << 16);
 }
 
 public void OnVomitBlindTimeChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -148,12 +218,16 @@ void ClearSIBileState(int client)
 	g_bSIBiled[client] = false;
 	g_fSIBileEnd[client] = 0.0;
 	g_fSIBileHeal[client] = 0.0;
+
+	if (g_bSIGlowApplied[client] && g_fSIGlowEnd[client] <= GetGameTime())
+		ClearSIBileGlow(client);
 }
 
 void ClearSIBileLife(int client)
 {
 	ClearSIBileState(client);
 	g_iSIBileCount[client] = 0;
+	ClearSIBileGlow(client);
 }
 
 void BileSpecialInfected(int victim, int attacker)
@@ -209,6 +283,47 @@ void ClearSIBileEffect(int victim)
 	L4D_OnITExpired(victim);
 	SetEntPropFloat(victim, Prop_Send, "m_vomitStart", 0.0);
 	SetEntPropFloat(victim, Prop_Send, "m_vomitFadeStart", 0.0);
+
+	// 游戏自带的胆汁轮廓会随 IT 状态一起消失，这里手动补一个胆汁颜色轮廓
+	ApplySIBileGlow(victim);
+}
+
+void ApplySIBileGlow(int client)
+{
+	if (!g_cvGlow.BoolValue || g_iGlowColor == 0)
+		return;
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client))
+		return;
+
+	if (!g_bSIGlowApplied[client])
+	{
+		g_iSIGlowPrevType[client] = GetEntProp(client, Prop_Send, "m_iGlowType");
+		g_iSIGlowPrevColor[client] = GetEntProp(client, Prop_Send, "m_glowColorOverride");
+		g_bSIGlowApplied[client] = true;
+	}
+
+	SetEntProp(client, Prop_Send, "m_iGlowType", 3);
+	SetEntProp(client, Prop_Send, "m_glowColorOverride", g_iGlowColor);
+	g_iSIGlowUsedColor[client] = g_iGlowColor;
+	g_fSIGlowEnd[client] = GetGameTime() + g_fBileDuration;
+}
+
+void ClearSIBileGlow(int client)
+{
+	if (client <= 0 || client > MaxClients || !g_bSIGlowApplied[client])
+		return;
+
+	g_bSIGlowApplied[client] = false;
+	g_fSIGlowEnd[client] = 0.0;
+
+	// 只回收本插件设置的轮廓；若期间被其他插件改写则不动它
+	if (IsClientInGame(client)
+		&& GetEntProp(client, Prop_Send, "m_iGlowType") == 3
+		&& GetEntProp(client, Prop_Send, "m_glowColorOverride") == g_iSIGlowUsedColor[client])
+	{
+		SetEntProp(client, Prop_Send, "m_iGlowType", g_iSIGlowPrevType[client]);
+		SetEntProp(client, Prop_Send, "m_glowColorOverride", g_iSIGlowPrevColor[client]);
+	}
 }
 
 public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
@@ -441,7 +556,21 @@ public Action Timer_HealBiled(Handle timer)
 				SetEntProp(i, Prop_Send, "m_iHealth", newHp);
 		}
 	}
+
+	// 手动胆汁轮廓到期回收
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_bSIGlowApplied[i] && g_fSIGlowEnd[i] <= now)
+			ClearSIBileGlow(i);
+	}
+
 	return Plugin_Continue;
+}
+
+public void OnClientDisconnect(int client)
+{
+	g_bSIGlowApplied[client] = false;
+	g_fSIGlowEnd[client] = 0.0;
 }
 
 public void L4D_OnEnterGhostState(int client)

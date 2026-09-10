@@ -18,6 +18,12 @@ char g_sConfigPath[PLATFORM_MAX_PATH];
 // ===== Forwards =====
 Handle g_fTagsUpdated;
 
+// ===== 联动：个人屏蔽插件（l4d_beblock）=====
+// BeBlock 记录“谁屏蔽了谁的聊天”，这里在把聊天逐条输出给每个接收者之前询问它，
+// 从而做到按接收者过滤聊天；未加载 BeBlock 时行为与之前完全一致。
+native bool BeBlock_CanSeeChat(int listener, int speaker);
+native bool BeBlock_HasChatBlocker(int speaker, bool teamChat);
+
 // ===== 插件信息 =====
 public Plugin myinfo = {
     name = "HexTags Lite",
@@ -35,6 +41,10 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     CreateNative("HexTags_ResetClientTag", Native_ResetClientTag);
 
     g_fTagsUpdated = new GlobalForward("HexTags_OnTagsUpdated", ET_Ignore, Param_Cell);
+
+    // 个人屏蔽插件的 native 是可选依赖
+    MarkNativeAsOptional("BeBlock_CanSeeChat");
+    MarkNativeAsOptional("BeBlock_HasChatBlocker");
 
     return APLRes_Success;
 }
@@ -141,13 +151,24 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
         return Plugin_Continue;
     }
 
+    bool bUseTags = !g_bHideTag[client];
+
+    // 个人屏蔽插件可用时，询问它是否有接收者屏蔽了发言者
+    bool bBeBlock = HasBeBlock();
+
+    // 有接收者屏蔽了发言者时，即使发言者隐藏了称号也必须由本插件输出，
+    // 否则消息会退回游戏原版显示，绕过接收者过滤。
+    bool bForcePrint = (bUseTags == false)
+        && bBeBlock
+        && BeBlock_HasChatBlocker(client, StrEqual(command, "say_team"));
+
     char sChatCommand[64];
     char sArguments[MAXLENGTH_MESSAGE];
 
     if (GetChatTriggerCommand(sMessage, sChatCommand, sizeof(sChatCommand), sArguments, sizeof(sArguments))) {
         if (IsVisibleChatCommand(sChatCommand)) {
-            if (sMessage[0] == '!' && !g_bHideTag[client]) {
-                PrintTaggedChatMessage(client, command, sMessage);
+            if (sMessage[0] == '!' && (bUseTags || bForcePrint)) {
+                PrintTaggedChatMessage(client, command, sMessage, bUseTags, bBeBlock);
                 return Plugin_Handled;
             }
 
@@ -157,34 +178,42 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
         return Plugin_Handled;
     }
 
-    if (g_bHideTag[client]) {
+    if (bUseTags == false && bForcePrint == false) {
         return Plugin_Continue;
     }
 
-    PrintTaggedChatMessage(client, command, sMessage);
+    PrintTaggedChatMessage(client, command, sMessage, bUseTags, bBeBlock);
     return Plugin_Handled;
 }
 
-void PrintTaggedChatMessage(int client, const char[] command, const char[] message) {
+void PrintTaggedChatMessage(int client, const char[] command, const char[] message, bool bUseTags, bool bBeBlock) {
     // 玩家名字与消息里的颜色标签先剥离，防止注入/叠加
     char sName[MAXLENGTH_NAME];
     GetClientName(client, sName, sizeof(sName));
     StripColorTags(sName, sizeof(sName));
 
     char sFullName[MAXLENGTH_NAME];
-    FormatEx(sFullName, sizeof(sFullName), "%s%s%s",
-        g_PlayerTags[client].ChatTag,
-        g_PlayerTags[client].NameColor,
-        sName);
+    if (bUseTags) {
+        FormatEx(sFullName, sizeof(sFullName), "%s%s%s",
+            g_PlayerTags[client].ChatTag,
+            g_PlayerTags[client].NameColor,
+            sName);
+    } else {
+        strcopy(sFullName, sizeof(sFullName), sName);
+    }
 
     char sCleanMessage[MAXLENGTH_MESSAGE];
     strcopy(sCleanMessage, sizeof(sCleanMessage), message);
     StripColorTags(sCleanMessage, sizeof(sCleanMessage));
 
     char sFullMessage[MAXLENGTH_MESSAGE];
-    FormatEx(sFullMessage, sizeof(sFullMessage), "%s%s",
-        g_PlayerTags[client].ChatColor,
-        sCleanMessage);
+    if (bUseTags) {
+        FormatEx(sFullMessage, sizeof(sFullMessage), "%s%s",
+            g_PlayerTags[client].ChatColor,
+            sCleanMessage);
+    } else {
+        strcopy(sFullMessage, sizeof(sFullMessage), sCleanMessage);
+    }
 
     // 配置里的 SayText2 标签（{lightgreen}/{red}/{blue}）预解析为 \x03，
     // 避免与 {teamcolor} 叠加触发 "two team colors" 崩溃；\x03 最终按发言人队伍着色
@@ -197,6 +226,9 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
     for (int i = 1; i <= MaxClients; i++) {
         if (!IsClientInGame(i)) continue;
 
+        // 该接收者屏蔽了发言者的文字 → 不给他显示（个人屏蔽插件 l4d_beblock）
+        if (bBeBlock && !BeBlock_CanSeeChat(i, client)) continue;
+
         int iTeam = GetClientTeam(i);
 
         // 队内聊天接收者：同队 + 旁观者（本服规则：旁观者可看两队队内聊天）
@@ -205,21 +237,23 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
         // 队伍前缀：公共聊天 *队伍名*，队内聊天 (队伍名)，不论有无称号都显示
         char sStatus[32];
         sStatus[0] = '\0';
-        if (teamChat) {
-            if (team == 1) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSpectator", i);
-            } else if (team == 2) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSurvivor", i);
-            } else if (team == 3) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamInfected", i);
-            }
-        } else {
-            if (team == 1) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
-            } else if (team == 2) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSurvivor", i);
-            } else if (team == 3) {
-                FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatInfected", i);
+        if (bUseTags) {
+            if (teamChat) {
+                if (team == 1) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSpectator", i);
+                } else if (team == 2) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamSurvivor", i);
+                } else if (team == 3) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_TeamInfected", i);
+                }
+            } else {
+                if (team == 1) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSpectator", i);
+                } else if (team == 2) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatSurvivor", i);
+                } else if (team == 3) {
+                    FormatEx(sStatus, sizeof(sStatus), "%T", "HexTags_ChatInfected", i);
+                }
             }
         }
 
@@ -228,6 +262,12 @@ void PrintTaggedChatMessage(int client, const char[] command, const char[] messa
         // "two team colors" 崩溃
         CPrintToChatEx(i, client, "{teamcolor}%s{default}%s{default} : %s", sStatus, sFullName, sFullMessage);
     }
+}
+
+// 个人屏蔽插件是否可用。每次都实时查询：插件晚加载/被卸载都能立刻反映，
+// 且它的 native 在注册库名之前就已创建，不会调用到未绑定的 native。
+bool HasBeBlock() {
+    return LibraryExists("beblock");
 }
 
 // 移除颜色标签（colors.inc 会把它们解析成颜色码）。玩家消息/名字里若包含

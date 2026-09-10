@@ -3,14 +3,14 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.7"
+#define PLUGIN_VERSION	"1.8"
 
 #define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
 #define EXPLODE_SAME_WINDOW_TIME	0.5	// 同一次爆炸事件的最大到达时间差(秒): 窗口开启超过此时长后到达的事件视为新一次爆炸
 #define EXPLODE_SCAN_INTERVAL	0.25	// 爆炸窗口结算扫描间隔(秒)
 #define TANK_HIT_WINDOW_TIME	0.5		// Tank 左键一爪/拍打移动物品的一次性判定窗口(秒)
-#define HIGHLIGHT_LOG_FILE	"l4d2_infected_highlight.log"	// 专门的检测记录日志(位于 addons/sourcemod/logs/)
+#define BOOMER_REPORT_DELAY		0.5		// Boomer 死亡后等待爆炸糊人的 player_now_it 事件到齐再播报累积胆汁的延迟(秒)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
 
 // ====================================================================================================
@@ -21,34 +21,10 @@ public Plugin myinfo =
 {
 	name		= "l4d2_infected_highlight_prompt",
 	author		= "apples1949",
-	description	= "感染者阵营高光操作提示: 喷中多名/爆炸炸到多名/一撞多/多控达成/坦克一爪多中/坦克拍物多中.",
+	description	= "感染者阵营高光操作提示: 喷中多名/爆炸炸到多名/累积胆汁/一撞多/多控达成/坦克一爪多中/坦克拍物多中.",
 	version		= PLUGIN_VERSION,
 	url			= "N/A"
 }
-
-// ====================================================================================================
-// 中文数字表
-// ====================================================================================================
-// 多控使用: 双控、三控
-char g_NumberText[15][8] =
-{
-	"双", "三", "四", "五", "六", "七", "八", "九", "十",
-	"十一", "十二", "十三", "十四", "十五", "十六"
-};
-
-// 一撞多单独使用: 一撞二、一撞三(与多控的"双控"区分)
-char g_NumberTextCharger[15][8] =
-{
-	"二", "三", "四", "五", "六", "七", "八", "九", "十",
-	"十一", "十二", "十三", "十四", "十五", "十六"
-};
-
-// 喷中/炸到多少"名"生还者使用: 两名、三名
-char g_NumberTextGe[15][8] =
-{
-	"两", "三", "四", "五", "六", "七", "八", "九", "十",
-	"十一", "十二", "十三", "十四", "十五", "十六"
-};
 
 // ====================================================================================================
 // Boomer 存活喷吐状态(按 boomer 玩家索引)
@@ -70,6 +46,16 @@ int   g_iLastExplodedBoomer;			// 最近爆炸的 boomer 的 userid(now_it 攻�
 float g_fLastExplodedTime;				// 最近爆炸发生的游戏时间
 
 // ====================================================================================================
+// Boomer 一轮生命累积胆汁状态(按 boomer 玩家索引, 生成到死亡)
+// ====================================================================================================
+bool  g_bBoomerBiledTracked[MAXPLAYERS+1];			// 本轮生命是否已有胆汁命中记录(死亡瞬间类别被重置时的兜底判据)
+bool  g_bBoomerBiled[MAXPLAYERS+1][MAXPLAYERS+1];	// 本轮被胆汁命中过的不重复生还者(主动喷吐 + 死亡爆炸)
+int   g_iBoomerBiledCount[MAXPLAYERS+1];			// 本轮被胆汁命中的不重复生还者数
+bool  g_bBoomerReportPending[MAXPLAYERS+1];			// 死亡后等待爆炸糊人事件到齐再播报
+float g_fBoomerDeathTime[MAXPLAYERS+1];				// 死亡时刻(游戏时间)
+char  g_sBoomerDeathName[MAXPLAYERS+1][MAX_NAME_LENGTH];	// 死亡时缓存的名字(播报时角色可能已失效)
+
+// ====================================================================================================
 // Charger 一撞多状态(按 charger 玩家索引)
 // ====================================================================================================
 bool  g_bChargerReady[MAXPLAYERS+1];	// 本次冲撞是否处于可计数窗口内
@@ -84,8 +70,6 @@ enum TankHitType
 	TankHit_Claw,		// 左键爪子
 	TankHit_Prop		// 拍打移动物品
 }
-
-char g_sTankTypeName[TankHitType][8] = { "爪击", "拍物" };
 
 bool  g_bTankHitActive[TankHitType][MAXPLAYERS+1];	// 当前是否处于一次攻击窗口内
 float g_fTankHitStart[TankHitType][MAXPLAYERS+1];	// 本次攻击窗口起始时间
@@ -102,6 +86,7 @@ int   g_iMultiPinnedAnnounced = 0;		// 上次已提示的控住生还者人数(0
 // ====================================================================================================
 ConVar g_cvBoomerSprayMin;
 ConVar g_cvBoomerExplodeMin;
+ConVar g_cvBoomerBiledMin;
 ConVar g_cvChargerMin;
 ConVar g_cvPinnedMin;
 ConVar g_cvTankClawMin;
@@ -109,6 +94,7 @@ ConVar g_cvTankPropMin;
 
 int g_iBoomerSprayMin;
 int g_iBoomerExplodeMin;
+int g_iBoomerBiledMin;
 int g_iChargerMin;
 int g_iPinnedMin;
 int g_iTankHitMin[TankHitType];
@@ -127,6 +113,10 @@ public void OnPluginStart()
 											"2",
 											"胖子死亡爆炸一次炸到多少个生还者时提示(>=2).",
 											FCVAR_NOTIFY, true, 2.0, true, 16.0);
+	g_cvBoomerBiledMin		= CreateConVar("l4d2_infected_highlight_boomer_biled_min",
+											"2",
+											"胖子一轮生命(生成到死亡)累积喷中多少名生还者时, 死亡后提示(含主动喷吐与死亡爆炸).",
+											FCVAR_NOTIFY, true, 1.0, true, 16.0);
 	g_cvChargerMin			= CreateConVar("l4d2_infected_highlight_charger_min",
 											"2",
 											"冲锋者一次冲撞连续撞中多少个生还者时提示(>=2).",
@@ -148,6 +138,7 @@ public void OnPluginStart()
 
 	g_cvBoomerSprayMin.AddChangeHook(OnConVarChanged);
 	g_cvBoomerExplodeMin.AddChangeHook(OnConVarChanged);
+	g_cvBoomerBiledMin.AddChangeHook(OnConVarChanged);
 	g_cvChargerMin.AddChangeHook(OnConVarChanged);
 	g_cvPinnedMin.AddChangeHook(OnConVarChanged);
 	g_cvTankClawMin.AddChangeHook(OnConVarChanged);
@@ -168,14 +159,6 @@ public void OnPluginStart()
 	CreateTimer(PINNED_CHECK_INTERVAL, Timer_CheckPinned, _, TIMER_REPEAT);
 	CreateTimer(EXPLODE_SCAN_INTERVAL, Timer_ScanExplode, _, TIMER_REPEAT);
 
-	// 专门的日志: 确保 logs 目录存在, 加载即写入一条含绝对路径的记录, 便于确认加载与定位日志
-	char sLogDir[PLATFORM_MAX_PATH], sLogPath[PLATFORM_MAX_PATH];
-	BuildPath(Path_SM, sLogDir, sizeof(sLogDir), "logs");
-	if (!DirExists(sLogDir))
-		CreateDirectory(sLogDir, 0);
-	BuildPath(Path_SM, sLogPath, sizeof(sLogPath), "logs/%s", HIGHLIGHT_LOG_FILE);
-	LogToFileEx(HIGHLIGHT_LOG_FILE, "[插件] l4d2_infected_highlight_prompt v%s 已加载, 日志路径: %s", PLUGIN_VERSION, sLogPath);
-
 	//AutoExecConfig(true, "l4d2_infected_highlight_prompt");
 }
 
@@ -188,6 +171,7 @@ void GetCvars()
 {
 	g_iBoomerSprayMin	= g_cvBoomerSprayMin.IntValue;
 	g_iBoomerExplodeMin	= g_cvBoomerExplodeMin.IntValue;
+	g_iBoomerBiledMin	= g_cvBoomerBiledMin.IntValue;
 	g_iChargerMin		= g_cvChargerMin.IntValue;
 	g_iPinnedMin		= g_cvPinnedMin.IntValue;
 	g_iTankHitMin[TankHit_Claw]	= g_cvTankClawMin.IntValue;
@@ -200,6 +184,7 @@ public void OnMapEnd()
 	{
 		ResetSpray(i);
 		ResetExplode(i);
+		ResetBoomerBiled(i);
 		ResetCharger(i);
 		ResetTankHit(TankHit_Claw, i);
 		ResetTankHit(TankHit_Prop, i);
@@ -217,6 +202,10 @@ public void OnClientDisconnect(int client)
 	ResetCharger(client);
 	ResetTankHit(TankHit_Claw, client);
 	ResetTankHit(TankHit_Prop, client);
+
+	// 待播报的累积胆汁记录保留(播报只用已缓存的名字与计数), 否则直接清空
+	if (!g_bBoomerReportPending[client])
+		ResetBoomerBiled(client);
 }
 
 // ====================================================================================================
@@ -257,6 +246,9 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 			g_iExplodeCount[boomer]++;
 		}
 
+		// 本轮生命累积: 死亡爆炸糊到的生还者同样计入
+		MarkBoomerBiled(boomer, victim);
+
 		return;
 	}
 
@@ -286,6 +278,9 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 		g_bSprayVictim[attacker][victim] = true;
 		g_iSprayCount[attacker]++;
 	}
+
+	// 本轮生命累积: 主动喷吐糊到的生还者
+	MarkBoomerBiled(attacker, victim);
 }
 
 public Action Timer_EndSpray(Handle timer, int userid)
@@ -297,8 +292,8 @@ public Action Timer_EndSpray(Handle timer, int userid)
 		char name[MAX_NAME_LENGTH];
 		GetActorName(boomer, name, sizeof(name));
 
-		PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01一次性喷中\x04%s\x05名生还者",
-			name, g_NumberTextGe[g_iSprayCount[boomer] - 2]);
+		PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01一次性喷中\x04%d\x05名生还者",
+			name, g_iSprayCount[boomer]);
 	}
 
 	if (boomer > 0)
@@ -318,6 +313,9 @@ public void Event_BoomerExploded(Event event, const char[] name, bool dontBroadc
 
 	g_iLastExplodedBoomer = event.GetInt("userid");
 	g_fLastExplodedTime = GetGameTime();
+
+	// 爆炸即 boomer 死亡: 安排播报本轮累积喷中的生还者数(与 player_death 互为兜底, 幂等)
+	ScheduleBoomerReport(boomer);
 
 	// 同一次爆炸的 player_now_it 已先到达开窗(时间差小于容差)则保留已计数;
 	// 时间差达到容差说明是 boomer 复活后的新一次爆炸, 重开窗口(会先结算上一次)
@@ -354,6 +352,13 @@ public Action Timer_ScanExplode(Handle timer)
 			PrintExplode(i);
 			ResetExplode(i);
 		}
+
+		// boomer 死亡后等爆炸糊人事件到齐, 再播报本轮(生成到死亡)累积喷中的生还者数
+		if (g_bBoomerReportPending[i] && now - g_fBoomerDeathTime[i] >= BOOMER_REPORT_DELAY)
+		{
+			PrintBoomerBiled(i);
+			ResetBoomerBiled(i);
+		}
 	}
 
 	return Plugin_Continue;
@@ -364,8 +369,8 @@ void PrintExplode(int boomer)
 	if (g_iExplodeCount[boomer] < g_iBoomerExplodeMin)
 		return;
 
-	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%s\x05名生还者",
-		g_sExplodeName[boomer], g_NumberTextGe[g_iExplodeCount[boomer] - 2]);
+	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%d\x05名生还者",
+		g_sExplodeName[boomer], g_iExplodeCount[boomer]);
 }
 
 void ResetSpray(int boomer)
@@ -388,6 +393,51 @@ void ResetExplode(int boomer)
 		g_bExplodeVictim[boomer][i] = false;
 
 	g_sExplodeName[boomer][0] = '\0';
+}
+
+// 记录一次胆汁命中(主动喷吐与死亡爆炸都算), 同一名生还者一轮生命只记一次
+void MarkBoomerBiled(int boomer, int victim)
+{
+	g_bBoomerBiledTracked[boomer] = true;
+
+	if (g_bBoomerBiled[boomer][victim])
+		return;
+
+	g_bBoomerBiled[boomer][victim] = true;
+	g_iBoomerBiledCount[boomer]++;
+}
+
+// boomer 死亡: 缓存名字并挂起播报, 等爆炸糊人的 player_now_it 事件到齐后由周期扫描统一输出
+void ScheduleBoomerReport(int boomer)
+{
+	if (g_bBoomerReportPending[boomer])
+		return;
+
+	g_bBoomerReportPending[boomer] = true;
+	g_fBoomerDeathTime[boomer] = GetGameTime();
+
+	GetActorName(boomer, g_sBoomerDeathName[boomer], MAX_NAME_LENGTH);
+}
+
+void PrintBoomerBiled(int boomer)
+{
+	if (g_iBoomerBiledCount[boomer] < g_iBoomerBiledMin)
+		return;
+
+	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01累积对\x04%d\x05名生还者喷射胆汁",
+		g_sBoomerDeathName[boomer], g_iBoomerBiledCount[boomer]);
+}
+
+void ResetBoomerBiled(int boomer)
+{
+	g_bBoomerBiledTracked[boomer] = false;
+	g_iBoomerBiledCount[boomer] = 0;
+	g_bBoomerReportPending[boomer] = false;
+	g_fBoomerDeathTime[boomer] = 0.0;
+	g_sBoomerDeathName[boomer][0] = '\0';
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_bBoomerBiled[boomer][i] = false;
 }
 
 // ====================================================================================================
@@ -459,14 +509,6 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	event.GetString("weapon", weapon, sizeof(weapon));
 	int dmg = event.GetInt("dmg_health");
 
-	// 专门的日志文件: 记录每次 Tank 造成伤害的原始事件数据, 用于排查提示不触发
-	char sTankName[MAX_NAME_LENGTH], sVictimName[MAX_NAME_LENGTH];
-	LogClientName(attacker, sTankName, sizeof(sTankName));
-	LogClientName(client, sVictimName, sizeof(sVictimName));
-
-	LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank检测] attacker=%d(%s) weapon=\"%s\" dmg=%d victim=%d(%s)",
-		attacker, sTankName, weapon, dmg, client, sVictimName);
-
 	if (dmg < 1)
 		return;
 
@@ -518,6 +560,14 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 
+	if (client <= 0)
+		return;
+
+	// Boomer 死亡: 安排播报本轮(生成到死亡)累积喷中的生还者数
+	// (死亡瞬间 m_zombieClass 可能已被重置, 本轮已有胆汁记录时同样认定)
+	if (IsBoomer(client) || g_bBoomerBiledTracked[client])
+		ScheduleBoomerReport(client);
+
 	if (!IsCharger(client))
 		return;
 
@@ -528,6 +578,12 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
+
+	if (client <= 0)
+		return;
+
+	// 任何一次生成都是一轮新生命: 清空上一轮的 boomer 累积胆汁记录
+	ResetBoomerBiled(client);
 
 	if (IsBoomer(client))
 		ResetSpray(client);
@@ -622,8 +678,8 @@ void PrintCharger(int charger)
 	char name[MAX_NAME_LENGTH];
 	GetActorName(charger, name, sizeof(name));
 
-	PrintToInfectedTeam("\x04[\x03!\x04] \x05Charger(\x03%s\x05) \x01一撞\x04%s\x05",
-		name, g_NumberTextCharger[g_iChargerCount[charger] - 2]);
+	PrintToInfectedTeam("\x04[\x03!\x04] \x05Charger(\x03%s\x05) \x01冲撞连续撞中\x04%d\x05名生还者",
+		name, g_iChargerCount[charger]);
 }
 
 // ====================================================================================================
@@ -639,8 +695,6 @@ void CountTankHit(TankHitType type, int tank, int victim)
 		g_bTankHitActive[type][tank] = true;
 		g_fTankHitStart[type][tank] = now;
 		CreateTankHitTimer(type, tank);
-
-		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank窗口] %s tank=%d 窗口开启", g_sTankTypeName[type], tank);
 	}
 	else if (now - g_fTankHitStart[type][tank] > TANK_HIT_WINDOW_TIME)
 	{
@@ -649,16 +703,12 @@ void CountTankHit(TankHitType type, int tank, int victim)
 		g_bTankHitActive[type][tank] = true;
 		g_fTankHitStart[type][tank] = now;
 		CreateTankHitTimer(type, tank);
-
-		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank窗口] %s tank=%d 窗口重开", g_sTankTypeName[type], tank);
 	}
 
 	if (!g_bTankHitVictim[type][tank][victim])
 	{
 		g_bTankHitVictim[type][tank][victim] = true;
 		g_iTankHitCount[type][tank]++;
-
-		LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank计数] %s tank=%d count=%d", g_sTankTypeName[type], tank, g_iTankHitCount[type][tank]);
 	}
 }
 
@@ -679,34 +729,20 @@ public Action Timer_EndTankHit(Handle timer, DataPack pack)
 
 	int tank = GetClientOfUserId(userid);
 
-	if (tank > 0 && g_bTankHitActive[type][tank])
+	if (tank > 0 && g_bTankHitActive[type][tank] && g_iTankHitCount[type][tank] >= g_iTankHitMin[type])
 	{
-		char sTankName[MAX_NAME_LENGTH];
-		LogClientName(tank, sTankName, sizeof(sTankName));
+		char name[MAX_NAME_LENGTH];
+		GetActorName(tank, name, sizeof(name));
 
-		if (g_iTankHitCount[type][tank] >= g_iTankHitMin[type])
+		if (type == TankHit_Claw)
 		{
-			LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank提示] %s tank=%d(%s) count=%d 达到阈值 → 输出提示",
-				g_sTankTypeName[type], tank, sTankName, g_iTankHitCount[type][tank]);
-
-			char name[MAX_NAME_LENGTH];
-			GetActorName(tank, name, sizeof(name));
-
-			if (type == TankHit_Claw)
-			{
-				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) 一次性\x01拍中\x04%s\x05名生还者",
-					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
-			}
-			else
-			{
-				PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品连续命中\x04%s\x05名生还者",
-					name, g_NumberTextGe[g_iTankHitCount[type][tank] - 2]);
-			}
+			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) 一次性\x01拍中\x04%d\x05名生还者",
+				name, g_iTankHitCount[type][tank]);
 		}
 		else
 		{
-			LogToFileEx(HIGHLIGHT_LOG_FILE, "[Tank结算] %s tank=%d(%s) count=%d 低于阈值%d → 不输出",
-				g_sTankTypeName[type], tank, sTankName, g_iTankHitCount[type][tank], g_iTankHitMin[type]);
+			PrintToInfectedTeam("\x04[\x03!\x04] \x05Tank(\x03%s\x05) \x01拍打移动物品连续命中\x04%d\x05名生还者",
+				name, g_iTankHitCount[type][tank]);
 		}
 	}
 
@@ -751,10 +787,10 @@ public Action Timer_CheckPinned(Handle timer)
 
 	if (pinned >= g_iPinnedMin)
 	{
-		// 控住人数上升到新档位时逐级提示: 双控 → 三控 → 四控 ...
+		// 控住人数上升到新档位时逐级提示: 2控 → 3控 → 4控 ...
 		if (pinned > g_iMultiPinnedAnnounced)
 		{
-			PrintToInfectedTeam("\x04[\x03!\x04] \x03%s控\x05 \x01达成.", g_NumberText[pinned - 2]);
+			PrintToInfectedTeam("\x04[\x03!\x04] \x03特感阵营达成\x04%d\x05控", pinned);
 			g_iMultiPinnedAnnounced = pinned;
 		}
 	}
@@ -828,23 +864,9 @@ void PrintToInfectedTeam(const char[] format, any ...)
 	char buffer[256];
 	VFormat(buffer, sizeof(buffer), format, 2);
 
-	int count = 0;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i) && GetClientTeam(i) != 2 && !IsFakeClient(i))
-		{
 			PrintToChat(i, buffer);
-			count++;
-		}
 	}
-
-	LogToFileEx(HIGHLIGHT_LOG_FILE, "[提示输出] 发送给%d名玩家: %s", count, buffer);
-}
-
-void LogClientName(int client, char[] buffer, int maxlen)
-{
-	if (client > 0 && client <= MaxClients && IsClientInGame(client))
-		GetClientName(client, buffer, maxlen);
-	else
-		strcopy(buffer, maxlen, "?");
 }

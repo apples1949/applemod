@@ -3,84 +3,116 @@
 	"No Access"
 	{
 		"en"			"You do not have access to this command"
+		"chi"			"你没有权限使用该指令"
+		"zho"			"你沒有權限使用該指令"
 	}
 	
 	"Back"
 	{
 		"en"			"Back"
+		"chi"			"返回"
+		"zho"			"返回"
 	}
 	
 	"Next"
 	{
 		"en"			"Next"
+		"chi"			"下一页"
+		"zho"			"下一頁"
 	}
 	
 	"Exit"
 	{
 		"en"			"Exit"
+		"chi"			"关闭"
+		"zho"			"關閉"
 	}
 	
 	"Previous"
 	{
 		"en"			"Previous"
+		"chi"			"上一页"
+		"zho"			"上一頁"
 	}
 	
 	"all players"
 	{
 		"en"			"all players"
+		"chi"			"所有玩家"
+		"zho"			"所有玩家"
 	}
 	
 	"all humans"
 	{
 		"en"			"all humans"
+		"chi"			"所有真人玩家"
+		"zho"			"所有真人玩家"
 	}
 	
 	"all bots"
 	{
 		"en"			"all bots"
+		"chi"			"所有电脑玩家"
+		"zho"			"所有電腦玩家"
 	}
 	
 	"all dead players"
 	{
 		"en"			"all dead players"
+		"chi"			"所有死亡的玩家"
+		"zho"			"所有死亡的玩家"
 	}
 	
 	"all alive players"
 	{
 		"en"			"all alive players"
+		"chi"			"所有活着的玩家"
+		"zho"			"所有活著的玩家"
 	}
-
+	
 	"all spectators"
 	{
 		"en"			"all spectators"
+		"chi"			"所有旁观玩家"
+		"zho"			"所有旁觀玩家"
 	}
-
+	
 	"Vote Count"
 	{
 		"#format"		"{1:i},{2:i},{3:i}"
 		"en"			"Votes: {1}/{2}, {3}s left"
+		"chi"			"投票：{1}/{2}，剩余 {3} 秒"
+		"zho"			"投票：{1}/{2}，剩餘 {3} 秒"
 	}
-
+	
 	"Voted For"
 	{
 		"#format"		"{1:s},{2:s}"
-		"en"			"{1} voted for {2}"	
+		"en"			"{1} voted for {2}"
+		"chi"			"{1} 投票给 {2}"
+		"zho"			"{1} 投票給 {2}"
 	}
-
+	
 	"Changed Vote"
 	{
 		"#format"		"{1:s},{2:s}"
-		"en"			"{1} changed their vote to {2}"	
+		"en"			"{1} changed their vote to {2}"
+		"chi"			"{1} 改投 {2}"
+		"zho"			"{1} 改投 {2}"
 	}
-
+	
 	"No Vote"
 	{
 		"en"			"No Vote"
+		"chi"			"不投票"
+		"zho"			"不投票"
 	}
 	
 	"Name Reserved"
 	{
 		"en"			"Your name is reserved by SourceMod; set your password to use it."
+		"chi"			"该名字已被 SourceMod 保留，请设置密码后再使用。"
+		"zho"			"該名字已被 SourceMod 保留，請設定密碼後再使用。"
 	}
 	
 	/* This is a special "pass-thru" translation */

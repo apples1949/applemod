@@ -13,41 +13,5 @@
 		{
 			"name" "ZoneMod 2.9.1b 混野匹配"
 		}
-		"zm1v1"
-		{
-			"name" "1v1 ZoneMod"
-		}
-		"zonemod4k"
-		{
-			"name" "Zonemod 2.9.1b 非匹配4控"
-		}
-	}
-	"NextMod Configs"
-	{
-		"nextmod1v1"
-		{
-			"name" "1v1 NextMod"
-		}
-	}
-	"Acemod Revamped Configs"
-	{
-		"amrv1v1"
-		{
-			"name" "1v1 Acemod RV"
-		}
-	}
-	"EQ Configs"
-	{
-		"eq1v1"
-		{
-			"name" "1v1 EQ"
-		}
-	}
-	"Hunters Configs"
-	{
-		"zh1v1"
-		{
-			"name" "1v1 ZoneHunters"
-		}
 	}
 }

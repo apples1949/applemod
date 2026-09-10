@@ -1,0 +1,107 @@
+"Phrases"
+{
+	"Menu_Title"
+	{
+		"chi"		"选择要屏蔽的玩家"
+		"zho"		"選擇要屏蔽的玩家"
+		"en"		"Select a player to block"
+	}
+
+	"Menu_Target_Title"
+	{
+		"chi"		"屏蔽设置：%s"
+		"zho"		"屏蔽設定：%s"
+		"en"		"Block settings: %s"
+	}
+
+	"Menu_Receive_Voice"
+	{
+		"chi"		"接收语音"
+		"zho"		"接收語音"
+		"en"		"Receive voice"
+	}
+
+	"Menu_Receive_Text"
+	{
+		"chi"		"接收文字"
+		"zho"		"接收文字"
+		"en"		"Receive text"
+	}
+
+	"Menu_Unblock_All"
+	{
+		"chi"		"解除全部屏蔽"
+		"zho"		"解除全部屏蔽"
+		"en"		"Unblock everyone"
+	}
+
+	"Msg_Disabled"
+	{
+		"chi"		"个人屏蔽功能已被服务器关闭。"
+		"zho"		"個人屏蔽功能已被伺服器關閉。"
+		"en"		"Personal blocking is disabled on this server."
+	}
+
+	"Msg_No_Players"
+	{
+		"chi"		"当前没有其他玩家可以屏蔽。"
+		"zho"		"目前沒有其他玩家可以屏蔽。"
+		"en"		"There is no other player to block right now."
+	}
+
+	"Msg_Target_Left"
+	{
+		"chi"		"该玩家已离开服务器。"
+		"zho"		"該玩家已離開伺服器。"
+		"en"		"That player has left the server."
+	}
+
+	"Msg_Voice_Blocked"
+	{
+		"chi"		"已屏蔽 %s 的语音。"
+		"zho"		"已屏蔽 %s 的語音。"
+		"en"		"Voice from %s is now blocked."
+	}
+
+	"Msg_Voice_Unblocked"
+	{
+		"chi"		"已恢复接收 %s 的语音。"
+		"zho"		"已恢復接收 %s 的語音。"
+		"en"		"Voice from %s is unblocked again."
+	}
+
+	"Msg_Text_Blocked"
+	{
+		"chi"		"已屏蔽 %s 的文字消息。"
+		"zho"		"已屏蔽 %s 的文字訊息。"
+		"en"		"Chat from %s is now blocked."
+	}
+
+	"Msg_Text_Unblocked"
+	{
+		"chi"		"已恢复接收 %s 的文字消息。"
+		"zho"		"已恢復接收 %s 的文字訊息。"
+		"en"		"Chat from %s is unblocked again."
+	}
+
+	"Msg_Unblock_All"
+	{
+		"chi"		"已解除全部屏蔽。"
+		"zho"		"已解除全部屏蔽。"
+		"en"		"All blocks have been removed."
+	}
+
+	"Msg_AutoMute_Team"
+	{
+		"chi"		"检测到 %s 进服后连续说话 %d 秒，已自动屏蔽其语音（输入 !bz 可自行解除）。"
+		"zho"		"偵測到 %s 進服後連續說話 %d 秒，已自動屏蔽其語音（輸入 !bz 可自行解除）。"
+		"en"		"%s talked non-stop for %d seconds after joining, their voice was blocked automatically (!bz to undo)."
+	}
+
+	"Msg_AutoMute_Restored"
+	{
+		"chi"		"%s 已安静 %d 秒，已自动恢复接收其语音。"
+		"zho"		"%s 已安靜 %d 秒，已自動恢復接收其語音。"
+		"en"		"%s has been quiet for %d seconds, their voice is unblocked again."
+	}
+}

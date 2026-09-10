@@ -3,25 +3,14 @@
 
 #include <sourcemod>
 #include <sdktools>
-#include <ripext>
 #include <protobuf>
 #include <multicolors>
 #include <geoip>
-
-#define DEBUG
 
 #define SOUNDFILE_PATH_LEN 256
 #define MSG_MAXLEN 512
 #define GEO_NAME_CN_FILE "data/connectinfo_geoname_cn.txt"
 #define GEO_UNMAPPED_FILE "data/connectinfo_unmapped.txt"
-
-// 归属地获取方式位掩码（sm_ipgeo_methods）
-#define GEO_METHOD_VORE    (1 << 0)  // 1: VORE-API (api.vore.top) 优先
-#define GEO_METHOD_GEOIP   (1 << 2)  // 4: geoip 本地库（GeoIP.ext + GeoLite2）
-
-// VORE-API 熔断：连续失败 N 次后暂停调用该 API，期间直接走 geoip
-#define VORE_FAIL_THRESHOLD   3
-#define VORE_COOLDOWN_SECONDS 300
 
 // ============ 内置消息模板（原 cannounce_settings.txt 文案硬编码） ============
 // 加入：2=国家+地区/城市，1=仅有国家，0=无地理信息
@@ -31,12 +20,6 @@
 // 离开：有地区/城市用完整模板，否则用简版；原因始终显示（已翻译为中文）
 #define DISC_MSG_FULL "来自{LIGHTGREEN}{PLAYERREGION} {PLAYERCITY}{DEFAULT}的[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
 #define DISC_MSG_NOGEO "[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
-
-ConVar g_hGeoMethods;
-
-// VORE-API 熔断状态
-int g_iVoreFailCount;
-bool g_bVoreCoolingDown;
 
 // 英->中 地理名称映射表（data/connectinfo_geoname_cn.txt）
 Handle g_hGeoNameKV = null;
@@ -52,7 +35,7 @@ ConVar g_CvarMapStartNoSound;
 
 bool g_bNoSoundPeriod;
 
-// ============ cannounce 风格消息输出 ============
+// ============ 客户端归属地信息 ============
 
 // 每个客户端的 geo 信息（供 {PLAYERCOUNTRY} {PLAYERREGION} {PLAYERCITY} 等占位符使用）
 enum struct ClientGeo {
@@ -68,14 +51,12 @@ char g_ClientIPs[MAXPLAYERS+1][36];
 public Plugin myinfo = {
     name = "Connect info",
     author = "HoongDou apples1949",
-    description = "Print SteamID and IP in chat via HTTP requests with REST in Pawn",
+    description = "Print SteamID, IP and geo location (geoip) on player connect/disconnect",
     version = "2.3",
     url = ""
 };
 
 public void OnPluginStart() {
-    g_hGeoMethods = CreateConVar("sm_ipgeo_methods", "5", "归属地获取方式位掩码(可组合): 1=VORE-API(api.vore.top), 4=geoip本地库; 默认5=全部", FCVAR_NOTIFY);
-    
     HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
     
     // 显示在场所有玩家归属地
@@ -96,7 +77,7 @@ public void OnPluginStart() {
     BuildPath(Path_SM, g_UnmappedPath, sizeof(g_UnmappedPath), GEO_UNMAPPED_FILE);
     
     // AutoExecConfig 必须在所有 CreateConVar 之后，确保生成的 cfg 包含全部 cvar
-    AutoExecConfig(true, "ip_data_api");
+    AutoExecConfig(true, "connectinfo");
 }
 
 public void OnMapStart() {
@@ -107,180 +88,25 @@ public void OnMapStart() {
     OnMapStart_JoinMsg();
 }
 
-public void OnClientPutInServer(int client) {
-    if (IsFakeClient(client)) {
-        return;
-    }
-    
-    char ipAddress[32];
-    GetClientIP(client, ipAddress, sizeof(ipAddress));
-    strcopy(g_ClientIPs[client], sizeof(g_ClientIPs[]), ipAddress);
-    
-    int methods = GetGeoMethods();
-    
-    // 按位掩码决定获取方式：优先 VORE-API（无需 key）；熔断冷却期内跳过 VORE
-    if ((methods & GEO_METHOD_VORE) && !g_bVoreCoolingDown) {
-        char url[512];
-        Format(url, sizeof(url), "/api/IPdata?ip=%s", ipAddress);
-
-        HTTPClient clientObj = new HTTPClient("https://api.vore.top");
-        clientObj.SetHeader("User-Agent", "Mozilla/5.0 (compatible; MyBot/1.0)");
-
-        clientObj.Get(url, VoreRequestCallback, client);
-    } else if (methods & GEO_METHOD_GEOIP) {
-        // 未启用 VORE（或处于熔断冷却期）：直接用 geoip 库
-        LookupGeoipFallback(client);
-        PrintJoinMessage(client);
-    } else {
-        // 没有任何方式启用：直接打印（显示未知国家/未知地区）
-        PrintJoinMessage(client);
-    }
-}
-
-// 读取归属地获取方式位掩码
-int GetGeoMethods() {
-    if (g_hGeoMethods == null) {
-        return GEO_METHOD_VORE | GEO_METHOD_GEOIP;
-    }
-    return g_hGeoMethods.IntValue;
-}
-
-// 玩家完成授权进入游戏后播放加入声音（与 cannounce 播放时机一致）
+// 玩家完成授权进入游戏：geoip 查询归属地 + 播放加入声音 + 播报
 public void OnClientPostAdminCheck(int client) {
     if (IsFakeClient(client)) {
         return;
     }
     
+    // 记录 IP 供 {PLAYERIP} 使用
+    char ipAddress[32];
+    GetClientIP(client, ipAddress, sizeof(ipAddress));
+    strcopy(g_ClientIPs[client], sizeof(g_ClientIPs[]), ipAddress);
+    
+    // 播放加入声音（与 cannounce 播放时机一致）
     PlayJoinSound();
-}
-
-// VORE-API 归属地回调（返回中文：ipdata.info1=省/市, info2=区/县; adcode.p=省, adcode.c=市）
-public void VoreRequestCallback(HTTPResponse response, int client) {
-    // API 请求失败：回退 geoip 库
-    if (response.Status != HTTPStatus_OK) {
-        LogError("[ConnectInfo] VORE-API 请求失败 (HTTP %d)，改用 geoip 兜底", view_as<int>(response.Status));
-        FallbackGeoipAndPrint(client);
-        return;
-    }
     
-    // response.Data 的 getter 会直接解析 JSON，遇到非 JSON 响应（运营商劫持页/防护页 HTML 等）会抛异常，
-    // 所以必须先按 Content-Type 判断响应类型，非 JSON 直接兜底
-    char contentType[64];
-    if (!response.GetHeader("Content-Type", contentType, sizeof(contentType))
-        || StrContains(contentType, "json", false) == -1) {
-        LogError("[ConnectInfo] VORE-API 返回非 JSON 响应 (Content-Type: \"%s\")，改用 geoip 兜底", contentType);
-        FallbackGeoipAndPrint(client);
-        return;
-    }
+    // geoip 本地库查询 + 中文对照翻译
+    LookupGeoip(client);
     
-    char responseBody[4096];
-    response.Data.ToString(responseBody, sizeof(responseBody));
-    
-    JSONObject jsonObject = JSONObject.FromString(responseBody);
-    if (jsonObject == null) {
-        // 响应解析失败：回退 geoip 库
-        FallbackGeoipAndPrint(client);
-        return;
-    }
-    
-    // code != 200 视为失败
-    if (jsonObject.GetInt("code") != 200) {
-        delete jsonObject;
-        FallbackGeoipAndPrint(client);
-        return;
-    }
-    
-    // 请求成功：重置熔断计数
-    g_iVoreFailCount = 0;
-    
-    bool cnip = false;
-    char info1[64], info2[64], info3[64];
-    char province[64], cityName[64];
-    
-    JSONObject ipinfo = view_as<JSONObject>(jsonObject.Get("ipinfo"));
-    if (ipinfo != null) {
-        cnip = ipinfo.GetBool("cnip");
-        delete ipinfo;
-    }
-    
-    JSONObject ipdata = view_as<JSONObject>(jsonObject.Get("ipdata"));
-    if (ipdata != null) {
-        ipdata.GetString("info1", info1, sizeof(info1));
-        ipdata.GetString("info2", info2, sizeof(info2));
-        ipdata.GetString("info3", info3, sizeof(info3));
-        delete ipdata;
-    }
-    
-    JSONObject adcode = view_as<JSONObject>(jsonObject.Get("adcode"));
-    if (adcode != null) {
-        adcode.GetString("p", province, sizeof(province));
-        adcode.GetString("c", cityName, sizeof(cityName));
-        delete adcode;
-    }
-    
-    delete jsonObject;
-    
-    char country[64], region[64], city[64];
-    
-    if (cnip) {
-        // 国内 IP：国家明确为中国；info1=省, info2=市
-        strcopy(country, sizeof(country), "中国");
-        strcopy(g_ClientGeo[client].countryCode, sizeof(g_ClientGeo[].countryCode), "CN");
-        strcopy(region, sizeof(region), info1);
-        strcopy(city, sizeof(city), info2);
-    } else {
-        // 国外 IP：info1=国家, info2=州/一级地区, info3=城市
-        strcopy(country, sizeof(country), info1);
-        strcopy(region, sizeof(region), info2);
-        strcopy(city, sizeof(city), info3);
-        if (country[0] == '\0') {
-            strcopy(country, sizeof(country), province);
-        }
-        if (region[0] == '\0') {
-            strcopy(region, sizeof(region), cityName);
-        }
-    }
-    
-    strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);
-    strcopy(g_ClientGeo[client].region, sizeof(g_ClientGeo[].region), region);
-    strcopy(g_ClientGeo[client].city, sizeof(g_ClientGeo[].city), city);
-    
-    // 中文直接显示，英文查映射表翻译；完全没拿到时用 geoip 补缺失
-    LocalizeGeo(client);
-    if (IsGeoFieldEmpty(g_ClientGeo[client].countryName) && (GetGeoMethods() & GEO_METHOD_GEOIP)) {
-        LookupGeoipFillMissing(client);
-    }
-    
+    // 播报加入消息
     PrintJoinMessage(client);
-}
-
-// VORE-API 不可用时的统一兜底：记录失败（触发熔断）→ 按位掩码用 geoip 库 → 打印加入消息
-void FallbackGeoipAndPrint(int client) {
-    MarkVoreFailure();
-    
-    if (GetGeoMethods() & GEO_METHOD_GEOIP) {
-        LookupGeoipFallback(client);
-    }
-    PrintJoinMessage(client);
-}
-
-// 记录 VORE-API 失败；连续失败达到阈值时进入冷却期，期间不再调用该 API
-void MarkVoreFailure() {
-    g_iVoreFailCount++;
-    
-    if (g_iVoreFailCount >= VORE_FAIL_THRESHOLD && !g_bVoreCoolingDown) {
-        g_bVoreCoolingDown = true;
-        LogError("[ConnectInfo] VORE-API 连续失败 %d 次，暂停调用 %d 秒，期间改用 geoip 本地库", g_iVoreFailCount, VORE_COOLDOWN_SECONDS);
-        CreateTimer(float(VORE_COOLDOWN_SECONDS), Timer_VoreCooldownEnd);
-    }
-}
-
-// VORE-API 冷却结束，恢复使用
-public Action Timer_VoreCooldownEnd(Handle timer) {
-    g_bVoreCoolingDown = false;
-    g_iVoreFailCount = 0;
-    LogMessage("[ConnectInfo] VORE-API 冷却结束，恢复调用");
-    return Plugin_Handled;
 }
 
 public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
@@ -342,7 +168,7 @@ public void OnPluginEnd() {
     }
 }
 
-// ==================== cannounce 风格消息输出 ====================
+// ==================== 消息输出 ====================
 
 void PrintJoinMessage(int client) {
     if (client <= 0 || client > MaxClients || !IsClientInGame(client)) {
@@ -375,7 +201,7 @@ int GetGeoLevel(int client) {
     return 0;
 }
 
-// sm_geo：显示在场所有玩家的归属地（缺失数据时若启用 geoip 则现场查询补齐）
+// sm_ip / sm_geo：显示在场所有玩家的归属地（数据缺失时现场查询补齐）
 public Action Command_ShowGeo(int client, int args) {
     int count = 0;
     
@@ -384,9 +210,12 @@ public Action Command_ShowGeo(int client, int args) {
             continue;
         }
         
-        // 完全没有数据时，若启用 geoip 则现场补齐
-        if (GetGeoLevel(i) == 0 && (GetGeoMethods() & GEO_METHOD_GEOIP)) {
-            LookupGeoipFallback(i);
+        // 没有数据时现场用 geoip 查询
+        if (GetGeoLevel(i) == 0) {
+            char ipAddress[32];
+            GetClientIP(i, ipAddress, sizeof(ipAddress));
+            strcopy(g_ClientIPs[i], sizeof(g_ClientIPs[]), ipAddress);
+            LookupGeoip(i);
         }
         
         char ip[32];
@@ -491,12 +320,12 @@ void ResolvePlaceholders(char[] message, int maxlen, int client, const char[] re
     }
 }
 
-// ==================== geo 信息取值（空值回退） ====================
+// ==================== geo 信息取值（空值回退为中文） ====================
 
 void GetCountryName(int client, char[] buffer, int maxlen) {
-    if (g_ClientGeo[client].countryName[0] != '\0' && !StrEqual(g_ClientGeo[client].countryName, "Unknown", false)) {
+    if (!IsGeoFieldEmpty(g_ClientGeo[client].countryName)) {
         strcopy(buffer, maxlen, g_ClientGeo[client].countryName);
-    } else if (g_ClientGeo[client].countryCode[0] != '\0' && !StrEqual(g_ClientGeo[client].countryCode, "Unknown", false)) {
+    } else if (!IsGeoFieldEmpty(g_ClientGeo[client].countryCode)) {
         strcopy(buffer, maxlen, g_ClientGeo[client].countryCode);
     } else {
         strcopy(buffer, maxlen, "未知国家");
@@ -504,7 +333,7 @@ void GetCountryName(int client, char[] buffer, int maxlen) {
 }
 
 void GetCountryCode(int client, char[] buffer, int maxlen) {
-    if (g_ClientGeo[client].countryCode[0] != '\0' && !StrEqual(g_ClientGeo[client].countryCode, "Unknown", false)) {
+    if (!IsGeoFieldEmpty(g_ClientGeo[client].countryCode)) {
         strcopy(buffer, maxlen, g_ClientGeo[client].countryCode);
     } else {
         strcopy(buffer, maxlen, "未知国家");
@@ -512,7 +341,7 @@ void GetCountryCode(int client, char[] buffer, int maxlen) {
 }
 
 void GetCity(int client, char[] buffer, int maxlen) {
-    if (g_ClientGeo[client].city[0] != '\0' && !StrEqual(g_ClientGeo[client].city, "Unknown", false)) {
+    if (!IsGeoFieldEmpty(g_ClientGeo[client].city)) {
         strcopy(buffer, maxlen, g_ClientGeo[client].city);
     } else {
         strcopy(buffer, maxlen, "未知地区");
@@ -520,98 +349,48 @@ void GetCity(int client, char[] buffer, int maxlen) {
 }
 
 void GetRegion(int client, char[] buffer, int maxlen) {
-    if (g_ClientGeo[client].region[0] != '\0' && !StrEqual(g_ClientGeo[client].region, "Unknown", false)) {
+    if (!IsGeoFieldEmpty(g_ClientGeo[client].region)) {
         strcopy(buffer, maxlen, g_ClientGeo[client].region);
     } else {
         strcopy(buffer, maxlen, "未知地区");
     }
 }
 
-// 用 geoip 库兜底查询 IP 归属地（当 API 未配置或失败时调用）
-void LookupGeoipFallback(int client) {
-    if (client <= 0 || client > MaxClients || g_ClientIPs[client][0] == '\0') {
-        return;
-    }
-    
-    // geoip 扩展可能未加载：先检查可选 native 是否可用
-    if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
-        return;
-    }
-    
-    char ip[36];
-    strcopy(ip, sizeof(ip), g_ClientIPs[client]);
-    
-    // geoip 库取英文名（client=-1 强制英文），填进 g_ClientGeo
-    char country[64], region[64], city[64];
-    GeoipCountry(ip, country, sizeof(country));
-    GeoipRegion(ip, region, sizeof(region));
-    GeoipCity(ip, city, sizeof(city));
-    
-    if (country[0] != '\0') {
-        strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);
-    } else {
-        // 拿不到国家名时用国家码
-        char code[3];
-        if (GeoipCode2(ip, code)) {
-            strcopy(g_ClientGeo[client].countryCode, sizeof(g_ClientGeo[].countryCode), code);
-        }
-    }
-    strcopy(g_ClientGeo[client].region, sizeof(g_ClientGeo[].region), region);
-    strcopy(g_ClientGeo[client].city, sizeof(g_ClientGeo[].city), city);
-    
-    // 翻译为中文
-    LocalizeGeo(client);
-}
-
-// 用 geoip 库只补齐缺失的地区/城市/国家（保留已有的数据）
-void LookupGeoipFillMissing(int client) {
-    if (client <= 0 || client > MaxClients || g_ClientIPs[client][0] == '\0') {
-        return;
-    }
-    
-    if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
-        return;
-    }
-    
-    char ip[36];
-    strcopy(ip, sizeof(ip), g_ClientIPs[client]);
-    
-    // 国家缺失
-    if (IsGeoFieldEmpty(g_ClientGeo[client].countryName) && IsGeoFieldEmpty(g_ClientGeo[client].countryCode)) {
-        char country[64];
-        if (GeoipCountry(ip, country, sizeof(country)) && country[0] != '\0') {
-            strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);
-        } else {
-            char code[3];
-            if (GeoipCode2(ip, code)) {
-                strcopy(g_ClientGeo[client].countryCode, sizeof(g_ClientGeo[].countryCode), code);
-            }
-        }
-    }
-    
-    // 地区缺失
-    if (IsGeoFieldEmpty(g_ClientGeo[client].region)) {
-        char region[64];
-        if (GeoipRegion(ip, region, sizeof(region)) && region[0] != '\0') {
-            strcopy(g_ClientGeo[client].region, sizeof(g_ClientGeo[].region), region);
-        }
-    }
-    
-    // 城市缺失
-    if (IsGeoFieldEmpty(g_ClientGeo[client].city)) {
-        char city[64];
-        if (GeoipCity(ip, city, sizeof(city)) && city[0] != '\0') {
-            strcopy(g_ClientGeo[client].city, sizeof(g_ClientGeo[].city), city);
-        }
-    }
-    
-    // 翻译为中文
-    LocalizeGeo(client);
-}
-
 // 判断 geo 字段是否为空（空字符串、Unknown、null 均视为空）
 bool IsGeoFieldEmpty(const char[] field) {
     return field[0] == '\0' || StrEqual(field, "Unknown", false) || StrEqual(field, "null", false);
+}
+
+// ==================== geoip 本地库查询 ====================
+
+// 用 geoip 本地库（GeoIP.ext + GeoLite2）查询 IP 归属地，再经中文对照表翻译
+void LookupGeoip(int client) {
+    if (client <= 0 || client > MaxClients || g_ClientIPs[client][0] == '\0') {
+        return;
+    }
+    
+    // geoip 扩展未加载时跳过（native 为可选，避免报错）
+    if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
+        return;
+    }
+    
+    char ip[36];
+    strcopy(ip, sizeof(ip), g_ClientIPs[client]);
+    
+    // geoip 库取英文名（client 参数默认 -1 = 英文）
+    char country[64] = "", code[3] = "", region[64] = "", city[64] = "";
+    GeoipCountry(ip, country, sizeof(country));
+    GeoipCode2(ip, code);
+    GeoipRegion(ip, region, sizeof(region));
+    GeoipCity(ip, city, sizeof(city));
+    
+    strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);
+    strcopy(g_ClientGeo[client].countryCode, sizeof(g_ClientGeo[].countryCode), code);
+    strcopy(g_ClientGeo[client].region, sizeof(g_ClientGeo[].region), region);
+    strcopy(g_ClientGeo[client].city, sizeof(g_ClientGeo[].city), city);
+    
+    // 英文名翻译为中文（本身已是中文/非 ASCII 则直接显示）
+    LocalizeGeo(client);
 }
 
 // 将 g_ClientGeo 中的英文国家/地区/城市名通过映射表翻译为中文；找不到保留原文

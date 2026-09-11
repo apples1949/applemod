@@ -73,6 +73,16 @@
 		"en"			"Access"
 	}
 	
+	"Username"
+	{
+		"en"			"Username"
+	}
+	
+	"Admin access"
+	{
+		"en"			"Admin access"
+	}
+	
 	"See console for output"
 	{
 		"en"			"See console for output."

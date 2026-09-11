@@ -22,6 +22,11 @@
 		"chi"			"游戏内玩家不足（{olive}需要 {1} 名玩家{default}）"
 	}
 
+	"NOT_FOUND"
+	{
+		"chi"			"本服务器未注册混队名单"
+	}
+
 	"SECOND_HALF_OF_ROUND"
 	{
 		"chi"			"无法混队：当前处于下半场"

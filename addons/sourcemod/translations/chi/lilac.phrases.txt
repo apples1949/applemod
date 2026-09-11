@@ -23,7 +23,7 @@
 		"chi"		"您的Ping值过高！ ({1} / {2} 最高)"
 	}
 
-	"kick_ban_genetic"
+	"kick_ban_generic"
 	{
 		"chi"		"您已经被此服务器封禁。"
 	}

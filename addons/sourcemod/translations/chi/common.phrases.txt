@@ -70,6 +70,16 @@
 		"chi"		"权限"
 	}
 
+	"Username"
+	{
+		"chi"		"用户名"
+	}
+
+	"Admin access"
+	{
+		"chi"		"管理员权限"
+	}
+
 	"See console for output"
 	{
 		"chi"		"请看控制台输出."

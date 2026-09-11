@@ -9,8 +9,6 @@
 
 #define SOUNDFILE_PATH_LEN 256
 #define MSG_MAXLEN 512
-#define GEO_NAME_CN_FILE "data/connectinfo_geoname_cn.txt"
-#define GEO_UNMAPPED_FILE "data/connectinfo_unmapped.txt"
 
 // ============ 内置消息模板（原 cannounce_settings.txt 文案硬编码） ============
 // 加入：2=国家+地区/城市，1=仅有国家，0=无地理信息
@@ -20,11 +18,6 @@
 // 离开：有地区/城市用完整模板，否则用简版；原因始终显示（已翻译为中文）
 #define DISC_MSG_FULL "来自{LIGHTGREEN}{PLAYERREGION} {PLAYERCITY}{DEFAULT}的[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
 #define DISC_MSG_NOGEO "[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
-
-// 英->中 地理名称映射表（data/connectinfo_geoname_cn.txt）
-Handle g_hGeoNameKV = null;
-char g_GeoNamePath[PLATFORM_MAX_PATH];
-char g_UnmappedPath[PLATFORM_MAX_PATH];
 
 // ============ 声音相关（沿用 cannounce/joinmsg.sp 的配置） ============
 ConVar g_CvarPlaySound;
@@ -63,18 +56,11 @@ public void OnPluginStart() {
     RegConsoleCmd("sm_ip", Command_ShowGeo, "显示在场所有玩家的归属地");
     RegConsoleCmd("sm_geo", Command_ShowGeo, "显示在场所有玩家的归属地");
     
+    // 查询指定 IP 的归属地（客户端与服务端控制台均可用）
+    RegConsoleCmd("sm_tip", Command_QueryIp, "查询指定 IP 的归属地，用法: sm_tip <IP>");
+    
     // cannounce 声音配置
     SetupJoinMsgSounds();
-    
-    // 加载 英->中 地理名称映射表
-    g_hGeoNameKV = CreateKeyValues("GeoNameCn");
-    BuildPath(Path_SM, g_GeoNamePath, sizeof(g_GeoNamePath), GEO_NAME_CN_FILE);
-    if (!FileToKeyValues(g_hGeoNameKV, g_GeoNamePath)) {
-        LogError("[ConnectInfo] 无法加载地理中文映射表: %s", g_GeoNamePath);
-    }
-    
-    // 未匹配英文记录文件的路径
-    BuildPath(Path_SM, g_UnmappedPath, sizeof(g_UnmappedPath), GEO_UNMAPPED_FILE);
     
     // AutoExecConfig 必须在所有 CreateConVar 之后，确保生成的 cfg 包含全部 cvar
     AutoExecConfig(true, "connectinfo");
@@ -161,13 +147,6 @@ public void OnClientDisconnect(int client) {
     }
 }
 
-public void OnPluginEnd() {
-    if (g_hGeoNameKV != null) {
-        CloseHandle(g_hGeoNameKV);
-        g_hGeoNameKV = null;
-    }
-}
-
 // ==================== 消息输出 ====================
 
 void PrintJoinMessage(int client) {
@@ -221,21 +200,9 @@ public Action Command_ShowGeo(int client, int args) {
         char ip[32];
         GetClientIP(i, ip, sizeof(ip));
         
-        char country[64], region[64], city[64];
-        GetCountryName(i, country, sizeof(country));
-        GetRegion(i, region, sizeof(region));
-        GetCity(i, city, sizeof(city));
-        
         char geo[192];
-        if (!IsGeoFieldEmpty(g_ClientGeo[i].region) && !IsGeoFieldEmpty(g_ClientGeo[i].city)) {
-            Format(geo, sizeof(geo), "%s %s %s", country, region, city);
-        } else if (!IsGeoFieldEmpty(g_ClientGeo[i].region)) {
-            Format(geo, sizeof(geo), "%s %s", country, region);
-        } else if (!IsGeoFieldEmpty(g_ClientGeo[i].city)) {
-            Format(geo, sizeof(geo), "%s %s", country, city);
-        } else {
-            Format(geo, sizeof(geo), "%s", country);
-        }
+        FormatGeoDisplay(g_ClientGeo[i].countryName, g_ClientGeo[i].countryCode,
+                         g_ClientGeo[i].region, g_ClientGeo[i].city, geo, sizeof(geo));
         
         count++;
         if (client == 0) {
@@ -252,6 +219,165 @@ public Action Command_ShowGeo(int client, int args) {
     }
     
     return Plugin_Handled;
+}
+
+// sm_tip <IP>：查询指定 IP 的归属地（客户端与服务端控制台均可用）
+public Action Command_QueryIp(int client, int args) {
+    if (args < 1) {
+        ReplyToCommand(client, "[ConnectInfo] 用法: sm_tip <IP>    例如: sm_tip 223.5.5.5");
+        return Plugin_Handled;
+    }
+    
+    char ip[64];
+    GetCmdArg(1, ip, sizeof(ip));
+    TrimString(ip);
+    
+    if (!IsValidIpString(ip)) {
+        ReplyToCommand(client, "[ConnectInfo] IP 格式无效: %s", ip);
+        return Plugin_Handled;
+    }
+    
+    char geo[192];
+    // 语言固定为服务器语言（中文）
+    QueryGeoDisplay(ip, geo, sizeof(geo));
+    
+    if (client == 0) {
+        PrintToServer("[ConnectInfo] %s - %s", ip, geo);
+    } else {
+        CPrintToChat(client, "{default}[ConnectInfo] {green}%s{default} - {lightgreen}%s", ip, geo);
+    }
+    
+    return Plugin_Handled;
+}
+
+// 组装归属地显示串：国家(代码) 地区 城市；缺失部分自动省略，全部缺失显示"未知国家"
+// note 非空时，在"只有国家、无省市"的情况下附加该诊断标注（sm_tip 用；sm_ip 传空保持简洁）
+void FormatGeoDisplay(const char[] country, const char[] code, const char[] region, const char[] city, char[] out, int maxlen, const char[] note = "") {
+    bool hasCountry = !IsGeoFieldEmpty(country) || !IsGeoFieldEmpty(code);
+    bool hasRegion = !IsGeoFieldEmpty(region);
+    bool hasCity = !IsGeoFieldEmpty(city);
+    
+    // 完全查不到：区分"库中无记录"与普通未知
+    if (!hasCountry && !hasRegion && !hasCity) {
+        strcopy(out, maxlen, "未知国家");
+        if (note[0] != '\0') {
+            StrCat(out, maxlen, " [库中无记录]");
+        }
+        return;
+    }
+    
+    // 国家部分：有名称则 "名称(代码)"，只有代码则只显示代码
+    char countryPart[96];
+    if (!IsGeoFieldEmpty(country) && !IsGeoFieldEmpty(code)) {
+        Format(countryPart, sizeof(countryPart), "%s(%s)", country, code);
+    } else if (!IsGeoFieldEmpty(country)) {
+        strcopy(countryPart, sizeof(countryPart), country);
+    } else {
+        strcopy(countryPart, sizeof(countryPart), code);
+    }
+    
+    if (hasRegion && hasCity) {
+        Format(out, maxlen, "%s %s %s", countryPart, region, city);
+    } else if (hasRegion) {
+        Format(out, maxlen, "%s %s", countryPart, region);
+    } else if (hasCity) {
+        Format(out, maxlen, "%s %s", countryPart, city);
+    } else {
+        strcopy(out, maxlen, countryPart);
+    }
+    
+    // 只有国家、库里没有省市：附加诊断标注
+    if (note[0] != '\0' && !hasRegion && !hasCity) {
+        StrCat(out, maxlen, " ");
+        StrCat(out, maxlen, note);
+    }
+}
+
+// 查询任意 IP 的归属地并组装为显示串（geoip 本地库）；带数据诊断标注
+// 语言固定为服务器语言（core.cfg ServerLang = chi）→ 返回中文地名
+void QueryGeoDisplay(const char[] ip, char[] out, int maxlen) {
+    // geoip 扩展未加载
+    if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
+        strcopy(out, maxlen, "geoip 扩展未加载");
+        return;
+    }
+    
+    bool hasCountryExNative = (GetFeatureStatus(FeatureType_Native, "GeoipCountryEx") == FeatureStatus_Available);
+    bool hasCodeNative = (GetFeatureStatus(FeatureType_Native, "GeoipCode2") == FeatureStatus_Available);
+    bool hasRegionNative = (GetFeatureStatus(FeatureType_Native, "GeoipRegion") == FeatureStatus_Available);
+    bool hasCityNative = (GetFeatureStatus(FeatureType_Native, "GeoipCity") == FeatureStatus_Available);
+    
+    char country[64] = "", code[3] = "", region[64] = "", city[64] = "";
+    
+    // 固定传 LANG_SERVER → 中文地名（库内含 zh-CN）
+    if (hasCountryExNative) {
+        GeoipCountryEx(ip, country, sizeof(country), LANG_SERVER);
+    } else {
+        GeoipCountry(ip, country, sizeof(country));
+    }
+    if (hasCodeNative) {
+        GeoipCode2(ip, code);
+    }
+    if (hasRegionNative) {
+        GeoipRegion(ip, region, sizeof(region), LANG_SERVER);
+    }
+    if (hasCityNative) {
+        GeoipCity(ip, city, sizeof(city), LANG_SERVER);
+    }
+    
+    // 诊断标注：区分"扩展不支持"与"库里没有数据"
+    char note[64] = "";
+    if (!hasRegionNative && !hasCityNative) {
+        strcopy(note, sizeof(note), "[geoip 扩展不支持城市查询]");
+    } else if (IsGeoFieldEmpty(region) && IsGeoFieldEmpty(city)) {
+        strcopy(note, sizeof(note), "[库中无省市数据]");
+    }
+    
+    FormatGeoDisplay(country, code, region, city, out, maxlen, note);
+}
+
+// 校验 IP 字符串（IPv4 四段 0-255 / IPv6 含冒号），避免非法输入送进 geoip
+bool IsValidIpString(const char[] ip) {
+    int len = strlen(ip);
+    if (len < 3 || len > 45) {
+        return false;
+    }
+    
+    // 字符集：仅允许 0-9 a-f A-F . :
+    for (int i = 0; i < len; i++) {
+        char c = ip[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '.' || c == ':')) {
+            return false;
+        }
+    }
+    
+    // IPv6：含冒号即视为合法形式
+    if (StrContains(ip, ":") != -1) {
+        return true;
+    }
+    
+    // IPv4：必须四段、每段 1-3 位纯数字且 0-255
+    char parts[4][8];
+    if (ExplodeString(ip, ".", parts, 4, 8) != 4) {
+        return false;
+    }
+    
+    for (int i = 0; i < 4; i++) {
+        int partLen = strlen(parts[i]);
+        if (partLen < 1 || partLen > 3) {
+            return false;
+        }
+        for (int j = 0; j < partLen; j++) {
+            if (parts[i][j] < '0' || parts[i][j] > '9') {
+                return false;
+            }
+        }
+        if (StringToInt(parts[i]) > 255) {
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 // 替换消息模板占位符
@@ -363,13 +489,13 @@ bool IsGeoFieldEmpty(const char[] field) {
 
 // ==================== geoip 本地库查询 ====================
 
-// 用 geoip 本地库（GeoIP.ext + GeoLite2）查询 IP 归属地，再经中文对照表翻译
+// 用 geoip 本地库（GeoIP.ext + GeoLite2 Country/City）查询 IP 归属地
 void LookupGeoip(int client) {
     if (client <= 0 || client > MaxClients || g_ClientIPs[client][0] == '\0') {
         return;
     }
     
-    // geoip 扩展未加载时跳过（native 为可选，避免报错）
+    // geoip 扩展未加载时跳过
     if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
         return;
     }
@@ -377,100 +503,31 @@ void LookupGeoip(int client) {
     char ip[36];
     strcopy(ip, sizeof(ip), g_ClientIPs[client]);
     
-    // geoip 库取英文名（client 参数默认 -1 = 英文）
+    // 所有 geoip native 都是可选的，逐个检查存在性，避免扩展版本不支持时调用抛异常。
+    // 语言参数固定传 LANG_SERVER → 使用服务器语言（core.cfg ServerLang = chi）返回中文地名
     char country[64] = "", code[3] = "", region[64] = "", city[64] = "";
-    GeoipCountry(ip, country, sizeof(country));
-    GeoipCode2(ip, code);
-    GeoipRegion(ip, region, sizeof(region));
-    GeoipCity(ip, city, sizeof(city));
+    
+    if (GetFeatureStatus(FeatureType_Native, "GeoipCountryEx") == FeatureStatus_Available) {
+        GeoipCountryEx(ip, country, sizeof(country), LANG_SERVER);
+    } else {
+        GeoipCountry(ip, country, sizeof(country));
+    }
+    
+    if (GetFeatureStatus(FeatureType_Native, "GeoipCode2") == FeatureStatus_Available) {
+        GeoipCode2(ip, code);
+    }
+    if (GetFeatureStatus(FeatureType_Native, "GeoipRegion") == FeatureStatus_Available) {
+        GeoipRegion(ip, region, sizeof(region), LANG_SERVER);
+    }
+    // 城市级查询需要扩展支持 + configs/geoip/GeoLite2-City.mmdb 存在
+    if (GetFeatureStatus(FeatureType_Native, "GeoipCity") == FeatureStatus_Available) {
+        GeoipCity(ip, city, sizeof(city), LANG_SERVER);
+    }
     
     strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);
     strcopy(g_ClientGeo[client].countryCode, sizeof(g_ClientGeo[].countryCode), code);
     strcopy(g_ClientGeo[client].region, sizeof(g_ClientGeo[].region), region);
     strcopy(g_ClientGeo[client].city, sizeof(g_ClientGeo[].city), city);
-    
-    // 英文名翻译为中文（本身已是中文/非 ASCII 则直接显示）
-    LocalizeGeo(client);
-}
-
-// 将 g_ClientGeo 中的英文国家/地区/城市名通过映射表翻译为中文；找不到保留原文
-void LocalizeGeo(int client) {
-    if (g_hGeoNameKV == null) {
-        return;
-    }
-    
-    TranslateGeoNameSection("countries", g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName));
-    TranslateGeoNameSection("china_regions", g_ClientGeo[client].region, sizeof(g_ClientGeo[].region));
-    TranslateGeoNameSection("cities", g_ClientGeo[client].city, sizeof(g_ClientGeo[].city));
-}
-
-// 在 KV 的指定 section 内查找英文名并替换为中文；找不到则保留原文，并记录到未匹配文件（去重）
-void TranslateGeoNameSection(const char[] section, char[] buffer, int maxlen) {
-    if (strlen(buffer) == 0 || StrEqual(buffer, "Unknown", false)) {
-        return;
-    }
-    
-    // 返回的已是中文（或任何非 ASCII 本地语言）：直接显示，不查映射、不记录
-    if (!IsAsciiString(buffer)) {
-        return;
-    }
-    
-    bool found = false;
-    char cn[128];
-    
-    KvRewind(g_hGeoNameKV);
-    if (KvJumpToKey(g_hGeoNameKV, section, false)) {
-        KvGetString(g_hGeoNameKV, buffer, cn, sizeof(cn), "");
-        if (cn[0] != '\0') {
-            strcopy(buffer, maxlen, cn);
-            found = true;
-        }
-    }
-    
-    // 未匹配：保留原英文，并记录到后台文件（已有的不重复记录）
-    if (!found) {
-        RecordUnmappedName(buffer);
-    }
-}
-
-// 判断字符串是否全部为 ASCII（纯英文）；含非 ASCII（如中文）返回 false
-bool IsAsciiString(const char[] str) {
-    for (int i = 0; str[i] != '\0'; i++) {
-        if (str[i] & 0x80) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// 将未匹配的英文地名记录到 data/connectinfo_unmapped.txt（去除已有重复），文件不存在则创建
-void RecordUnmappedName(const char[] english) {
-    if (strlen(english) == 0 || g_UnmappedPath[0] == '\0') {
-        return;
-    }
-    
-    // 读取已有记录，检查是否已存在
-    if (FileExists(g_UnmappedPath)) {
-        File fh = OpenFile(g_UnmappedPath, "r");
-        if (fh != null) {
-            char line[128];
-            while (!IsEndOfFile(fh) && fh.ReadLine(line, sizeof(line))) {
-                TrimString(line);
-                if (StrEqual(line, english, false)) {
-                    delete fh;
-                    return; // 已记录过，跳过
-                }
-            }
-            delete fh;
-        }
-    }
-    
-    // 追加记录
-    File fw = OpenFile(g_UnmappedPath, "a");
-    if (fw != null) {
-        fw.WriteLine("%s", english);
-        delete fw;
-    }
 }
 
 // 将常见的离开原因翻译为中文；无法识别时保留原文，空原因显示"未知原因"

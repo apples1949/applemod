@@ -1,9 +1,14 @@
-﻿"Phrases"
+"Phrases"
 {
 	"Change map advertise"
 	{
 		"#format"		"{1:s}"
 		"en"			"Type {1} in chat to initiate a vote for the next campaign."
+	}
+	"Change chmap advertise"
+	{
+		"#format"		"{1:s}"
+		"en"			"The map change vote command {1} is not enabled."
 	}
 	"Map vote advertise"
 	{

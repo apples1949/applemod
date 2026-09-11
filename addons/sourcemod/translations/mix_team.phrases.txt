@@ -22,6 +22,11 @@
 		"en"			"There are not enough players in the game ({olive}Need {1} players{default})"
 	}
 
+	"NOT_FOUND"
+	{
+		"en"			"No mix roster was registered on this server"
+	}
+
 	"SECOND_HALF_OF_ROUND"
 	{
 		"en"			"Mixing is impossible: now in the second half of the round"

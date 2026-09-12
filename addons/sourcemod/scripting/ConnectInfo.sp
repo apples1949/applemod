@@ -28,6 +28,9 @@ ConVar g_CvarMapStartNoSound;
 
 bool g_bNoSoundPeriod;
 
+// geoip 查询固定使用的中文语言（简体中文，OnPluginStart 时解析）
+int g_iChineseLang = -1;
+
 // ============ 客户端归属地信息 ============
 
 // 每个客户端的 geo 信息（供 {PLAYERCOUNTRY} {PLAYERREGION} {PLAYERCITY} 等占位符使用）
@@ -62,8 +65,39 @@ public void OnPluginStart() {
     // cannounce 声音配置
     SetupJoinMsgSounds();
     
+    // 直接指定中文语言：geoip native 只能通过 client 参数指定语言，
+    // 这里解析简体中文语言号，配合 GeoLangSource() 强制返回中文地名
+    g_iChineseLang = GetLanguageByCode("chi");
+    if (g_iChineseLang == -1) {
+        LogError("[ConnectInfo] SourceMod 语言列表中未找到简体中文(chi)，地名将回退为服务器默认语言");
+    }
+    
     // AutoExecConfig 必须在所有 CreateConVar 之后，确保生成的 cfg 包含全部 cvar
     AutoExecConfig(true, "connectinfo");
+}
+
+// 返回用于 geoip 查询的语言来源参数，保证返回中文地名。
+// geoip native 的语言只能通过第 4 个 client 参数间接指定（-1=英文 / 0=服务器语言 / >=1=玩家语言），
+// 没有直接传语言代码的参数，因此：
+//   1) 服务器语言已是中文 → 用 LANG_SERVER
+//   2) 服务器语言不是中文 → 借用一名中文客户端（不依赖 core.cfg 设置）
+//   3) 没有中文语言/客户端 → 回退 LANG_SERVER
+int GeoLangSource() {
+    if (g_iChineseLang == -1) {
+        return LANG_SERVER;
+    }
+    
+    if (GetServerLanguage() == g_iChineseLang) {
+        return LANG_SERVER;
+    }
+    
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsClientInGame(i) && GetClientLanguage(i) == g_iChineseLang) {
+            return i;
+        }
+    }
+    
+    return LANG_SERVER;
 }
 
 public void OnMapStart() {
@@ -294,7 +328,7 @@ void FormatGeoDisplay(const char[] country, const char[] code, const char[] regi
 }
 
 // 查询任意 IP 的归属地并组装为显示串（geoip 本地库）；带数据诊断标注
-// 语言固定为服务器语言（core.cfg ServerLang = chi）→ 返回中文地名
+// 语言由 GeoLangSource() 指定为中文
 void QueryGeoDisplay(const char[] ip, char[] out, int maxlen) {
     // geoip 扩展未加载
     if (GetFeatureStatus(FeatureType_Native, "GeoipCountry") != FeatureStatus_Available) {
@@ -307,11 +341,12 @@ void QueryGeoDisplay(const char[] ip, char[] out, int maxlen) {
     bool hasRegionNative = (GetFeatureStatus(FeatureType_Native, "GeoipRegion") == FeatureStatus_Available);
     bool hasCityNative = (GetFeatureStatus(FeatureType_Native, "GeoipCity") == FeatureStatus_Available);
     
+    int langSrc = GeoLangSource();
     char country[64] = "", code[3] = "", region[64] = "", city[64] = "";
     
-    // 固定传 LANG_SERVER → 中文地名（库内含 zh-CN）
+    // 指定中文语言 → 返回中文地名（库内含 zh-CN）
     if (hasCountryExNative) {
-        GeoipCountryEx(ip, country, sizeof(country), LANG_SERVER);
+        GeoipCountryEx(ip, country, sizeof(country), langSrc);
     } else {
         GeoipCountry(ip, country, sizeof(country));
     }
@@ -319,10 +354,10 @@ void QueryGeoDisplay(const char[] ip, char[] out, int maxlen) {
         GeoipCode2(ip, code);
     }
     if (hasRegionNative) {
-        GeoipRegion(ip, region, sizeof(region), LANG_SERVER);
+        GeoipRegion(ip, region, sizeof(region), langSrc);
     }
     if (hasCityNative) {
-        GeoipCity(ip, city, sizeof(city), LANG_SERVER);
+        GeoipCity(ip, city, sizeof(city), langSrc);
     }
     
     // 诊断标注：区分"扩展不支持"与"库里没有数据"
@@ -504,11 +539,12 @@ void LookupGeoip(int client) {
     strcopy(ip, sizeof(ip), g_ClientIPs[client]);
     
     // 所有 geoip native 都是可选的，逐个检查存在性，避免扩展版本不支持时调用抛异常。
-    // 语言参数固定传 LANG_SERVER → 使用服务器语言（core.cfg ServerLang = chi）返回中文地名
+    // 语言参数由 GeoLangSource() 指定为中文
+    int langSrc = GeoLangSource();
     char country[64] = "", code[3] = "", region[64] = "", city[64] = "";
     
     if (GetFeatureStatus(FeatureType_Native, "GeoipCountryEx") == FeatureStatus_Available) {
-        GeoipCountryEx(ip, country, sizeof(country), LANG_SERVER);
+        GeoipCountryEx(ip, country, sizeof(country), langSrc);
     } else {
         GeoipCountry(ip, country, sizeof(country));
     }
@@ -517,11 +553,11 @@ void LookupGeoip(int client) {
         GeoipCode2(ip, code);
     }
     if (GetFeatureStatus(FeatureType_Native, "GeoipRegion") == FeatureStatus_Available) {
-        GeoipRegion(ip, region, sizeof(region), LANG_SERVER);
+        GeoipRegion(ip, region, sizeof(region), langSrc);
     }
     // 城市级查询需要扩展支持 + configs/geoip/GeoLite2-City.mmdb 存在
     if (GetFeatureStatus(FeatureType_Native, "GeoipCity") == FeatureStatus_Available) {
-        GeoipCity(ip, city, sizeof(city), LANG_SERVER);
+        GeoipCity(ip, city, sizeof(city), langSrc);
     }
     
     strcopy(g_ClientGeo[client].countryName, sizeof(g_ClientGeo[].countryName), country);

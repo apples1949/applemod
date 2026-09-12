@@ -48,9 +48,9 @@ int	   ColorGrey;
 public Plugin myinfo =
 {
 	name		= "Tank Trace Rock",
-	author		= "",
+	author		= "apples1949",
 	description = ".",
-	version		= "1.3",
+	version		= "1.4",
 	url			= ""
 
 }
@@ -96,7 +96,7 @@ public void OnPluginStart()
 		l4d_tracerock_Glow_Color	= CreateConVar("l4d_tracerock_glow_color", "-1 -1 -1", "设置跟踪岩石的发光颜色。RGB颜色255-红绿色蓝。[-1 -1 -1：随机]", FCVAR_NOTIFY);
 		l4d_tracerock_Glow_Flashing = CreateConVar("l4d_tracerock_glow_flashing", "1", "在发光的岩石上添加闪烁效果。（0 =关闭，1 =打开）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	}
-	l4d_tracerock_ClearTime		= CreateConVar("l4d_tracerock_kill", "30.0", "设置跟踪岩石的自毁时间.", FCVAR_NOTIFY, true, 0.0);
+	l4d_tracerock_ClearTime		= CreateConVar("l4d_tracerock_kill", "12.0", "设置跟踪岩石的自毁时间.", FCVAR_NOTIFY, true, 0.0);
 	l4d_tracerock_TraceInterval = CreateConVar("l4d_tracerock_time_interval", "0.1", "跟踪岩石更新时间间隔.", FCVAR_NOTIFY, true, 0.0);
 	//AutoExecConfig(true, "l4d_tracerock");
 
@@ -237,10 +237,11 @@ void StartRockTrace(int ent)
 
 public Action Timer_KillRock(Handle timer, int ref)
 {
-	if (ref && EntRefToEntIndex(ref) != INVALID_ENT_REFERENCE)
+	int entity = EntRefToEntIndex(ref);
+	if (ref && entity != INVALID_ENT_REFERENCE)
 	{
-		SetEntityRenderFx(ref, RENDERFX_FADE_FAST);	   // RENDERFX_FADE_SLOW 3.5
-		CreateTimer(1.5, _KillEntity, ref, TIMER_FLAG_NO_MAPCHANGE);
+		SetEntityRenderFx(entity, RENDERFX_FADE_FAST);	   // RENDERFX_FADE_SLOW 3.5
+		CreateTimer(1.5, _KillEntity, EntIndexToEntRef(entity), TIMER_FLAG_NO_MAPCHANGE);
 	}
 
 	return Plugin_Continue;
@@ -248,9 +249,10 @@ public Action Timer_KillRock(Handle timer, int ref)
 
 public Action _KillEntity(Handle timer, int ref)
 {
-	if (ref && EntRefToEntIndex(ref) != INVALID_ENT_REFERENCE)
+	int entity = EntRefToEntIndex(ref);
+	if (ref && entity != INVALID_ENT_REFERENCE)
 	{
-		RemoveEntity(ref);
+		RemoveEntity(entity);
 	}
 
 	return Plugin_Continue;

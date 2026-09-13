@@ -1,0 +1,72 @@
+"Phrases"
+{
+    "PlayerConnect"
+    {
+        "#format"   "{1:N}"
+        "zho"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}已連接,正在獲取玩家的遊戲時長."
+    }
+    "kickplayerUnqualified"
+    {
+        "#format"   "{1:.2f},{2:.2f}"
+        "zho"       "你因遊戲時長不符合伺服器規則({1} 小時 - {2} 小時)而被自動踢出"
+    }
+    "forcespecplayerUnqualified"
+    {
+        "#format"   "{1:N}"
+        "zho"       "{green}[{olive}!{green}]{default}玩家{olive} {1} 因遊戲時長不符合伺服器規則而被強制移動到旁觀!"
+    }
+    "announcegametime"
+    {
+        "#format"   "{1:N},{2:s},{3:s}"
+        "zho"       "{green}[{olive}!{green}]{default}玩家{olive} {1}{default}的遊戲時長是{2}{3}"
+    }
+    "timeprofile"
+    {
+        "#format"   "{1:.2f}"
+        "zho"       " 主頁{olive} {1} {default}小時"
+    }
+    "timestats"
+    {
+        "#format"   "{1:.2f}"
+        "zho"       " 成就{olive} {1} {default}小時"
+    }
+    "timeprofile1"
+    {
+        "#format"   "{1:d},{2:d}"
+        "zho"       " 主頁{olive} {1} {default}小時{olive} {2} {default}分鐘"
+    }
+    "timestats1"
+    {
+        "#format"   "{1:d},{2:d}"
+        "zho"       " 成就{olive} {1} {default}小時{olive} {2} {default}分鐘"
+    }
+    "showlerp"
+    {
+        "#format"   "{1:.1f}"
+        "zho"       " Lerp為 {olive}{1}{default} ."
+    }
+    "RequestingPlayerGametime"
+    {
+        "#format"   "{1:N},{2:d},{3:d}"
+        "zho"       "{green}[{olive}!{green}]{default}正在請求玩家{olive} {1} {default}的遊戲時長,請求次數{2}/{3}"
+    }
+    "FailureGetPlayerGametime"
+    {
+        "#format"   "{1:N}"
+        "zho"       "{green}[{olive}!{green}]{default}請求玩家{olive} {1} {default}的遊戲時長失敗"
+    }
+    "kickplayerFailureGet"
+    {
+        "zho"       "你因伺服器獲取遊戲時長失敗而被自動踢出"
+    }
+    "forcespecplayerFailureGet"
+    {
+        "#format"   "{1:N}"
+        "zho"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}因獲取遊戲時長失敗而被強制移動到旁觀!"
+    }
+    "forcespecplayerRequesting"
+    {
+        "#format"   "{1:N},{2:d},{3:d}"
+        "zho"       "{green}[{olive}!{green}]{default}因正在獲取玩家{olive} {1} {default}的遊戲時長.伺服器暫時將其移動到旁觀.請等待至成功獲取遊戲時長再加入對局.請求次數{2}/{3}"
+    }
+}

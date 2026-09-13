@@ -4,24 +4,63 @@
 #include <sourcemod>
 #include <SteamWorks>
 #include <left4dhooks>
+#include <colors>
 
 #define DEBUG 0
 
+#define APPID_L4D2			 550
+#define STATS_PLAYTIME_KEY	 "Stat.TotalPlayTime.Total"
+#define SECONDS_PER_HOUR	 3600
+#define SECONDS_PER_MINUTE	 60
+
+// Steam Web API: 玩家主页(Steam 个人资料)游戏时长
+#define PROFILE_GAMETIME_URL "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?format=json&appids_filter[0]=550"
+
 public Plugin myinfo =
 {
-	name		= "get player real gametime",
+	name		= "get player gametime",
 	author		= "apples1949 , 豆瓣酱な , deepseek",
 	description = "",
-	version		= "1.5.0",
+	version		= "1.6.0",
 	url			= "https://github.com/apples1949",
 };
 
+// 查询的数据源
+enum
+{
+	QUERY_PROFILE = (1 << 0),	// 1: Steam 玩家主页时长
+	QUERY_STATS	  = (1 << 1),	// 2: 成就统计时长
+}
+
+// 单个数据源的状态
+enum
+{
+	SOURCE_PENDING = 0,	// 仍在请求/重试
+	SOURCE_OK,			// 已取到数据
+	SOURCE_FAILED,		// 达到最大请求次数仍然失败
+}
+
 int	   i_Count[MAXPLAYERS + 1];
+int	   i_ProfileCount[MAXPLAYERS + 1];
+int	   i_StatsUserID[MAXPLAYERS + 1];
+int	   i_ProfileUserID[MAXPLAYERS + 1];
 int	   i_PlayerTime[MAXPLAYERS + 1];
+int	   i_StatTime[MAXPLAYERS + 1];
+int	   i_ProfileTime[MAXPLAYERS + 1];
+int	   i_StatState[MAXPLAYERS + 1];
+int	   i_ProfileState[MAXPLAYERS + 1];
+bool   b_Announced[MAXPLAYERS + 1];
 bool   b_IsProcessingLimitPlayer[MAXPLAYERS + 1];
 bool   CheckPluginLate = false;
+bool   b_SteamWorksAvailable = false;
+bool   b_StatsSourceEnabled = false;
+bool   b_ProfileSourceEnabled = false;
+bool   b_WarnedNoSource = false;
+bool   b_WarnedNoKey = false;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
+int	   i_CheckPlayerProfileCount;
+int	   i_QueryMode;
 int	   b_LimitPlayer;
 int	   i_LimitPlayerMinGametime;
 int	   i_LimitPlayerMaxGametime;
@@ -47,8 +86,12 @@ ConVar c_LPLateload;
 ConVar c_LPMWFailureGet;
 ConVar c_SPLMode;
 ConVar c_IfNeedLogKickMsg;
+ConVar c_QueryMode;
+ConVar c_CheckPlayerProfileCount;
+ConVar c_APIKey;
 
 char   chatFile[128];
+char   s_APIKey[128];
 
 ConVar
 	g_cvMinUpdateRate  = null,
@@ -64,11 +107,14 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	// 供其他插件调用的公共接口 (配合 include/GetPlayerGametime.inc)
 	CreateNative("GetPlayerGametime_GetTime", Native_GetPlayerGametime_GetTime);
 	CreateNative("GetPlayerGametime_GetLerp", Native_GetPlayerGametime_GetLerp);
+	CreateNative("GetPlayerGametime_GetProfileTime", Native_GetPlayerGametime_GetProfileTime);
+	CreateNative("GetPlayerGametime_GetStatTime", Native_GetPlayerGametime_GetStatTime);
+	CreateNative("GetPlayerGametime_GetSource", Native_GetPlayerGametime_GetSource);
 
 	return APLRes_Success;
 }
 
-// 返回玩家的真实游戏时长(秒), <=0 表示未获取到/未知
+// 返回玩家的游戏时长(秒), <=0 表示未获取到/未知
 any Native_GetPlayerGametime_GetTime(Handle plugin, int numParams)
 {
 	int client = GetNativeCell(1);
@@ -86,6 +132,35 @@ any Native_GetPlayerGametime_GetLerp(Handle plugin, int numParams)
 	return GetPlayerLerp(client);
 }
 
+// 返回玩家的主页(Steam 个人资料)游戏时长(秒), <=0 表示未获取到/未知
+any Native_GetPlayerGametime_GetProfileTime(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+	return i_ProfileTime[client];
+}
+
+// 返回玩家的成就统计游戏时长(秒), <=0 表示未获取到/未知
+any Native_GetPlayerGametime_GetStatTime(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+	return i_StatTime[client];
+}
+
+// 返回 GetPlayerGametime_GetTime 当前采用的时长来源: 0=无数据, 1=主页时长, 2=成就统计时长
+any Native_GetPlayerGametime_GetSource(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+	if (i_StatTime[client] > 0) return 2;
+	if (i_ProfileTime[client] > 0) return 1;
+	return 0;
+}
+
 public void OnPluginStart()
 {
 	char path[PLATFORM_MAX_PATH];
@@ -94,25 +169,28 @@ public void OnPluginStart()
 	if (hasTranslations) LoadTranslations("GetPlayerGametime.phrases");
 	else LogError("Not translations file GetPlayerGametime.phrases.txt found yet!");
 
-	if (GetExtensionFileStatus("SteamWorks.ext") != 1)
+	b_SteamWorksAvailable = (GetExtensionFileStatus("SteamWorks.ext") == 1);
+	if (!b_SteamWorksAvailable)
 	{
-		LogError("SteamWorks isn't installed or failed to load. Grenade Trails will be disabled. Please install SteamWorks. (https://forums.alliedmods.net/showthread.php?t=229556)");
-		return;
+		LogError("SteamWorks isn't installed or failed to load. Player gametime query is disabled. Please install SteamWorks. (https://forums.alliedmods.net/showthread.php?t=229556)");
 	}
 
-	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "启用插件？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);																																		   //这个都看不懂建议别玩插件捏
-	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "向玩家显示什么类型的游戏时长？1:小时和分钟 2=四舍五入到两位小数的小时", FCVAR_NOTIFY, true, 1.0, true, 2.0);															   //向玩家显示什么类型的游戏时长? 1:小时分钟 2=小时带两位小数
-	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "如果由于任何可能的原因未能获取到玩家的真实游戏时长，应重复多少次以获取玩家的游戏时长？0:禁用", FCVAR_NOTIFY, true, 0.0);							   //如果因可能的各种原因导致获取玩家的真实游戏时长失败,那么重复多少次获取玩家游戏时长? 0:禁用
-	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "正在反复获取玩家的真实游戏时长时，是否将玩家移动到旁观？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);																	   //如果正在反复获取玩家的真实游戏时长的情况下。是否将玩家移动到旁观？0:禁用
-	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "反复获取玩家真实游戏时长失败时如何处理玩家？0:禁用，1:踢出 2=移动到旁观", FCVAR_NOTIFY, true, 0.0, true, 2.0);																   //如果反复获取玩家真实游戏时长失败，如何处理玩家？0:禁用，1:踢出 2=移动到旁观
-	c_LPLateload			 = CreateConVar("LPLateload", "1", "如果 LimitPlayer=1 且插件未正常启动，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);	   //如果LimitPlayer=1且插件未正常启动的情况下，是否取消各种因真实游戏时长而限制玩家的插件行为？0:禁用
-	c_LimitPlayer			 = CreateConVar("LimitPlayer", "1", "是否禁止符合游戏时长条件的玩家进入服务器或进入游戏？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);														   //是否禁止符合时长条件的玩家进入服务器或进入对局? 0:禁用 1:启用
-	c_LimitPlayerMinGametime = CreateConVar("LimitPlayerMinGametime", "1", "符合游戏时长条件的玩家进入服务器或进入游戏的最低禁止时长", FCVAR_NOTIFY, true, 1.0);																				   //最低禁止多少秒的玩家进入服务器或进入对局(小时乘3600)
-	c_LimitPlayerMaxGametime = CreateConVar("LimitPlayerMaxGametime", "36000", "符合游戏时长条件的玩家进入服务器或进入游戏的最高禁止时长", FCVAR_NOTIFY, true, 1.0);
-	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "如果 LimitPlayer 不为 0，如何处理符合条件的玩家？1:踢出，2=移动到旁观", FCVAR_NOTIFY, true, 1.0, true, 2.0);		 //如果LimitPlayer不为0,则如何处理符合时长区间的玩家? 1:踢出,2=移动到旁观
-	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "显示玩家 Lerp 及游戏时长？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否显示玩家的lerp值，0:禁用，1:启用
-	c_SPLMode				 = CreateConVar("SPLMode", "1", "是否按玩家队伍显示玩家真实游戏时长和 Lerp 信息 0:按玩家顺序输出", FCVAR_NOTIFY, true, 0.0, true, 1.0);	 //是否按照玩家阵营显示玩家真实玩家时长及Lerp信息 0:按照玩家顺序输出
-	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "是否记录自动踢出玩家的消息？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);												 //是否记录踢出玩家的信息？
+	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "启用插件？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "向玩家显示什么类型的游戏时长？1:小时和分钟 2=四舍五入到两位小数的小时", FCVAR_NOTIFY, true, 1.0, true, 2.0);
+	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "如果由于任何可能的原因未能获取到玩家的成就统计时长，应重复多少次以获取玩家的成就统计时长？0:不重试", FCVAR_NOTIFY, true, 0.0);
+	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "正在反复获取玩家的游戏时长时，是否将玩家移动到旁观？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "反复获取玩家游戏时长失败时如何处理玩家？0:禁用，1:踢出 2=移动到旁观", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	c_LPLateload			 = CreateConVar("LPLateload", "1", "如果 LimitPlayer=1 且插件未正常启动，是否取消各种因游戏时长而限制玩家的插件行为？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_LimitPlayer			 = CreateConVar("LimitPlayer", "0", "是否禁止符合游戏时长条件的玩家进入服务器或进入游戏？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_LimitPlayerMinGametime = CreateConVar("LimitPlayerMinGametime", "0", "符合游戏时长条件的玩家进入服务器或进入游戏的最低禁止时长(单位:小时)", FCVAR_NOTIFY, true, 0.0);
+	c_LimitPlayerMaxGametime = CreateConVar("LimitPlayerMaxGametime", "10", "符合游戏时长条件的玩家进入服务器或进入游戏的最高禁止时长(单位:小时)", FCVAR_NOTIFY, true, 1.0);
+	c_LimitPlayerMode		 = CreateConVar("LimitPlayerMode", "2", "如果 LimitPlayer 不为 0，如何处理符合条件的玩家？1:踢出，2=移动到旁观", FCVAR_NOTIFY, true, 1.0, true, 2.0);
+	c_ShowPlayerLerp		 = CreateConVar("ShowPlayerLerp", "1", "显示玩家 Lerp 及游戏时长？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_SPLMode				 = CreateConVar("SPLMode", "1", "是否按玩家队伍显示玩家游戏时长和 Lerp 信息 0:按玩家顺序输出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "是否记录自动踢出玩家的消息？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	c_QueryMode				 = CreateConVar("QueryGametimeMode", "3", "查询哪些来源的玩家游戏时长？1=玩家主页 2=成就统计 3=两者都查询", FCVAR_NOTIFY, true, 1.0, true, 3.0);
+	c_CheckPlayerProfileCount = CreateConVar("CheckPlayerProfileCount", "3", "查询玩家主页游戏时长的次数？0=禁用玩家主页查询", FCVAR_NOTIFY, true, 0.0);
+	c_APIKey				 = CreateConVar("GetPlayerGametimeAPIKey", "", "Steam Web API Key(查询玩家主页游戏时长用)，留空则禁用玩家主页查询，申请: https://steamcommunity.com/dev/apikey", FCVAR_NOTIFY);
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
 	g_cvMaxUpdateRate		 = FindConVar("sv_maxupdaterate");
@@ -133,6 +211,9 @@ public void OnPluginStart()
 	c_ShowPlayerLerp.AddChangeHook(ConVarChanged);
 	c_SPLMode.AddChangeHook(ConVarChanged);
 	c_IfNeedLogKickMsg.AddChangeHook(ConVarChanged);
+	c_QueryMode.AddChangeHook(ConVarChanged);
+	c_CheckPlayerProfileCount.AddChangeHook(ConVarChanged);
+	c_APIKey.AddChangeHook(ConVarChanged);
 
 	HookEvent("player_team", Event_PlayerTeam);
 
@@ -140,7 +221,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_time", cmdplayertime);
 	RegConsoleCmd("sm_pt", cmdplayertime);
 
-	//AutoExecConfig(true, "GetPlayerGametime");
+	AutoExecConfig(true, "GetPlayerGametime");
 
 	if (CheckPluginLate)
 	{
@@ -150,8 +231,10 @@ public void OnPluginStart()
 
 void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
+	// 换图时 AutoExecConfig 生成的 cfg 会重复执行, 值没变就不用重新查询所有玩家(否则每次换图都会刷一遍时长播报)
+	if (StrEqual(oldValue, newValue)) return;
 #if DEBUG
-	colors_print_to_chat_all("cvar is change,requite all player gametime");
+	CPrintToChatAll("cvar is change,requite all player gametime");
 #endif
 	GetCvars();
 	for (int i = 1; i <= MaxClients; i++)
@@ -169,80 +252,330 @@ void GetCvars()
 	i_LPMWFailureGet		 = c_LPMWFailureGet.IntValue;
 	b_LPLateload			 = c_LPLateload.BoolValue;
 	b_LimitPlayer			 = c_LimitPlayer.BoolValue;
-	i_LimitPlayerMaxGametime = c_LimitPlayerMaxGametime.IntValue;
-	i_LimitPlayerMinGametime = c_LimitPlayerMinGametime.IntValue;
+	i_LimitPlayerMinGametime = c_LimitPlayerMinGametime.IntValue * SECONDS_PER_HOUR;
+	i_LimitPlayerMaxGametime = c_LimitPlayerMaxGametime.IntValue * SECONDS_PER_HOUR;
 	i_LimitPlayerMode		 = c_LimitPlayerMode.IntValue;
 	b_ShowPlayerLerp		 = c_ShowPlayerLerp.BoolValue;
 	b_SPLMode				 = c_SPLMode.BoolValue;
 	b_IfNeedLogKickMsg		 = c_IfNeedLogKickMsg.BoolValue;
+	i_QueryMode				 = c_QueryMode.IntValue;
+	i_CheckPlayerProfileCount = c_CheckPlayerProfileCount.IntValue;
+	c_APIKey.GetString(s_APIKey, sizeof(s_APIKey));
+
+	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0);
+	b_ProfileSourceEnabled = b_SteamWorksAvailable && ((i_QueryMode & QUERY_PROFILE) != 0) && (i_CheckPlayerProfileCount > 0) && (s_APIKey[0] != '\0');
+
+	// 没有任何可用数据源时, 关闭时长限制, 否则所有玩家都会被判定成"获取游戏时长失败"
+	if (b_Enable && b_LimitPlayer && !b_StatsSourceEnabled && !b_ProfileSourceEnabled)
+	{
+		if (!b_WarnedNoSource)
+		{
+			b_WarnedNoSource = true;
+			LogError("没有任何可用的游戏时长数据源(QueryGametimeMode=%d, CheckPlayerProfileCount=%d, APIKey=%s), 已暂停因游戏时长而限制玩家的功能.",
+					 i_QueryMode, i_CheckPlayerProfileCount, s_APIKey[0] ? "已设置" : "未设置");
+		}
+	}
+	else
+	{
+		b_WarnedNoSource = false;
+	}
+
+	// 想查询玩家主页时长但没有配置好(缺少 API Key / 次数为 0)时给出提示
+	if (((i_QueryMode & QUERY_PROFILE) != 0) && !b_ProfileSourceEnabled && b_SteamWorksAvailable)
+	{
+		if (!b_WarnedNoKey)
+		{
+			b_WarnedNoKey = true;
+			LogError("玩家主页时长查询未启用: %s, 输出中只会显示成就统计时长.", (i_CheckPlayerProfileCount <= 0) ? "CheckPlayerProfileCount=0" : "未设置 GetPlayerGametimeAPIKey");
+		}
+	}
+	else
+	{
+		b_WarnedNoKey = false;
+	}
 }
 
 public void OnClientPostAdminCheck(int client)
 {
 	if (!b_Enable) return;
-	if (IsValidClient(client) && !IsFakeClient(client) && IsClientConnected(client))
+	if (!IsValidClient(client) || IsFakeClient(client) || !IsClientConnected(client)) return;
+
+	i_Count[client]			 = 0;
+	i_ProfileCount[client]	 = 0;
+	i_StatTime[client]		 = 0;
+	i_ProfileTime[client]	 = 0;
+	i_PlayerTime[client]	 = 0;
+	i_StatState[client]		 = SOURCE_PENDING;
+	i_ProfileState[client]	 = SOURCE_PENDING;
+	b_Announced[client]		 = false;
+	// 注意: i_StatsUserID / i_ProfileUserID 不要在这里清, 它们用于防止"同一条连接重复发起请求"
+
+	// 两个数据源都是异步的: 成就统计需要等待 Steam 回调, 主页需要等待 HTTP 响应
+	if (b_StatsSourceEnabled) StartStatsQuery(client);
+	if (b_ProfileSourceEnabled) RequestProfileGametime(client);
+
+	OnSourceUpdate(client);
+}
+
+// 主页/成就数据晚于另一数据源到达时, 补播一次包含两个时长的完整信息
+void OnSourceUpdate(int client, bool bNewData = false)
+{
+	if (!IsValidClient(client)) return;
+
+	UpdatePlayerTimeState(client);
+
+	if (i_PlayerTime[client] > 0 && (!b_Announced[client] || bNewData))
 	{
-		i_Count[client]		 = 0;
-		i_PlayerTime[client] = 0;
-		if (!GetPlayerGameTime(client))
-		{
-			i_PlayerTime[client] = -1;
-#if DEBUG
-			colors_print_to_chat_all("failure get player %N gametime", client);
-#endif
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N {default}已连接,正在获取玩家的实际游戏时长.", client);
-			// colors_print_to_chat_all("%t", "PlayerConnect", client);
-			LimitPlayer(client);
-			CreateTimer(1.0, MoreGetPlayerGameTime, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-		}
-		else
-		{
-#if DEBUG
-			colors_print_to_chat_all("get player %N gametime success", client);
-#endif
-			AnnouncePlayerTime(client);
-			LimitPlayer(client);
-		}
+		AnnouncePlayerTime(client);
+	}
+
+	LimitPlayer(client);
+}
+
+// 汇总两个数据源, 刷新用于限制/native 的生效时长: >0 成功, -1 获取中, -2 获取失败
+void UpdatePlayerTimeState(int client)
+{
+	if (i_StatTime[client] > 0) i_PlayerTime[client] = i_StatTime[client];
+	else if (i_ProfileTime[client] > 0) i_PlayerTime[client] = i_ProfileTime[client];
+	else if (!AllSourcesFinished(client)) i_PlayerTime[client] = -1;
+	else i_PlayerTime[client] = -2;
+}
+
+// 所有已启用的数据源是否都已经结束(成功或失败)
+bool AllSourcesFinished(int client)
+{
+	if (b_StatsSourceEnabled && i_StatState[client] == SOURCE_PENDING) return false;
+	if (b_ProfileSourceEnabled && i_ProfileState[client] == SOURCE_PENDING) return false;
+	return true;
+}
+
+// 已请求次数(取两个数据源中较大者, 用于"请求中"提示)
+int GetRequestCount(int client)
+{
+	return (i_Count[client] > i_ProfileCount[client]) ? i_Count[client] : i_ProfileCount[client];
+}
+
+// 只统计已启用的数据源, 否则单独启用某个数据源时永远达不到"最大请求次数"
+int GetRequestMaxCount()
+{
+	int iMax = 0;
+	if (b_StatsSourceEnabled && i_CheckPlayerGameCount > iMax) iMax = i_CheckPlayerGameCount;
+	if (b_ProfileSourceEnabled && i_CheckPlayerProfileCount > iMax) iMax = i_CheckPlayerProfileCount;
+	return iMax;
+}
+
+// 释放某条成就时长重试链的占用标记(只释放属于这条链的标记)
+void ReleaseStatsChain(int client, int userid)
+{
+	if (client > 0 && client <= MaxClients && i_StatsUserID[client] == userid) i_StatsUserID[client] = 0;
+}
+
+// 数据源一: 成就统计时长(SteamWorks)
+void StartStatsQuery(int client)
+{
+	int userid = GetClientUserId(client);
+
+	// 同一连接已经有重试链在跑就不再重复发起(cvar 变更/中途加载会重复调用到这里)
+	if (i_StatsUserID[client] == userid) return;
+
+	i_StatState[client] = SOURCE_PENDING;
+	i_StatTime[client]	= 0;
+
+	// SteamWorks_RequestStats 是异步请求, 这里只是发起请求, 数据要等 Steam 回调后才可读
+	SteamWorks_RequestStats(client, APPID_L4D2);
+
+	if (SteamWorks_GetStatCell(client, STATS_PLAYTIME_KEY, i_StatTime[client]) && i_StatTime[client] > 0)
+	{
+		i_StatState[client] = SOURCE_OK;
+		return;
+	}
+
+	i_StatTime[client] = 0;
+
+	if (i_CheckPlayerGameCount > 0)
+	{
+		i_StatsUserID[client] = userid;
+		CreateTimer(1.0, MoreGetPlayerGameTime, userid, TIMER_FLAG_NO_MAPCHANGE);
+	}
+	else
+	{
+		i_StatState[client] = SOURCE_FAILED;
 	}
 }
 
-Action MoreGetPlayerGameTime(Handle timer, any client)
+Action MoreGetPlayerGameTime(Handle timer, any userid)
 {
-	if ((client = GetClientOfUserId(client)) && IsValidClient(client) && !IsFakeClient(client))
+	int client = GetClientOfUserId(userid);
+	// 玩家已离开: 标记留在原 userid 上, 新连接 userid 不同, 不会误挡
+	if (!client || !IsValidClient(client) || IsFakeClient(client)) return Plugin_Stop;
+
+	if (i_StatState[client] != SOURCE_PENDING)
+	{
+		ReleaseStatsChain(client, userid);
+		return Plugin_Stop;
+	}
+
+	i_Count[client] += 1;
+
+	if (i_Count[client] >= i_CheckPlayerGameCount)
+	{
+		ReleaseStatsChain(client, userid);
+		i_StatState[client] = SOURCE_FAILED;
+		OnSourceUpdate(client);
+		return Plugin_Stop;
+	}
+
+	if (SteamWorks_GetStatCell(client, STATS_PLAYTIME_KEY, i_StatTime[client]) && i_StatTime[client] > 0)
+	{
+		ReleaseStatsChain(client, userid);
+		i_StatState[client] = SOURCE_OK;
+		OnSourceUpdate(client, true);
+		return Plugin_Stop;
+	}
+
+	i_StatTime[client] = 0;
+	SteamWorks_RequestStats(client, APPID_L4D2);
+
+	OnSourceUpdate(client);
+
+	// 继续下一次重试(单次计时器链, 标记继续由这条链持有)
+	CreateTimer(1.0, MoreGetPlayerGameTime, userid, TIMER_FLAG_NO_MAPCHANGE);
+	return Plugin_Stop;
+}
+
+// 数据源二: 玩家主页时长(Steam Web API, 由 SteamWorks 的 HTTP 接口发起)
+void RequestProfileGametime(int client)
+{
+	if (!b_ProfileSourceEnabled || !IsValidClient(client) || IsFakeClient(client)) return;
+	if (i_ProfileState[client] != SOURCE_PENDING) return;
+
+	int userid = GetClientUserId(client);
+
+	// 该连接已经有一个主页请求在飞(例如重试计时器与 cvar 变更/中途加载同时发生)时不再重复发
+	if (i_ProfileUserID[client] == userid) return;
+
+	char sSteamID[32];
+	if (!GetClientAuthId(client, AuthId_SteamID64, sSteamID, sizeof(sSteamID)))
+	{
+		OnProfileQueryFailed(client);
+		return;
+	}
+
+	char sURL[512];
+	FormatEx(sURL, sizeof(sURL), "%s&key=%s&steamid=%s", PROFILE_GAMETIME_URL, s_APIKey, sSteamID);
+
+	Handle hRequest = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, sURL);
+	if (hRequest == null)
+	{
+		OnProfileQueryFailed(client);
+		return;
+	}
+
+	SteamWorks_SetHTTPRequestNetworkActivityTimeout(hRequest, 10);
+	SteamWorks_SetHTTPRequestContextValue(hRequest, userid);
+	SteamWorks_SetHTTPCallbacks(hRequest, OnProfileHTTPCompleted);
+
+	if (!SteamWorks_SendHTTPRequest(hRequest))
+	{
+		CloseHandle(hRequest);
+		OnProfileQueryFailed(client);
+		return;
+	}
+
+	i_ProfileUserID[client] = userid;
+}
+
+public void OnProfileHTTPCompleted(Handle hRequest, bool bFailure, bool bRequestSuccessful, EHTTPStatusCode eStatusCode, any data1)
+{
+	int client = GetClientOfUserId(data1);
+	bool bHandled = false;
+
+	// 请求已结束, 释放"在飞"占位
+	if (client && i_ProfileUserID[client] == data1) i_ProfileUserID[client] = 0;
+
+	if (!bFailure && bRequestSuccessful && eStatusCode == k_EHTTPStatusCode200OK && client && IsClientInGame(client) && i_ProfileState[client] == SOURCE_PENDING)
+	{
+		int iSize;
+		if (SteamWorks_GetHTTPResponseBodySize(hRequest, iSize) && iSize > 0)
+		{
+			char[] sBody = new char[iSize + 1];
+			sBody[iSize] = '\0';	// 响应体不保证带结束符, 手动补上
+			if (SteamWorks_GetHTTPResponseBodyData(hRequest, sBody, iSize))
+			{
+				int iMinutes;
+				if (ParseProfilePlaytime(sBody, iMinutes))
+				{
+					i_ProfileTime[client]  = iMinutes * SECONDS_PER_MINUTE;
+					i_ProfileState[client] = SOURCE_OK;
+					bHandled = true;
+					OnSourceUpdate(client, true);
+				}
+			}
+		}
+	}
+
+	// 一个响应只走一条结局: 成功已处理, 否则按失败重试
+	if (!bHandled && client && IsClientInGame(client))
 	{
 #if DEBUG
-		colors_print_to_chat_all("%N Need More Get PlayerGametime%d/%d", client, i_Count[client], i_CheckPlayerGameCount);
+		PrintToServer("[GetPlayerGametime] %N 主页时长查询失败 (http:%d failure:%d successful:%d)", client, eStatusCode, bFailure, bRequestSuccessful);
 #endif
-		i_Count[client] += 1;
-		if (i_Count[client] >= i_CheckPlayerGameCount)
-		{
-			i_PlayerTime[client] = -2;
-			LimitPlayer(client);
-			return Plugin_Stop;
-		}
-		else
-		{
-			if (!GetPlayerGameTime(client))
-			{
-				i_PlayerTime[client] = -1;
-				LimitPlayer(client);
-				CreateTimer(1.0, MoreGetPlayerGameTime, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-			}
-			else
-			{
-				AnnouncePlayerTime(client);
-				LimitPlayer(client);
-			}
-		}
-		return Plugin_Continue;
+		OnProfileQueryFailed(client);
 	}
+
+	CloseHandle(hRequest);
+}
+
+// 从 GetOwnedGames 返回的 JSON 中取出 playtime_forever(分钟)
+// 玩家资料/游戏详情未公开时 Steam 只返回 {"response":{}}, 这里会判定为失败
+bool ParseProfilePlaytime(const char[] sData, int &iMinutes)
+{
+	iMinutes = 0;
+
+	if (StrContains(sData, "\"games\"", false) == -1) return false;
+
+	int iPos = StrContains(sData, "\"playtime_forever\"", false);
+	if (iPos == -1) return false;
+
+	iPos += 18;	// strlen("\"playtime_forever\"")
+
+	while (sData[iPos] != '\0' && (sData[iPos] == ' ' || sData[iPos] == '\t' || sData[iPos] == ':' || sData[iPos] == '"')) iPos++;
+
+	if (sData[iPos] < '0' || sData[iPos] > '9') return false;
+
+	iMinutes = StringToInt(sData[iPos]);
+	return (iMinutes > 0);
+}
+
+void OnProfileQueryFailed(int client)
+{
+	if (!IsValidClient(client)) return;
+	if (i_ProfileState[client] != SOURCE_PENDING) return;
+
+	i_ProfileCount[client] += 1;
+
+	if (i_ProfileCount[client] >= i_CheckPlayerProfileCount)
+	{
+		i_ProfileState[client] = SOURCE_FAILED;
+		OnSourceUpdate(client);
+		return;
+	}
+
+	OnSourceUpdate(client);
+	CreateTimer(1.0, TimerProfileRetry, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action TimerProfileRetry(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client && IsValidClient(client) && !IsFakeClient(client)) RequestProfileGametime(client);
 	return Plugin_Stop;
 }
 
 Action cmdplayertime(int client, int args)
 {
 #if DEBUG
-	colors_print_to_chat_all("Command executed successfully");
+	CPrintToChatAll("Command executed successfully");
 #endif
 	if (b_SPLMode)
 	{
@@ -258,7 +591,7 @@ Action cmdplayertime(int client, int args)
 				if (GetClientTeam(i) == 1) spectatorCount = 1;
 			}
 		}
-		if (survivorCount == 1) colors_print_to_chat_all("{olive}-------------------------------------------------------------------");
+		if (survivorCount == 1) CPrintToChatAll("{olive}-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
 			if (IsClientInGame(i) && !IsFakeClient(i) && IsClientConnected(i) && GetClientTeam(i) == 2)
@@ -266,8 +599,8 @@ Action cmdplayertime(int client, int args)
 				AnnouncePlayerTime(i);
 			}
 		}
-		if (survivorCount == 1) colors_print_to_chat_all("{olive}-------------------------------------------------------------------");
-		if (infectedCount == 1) colors_print_to_chat_all("{green}-------------------------------------------------------------------");
+		if (survivorCount == 1) CPrintToChatAll("{olive}-------------------------------------------------------------------");
+		if (infectedCount == 1) CPrintToChatAll("{green}-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
 			if (IsClientInGame(i) && !IsFakeClient(i) && IsClientConnected(i) && GetClientTeam(i) == 3)
@@ -275,8 +608,8 @@ Action cmdplayertime(int client, int args)
 				AnnouncePlayerTime(i);
 			}
 		}
-		if (infectedCount == 1) colors_print_to_chat_all("{green}-------------------------------------------------------------------");
-		if (spectatorCount == 1) colors_print_to_chat_all("-------------------------------------------------------------------");
+		if (infectedCount == 1) CPrintToChatAll("{green}-------------------------------------------------------------------");
+		if (spectatorCount == 1) CPrintToChatAll("-------------------------------------------------------------------");
 		for (int i = 1; i <= MaxClients; i++)
 		{
 			if (IsClientInGame(i) && !IsFakeClient(i) && IsClientConnected(i) && GetClientTeam(i) == 1)
@@ -284,7 +617,7 @@ Action cmdplayertime(int client, int args)
 				AnnouncePlayerTime(i);
 			}
 		}
-		if (spectatorCount == 1) colors_print_to_chat_all("-------------------------------------------------------------------");
+		if (spectatorCount == 1) CPrintToChatAll("-------------------------------------------------------------------");
 	}
 	else
 	{
@@ -313,16 +646,6 @@ void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 	}
 }
 
-bool GetPlayerGameTime(int client)
-{
-	SteamWorks_RequestStats(client, 550);
-	bool b_gametime = SteamWorks_GetStatCell(client, "Stat.TotalPlayTime.Total", i_PlayerTime[client]);
-#if DEBUG
-	colors_print_to_chat_all("Get %N Real GameTime bool:%d gametime is:%d", client, b_gametime, i_PlayerTime[client]);
-#endif
-	return b_gametime;
-}
-
 bool IsValidClient(int client)
 {
 	return client > 0 && client <= MaxClients && IsClientInGame(client);
@@ -336,12 +659,12 @@ bool CheckPlayerGametime(int client)
 	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime)
 	{
 #if DEBUG
-		colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+		CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
 #endif
 		return true;
 	}
 #if DEBUG
-	colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+	CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
 #endif
 	return false;
 }
@@ -356,7 +679,7 @@ void CheckPlayerGametime(int client)
 	{
 		if(b_LPLateload && CheckPluginLate)return;
 		#if DEBUG
-		colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+		CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
 		#endif
 		if (i_LimitPlayerMode == 1)
 		{
@@ -369,12 +692,12 @@ void CheckPlayerGametime(int client)
 		else
 		{
 			ChangeClientToSpec(client);
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
-			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", client);
+			// CPrintToChatAll("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
+			CPrintToChatAll("%t", "forcespecplayerUnqualified", client);
 		}
 	}
 	#if DEBUG
-	colors_print_to_chat_all("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
+	CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
 	#endif
 }
 */
@@ -384,6 +707,8 @@ void LimitPlayer(int client)
 	if (b_IsProcessingLimitPlayer[client]) return;
 	if (!IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
+	// 无可用数据源时不做任何限制
+	if (!b_StatsSourceEnabled && !b_ProfileSourceEnabled) return;
 
 	b_IsProcessingLimitPlayer[client] = true;
 	LimitPlayerInner(client);
@@ -397,41 +722,36 @@ void LimitPlayerInner(int client)
 #endif
 	if (i_PlayerTime[client] == -1)
 	{
-		if (i_Count[client] < i_CheckPlayerGameCount)
+		if (GetRequestCount(client) < GetRequestMaxCount())
 		{
 			if (!b_LPWRequesting || (b_LPLateload && CheckPluginLate)) return;
 			ChangeClientToSpec(client);
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}因正在获取玩家{olive} %N {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数%d/%d",client,i_Count[client], i_CheckPlayerGameCount);
-			colors_print_to_chat_all("%t", "forcespecplayerRequesting", client, i_Count[client], i_CheckPlayerGameCount);
+			CPrintToChatAll("%t", "forcespecplayerRequesting", client, GetRequestCount(client), GetRequestMaxCount());
 		}
 		else
 		{
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}正在获取玩家{olive} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
-			colors_print_to_chat_all("%t", "RequestingPlayerGametime", client, i_Count[client] + 1, i_CheckPlayerGameCount);
+			CPrintToChatAll("%t", "RequestingPlayerGametime", client, GetRequestCount(client) + 1, GetRequestMaxCount());
 		}
 	}
 	else if (i_PlayerTime[client] == -2)
 	{
-		if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet != 0))
+		if ((GetRequestCount(client) >= GetRequestMaxCount()) && (i_LPMWFailureGet != 0))
 		{
 			if (b_LPLateload && CheckPluginLate) return;
 			if (i_LPMWFailureGet == 1)
 			{
-				// KickClient(client, "你因服务器获取真实游戏时长失败而被自动踢出!");
 				KickClient(client, "%t", "kickplayerFailureGet");
 				LogKickPlayer(client, 1);
 			}
 			else if (i_LPMWFailureGet == 2)
 			{
 				ChangeClientToSpec(client);
-				// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因获取真实游戏时长失败而被强制移动到旁观!", client);
-				colors_print_to_chat_all("%t", "forcespecplayerFailureGet", client);
+				CPrintToChatAll("%t", "forcespecplayerFailureGet", client);
 			}
 		}
-		else if ((i_Count[client] >= i_CheckPlayerGameCount) && (i_LPMWFailureGet == 0))
+		else if ((GetRequestCount(client) >= GetRequestMaxCount()) && (i_LPMWFailureGet == 0))
 		{
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}获取玩家{olive} %N {default}的游戏时长失败", client);
-			colors_print_to_chat_all("%t", "FailureGetPlayerGametime", client);
+			CPrintToChatAll("%t", "FailureGetPlayerGametime", client);
 		}
 	}
 	else if (CheckPlayerGametime(client) && (i_LimitPlayerMode != 0))
@@ -442,22 +762,19 @@ void LimitPlayerInner(int client)
 		if (b_LPLateload && CheckPluginLate) return;
 #if DEBUG
 		PrintToChatAll("LimitPlayerMode is %d", i_LimitPlayerMode);
+		PrintToChatAll("try to handle %N", client);
 #endif
 		if (i_LimitPlayerMode == 1)
 		{
-			PrintToChatAll("try to kick %N", client);
-			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
-			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
-			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
+			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
+			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / SECONDS_PER_HOUR;
 			KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
 			LogKickPlayer(client, 2);
 		}
 		else
 		{
-			PrintToChatAll("try to chance %N team", client);
 			ChangeClientToSpec(client);
-			// colors_print_to_chat_all("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
-			colors_print_to_chat_all("%t", "forcespecplayerUnqualified", client);
+			CPrintToChatAll("%t", "forcespecplayerUnqualified", client);
 		}
 	}
 }
@@ -465,56 +782,71 @@ void LimitPlayerInner(int client)
 void AnnouncePlayerTime(int client)
 {
 	if (!b_Enable) return;
+	if (!IsClientInGame(client)) return;
+
 	if (i_PlayerTime[client] > 0)
 	{
-		char g_lerp[64];
-		char g_playertime[64];
-		if (b_ShowPlayerLerp)
+		b_Announced[client] = true;
+
+		// 每个接收者都用自己的语言格式化: 外层语句 + 内层"主页/成就时长"与"Lerp"文本
+		for (int receiver = 1; receiver <= MaxClients; receiver++)
 		{
-			// FormatEx(g_lerp, sizeof(g_lerp), ", Lerp值为 %.1f", GetPlayerLerp(client) * 1000);
-			FormatEx(g_lerp, sizeof(g_lerp), "%t", "showlerp", GetPlayerLerp(client) * 1000);
-			for (int i = 1; i <= MaxClients; i++)
-			{
-				if (IsClientInGame(i))
-				{
-					FormatEx(g_lerp, sizeof(g_lerp), "%t", "showlerp", GetPlayerLerp(client) * 1000);
-				}
-			}
-		}
-		else FormatEx(g_lerp, sizeof(g_lerp), " ");
-		float gametime = float(i_PlayerTime[client]);
-		if (i_ShowGametimeMode == 1)
-		{
-			// FormatEx(g_playertime, sizeof(g_playertime), "{olive} %d{default} 小时{olive} %d{default} 分钟.", i_PlayerTime[client] / 3600, i_PlayerTime[client] / 60 % 60);
-			FormatEx(g_playertime, sizeof(g_playertime), "%t", "announcegametimemode1", i_PlayerTime[client] / 3600, i_PlayerTime[client] / 60 % 60);
-			for (int i = 1; i <= MaxClients; i++)
-			{
-				if (IsClientInGame(i))
-				{
-					FormatEx(g_playertime, sizeof(g_playertime), "%t", "announcegametimemode1", i_PlayerTime[client] / 3600, i_PlayerTime[client] / 60 % 60);
-				}
-			}
-		}
-		else
-		{
-			// FomatEX(g_playertime, sizeof(g_playertime), "{olive} %.2f {default}小时", gametime / 3600);
-			FormatEx(g_playertime, sizeof(g_playertime), "%t", "announcegametimemode2", gametime / 3600);
+			if (!IsClientInGame(receiver) || IsFakeClient(receiver)) continue;
+
+			SetGlobalTransTarget(receiver);
+
+			char g_playertime[160];
+			BuildGametimeText(client, g_playertime, sizeof(g_playertime));
+
+			char g_lerp[64];
+			if (b_ShowPlayerLerp) FormatEx(g_lerp, sizeof(g_lerp), "%t", "showlerp", GetPlayerLerp(client) * 1000);
+			else g_lerp[0] = '\0';
+
+			CPrintToChat(receiver, "%t", "announcegametime", client, g_playertime, g_lerp);
 		}
 #if DEBUG
-		colors_print_to_chat_all("%N %d %dh%dm %.2fh", client, i_PlayerTime[client], i_PlayerTime[client] / 3600, i_PlayerTime[client] / 60 % 60, gametime / 3600);
+		PrintToChatAll("%N stat:%d profile:%d", client, i_StatTime[client], i_ProfileTime[client]);
 #endif
-		colors_print_to_chat_all("%t", "announcegametime", client, g_playertime, g_lerp);
 	}
-	else if ((i_PlayerTime[client] == -1 && i_Count[client] < i_CheckPlayerGameCount))
+	else
 	{
-		// colors_print_to_chat_all("{green}[{olive}!{green}]{default}正在获取玩家{olive} %N {default}的游戏时长,请求次数{2}/{3}", client, client,i_Count[client], i_CheckPlayerGameCount);
-		colors_print_to_chat_all("%t", "RequestingPlayerGametime", client, i_Count[client] + 1, i_CheckPlayerGameCount);
+		if (!b_StatsSourceEnabled && !b_ProfileSourceEnabled) return;
+
+		if ((i_PlayerTime[client] == -1 && GetRequestCount(client) < GetRequestMaxCount()))
+		{
+			CPrintToChatAll("%t", "RequestingPlayerGametime", client, GetRequestCount(client) + 1, GetRequestMaxCount());
+		}
+		else if ((i_PlayerTime[client] == -2 && GetRequestCount(client) >= GetRequestMaxCount()))
+		{
+			CPrintToChatAll("%t", "FailureGetPlayerGametime", client);
+		}
 	}
-	else if ((i_PlayerTime[client] == -2 && i_Count[client] >= i_CheckPlayerGameCount))
+}
+
+// 组装时长文本: 玩家主页时长\成就统计时长 (缺失的一方不显示)
+void BuildGametimeText(int client, char[] buffer, int maxlen)
+{
+	char sProfile[64];
+	char sStats[64];
+	sProfile[0] = '\0';
+	sStats[0]   = '\0';
+
+	if (i_ProfileTime[client] > 0)
 	{
-		// colors_print_to_chat_all("{green}[{olive}!{green}]{default}获取玩家{olive} %N {default}的游戏时长失败", client);
-		colors_print_to_chat_all("%t", "FailureGetPlayerGametime", client);
+		if (i_ShowGametimeMode == 1) FormatEx(sProfile, sizeof(sProfile), "%t", "timeprofile1", i_ProfileTime[client] / SECONDS_PER_HOUR, i_ProfileTime[client] / SECONDS_PER_MINUTE % SECONDS_PER_MINUTE);
+		else FormatEx(sProfile, sizeof(sProfile), "%t", "timeprofile", float(i_ProfileTime[client]) / SECONDS_PER_HOUR);
 	}
+
+	if (i_StatTime[client] > 0)
+	{
+		if (i_ShowGametimeMode == 1) FormatEx(sStats, sizeof(sStats), "%t", "timestats1", i_StatTime[client] / SECONDS_PER_HOUR, i_StatTime[client] / SECONDS_PER_MINUTE % SECONDS_PER_MINUTE);
+		else FormatEx(sStats, sizeof(sStats), "%t", "timestats", float(i_StatTime[client]) / SECONDS_PER_HOUR);
+	}
+
+	if (sProfile[0] != '\0' && sStats[0] != '\0') FormatEx(buffer, maxlen, "%s\\%s", sProfile, sStats);
+	else if (sProfile[0] != '\0') strcopy(buffer, maxlen, sProfile);
+	else if (sStats[0] != '\0') strcopy(buffer, maxlen, sStats);
+	else buffer[0] = '\0';
 }
 
 void lateload()
@@ -576,9 +908,9 @@ void LogKickPlayer(int client, int Mode)
 		if (Mode == 1) Format(KickMsg, sizeof(KickMsg), "%N were auto kicked because failed to get playtime!", client);
 		else
 		{
-			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
-			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
-			float gametime				   = float(i_PlayerTime[client]) / 3600;
+			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
+			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / SECONDS_PER_HOUR;
+			float gametime				   = float(i_PlayerTime[client]) / SECONDS_PER_HOUR;
 			Format(KickMsg, sizeof(KickMsg), "%N kicked : %.2fh (%.2f h - %.2f h)!", client, gametime, f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
 		}
 		Format(Msg, sizeof(Msg), "[%s] %s", Time, KickMsg);
@@ -624,46 +956,4 @@ int GetIdlePlayerOfBot(int client) {
 		return 0;
 
 	return GetClientOfUserId(GetEntProp(client, Prop_Send, "m_humanSpectatorUserID"));
-}
-
-// by litter fory:https://forums.alliedmods.net/member.php?u=311461
-void colors_replace(char[] str, int max_len)
-{
-	static const char color_tag_and_codes[][2][32] = {
-		{"{default}",
-		  "\x01"},
-		{ "{lightgreen}",
-		  "\x03"},
-		{ "{olive}",
-		  "\x04"},
-		{ "{green}",
-		  "\x05"},
-	};
-	for (int i = 0; i < sizeof(color_tag_and_codes); i++)
-	{
-		ReplaceString(str, max_len, color_tag_and_codes[i][0], color_tag_and_codes[i][1]);
-	}
-}
-/*
-void colors_print_to_chat(int client, const char[] format, any...)
-{
-	char buffer[256];
-	VFormat(buffer, sizeof(buffer), format, 3);
-	colors_replace(buffer, sizeof(buffer));
-	PrintToChat(client, "%s", buffer);
-}
-*/
-void colors_print_to_chat_all(const char[] format, any...)
-{
-	char buffer[256];
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i))
-		{
-			SetGlobalTransTarget(i);
-			VFormat(buffer, sizeof(buffer), format, 2);
-			colors_replace(buffer, sizeof(buffer));
-			PrintToChat(i, "%s", buffer);
-		}
-	}
 }

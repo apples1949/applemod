@@ -34,7 +34,7 @@ void InitPanel()
 		cmdFooter.Add("!swapto 1/2/3/4 灵魂特感切换到相当于路程哪个玩家位置");
 		cmdFooter.Add("!tankhud 坦克在场时开关坦克状态hud");
 		cmdFooter.Add("!spechud 旁观hud开关");
-		cmdFooter.Add("!time 查看所有玩家的真实时长及lerp值");
+		cmdFooter.Add("!pt 查看所有玩家的游戏时长及lerp值");
 	}
 
 	curCmd = 0;
@@ -110,7 +110,7 @@ void UpdatePanel()
 	
 	menuPanel.DrawText(" ");
 
-	char nameBuf[64];
+	char nameBuf[128];
 	
 	for (int client = 1; client <= MaxClients; client++)
 	{
@@ -124,7 +124,7 @@ void UpdatePanel()
 				bool type = (GetClientTeam(client) == L4D2Team_Survivor);
 				int isReady = view_as<int>(IsPlayerReady(client));
 
-				char infoBuf[32];
+				char infoBuf[64];
 				GetPlayerGametimeDisplay(client, infoBuf, sizeof(infoBuf));
 
 				switch (readyUpMode)
@@ -256,15 +256,23 @@ void UpdatePanel()
 }
 
 // 在准备状态下显示玩家的游戏时长和 Lerp 值 (数据来自 GetPlayerGametime 插件)
-// 格式: " 12h/lerp15.6" ; 未获取到时长为空
+// 格式: " [主页12.57/成就11.98/15.6]" (小时两位小数 / Lerp 毫秒) ; 未获取到的时长不显示
 void GetPlayerGametimeDisplay(int client, char[] buffer, int maxlen)
 {
 	buffer[0] = '\0';
 
-	int iTime = GetPlayerGametime_GetTime(client);
-	if (iTime <= 0)
+	// GetPlayerGametime 是可选依赖(inc 中 required = 0), 插件不在时不要调用它的 native
+	if (!LibraryExists("GetPlayerGametime"))
+		return;
+
+	int iProfile = GetPlayerGametime_GetProfileTime(client);
+	int iStat = GetPlayerGametime_GetStatTime(client);
+	if (iProfile <= 0 && iStat <= 0)
 		return;
 
 	float fLerp = GetPlayerGametime_GetLerp(client) * 1000.0; // 秒 -> 毫秒
-	FormatEx(buffer, maxlen, " [%dh/%.1f]", iTime / 3600, fLerp);
+
+	if (iProfile > 0 && iStat > 0) FormatEx(buffer, maxlen, " [主页%.2f/成就%.2f/%.1f]", float(iProfile) / 3600.0, float(iStat) / 3600.0, fLerp);
+	else if (iProfile > 0) FormatEx(buffer, maxlen, " [主页%.2f/%.1f]", float(iProfile) / 3600.0, fLerp);
+	else FormatEx(buffer, maxlen, " [成就%.2f/%.1f]", float(iStat) / 3600.0, fLerp);
 }

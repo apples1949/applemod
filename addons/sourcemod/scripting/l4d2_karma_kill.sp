@@ -74,6 +74,23 @@ char karmaNames[KarmaType_MAX][] = {
 	"跳跃",
 };
 
+// 播报前缀：替换原本写死的 [TS]
+enum
+{
+	KP_HighDamage = 0,    // [高伤] 生还者因特感将/已直接倒地（判不出来时也用它，不再有 [TS]）
+	KP_InstantKill,       // [秒杀] 生还者因特感将/已直接死亡
+	KP_Suicide,           // [自杀] 生还者主动跳跃导致倒地或死亡
+	KP_Ledge,             // [挂边] 生还者挂边松手
+	KP_MAX
+};
+
+char karmaPrefixes[KP_MAX][] = {
+	"高伤",
+	"秒杀",
+	"自杀",
+	"挂边",
+};
+
 // I'll probably eventually add a logger for karma jumps and add "lastDistance" to this enum struct that dictates the closest special infected if maybe something messed up.
 enum struct enLastKarma
 {
@@ -131,6 +148,14 @@ Handle JumpRegisterTimer[MAXPLAYERS + 1]     = { null, ... };
 
 float fLogHeight[MAXPLAYERS + 1] = { -1.0, ... };
 
+// 前缀判定用的状态
+// g_bLedgeRelease      : 本次 karma 结局来自"挂边松手" -> [挂边]
+// g_iKarmaDamageType   : 最近一次触发 karma 的环境伤害类型（用于排除枪伤/近战造成的倒地）
+// g_fKarmaDamageTime   : 上述伤害的发生时间
+bool  g_bLedgeRelease[MAXPLAYERS + 1];
+int   g_iKarmaDamageType[MAXPLAYERS + 1];
+float g_fKarmaDamageTime[MAXPLAYERS + 1];
+
 public Plugin myinfo =
 {
 	name        = "L4D2 Karma Kill System (tranchi)",
@@ -183,6 +208,7 @@ public void OnPluginStart()
 	HookEvent("charger_impact", event_ChargerImpact, EventHookMode_Post);
 	HookEvent("player_ledge_grab", Event_PlayerLedgeGrab, EventHookMode_Post);
 	HookEvent("player_death", event_playerDeathPre, EventHookMode_Pre);
+	HookEvent("player_incapacitated", event_PlayerIncapacitated, EventHookMode_Post);
 	HookEvent("round_start_post_nav", event_RoundStartPostNav, EventHookMode_Post);
 	HookEvent("round_start", event_RoundStart, EventHookMode_Post);
 	HookEvent("round_end", event_RoundEnd, EventHookMode_Post);
@@ -258,6 +284,10 @@ Action SDKEvent_OnTakeDamage(int victim, int& attacker, int& inflictor, float& d
 	// Dead Air has a spot where you take 5000 crush damage.
 	if (damage >= 100.0 && (damagetype == DMG_DROWN || damagetype == DMG_FALL || damage >= 5000.0))
 	{
+		// 记录这次"环境伤害"的类型与时间：倒地播报靠它区分"摔落/溺水致死致倒"与普通枪伤近战
+		g_iKarmaDamageType[victim] = damagetype;
+		g_fKarmaDamageTime[victim] = GetGameTime();
+
 		if (fLogHeight[victim] != -1.0)
 		{
 			DebugLogToFile("karma_var.log", "{ %.1f, %f },", fLogHeight[victim], damage);
@@ -298,6 +328,9 @@ public void OnClientDisconnect(int client)
 {
 	ResetKarma(client);
 
+	g_iKarmaDamageType[client] = 0;
+	g_fKarmaDamageTime[client] = 0.0;
+
 	if (IsFakeClient(client))
 	{
 		StripKarmaArtistFromVictim(client, KarmaType_MAX);
@@ -332,6 +365,10 @@ public void OnMapStart()
 		apexHeight[i]  = -65535.0;
 		catchHeight[i] = -65535.0;
 		fLogHeight[i]  = -1.0;
+
+		g_bLedgeRelease[i]    = false;
+		g_iKarmaDamageType[i] = 0;
+		g_fKarmaDamageTime[i] = 0.0;
 	}
 
 	//cooldownTimer = null;
@@ -563,7 +600,7 @@ Action Timer_CheckVictim(Handle m_hTimer, DataPack hPack)
 	{
 		if (secondsLeft <= 0.0)
 		{
-			AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer);
+			AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer, KP_InstantKill);
 			victimTimer[client].m_hTimer = null;
 
 			delete aEntities;
@@ -584,13 +621,19 @@ Action Timer_CheckVictim(Handle m_hTimer, DataPack hPack)
 		TR_EnumerateEntities(fOrigin, fEndOrigin, PARTITION_SOLID_EDICTS | PARTITION_TRIGGER_EDICTS | PARTITION_STATIC_PROPS, RayType_EndPoint, TraceEnum_TriggerHurt, aEntities);
 
 		int iSize = GetArraySize(aEntities);
+		int iPrefix = KP_HighDamage;
+
+		// 用命中的 trigger_hurt 伤害量估算结局：足以秒杀 -> [秒杀]，只够打倒 -> [高伤]
+		if (iSize > 0)
+			iPrefix = GetTriggerKarmaPrefix(client, aEntities.Get(0));
+
 		delete aEntities;
 
 		if (iSize > 0)
 		{
 			if (secondsLeft <= 0.0)
 			{
-				AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer);
+				AnnounceKarma(lastKarma, client, type, false, false, victimTimer[client].m_hTimer, hIgnoreTimer, iPrefix);
 				victimTimer[client].m_hTimer = null;
 				return Plugin_Stop;
 			}
@@ -712,10 +755,14 @@ Action Timer_CheckLedgeChange(Handle hTimer, int userId)
 		int type;
 		int lastKarma = GetAnyLastKarma(victim, type);
 
+		// 松手了：无论这条播报会不会被 only_confirmed 挡下，都记下结局来源，
+		// 这样随后的死亡播报也能用 [挂边]
+		g_bLedgeRelease[victim] = true;
+
 		if (lastKarma <= 0 || !IsClientInGame(lastKarma) || g_bkarmaOnlyConfirmed || type == KT_Jump)
 			return Plugin_Stop;
 
-		AnnounceKarma(lastKarma, victim, type, false, false, null);
+		AnnounceKarma(lastKarma, victim, type, false, false, null, INVALID_HANDLE, KP_Ledge);
 		return Plugin_Stop;
 	}
 	else if (GetEntProp(victim, Prop_Send, "m_isHangingFromLedge"))
@@ -756,7 +803,15 @@ Action event_playerDeathPre(Event event, const char[] name, bool dontBroadcast)
 
 			int memoryLastKarma = LastKarma[victim][i].artist;
 
-			AnnounceKarma(LastKarma[victim][i].artist, victim, i, false, true);
+			// 死亡播报前缀：主动跳跃 -> [自杀]，挂边松手 -> [挂边]，其余因特感致死 -> [秒杀]
+			int iPrefix = KP_InstantKill;
+
+			if (i == KT_Jump)
+				iPrefix = KP_Suicide;
+			else if (g_bLedgeRelease[victim])
+				iPrefix = KP_Ledge;
+
+			AnnounceKarma(LastKarma[victim][i].artist, victim, i, false, true, null, INVALID_HANDLE, iPrefix);
 
 			if (memoryLastKarma > 0 && g_bkarmaAwardConfirmed)
 			{
@@ -778,6 +833,48 @@ Action event_playerDeathPre(Event event, const char[] name, bool dontBroadcast)
 	}
 
 	return Plugin_Continue;
+}
+
+// 真实倒地播报：原本插件只在"预判必死"时播报，生还者被特感弄成只倒地、
+// 或者自己跳下去只倒地时完全没有消息，这里补上：
+// 主动跳跃 -> [自杀]；挂边松手 -> [挂边]；因特感 -> [高伤]
+void event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+
+	// 此事件在坦克被击杀时也会派发，非幸存者直接挡掉
+	if (!g_bEnabled || !victim || !IsClientInGame(victim))
+		return;
+
+	if (L4D_GetClientTeam(victim) != L4DTeam_Survivor)
+		return;
+
+	// 与击杀确认同一道门：3 秒内刚吃过够致命的环境伤害（见 SDKEvent_OnTakeDamage）
+	if (AllKarmaRegisterTimer[victim] == null)
+		return;
+
+	// 只认摔落 / 溺水造成的倒地，排除枪伤、近战、坦克拳等普通伤害造成的倒地
+	if (g_iKarmaDamageType[victim] != DMG_FALL && g_iKarmaDamageType[victim] != DMG_DROWN)
+		return;
+
+	// 伤害与倒地必须发生在同一瞬间，避免"先摔了一下、几秒后才被别的伤害打倒"被误判
+	if (GetGameTime() - g_fKarmaDamageTime[victim] > 0.5)
+		return;
+
+	int type;
+	int lastKarma = GetAnyLastKarma(victim, type);
+
+	if (lastKarma <= 0 || !IsClientInGame(lastKarma))
+		return;
+
+	int iPrefix = KP_HighDamage;
+
+	if (type == KT_Jump)
+		iPrefix = KP_Suicide;
+	else if (g_bLedgeRelease[victim])
+		iPrefix = KP_Ledge;
+
+	AnnounceKarma(lastKarma, victim, type, false, false, null, INVALID_HANDLE, iPrefix);
 }
 
 void event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -1023,6 +1120,12 @@ void OnPlayersSwapped(int oldPlayer, int newPlayer)
 	}
 
 	BlockAnnounce[newPlayer] = BlockAnnounce[oldPlayer];
+
+	g_bLedgeRelease[newPlayer] = g_bLedgeRelease[oldPlayer];
+	g_bLedgeRelease[oldPlayer] = false;
+
+	g_iKarmaDamageType[newPlayer] = g_iKarmaDamageType[oldPlayer];
+	g_fKarmaDamageTime[newPlayer] = g_fKarmaDamageTime[oldPlayer];
 
 	TransferKarmaToVictim(newPlayer, oldPlayer);
 
@@ -1456,20 +1559,27 @@ Action Timer_CheckCharge(Handle m_hTimer, any client)
 	TR_EnumerateEntities(fOrigin, fEndOrigin, PARTITION_SOLID_EDICTS | PARTITION_TRIGGER_EDICTS | PARTITION_STATIC_PROPS, RayType_EndPoint, TraceEnum_TriggerHurt, aEntities);
 
 	int iSize = GetArraySize(aEntities);
+	int iPrefix = KP_HighDamage;
+
+	// 用命中的 trigger_hurt 伤害量估算结局：足以秒杀 -> [秒杀]，只够打倒 -> [高伤]
+	if (iSize > 0)
+		iPrefix = GetTriggerKarmaPrefix(victim, aEntities.Get(0));
+
 	delete aEntities;
 
 	if (iSize > 0)
 	{
-		AnnounceKarma(client, victim, KT_Charge, false, false, chargerTimer[client]);
+		AnnounceKarma(client, victim, KT_Charge, false, false, chargerTimer[client], INVALID_HANDLE, iPrefix);
 		chargerTimer[client] = null;
 		return Plugin_Stop;
 	}
 	else
 	{
 		// 0.0 is also flat apparently.
+		// 此判断要求坠落伤害达到 survivor_incap_max_fall_damage，属于必死，故为 [秒杀]
 		if ((fPlaneNormal[2] >= 0.7 || fPlaneNormal[2] == 0.0) && !CanClientSurviveFall(victim, catchHeight[client] - fEndOrigin[2]))
 		{
-			AnnounceKarma(client, victim, KT_Charge, true, false, chargerTimer[client]);
+			AnnounceKarma(client, victim, KT_Charge, true, false, chargerTimer[client], INVALID_HANDLE, KP_InstantKill);
 			chargerTimer[client] = null;
 			return Plugin_Stop;
 		}
@@ -1554,9 +1664,36 @@ bool TraceEnum_TriggerHurt(int entity, ArrayList aEntities)
 	return true;
 }
 
+// 用 trigger_hurt / KarmaKill 区域的伤害量估算这次 karma 的结局，决定播报前缀
+// trigger_multiple 命名的 KarmaKill 区域没有伤害属性，按地图本意（报应死区）记为 [秒杀]
+int GetTriggerKarmaPrefix(int victim, int entity)
+{
+	char sClassname[24];
+	GetEdictClassname(entity, sClassname, sizeof(sClassname));
+
+	if (strncmp(sClassname, "trigger_hurt", 12) != 0)
+		return KP_InstantKill;
+
+	// 已经倒地的人再吃摔落/溺水伤害就是直接死
+	if (L4D_IsPlayerIncapacitated(victim))
+		return KP_InstantKill;
+
+	float fDamage = GetEntPropFloat(entity, Prop_Data, "m_flDamage");
+
+	// 摔落伤害达到 survivor_incap_max_fall_damage 即当场死亡，5000 以上必死
+	if (fDamage >= 5000.0 || fDamage >= g_fFatalFallDamage)
+		return KP_InstantKill;
+
+	if (fDamage >= float(GetEntProp(victim, Prop_Send, "m_iHealth") + L4D_GetPlayerTempHealth(victim)))
+		return KP_HighDamage;
+
+	// 连"打倒"都判不出来时也不再用 [TS]，一律按 [高伤]
+	return KP_HighDamage;
+}
+
 // Client will be negative if the karma is done by a bot and the bot left the server.
 // In that case, client = -1 * zombieclass
-void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfirmed, Handle hDontKillHandle = null, Handle hDontKillHandle2 = INVALID_HANDLE)
+void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfirmed, Handle hDontKillHandle = null, Handle hDontKillHandle2 = INVALID_HANDLE, int iPrefix = KP_HighDamage)
 {
 	char KarmaName[64];
 	FormatEx(KarmaName, sizeof(KarmaName), karmaNames[type]);
@@ -1603,11 +1740,11 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 
 		if (type == KT_Jump)
 		{
-			CPrintToChatAll("[{olive}TS{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}，正义执行！！", LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "小鸟" : "报应", KarmaName, victim);
+			CPrintToChatAll("[{olive}%s{default}] {green}%s{olive} [%s] {default} %s %s {olive}%N{default}，正义执行！！", karmaPrefixes[iPrefix], LastKarma[victim][type].artistName, LastKarma[victim][type].artistSteamId, bBird ? "小鸟" : "报应", KarmaName, victim);
 		}
 		else
 		{
-			CPrintToChatAll("[{olive}TS{default}] {green}%s{default} %s %s {olive}%N{default}，正义执行！！", LastKarma[victim][type].artistName, bBird ? "小鸟" : "报应", KarmaName, victim);
+			CPrintToChatAll("[{olive}%s{default}] {green}%s{default} %s %s {olive}%N{default}，正义执行！！", karmaPrefixes[iPrefix], LastKarma[victim][type].artistName, bBird ? "小鸟" : "报应", KarmaName, victim);
 		}
 	}
 
@@ -1660,7 +1797,9 @@ void AnnounceKarma(int client, int victim, int type, bool bBird, bool bKillConfi
 	}
 	else
 	{
-		if (!StrEqual(LastKarma[victim][type].artistSteamId, "BOT"))
+		// 跳跃 karma 只在"确认死亡"时通知外部插件：倒地被判为 [自杀] 但不是被杀，
+		// 若照旧发 OnKarmaJumpPost / OnRPGKarmaEventPost，RPG 类插件可能误把倒地当死亡处理
+		if (bKillConfirmed && !StrEqual(LastKarma[victim][type].artistSteamId, "BOT"))
 		{
 			Call_StartForward(fw_OnKarmaJumpPost);
 
@@ -2236,6 +2375,9 @@ bool IsLastStandingSurvivor(int client)
 
 void AttachKarmaToVictim(int victim, int attacker, int type, bool bLastPos = false)
 {
+	// 产生了新的 karma 归属，"挂边松手"这个结局来源作废
+	g_bLedgeRelease[victim] = false;
+
 	LastKarma[victim][type].artist = attacker;
 	GetClientName(attacker, LastKarma[victim][type].artistName, sizeof(enLastKarma::artistName));
 	GetClientAuthId(attacker, AuthId_Steam2, LastKarma[victim][type].artistSteamId, sizeof(enLastKarma::artistSteamId));
@@ -2377,6 +2519,7 @@ bool CheckIfEntitySafe(int entity)
 void ResetKarma(int client)
 {
 	BlockAnnounce[client] = false;
+	g_bLedgeRelease[client] = false;
 	apexHeight[client]    = -65535.0;
 	catchHeight[client]   = -65535.0;
 
@@ -2519,7 +2662,7 @@ void OnCheckKarmaZoneTouch(int victim, int entity, const char[] zone_name, int p
 			int lastKarma = GetAnyLastKarma(victim, type);
 
 			if (lastKarma > 0 && IsClientInGame(lastKarma))
-				AnnounceKarma(lastKarma, victim, type, false, true);
+				AnnounceKarma(lastKarma, victim, type, false, true, null, INVALID_HANDLE, KP_InstantKill);
 		}
 	}
 }

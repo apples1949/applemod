@@ -3,12 +3,12 @@
     "PlayerConnect"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}已连接,正在获取玩家的实际游戏时长."
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}已连接,正在获取玩家的游戏时长."
     }
     "kickplayerUnqualified"
     {
         "#format"   "{1:.2f},{2:.2f}"
-        "chi"       "你因真实游戏时长不符合服务器规则({1} 小时 - {2}小时)而被自动踢出"
+        "chi"       "你因游戏时长不符合服务器规则({1} 小时 - {2} 小时)而被自动踢出"
     }
     "forcespecplayerUnqualified"
     {
@@ -18,17 +18,27 @@
     "announcegametime"
     {
         "#format"   "{1:N},{2:s},{3:s}"
-        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1}{default}的真实游戏时长是{2}{3}"
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1}{default}的游戏时长是{2}{3}"
     }
-    "announcegametimemode1"
-    {
-        "#format"   "{1:d},{2:d}"
-        "chi"       "{olive} {1}{default} 小时{olive} {2}{default} 分钟."
-    }
-    "announcegametimemode2"
+    "timeprofile"
     {
         "#format"   "{1:.2f}"
-        "chi"       "{olive} {1} {default}小时"
+        "chi"       " 主页{olive} {1} {default}小时"
+    }
+    "timestats"
+    {
+        "#format"   "{1:.2f}"
+        "chi"       " 成就{olive} {1} {default}小时"
+    }
+    "timeprofile1"
+    {
+        "#format"   "{1:d},{2:d}"
+        "chi"       " 主页{olive} {1} {default}小时{olive} {2} {default}分钟"
+    }
+    "timestats1"
+    {
+        "#format"   "{1:d},{2:d}"
+        "chi"       " 成就{olive} {1} {default}小时{olive} {2} {default}分钟"
     }
     "showlerp"
     {
@@ -38,25 +48,25 @@
     "RequestingPlayerGametime"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "chi"       "{green}[{olive}!{green}]{default}正在请求玩家{olive} {1} {default}的真实游戏时长,请求次数{2}/{3}"
+        "chi"       "{green}[{olive}!{green}]{default}正在请求玩家{olive} {1} {default}的游戏时长,请求次数{2}/{3}"
     }
     "FailureGetPlayerGametime"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{olive}!{green}]{default}请求玩家{olive} {1} {default}的真实游戏时长失败"
+        "chi"       "{green}[{olive}!{green}]{default}请求玩家{olive} {1} {default}的游戏时长失败"
     }
     "kickplayerFailureGet"
     {
-        "chi"       "你因服务器获取真实游戏时长失败而被自动踢出"
+        "chi"       "你因服务器获取游戏时长失败而被自动踢出"
     }
     "forcespecplayerFailureGet"
     {
         "#format"   "{1:N}"
-        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}因获取真实游戏时长失败而被强制移动到旁观!"
+        "chi"       "{green}[{olive}!{green}]{default}玩家{olive} {1} {default}因获取游戏时长失败而被强制移动到旁观!"
     }
     "forcespecplayerRequesting"
     {
         "#format"   "{1:N},{2:d},{3:d}"
-        "chi"       "{green}[{olive}!{green}]{default}因正在获取玩家{olive} {1} {default}的真实游戏时长.服务器暂时将其移动到旁观.请等待至成功获取真实游戏时长再加入对局.请求次数{2}/{3}"
+        "chi"       "{green}[{olive}!{green}]{default}因正在获取玩家{olive} {1} {default}的游戏时长.服务器暂时将其移动到旁观.请等待至成功获取游戏时长再加入对局.请求次数{2}/{3}"
     }
 }

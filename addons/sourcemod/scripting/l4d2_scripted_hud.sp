@@ -70,6 +70,23 @@ public Plugin myinfo =
 #define FIX_HUD_HEIGHT                 0.05
 #define FIX_HUD_FLAGS                  (HUD_FLAG_TEXT | HUD_FLAG_ALIGN_LEFT)
 
+// 局末趣文独立槽位 (带背景, 与修复队伍提示同风格但不共用槽位).
+// 不用 6 号 HUD_TICKER: 那是游戏自带 ticker 的地盘, 回合结束时游戏正在往那里写结算/奖励提示,
+// 只写一次会被立刻覆盖 -> 这就是"趣文 HUD 不显示"的原因.
+#define FUNFACT_HUD                    2
+#define FUNFACT_HUD_X                  0.25
+#define FUNFACT_HUD_Y                  0.14
+#define FUNFACT_HUD_WIDTH              0.6
+#define FUNFACT_HUD_HEIGHT             0.05
+#define FUNFACT_HUD_FLAGS              (HUD_FLAG_TEXT | HUD_FLAG_ALIGN_LEFT)
+
+// 趣文显示时长与重写策略.
+#define FUNFACT_REFRESH_INTERVAL       0.5     // 重写间隔: 游戏在回合结束/回合开始会整片重置脚本 HUD.
+#define FUNFACT_HIDE_DEFAULT           5.0     // 调用方没给时长时的默认显示时间.
+#define FUNFACT_ROUNDSTART_SHOW        6.0     // 下一回合开始时补显的时长 (回合结束的记分板会盖住 HUD).
+#define FUNFACT_MAX_DISPLAY            30.0    // 兜底上限: 单条趣文最长显示时间, 避免无限重写.
+#define FUNFACT_TEXT_MAX               256     // 与本插件 HUD1/HUD2 文本缓冲一致, 与脚本 HUD 单槽字符串长度对齐 (超长截断).
+
 // 修正中/完成提示文字与动画参数.
 #define FIX_MSG_BASE                   "正在修正队伍 非上一轮游戏的玩家请等待位置修正完成再加入游戏"
 #define FIX_MSG_DONE                   "队伍修正完成 可以加入游戏了"
@@ -103,9 +120,16 @@ static Handle g_hFixAnimTimer;
 static Handle g_hFixDoneTimer;
 static int    g_iFixDotCount;
 
-// 局末趣文 HUD_TICKER (复用"修复队伍"槽位) 状态.
+// 局末趣文 HUD (独立槽位 FUNFACT_HUD) 状态.
 static bool   g_bFunFactHUDVisible;
-static Handle g_hFunFactHideTimer;
+static char   g_sFunFactText[FUNFACT_TEXT_MAX];
+static Handle g_hFunFactTimer;                                  // 重复重写计时器.
+static float  g_fFunFactExpire;                                 // 计划隐藏时间 (GameTime).
+static float  g_fFunFactHardExpire;                             // 硬性上限 (GameTime).
+// 回合结束~下一回合开始之间屏幕上先是记分板/过渡画面, 趣文这时候可能没人看得到;
+// 因此记下待补显的文字, 在新回合开始时(记分板收起后)再显示一次.
+static bool   g_bFunFactPending;
+static char   g_sFunFactPendingText[FUNFACT_TEXT_MAX];
 
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
@@ -232,9 +256,14 @@ public void OnMapEnd()
     HideFixHUD();
 
     // 局末趣文 timer 未加 NO_MAPCHANGE: 换图时清掉并复位状态, 避免句柄悬垂.
-    delete g_hFunFactHideTimer;
-    g_hFunFactHideTimer = null;
+    delete g_hFunFactTimer;
+    g_hFunFactTimer = null;
     g_bFunFactHUDVisible = false;
+    g_sFunFactText[0] = '\0';
+
+    // 趣文属于上一张图的回合, 换图后不再补显.
+    g_bFunFactPending = false;
+    g_sFunFactPendingText[0] = '\0';
 }
 
 public void OnClientConnected(int client)
@@ -275,6 +304,14 @@ public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
     TryHookHUDSendProxy();
     UpdateFixTeamShuffleHUD();
     UpdateHUD();
+
+    // 回合结束时屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住; 新回合开始时(记分板收起后)
+    // 把上一回合的趣文再显示一次, 保证玩家一定能看到.
+    if (StrEqual(name, "round_start") && g_bFunFactPending && !g_bFixTeamShuffleInProgress)
+    {
+        g_bFunFactPending = false;
+        StartFunFactHUD(g_sFunFactPendingText, FUNFACT_ROUNDSTART_SHOW);
+    }
 }
 
 // ====================================================================================================
@@ -640,13 +677,11 @@ void StartFixHUD()
     g_bFixTeamShuffleInProgress = true;
     g_iFixDotCount = 0;
 
-    // 修复队伍开始, 取消仍在展示的局末趣文.
+    // 修复队伍提示优先: 结束仍在展示的局末趣文 (两者位置接近, 同时显示会互相压字).
     if (g_bFunFactHUDVisible)
-    {
-        delete g_hFunFactHideTimer;
-        g_hFunFactHideTimer = null;
-        g_bFunFactHUDVisible = false;
-    }
+        HideFunFactHUD();
+
+    ClearFunFactPending();
 
     ShowFixHUDText(FIX_MSG_BASE);
 
@@ -744,9 +779,16 @@ public void L4D2_FixTeamShuffle_OnFixComplete()
 }
 
 // ====================================================================================================
-// 局末趣文 HUD_TICKER (复用"修复队伍"的槽位/位置)
-//    由 l4d2_playstats_tranchi 在回合结束时调用, 把随机趣文展示在"修复队伍"显示的位置.
-//    展示 hideTime 秒后自动隐藏; 若期间修复队伍流程开始, 趣文被修复提示覆盖.
+// 局末趣文 HUD (独立槽位 FUNFACT_HUD)
+//    由 l4d2_playstats_tranchi 在回合结束时调用, 显示一条随机趣文.
+//
+//    为什么不能"只写一次":
+//      1) 6 号 HUD_TICKER 是游戏自带 ticker 的槽位, 回合结束时游戏正在往那里写结算/奖励提示,
+//         只写一次会立刻被游戏覆盖;
+//      2) 回合结束~下一回合开始这段时间屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住,
+//         即使写进去了玩家也看不到.
+//    因此这里: 独立槽位 + 每 FUNFACT_REFRESH_INTERVAL 秒重写一次, 并在新回合开始时
+//    (记分板收起后) 补显一次, 直到显示时间用完或到达 FUNFACT_MAX_DISPLAY 上限.
 // ====================================================================================================
 public int Native_ShowRoundFunFact(Handle plugin, int numParams)
 {
@@ -762,17 +804,67 @@ public int Native_ShowRoundFunFact(Handle plugin, int numParams)
     GetNativeString(1, sText, textLen + 1);
     float fHideTime = GetNativeCell(2);
 
+    // 聊天颜色控制码(\x01-\x05)脚本 HUD 不解析, 会画成方块/乱码: 去掉.
+    StripFunFactChatColors(sText);
+    TrimFunFactText(sText);
+
+    if (sText[0] == '\0')
+        return 0;
+
     // 修复队伍进行中时, 趣文跳过(修复提示优先).
     if (g_bFixTeamShuffleInProgress)
         return 0;
 
-    ShowFunFactHUDText(sText);
-
-    delete g_hFunFactHideTimer;
-    g_hFunFactHideTimer = null;
-    g_hFunFactHideTimer = CreateTimer((fHideTime > 0.0) ? fHideTime : FIX_DONE_HIDE_TIME, Timer_HideFunFactHUD);
+    StartFunFactHUD(sText, (fHideTime > 0.0) ? fHideTime : FUNFACT_HIDE_DEFAULT);
+    MarkFunFactPending(g_sFunFactText);
 
     return 1;
+}
+
+void StartFunFactHUD(const char[] sText, float fDuration)
+{
+    strcopy(g_sFunFactText, sizeof(g_sFunFactText), sText);
+
+    float fNow = GetGameTime();
+    g_fFunFactExpire = fNow + fDuration;
+    g_fFunFactHardExpire = fNow + fDuration + FUNFACT_MAX_DISPLAY;
+    g_bFunFactHUDVisible = true;
+
+    // 立即显示, 不等第一个 tick.
+    ShowFunFactHUDText(g_sFunFactText);
+
+    delete g_hFunFactTimer;
+    g_hFunFactTimer = CreateTimer(FUNFACT_REFRESH_INTERVAL, Timer_FunFactHUD, _, TIMER_REPEAT);
+}
+
+// 记下这条趣文, 等新回合开始时再补显一次.
+void MarkFunFactPending(const char[] sText)
+{
+    strcopy(g_sFunFactPendingText, sizeof(g_sFunFactPendingText), sText);
+    g_bFunFactPending = true;
+}
+
+void ClearFunFactPending()
+{
+    g_bFunFactPending = false;
+    g_sFunFactPendingText[0] = '\0';
+}
+
+public Action Timer_FunFactHUD(Handle timer)
+{
+    float fNow = GetGameTime();
+
+    if (!g_bFunFactHUDVisible || fNow >= g_fFunFactExpire || fNow >= g_fFunFactHardExpire)
+    {
+        // 不能在回调里 delete 自己; 只清句柄和槽位.
+        g_hFunFactTimer = null;
+        HideFunFactHUD();
+        return Plugin_Stop;
+    }
+
+    // 游戏/其它插件可能已经清掉或改写了该槽位: 每次重新写入整组属性, 保证整段显示时间都可见.
+    ShowFunFactHUDText(g_sFunFactText);
+    return Plugin_Continue;
 }
 
 void ShowFunFactHUDText(const char[] sText)
@@ -780,53 +872,75 @@ void ShowFunFactHUDText(const char[] sText)
     if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
         return;
 
-    GameRules_SetProp("m_iScriptedHUDFlags", FIX_HUD_FLAGS, _, HUD_TICKER);
-    GameRules_SetPropFloat("m_fScriptedHUDPosX", FIX_HUD_X, HUD_TICKER);
-    GameRules_SetPropFloat("m_fScriptedHUDPosY", FIX_HUD_Y, HUD_TICKER);
-    GameRules_SetPropFloat("m_fScriptedHUDWidth", FIX_HUD_WIDTH, HUD_TICKER);
-    GameRules_SetPropFloat("m_fScriptedHUDHeight", FIX_HUD_HEIGHT, HUD_TICKER);
-    GameRules_SetPropString("m_szScriptedHUDStringSet", sText, _, HUD_TICKER);
+    GameRules_SetProp("m_iScriptedHUDFlags", FUNFACT_HUD_FLAGS, _, FUNFACT_HUD);
+    GameRules_SetPropFloat("m_fScriptedHUDPosX", FUNFACT_HUD_X, FUNFACT_HUD);
+    GameRules_SetPropFloat("m_fScriptedHUDPosY", FUNFACT_HUD_Y, FUNFACT_HUD);
+    GameRules_SetPropFloat("m_fScriptedHUDWidth", FUNFACT_HUD_WIDTH, FUNFACT_HUD);
+    GameRules_SetPropFloat("m_fScriptedHUDHeight", FUNFACT_HUD_HEIGHT, FUNFACT_HUD);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", sText, _, FUNFACT_HUD);
     g_bFunFactHUDVisible = true;
-}
-
-public Action Timer_HideFunFactHUD(Handle timer)
-{
-    g_hFunFactHideTimer = null;
-    HideFunFactHUD();
-    return Plugin_Stop;
 }
 
 void HideFunFactHUD()
 {
+    ClearFunFactHUDSlot(g_sFunFactText);
+
     g_bFunFactHUDVisible = false;
+    g_sFunFactText[0] = '\0';
 
-    delete g_hFunFactHideTimer;
-    g_hFunFactHideTimer = null;
-
-    // 趣文结束后优先把 HUD 还给修复队伍流程.
-    if (g_bFixTeamShuffleInProgress)
-    {
-        if (g_hFixAnimTimer != null)
-            ShowFixHUDText(FIX_MSG_BASE);
-        else
-            ShowFixHUDText(FIX_MSG_DONE);
-        return;
-    }
-
-    ClearFunFactHUDSlot();
+    delete g_hFunFactTimer;
+    g_hFunFactTimer = null;
 }
 
-void ClearFunFactHUDSlot()
+// 只有当槽位里还是我们写进去的文字时才清空: 若期间游戏/其它插件改写了该槽位, 保持原样不破坏它们.
+void ClearFunFactHUDSlot(const char[] sOurs)
 {
     if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
-    {
-        g_bFunFactHUDVisible = false;
         return;
+
+    char sCurrent[FUNFACT_TEXT_MAX];
+    GameRules_GetPropString("m_szScriptedHUDStringSet", sCurrent, sizeof(sCurrent), FUNFACT_HUD);
+
+    if (sOurs[0] != '\0' && sCurrent[0] != '\0' && !StrEqual(sCurrent, sOurs))
+        return;
+
+    GameRules_SetProp("m_iScriptedHUDFlags", HUD_FLAG_NOTVISIBLE, _, FUNFACT_HUD);
+    GameRules_SetPropString("m_szScriptedHUDStringSet", "", _, FUNFACT_HUD);
+}
+
+// 去掉聊天颜色控制码 \x01-\x05 (PrintToChat 专用, 脚本 HUD 不认识).
+void StripFunFactChatColors(char[] sText)
+{
+    int iWrite = 0;
+
+    for (int iRead = 0; sText[iRead] != '\0'; iRead++)
+    {
+        if (sText[iRead] >= 1 && sText[iRead] <= 5)
+            continue;
+
+        sText[iWrite++] = sText[iRead];
     }
 
-    GameRules_SetProp("m_iScriptedHUDFlags", HUD_FLAG_NOTVISIBLE, _, HUD_TICKER);
-    GameRules_SetPropString("m_szScriptedHUDStringSet", "", _, HUD_TICKER);
-    g_bFunFactHUDVisible = false;
+    sText[iWrite] = '\0';
+}
+
+// 去掉首尾空白/换行: HUD 是单行框, 换行会撑高并挤掉正文.
+void TrimFunFactText(char[] sText)
+{
+    int iStart = 0;
+    while (sText[iStart] == ' ' || sText[iStart] == '\t' || sText[iStart] == '\r' || sText[iStart] == '\n')
+        iStart++;
+
+    int iEnd = strlen(sText);
+    while (iEnd > iStart && (sText[iEnd - 1] == ' ' || sText[iEnd - 1] == '\t' || sText[iEnd - 1] == '\r' || sText[iEnd - 1] == '\n'))
+        iEnd--;
+
+    // 统一在这里收尾: 全空白输入也会得到空串.
+    int iWrite = 0;
+    for (int i = iStart; i < iEnd; i++)
+        sText[iWrite++] = sText[i];
+
+    sText[iWrite] = '\0';
 }
 
 // ====================================================================================================

@@ -6,12 +6,16 @@
 #include <left4dhooks>
 #include <colors>
 
-#define PLUGIN_VERSION "1.5"
+#define PLUGIN_VERSION "1.6"
 
 float CONTROL_DELAY_SAFETY             = 0.3;
 float CONTROL_RETRY_DELAY              = 2.0;
 int TEAM_INFECTED                      = 3;
 #define MAX_TANK_ATTEMPTS              5
+
+// 玩家接管坦克后, 在这段时间内反复把面板弹回玩家屏幕上(避免玩家没看到面板)
+#define MENU_REFRESH_DURATION          10.0
+#define MENU_REFRESH_INTERVAL          2.0
 
 ConVar cvar_SurrenderTimeLimit         = null;
 ConVar cvar_SurrenderChoiceType        = null;
@@ -22,6 +26,7 @@ Handle surrenderMenu                  = null;
 Handle notifyTimer                    = null;
 Handle autoMenuTimer                  = null;
 Handle timeLimitTimer                 = null;
+Handle menuRefreshTimer               = null;
 Handle g_hForwardTankPassed           = null;
 
 bool withinTimeLimit                  = false;
@@ -30,11 +35,13 @@ int tankAttemptsFailed                = 0;
 bool g_bIsTankAlive                   = false;
 int currentTank                       = 0;
 int tankNoTargetRetries               = 0;
+float menuRefreshUntil                = 0.0;
+bool tankMenuChosen                   = false;
 
 public Plugin myinfo =
 {
 	name = "L4D Tank Swap",
-	author = "AtomicStryker, HarryPotter, Bred",
+	author = "AtomicStryker, HarryPotter, Bred, apples1949",
 	description = " Allows a primary Tank Player to surrender control to one of his teammates",
 	version = PLUGIN_VERSION,
 	url = "https://forums.alliedmods.net/showthread.php?t=326155"
@@ -116,6 +123,8 @@ public void OnClientDisconnect(int client)
 			CancelMenu(surrenderMenu);
 			surrenderMenu = null;
 		}
+
+		StopMenuRefresh();
 	}
 
 	// A Tank disconnect does not always fire entity_killed. Make sure a later
@@ -157,12 +166,27 @@ void ResetRoundState()
 		surrenderMenu = null;
 	}
 
+	StopMenuRefresh();
+
 	g_bIsTankAlive = false;
 	currentTank = 0;
 	withinTimeLimit = false;
 	primaryTankPlayer = -1;
 	tankAttemptsFailed = 0;
 	tankNoTargetRetries = 0;
+	tankMenuChosen = false;
+}
+
+/* 停止"接管坦克后 10 秒内持续重弹面板"的循环 */
+void StopMenuRefresh()
+{
+	if (menuRefreshTimer != null)
+	{
+		KillTimer(menuRefreshTimer);
+		menuRefreshTimer = null;
+	}
+
+	menuRefreshUntil = 0.0;
 }
 
 public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -200,12 +224,15 @@ public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast
 		surrenderMenu = null;
 	}
 
+	StopMenuRefresh();
+
 	currentTank = tankid;
 	g_bIsTankAlive = true;
 	withinTimeLimit = false;
 	primaryTankPlayer = -1;
 	tankAttemptsFailed = 0;
 	tankNoTargetRetries = 0;
+	tankMenuChosen = false;
 
 	float PlayerControlDelay = 0.0;
 	if (cvar_TankLotteryTime != null)
@@ -309,12 +336,15 @@ void ScheduleTakeoverMenu(int player)
 		surrenderMenu = null;
 	}
 
+	StopMenuRefresh();
+
 	primaryTankPlayer = player;
 	currentTank = player;
 	g_bIsTankAlive = true;
 	withinTimeLimit = false;
 	tankAttemptsFailed = 0;
 	tankNoTargetRetries = 0;
+	tankMenuChosen = false;
 
 	int userid = GetClientUserId(player);
 	if (cvar_SurrenderChoiceType.IntValue == 1)
@@ -375,6 +405,8 @@ public Action TS_TimeLimitIsOver(Handle timer)
 		CancelMenu(surrenderMenu);
 		surrenderMenu = null;
 	}
+
+	StopMenuRefresh();
 
 	return Plugin_Stop;
 }
@@ -535,21 +567,60 @@ public Action TS_Display_Auto_MenuToTank(Handle timer, int clientid)
 
 	tankAttemptsFailed = 0;
 
-	if (surrenderMenu != null)
+	if (ShowAutoMenuToTank(primaryTankPlayer))
+	{
+		tankNoTargetRetries = 0;
+		StartMenuRefresh();
 		return Plugin_Stop;
+	}
+
+	// 一个可接管的人都没有: 其它人类感染者可能马上变成可移交的 ghost → 短暂重试; 否则明确提示
+	if (tankNoTargetRetries < MAX_TANK_ATTEMPTS && HasOtherHumanInfected(primaryTankPlayer))
+	{
+		tankNoTargetRetries++;
+		autoMenuTimer = CreateTimer(CONTROL_RETRY_DELAY, TS_Display_Auto_MenuToTank, GetClientUserId(primaryTankPlayer));
+		return Plugin_Stop;
+	}
+
+	CPrintToChat(primaryTankPlayer, "%t", "No_Target");
+
+	return Plugin_Stop;
+}
+
+/* 构建并弹出克面板. 每次都重建: 队友可能在几秒内才变成 ghost/复活, 重建才能把
+   新出现的可接管玩家补进名单(修复面板"人不全"). 返回 false = 当前无人可接管. */
+bool ShowAutoMenuToTank(int tank)
+{
+	// 先数一下可接管的人: 一个都没有就别动已经弹着的面板
+	int electables;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsEligibleSwapTarget(i))
+			electables++;
+	}
+
+	if (electables == 0)
+		return false;
+
+	if (surrenderMenu != null)
+	{
+		// 先摘掉引用再取消: 旧面板的 End 回调不会误清新面板
+		Handle oldMenu = surrenderMenu;
+		surrenderMenu = null;
+		CancelMenu(oldMenu);
+	}
 
 	surrenderMenu = CreateMenu(TS_Auto_MenuCallBack);
 
 	char buffer[256];
-	Format(buffer, sizeof(buffer), "%T", "Menu_Title", primaryTankPlayer);
+	Format(buffer, sizeof(buffer), "%T", "Menu_Title", tank);
 	SetMenuTitle(surrenderMenu, buffer);
 
 	char name[MAX_NAME_LENGTH], number[8];
-	int electables;
 
-	Format(buffer, sizeof(buffer), "%T", "Stay_Me", primaryTankPlayer);
+	Format(buffer, sizeof(buffer), "%T", "Stay_Me", tank);
 	AddMenuItem(surrenderMenu, "0", buffer);
-	Format(buffer, sizeof(buffer), "%T", "Anyone_But_Me", primaryTankPlayer);
+	Format(buffer, sizeof(buffer), "%T", "Anyone_But_Me", tank);
 	AddMenuItem(surrenderMenu, "99", buffer);
 
 	for (int i = 1; i <= MaxClients; i++)
@@ -559,35 +630,57 @@ public Action TS_Display_Auto_MenuToTank(Handle timer, int clientid)
 		Format(name, sizeof(name), "%N", i);
 		Format(number, sizeof(number), "%i", i);
 		AddMenuItem(surrenderMenu, number, name);
-
-		electables++;
 	}
 
-	if (electables > 0) // only show it if there is someone to swap to
+	SetMenuExitButton(surrenderMenu, false);
+	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(2.0 * GetSurrenderTimeLimit())))
+		return true;
+
+	CloseHandle(surrenderMenu);
+	surrenderMenu = null;
+
+	return false;
+}
+
+/* 面板弹给玩家后, 开始"10 秒内持续重弹"的循环 */
+void StartMenuRefresh()
+{
+	if (tankMenuChosen)
+		return;
+
+	if (menuRefreshTimer != null)
 	{
-		SetMenuExitButton(surrenderMenu, false);
-		if (!DisplayMenu(surrenderMenu, primaryTankPlayer, RoundToCeil(2.0 * GetSurrenderTimeLimit())))
-		{
-			CloseHandle(surrenderMenu);
-			surrenderMenu = null;
-		}
-		tankNoTargetRetries = 0;
+		KillTimer(menuRefreshTimer);
+		menuRefreshTimer = null;
 	}
-	else
-	{
-		CloseHandle(surrenderMenu);
-		surrenderMenu = null;
 
-		// 其它人类感染者可能马上变成可移交的 ghost → 短暂重试; 否则明确提示
-		if (tankNoTargetRetries < MAX_TANK_ATTEMPTS && HasOtherHumanInfected(primaryTankPlayer))
-		{
-			tankNoTargetRetries++;
-			autoMenuTimer = CreateTimer(CONTROL_RETRY_DELAY, TS_Display_Auto_MenuToTank, GetClientUserId(primaryTankPlayer));
-			return Plugin_Stop;
-		}
+	menuRefreshUntil = GetGameTime() + MENU_REFRESH_DURATION;
+	menuRefreshTimer = CreateTimer(MENU_REFRESH_INTERVAL, TS_RefreshAutoMenu);
+}
 
-		CPrintToChat(primaryTankPlayer, "%t", "No_Target");
-	}
+/* 10 秒窗口内反复把面板弹回玩家屏幕上, 避免玩家没看到面板;
+   玩家选择过了 / 坦克没了 / 窗口结束 就停下 */
+public Action TS_RefreshAutoMenu(Handle timer)
+{
+	menuRefreshTimer = null;
+
+	if (tankMenuChosen || !g_bIsTankAlive)
+		return Plugin_Stop;
+
+	if (cvar_SurrenderChoiceType.IntValue != 2)
+		return Plugin_Stop;
+
+	if (!IsHumanTank(primaryTankPlayer))
+		return Plugin_Stop;
+
+	if (GetGameTime() >= menuRefreshUntil)
+		return Plugin_Stop;
+
+	// 重建面板: 顺便把这几秒内新变成 ghost 的队友补进名单
+	ShowAutoMenuToTank(primaryTankPlayer);
+
+	if (!tankMenuChosen && GetGameTime() < menuRefreshUntil)
+		menuRefreshTimer = CreateTimer(MENU_REFRESH_INTERVAL, TS_RefreshAutoMenu);
 
 	return Plugin_Stop;
 }
@@ -632,6 +725,9 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 	int choice = StringToInt(number);
 	if (!choice)
 	{
+		// "我自己玩": 玩家已经做出选择, 不再重复弹面板
+		tankMenuChosen = true;
+		StopMenuRefresh();
 		return 0; // "I want to stay Tank"
 	}
 	else if (choice == 99) // "Anyone but me"
@@ -644,6 +740,9 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 	{
 		CPrintToChatAll("%t", "Surrend", choice);
 	}
+
+	// 换克成功时 PerformTankSwap 内部已置位并停表;
+	// 失败(目标这几秒里失效了)则不置位, 刷新循环会在窗口内把面板弹回来给玩家重选
 
 	return 0;
 }
@@ -721,6 +820,8 @@ public Action FindAnyTank(Handle timer, int client)
 			CancelMenu(surrenderMenu);
 			surrenderMenu = null;
 		}
+
+		StopMenuRefresh();
 	}
 
 	return Plugin_Continue;
@@ -766,8 +867,10 @@ bool IsEligibleSwapTarget(int client)
 	if (IsFakeClient(client)) return false;
 	if (GetClientTeam(client) != TEAM_INFECTED) return false;
 	if (IsPlayerTank(client)) return false;
-	if (!IsPlayerAlive(client) && !IsPlayerGhost(client)) return false;
 
+	// 阵亡(死亡回放中, 还没来得及变 ghost)的队友同样列出:
+	// 引擎换克本来就要求目标处于"躺尸/幽灵"状态才拿得到控制权(见 PerformTankSwap),
+	// 之前这里额外要求"活着或已是幽灵", 导致面板上经常缺人。
 	return true;
 }
 
@@ -803,6 +906,10 @@ bool PerformTankSwap(int oldTank, int newTank)
 		KillTimer(timeLimitTimer);
 		timeLimitTimer = null;
 	}
+
+	// 已经换过克: 不再重复弹面板
+	tankMenuChosen = true;
+	StopMenuRefresh();
 
 	return true;
 }

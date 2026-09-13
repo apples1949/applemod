@@ -11,6 +11,8 @@
  *   - 之后按间隔给血，默认每 3 秒 5 点，共 8 次；期间虚血不自然流失。
  *   - 回满后去掉黑白；中途打包/倒地默认停止后续回血。
  *   - 可在指定回血次数后把倒地次数改为目标值。
+ *   - 复活后起身(到完全站立)期间豁免 Spitter 酸液伤害；
+ *     若起身中被特殊感染者直接控住(扑倒/骑乘/拖拽/冲撞)，立即取消豁免。
  * ========================================================================== */
 
 #pragma semicolon 1
@@ -18,19 +20,31 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.5"
+#define PLUGIN_VERSION		"1.6"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
 #define ZC_TANK				8
+#define ZC_SPITTER			4
 
 #define MODEL_DEFIB			"models/w_models/weapons/w_eq_defibrillator.mdl"
 #define CLASS_DEFIB_SPAWN	"weapon_defibrillator_spawn"
 
 #define GLOW_COLOR_BLUE		16711680	// 0 0 255
 #define GLOW_RANGE			800
+
+// Spitter 酸液伤害：CInsectSwarm::GetDamageType() = 263168 (DMG_RADIATION|DMG_ENERGYBEAM)
+#define DMG_TYPE_SPIT		(DMG_RADIATION | DMG_ENERGYBEAM)
+#define CLASS_SPIT_GOO		"insect_swarm"
+#define CLASS_SPIT_PROJ		"spitter_projectile"
+
+// 起身豁免：电击瞬间与游戏写入起身状态之间可能差几帧，先保证这段宽限不被判结束
+#define SPIT_IMMUNE_GRACE		0.3
+// 起身豁免：迟迟观察不到起身状态时，最多再等这么久就按兜底收手
+#define SPIT_IMMUNE_WAIT_MAX	1.5
 
 ConVar g_cvEnable;
 ConVar g_cvGiveMode;
@@ -45,6 +59,8 @@ ConVar g_cvTempDecay;
 ConVar g_cvHealCount;
 ConVar g_cvReviveCountTick;
 ConVar g_cvReviveCountSet;
+ConVar g_cvSpitImmune;
+ConVar g_cvSpitImmuneMax;
 
 ConVar g_hGameMaxIncap;
 ConVar g_hPillsDecayRate;
@@ -72,6 +88,15 @@ bool g_bSwappedTank[MAXPLAYERS + 1];
 // 本插件复活后给黑白生还者加的蓝色轮廓
 bool g_bBWOutline[MAXPLAYERS + 1];
 
+// 起身期间 Spitter 酸液豁免（除颤器复活 -> 完全站立）
+bool g_bSpitImmune[MAXPLAYERS + 1];			// 豁免生效中（伤害钩子只看这个）
+float g_fSpitImmuneStart[MAXPLAYERS + 1];	// 豁免开始时间
+bool g_bSpitGetupSeen[MAXPLAYERS + 1];		// 是否已观察到游戏的“正在被电起”起身状态
+bool g_bDefibAnimActive[MAXPLAYERS + 1];	// 收到 DEFIB_START 但还没收到 DEFIB_END
+int g_iSpitImmuneCount;
+
+bool g_bLateLoad;
+
 public Plugin myinfo =
 {
 	name		= "[L4D2] Tank Defib Revive",
@@ -88,6 +113,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		strcopy(error, err_max, "This plugin only runs in \"Left 4 Dead 2\" game.");
 		return APLRes_SilentFailure;
 	}
+	g_bLateLoad = late;
 	return APLRes_Success;
 }
 
@@ -117,12 +143,15 @@ public void OnPluginStart()
 	g_cvHealCount				= CreateConVar("l4d2_tank_defib_heal_count", "8", "复活后的回血次数,回满后去掉黑白状态且不再回血.", FCVAR_NOTIFY, true, 0.0, true, 100.0);
 	g_cvReviveCountTick			= CreateConVar("l4d2_tank_defib_revive_count_tick", "-1", "在多少次回血后设置倒地次数: -1=不设置, 0=复活后立即设置,目标值由l4d2_tank_defib_revive_count_set决定.", FCVAR_NOTIFY, true, -1.0, true, 100.0);
 	g_cvReviveCountSet			= CreateConVar("l4d2_tank_defib_revive_count_set", "1", "回血达到l4d2_tank_defib_revive_count_tick次数后设置的倒地次数: 0=未倒地状态,设置值不能超过survivor_max_incapacitated_count(运行时自动钳制).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
+	g_cvSpitImmune				= CreateConVar("l4d2_tank_defib_spit_immune", "1", "除颤器复活后起身(到完全站立)期间是否豁免 Spitter 酸液伤害: 0=关闭, 1=开启(起身中被特感控住则立即取消豁免).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvSpitImmuneMax			= CreateConVar("l4d2_tank_defib_spit_immune_max", "5.0", "起身豁免的兜底上限(秒): 游戏状态异常、无法判定起身已结束时, 最多豁免这么久.", FCVAR_NOTIFY, true, 0.5, true, 30.0);
 
 	g_cvInitialReviveCount.SetInt(defaultReviveCount, false, false);
 
 	// 总开关/接管开关被关闭时，立即停止正在进行的回血流程
 	g_cvEnable.AddChangeHook(CvarFeatureChanged);
 	g_cvTakeover.AddChangeHook(CvarFeatureChanged);
+	g_cvSpitImmune.AddChangeHook(CvarFeatureChanged);
 
 	HookEvent("player_death", Event_PlayerDeath);
 	HookEvent("defibrillator_used", Event_DefibrillatorUsed);
@@ -130,6 +159,13 @@ public void OnPluginStart()
 	HookEvent("player_incapacitated", Event_PlayerIncapacitated);
 	HookEvent("round_start", Event_RoundStart);
 	HookEvent("tank_spawn", Event_TankSpawn);
+
+	// 起身中被特感直接控住 -> 取消酸液豁免
+	HookEvent("lunge_pounce", Event_SIControl);
+	HookEvent("tongue_grab", Event_SIControl);
+	HookEvent("jockey_ride", Event_SIControl);
+	HookEvent("charger_carry_start", Event_SIControl);
+	HookEvent("charger_pummel_start", Event_SIControl);
 
 	// 黑白轮廓：外部把黑白移除时同步移除轮廓
 	HookEvent("heal_success", Event_HealSuccess);
@@ -140,6 +176,24 @@ public void OnPluginStart()
 	HookEvent("player_team", Event_PlayerTeam);
 
 	//AutoExecConfig(true, "l4d2_tank_defib_revive");
+
+	// 中途加载插件时，补挂已在线玩家的伤害钩子
+	if (g_bLateLoad)
+	{
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (IsClientInGame(i))
+			{
+				OnClientPutInServer(i);
+			}
+		}
+	}
+}
+
+public void OnClientPutInServer(int client)
+{
+	// 起身酸液豁免靠拦伤害实现，必须给每个玩家挂上伤害钩子
+	SDKHook(client, SDKHook_OnTakeDamage, Hook_OnTakeDamage);
 }
 
 public void OnMapStart()
@@ -152,6 +206,7 @@ public void OnMapEnd()
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		ClearHealingState(i);
+		ClearSpitImmunity(i);
 		g_bHasDeathPos[i] = false;
 		g_bSwappedTank[i] = false;
 		ResetBWOutline(i);
@@ -162,24 +217,29 @@ public void OnGameFrame()
 {
 	// 回血期间虚血不自然流失：每帧刷新 m_healthBufferTime，
 	// 只阻止自然衰减计时，不恢复玩家实际受到的伤害。
-	if (g_iHealingCount == 0 || g_cvTempDecay.BoolValue)
+	if (g_iHealingCount > 0 && !g_cvTempDecay.BoolValue)
 	{
-		return;
+		float now = GetGameTime();
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (g_bHealing[i] && g_bHealTypeTemp[i] && IsValidSurvivor(i) && IsPlayerAlive(i))
+			{
+				SetEntPropFloat(i, Prop_Send, "m_healthBufferTime", now);
+			}
+		}
 	}
 
-	float now = GetGameTime();
-	for (int i = 1; i <= MaxClients; i++)
+	// 起身酸液豁免：只有存在豁免窗口时才遍历判定起身是否结束
+	if (g_iSpitImmuneCount > 0)
 	{
-		if (g_bHealing[i] && g_bHealTypeTemp[i] && IsValidSurvivor(i) && IsPlayerAlive(i))
-		{
-			SetEntPropFloat(i, Prop_Send, "m_healthBufferTime", now);
-		}
+		UpdateSpitImmunity();
 	}
 }
 
 public void OnClientDisconnect(int client)
 {
 	ClearHealingState(client);
+	ClearSpitImmunity(client);
 	g_bHasDeathPos[client] = false;
 	g_bSwappedTank[client] = false;
 	ResetBWOutline(client);
@@ -190,6 +250,7 @@ public void CvarFeatureChanged(ConVar convar, const char[] oldValue, const char[
 	if (StringToInt(newValue) == 0)
 	{
 		StopAllHealing();
+		StopAllSpitImmunity();
 	}
 }
 
@@ -332,12 +393,15 @@ public void Event_ReviveSuccess(Event event, const char[] name, bool dontBroadca
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int userid = GetClientOfUserId(event.GetInt("userid"));
+	// 这里不清起身豁免：复活瞬间也可能触发 player_spawn，
+	// 豁免的结束由“起身状态消失/兜底上限”判定，另有死亡/换边/回合开始等清理路径。
 	ResetBWOutline(userid);
 }
 
 public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
 	int userid = GetClientOfUserId(event.GetInt("userid"));
+	ClearSpitImmunity(userid);
 	ResetBWOutline(userid);
 }
 
@@ -346,6 +410,7 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		ClearHealingState(i);
+		ClearSpitImmunity(i);
 		g_bHasDeathPos[i] = false;
 		g_bSwappedTank[i] = false;
 		ResetBWOutline(i);
@@ -373,6 +438,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 
 		ResetBWOutline(victim);
 		ClearHealingState(victim);
+		ClearSpitImmunity(victim);
 		return;
 	}
 
@@ -418,6 +484,12 @@ public void Event_DefibrillatorUsed(Event event, const char[] name, bool dontBro
 		return;
 	}
 
+	// 起身(到完全站立)期间豁免 Spitter 酸液伤害
+	if (g_cvSpitImmune.BoolValue)
+	{
+		StartSpitImmunity(subject);
+	}
+
 	// 稍微延迟，确保游戏先完成默认复活流程，再覆盖血量/倒地次数/黑白状态
 	CreateTimer(0.1, Timer_ApplyDefibState, GetClientUserId(subject), TIMER_FLAG_NO_MAPCHANGE);
 }
@@ -446,16 +518,27 @@ public void Event_HealBegin(Event event, const char[] name, bool dontBroadcast)
 
 public void Event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcast)
 {
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+
+	// 已经倒地，起身窗口结束，取消酸液豁免
+	ClearSpitImmunity(victim);
+
 	if (!g_cvEnable.BoolValue || !g_cvTakeover.BoolValue || g_cvContinueOnInterrupt.BoolValue)
 	{
 		return;
 	}
 
-	int victim = GetClientOfUserId(event.GetInt("userid"));
 	if (IsValidSurvivor(victim) && g_bHealing[victim])
 	{
 		StopHealing(victim);
 	}
+}
+
+// 起身中被特感直接控住（扑倒/骑乘/拖拽/冲撞）-> 取消豁免
+public void Event_SIControl(Event event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(event.GetInt("victim"));
+	ClearSpitImmunity(victim);
 }
 
 public Action Timer_ApplyDefibState(Handle timer, int userid)
@@ -839,6 +922,177 @@ void ClearHealingState(int client)
 	{
 		KillTimer(g_hHealTimer[client]);
 		g_hHealTimer[client] = null;
+	}
+}
+
+// =============================
+// 起身期间 Spitter 酸液豁免
+//
+// 窗口 = 除颤器复活瞬间 -> 完全站立：
+//   证据1(状态)：起身期间游戏给生还者记 m_iCurrentUseAction = L4D2UseAction_GettingDefibed，
+//                起身结束（能重新行动）时清除。
+//   证据2(动画)：游戏播放起身动画时发 PLAYERANIMEVENT_DEFIB_START，播放完发 ..._DEFIB_END。
+//   两个信号任一仍在，就认为还在起身；两个都结束才取消豁免（避免单一信号异常导致提前漏挡）。
+//   兜底：SPIT_IMMUNE_WAIT_MAX 内没等到起身状态、以及 l4d2_tank_defib_spit_immune_max 上限。
+// 取消：起身中被特感直接控住 / 倒地 / 死亡 / 换边 / 掉线 / 回合开始。
+// =============================
+public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype)
+{
+	// 只有处于起身豁免窗口的玩家才需要进一步判断
+	if (victim < 1 || victim > MaxClients || !g_bSpitImmune[victim])
+	{
+		return Plugin_Continue;
+	}
+
+	if (!IsSpitterDamage(inflictor, attacker, damagetype))
+	{
+		return Plugin_Continue;
+	}
+
+	return Plugin_Handled;
+}
+
+bool IsSpitterDamage(int inflictor, int attacker, int damagetype)
+{
+	// 酸液本体(insect_swarm) 与 吐酸投射物(spitter_projectile)
+	if (inflictor > MaxClients && IsValidEdict(inflictor))
+	{
+		char classname[64];
+		GetEdictClassname(inflictor, classname, sizeof(classname));
+
+		if (StrEqual(classname, CLASS_SPIT_GOO, false) || StrEqual(classname, CLASS_SPIT_PROJ, false))
+		{
+			return true;
+		}
+	}
+
+	// 兜底：酸液伤害类型 + 攻击者是 Spitter
+	if ((damagetype & DMG_TYPE_SPIT) == DMG_TYPE_SPIT
+		&& attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker)
+		&& GetClientTeam(attacker) == TEAM_INFECTED
+		&& GetEntProp(attacker, Prop_Send, "m_zombieClass") == ZC_SPITTER)
+	{
+		return true;
+	}
+
+	return false;
+}
+
+public Action L4D_OnDoAnimationEvent(int client, int &event, int &variant_param)
+{
+	// 本回调每个动画事件都会触发，先做最轻的短路
+	if (g_iSpitImmuneCount == 0)
+	{
+		return Plugin_Continue;
+	}
+
+	PlayerAnimEvent_t anim = view_as<PlayerAnimEvent_t>(event);
+	if (anim != PLAYERANIMEVENT_DEFIB_START && anim != PLAYERANIMEVENT_DEFIB_END)
+	{
+		return Plugin_Continue;
+	}
+
+	if (client < 1 || client > MaxClients || !g_bSpitImmune[client])
+	{
+		return Plugin_Continue;
+	}
+
+	g_bDefibAnimActive[client] = (anim == PLAYERANIMEVENT_DEFIB_START);
+	return Plugin_Continue;
+}
+
+void StartSpitImmunity(int client)
+{
+	if (!g_bSpitImmune[client])
+	{
+		g_iSpitImmuneCount++;
+	}
+
+	g_bSpitImmune[client]		= true;
+	g_fSpitImmuneStart[client]	= GetGameTime();
+	g_bSpitGetupSeen[client]	= false;
+	g_bDefibAnimActive[client]	= false;
+}
+
+// 幂等：非豁免状态、非法 client 都直接返回
+void ClearSpitImmunity(int client)
+{
+	if (client < 1 || client > MaxClients || !g_bSpitImmune[client])
+	{
+		return;
+	}
+
+	g_iSpitImmuneCount--;
+	g_bSpitImmune[client]		= false;
+	g_fSpitImmuneStart[client]	= 0.0;
+	g_bSpitGetupSeen[client]	= false;
+	g_bDefibAnimActive[client]	= false;
+}
+
+void StopAllSpitImmunity()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		ClearSpitImmunity(i);
+	}
+}
+
+void UpdateSpitImmunity()
+{
+	float now = GetGameTime();
+	float maxDuration = g_cvSpitImmuneMax.FloatValue;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!g_bSpitImmune[i])
+		{
+			continue;
+		}
+
+		// 掉线/换边（死亡由 player_death 清理，复活瞬间可能还判定为死亡，这里不判 IsPlayerAlive）
+		if (!IsValidSurvivor(i))
+		{
+			ClearSpitImmunity(i);
+			continue;
+		}
+
+		float elapsed = now - g_fSpitImmuneStart[i];
+
+		// 兜底上限：状态异常时不会变成永久豁免
+		if (elapsed >= maxDuration)
+		{
+			ClearSpitImmunity(i);
+			continue;
+		}
+
+		// 电击到游戏写入起身状态之间的宽限期，不做结束判定
+		if (elapsed < SPIT_IMMUNE_GRACE)
+		{
+			continue;
+		}
+
+		bool bGettingUp = (L4D2_GetPlayerUseAction(i) == L4D2UseAction_GettingDefibed)
+			|| g_bDefibAnimActive[i];
+
+		if (!g_bSpitGetupSeen[i])
+		{
+			if (bGettingUp)
+			{
+				g_bSpitGetupSeen[i] = true;
+			}
+			else if (elapsed >= SPIT_IMMUNE_WAIT_MAX)
+			{
+				// 一直没观察到起身状态：按兜底收手
+				ClearSpitImmunity(i);
+			}
+			continue;
+		}
+
+		// 起身结束（已经完全站立）
+		if (!bGettingUp)
+		{
+			ClearSpitImmunity(i);
+		}
 	}
 }
 

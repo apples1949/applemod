@@ -18,19 +18,28 @@
 
 
 
-#define PLUGIN_VERSION 		"1.7"
+#define PLUGIN_VERSION 		"1.8"
 
 /*=======================================================================================
 	Plugin Info:
 
 *	Name	:	[L4D2] Charger Power - Objects Glow
-*	Author	:	SilverShot
+*	Author	:	SilverShot, apples1949
 *	Descrp	:	Creates a glow for the objects which chargers can move.
 *	Link	:	https://forums.alliedmods.net/showthread.php?t=186556
 *	Plugins	:	https://sourcemod.net/plugins.php?exact=exact&sortby=title&search=1&author=Silvers
 
 ========================================================================================
 	Change Log:
+
+1.8 (13-Sep-2026)
+	- Fixed the glow still showing after a dead Charger respawns as another infected type. Whether a
+	  player may see the glow is now decided every tick from the client's live state (team / alive /
+	  m_isGhost / m_zombieClass) instead of the "player_spawn" event, so a stale zombie class can no
+	  longer leave the glow enabled. Dead players and ghosts never see the glow any more.
+	- Glow is now aim based: only the object the Charger's crosshair is on glows for that Charger. A ray
+	  trace is cast along the view angles and "l4d2_charger_power_glow_range" also limits the maximum aim
+	  distance. Players and common infected do not block the ray.
 
 1.7 (27-Jul-2023)
 	- Changes to fix warnings when compiling on SourceMod 1.11.
@@ -79,7 +88,8 @@
 Handle g_hTimerStart;
 ConVar g_hCvarAllow, g_hCvarColor, g_hCvarLimit, g_hCvarMPGameMode, g_hCvarObjects, g_hCvarRange;
 int g_iCount, g_iCvarColor, g_iCvarLimit, g_iCvarRange, g_iEntities[MAX_ALLOWED], g_iTarget[MAX_ALLOWED];
-bool g_bLoaded, g_bMapStarted, g_bShowProp[MAXPLAYERS+1];
+int g_iAimGlow[MAXPLAYERS+1], g_iAimTick[MAXPLAYERS+1];
+bool g_bLoaded, g_bMapStarted, g_bCanGlow[MAXPLAYERS+1];
 
 
 
@@ -89,7 +99,7 @@ bool g_bLoaded, g_bMapStarted, g_bShowProp[MAXPLAYERS+1];
 public Plugin myinfo =
 {
 	name = "[L4D2] Charger Power - Objects Glow",
-	author = "SilverShot",
+	author = "SilverShot, apples1949",
 	description = "Creates a glow for the objects which chargers can move.",
 	version = PLUGIN_VERSION,
 	url = "https://forums.alliedmods.net/showthread.php?t=186556"
@@ -142,20 +152,14 @@ public void OnAllPluginsLoaded()
 
 public void OnClientDisconnect(int client)
 {
-	g_bShowProp[client] = false;
+	g_bCanGlow[client] = false;
+	g_iAimGlow[client] = 0;
+	g_iAimTick[client] = 0;
 }
 
 void LateLoad()
 {
 	g_hTimerStart = CreateTimer(1.0, TimerStart, _, TIMER_FLAG_NO_MAPCHANGE);
-
-	for( int i = 1; i <= MaxClients; i++ )
-	{
-		if( IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == 3 && IsPlayerAlive(i) && GetEntProp(i, Prop_Send, "m_zombieClass") == 6 )
-		{
-			g_bShowProp[i] = true;
-		}
-	}
 }
 
 void ResetPlugin(bool all)
@@ -177,10 +181,24 @@ void ResetPlugin(bool all)
 
 		for( int i = 0; i <= MAXPLAYERS; i++ )
 		{
-			g_bShowProp[i] = false;
+			g_bCanGlow[i] = false;
+			g_iAimGlow[i] = 0;
+			g_iAimTick[i] = 0;
 		}
 
 		delete g_hTimerStart;
+	}
+}
+
+public void OnGameFrame()
+{
+	// 没有发光体时不需要做任何判定
+	if( g_iCount == 0 )
+		return;
+
+	for( int i = 1; i <= MaxClients; i++ )
+	{
+		UpdateGlow(i);
 	}
 }
 
@@ -339,32 +357,137 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client > 0 )
 	{
-		CheckClient(client);
+		// 不等下一帧: 死亡 / 换阵营 / 变 Tank 后立刻重新判定, 马上熄灭残留的光圈
+		g_iAimTick[client] = 0;
+		UpdateGlow(client);
 	}
 }
 
-void CheckClient(int client)
+// 每个 tick 只判定一次: 玩家是否还是"活着的真人 Charger", 以及准星是否正对着可撞动的物体。
+// 不再相信 player_spawn 事件瞬间的 m_zombieClass(死亡瞬间会被重置/换职业时会滞后),
+// 所以 Charger 死后换成其他特感、变灵魂状态或换阵营时都会立刻停止发光。
+void UpdateGlow(int client)
 {
-	if( g_bShowProp[client] == true )
+	if( client < 1 || client > MaxClients )
+		return;
+
+	int tick = GetGameTickCount();
+	if( g_iAimTick[client] == tick )
+		return;
+
+	g_iAimTick[client] = tick;
+
+	bool bCharger = IsGlowCharger(client);
+
+	if( g_bCanGlow[client] && !bCharger )
 	{
-		g_bShowProp[client] = false;
+		// 从"看得见发光"变成"看不见": 强制客户端丢掉已经渲染出来的光圈
+		g_bCanGlow[client] = false;
+		g_iAimGlow[client] = 0;
+		RefreshGlow();
+		return;
+	}
 
-		int entity, done;
-		for( int i = 0; i < MAX_ALLOWED; i++ )
-		{
-			entity = g_iEntities[i];
-			if( entity && (entity = EntRefToEntIndex(entity)) != INVALID_ENT_REFERENCE )
-			{
-				SetEntProp(entity, Prop_Send, "m_nGlowRange", 1);
-				SDKUnhook(entity, SDKHook_SetTransmit, OnTransmit);
-				done++;
-			}
-		}
+	g_bCanGlow[client] = bCharger;
+	g_iAimGlow[client] = bCharger ? GetAimGlow(client) : 0;
+}
 
-		if( done )
+bool IsGlowCharger(int client)
+{
+	return IsClientInGame(client)
+		&& !IsFakeClient(client)
+		&& GetClientTeam(client) == 3
+		&& IsPlayerAlive(client)
+		&& GetEntProp(client, Prop_Send, "m_isGhost") == 0	// L4D2 的灵魂状态也算"活着"(IsPlayerAlive 为真), 必须单独排除
+		&& GetEntProp(client, Prop_Send, "m_zombieClass") == 6;
+}
+
+// 沿准星射线找出正对着的可撞动物体, 返回该物体对应的发光克隆体实体索引, 没有则返回 0
+int GetAimGlow(int client)
+{
+	if( g_iCount == 0 )
+		return 0;
+
+	float vPos[3], vAng[3], vEnd[3];
+	GetClientEyePosition(client, vPos);
+	GetClientEyeAngles(client, vAng);
+
+	Handle hTrace = TR_TraceRayFilterEx(vPos, vAng, MASK_OPAQUE, RayType_Infinite, TraceFilterAim);
+
+	if( !TR_DidHit(hTrace) )
+	{
+		delete hTrace;
+		return 0;
+	}
+
+	TR_GetEndPosition(vEnd, hTrace);
+	int hit = TR_GetEntityIndex(hTrace);
+	delete hTrace;
+
+	// 超过 l4d2_charger_power_glow_range 的距离同样不发光
+	if( hit <= 0 || GetVectorDistance(vPos, vEnd) > float(g_iCvarRange) )
+		return 0;
+
+	int entity;
+
+	// 命中的是原物体
+	for( int i = 0; i < g_iCount; i++ )
+	{
+		if( (entity = EntRefToEntIndex(g_iTarget[i])) != INVALID_ENT_REFERENCE && entity == hit )
 		{
-			CreateTimer(0.1, TimerHook);
+			entity = EntRefToEntIndex(g_iEntities[i]);
+			return (entity == INVALID_ENT_REFERENCE) ? 0 : entity;
 		}
+	}
+
+	// 命中的是发光克隆体本身
+	for( int i = 0; i < g_iCount; i++ )
+	{
+		if( (entity = EntRefToEntIndex(g_iEntities[i])) != INVALID_ENT_REFERENCE && entity == hit )
+		{
+			return entity;
+		}
+	}
+
+	return 0;
+}
+
+// 射线过滤器: 玩家与小僵尸不阻挡准星(队友/尸群挡在前面也能看到物体发光), 世界与其它道具照常阻挡
+bool TraceFilterAim(int entity, int contentsMask)
+{
+	if( entity >= 1 && entity <= MaxClients )
+		return false;
+
+	if( entity > MaxClients && IsValidEdict(entity) )
+	{
+		char sClass[16];
+		GetEdictClassname(entity, sClass, sizeof(sClass));
+		if( strcmp(sClass, "infected") == 0 )
+			return false;
+	}
+
+	return true;
+}
+
+// 把光圈范围压到 1 再还原: 让客户端立刻丢掉已经渲染出来的光圈(0.1 秒后由 TimerHook 还原)
+void RefreshGlow()
+{
+	int entity, done;
+
+	for( int i = 0; i < MAX_ALLOWED; i++ )
+	{
+		entity = g_iEntities[i];
+		if( entity && (entity = EntRefToEntIndex(entity)) != INVALID_ENT_REFERENCE )
+		{
+			SetEntProp(entity, Prop_Send, "m_nGlowRange", 1);
+			SDKUnhook(entity, SDKHook_SetTransmit, OnTransmit);
+			done++;
+		}
+	}
+
+	if( done )
+	{
+		CreateTimer(0.1, TimerHook);
 	}
 }
 
@@ -389,14 +512,9 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if( client > 0 )
 	{
-		if( !IsFakeClient(client) && GetClientTeam(client) == 3 && GetEntProp(client, Prop_Send, "m_zombieClass") == 6 )
-		{
-			g_bShowProp[client] = true;
-		}
-		else
-		{
-			CheckClient(client);
-		}
+		// 换职业(Charger 换成其他特感)时立刻重新判定, 不依赖事件里 m_zombieClass 的取值
+		g_iAimTick[client] = 0;
+		UpdateGlow(client);
 	}
 }
 
@@ -576,8 +694,10 @@ void OnHealthChanged(const char[] output, int caller, int activator, float delay
 
 Action OnTransmit(int entity, int client)
 {
-	if( g_bShowProp[client] )
+	// 每个 tick 由 OnGameFrame 判定一次: 只有准星正对该发光物体的玩家才收得到它
+	if( client >= 1 && client <= MaxClients && entity == g_iAimGlow[client] )
 		return Plugin_Continue;
+
 	return Plugin_Handled;
 }
 

@@ -87,6 +87,9 @@ int		MapRestartDelay;
 Handle	MapCountdownTimer;
 bool	isMapRestartPending = false;
 
+// 地图是否已过关/正在过关(服务器即将切换下一关)
+bool isMapTransitioning = false;
+
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	EngineVersion test = GetEngineVersion();
@@ -148,6 +151,8 @@ public void OnPluginStart()
 	hvotedelay_time		   = CreateConVar("l4d_votedelay_time", "30", "多长时间才能发起新投票", FCVAR_NOTIFY);
 
 	HookEvent("round_start", event_Round_Start);
+	HookEvent("map_transition", event_Map_Transition, EventHookMode_PostNoCopy);	   // 战役过关: 服务器即将切换下一关
+	HookEvent("finale_win", event_Finale_Win, EventHookMode_PostNoCopy);		   // 终局过关: 即将进入下一关
 
 	GetCvars();
 	g_Cvar_Limits.AddChangeHook(ConVarChanged_Cvars);
@@ -210,6 +215,18 @@ public void event_Round_Start(Event event, const char[] name, bool dontBroadcast
 	}
 }
 
+// 战役过关: 幸存者已进入终点安全室, 服务器即将切换下一关(过场动画开始)
+public void event_Map_Transition(Event event, const char[] name, bool dontBroadcast)
+{
+	isMapTransitioning = true;
+}
+
+// 终局过关: 同样属于"已过关", 之后会切换下一关/结算
+public void event_Finale_Win(Event event, const char[] name, bool dontBroadcast)
+{
+	isMapTransitioning = true;
+}
+
 // 开局提示
 public void OnClientPutInServer(int client)
 {
@@ -233,6 +250,7 @@ public Action g_hTimerAnnounce(Handle timer, any client)
 public void OnMapStart()
 {
 	isMapRestartPending = false;
+	isMapTransitioning	 = false;
 	MapCountdownTimer	= INVALID_HANDLE;
 
 	if (IsBuiltinVoteInProgress())
@@ -1107,7 +1125,15 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 		case map:
 		{
-			CreateTimer(5.0, Changelevel_Map);
+			// 执行换图前检测: 地图已过关并即将切换下一关时, 不切换投票的地图
+			if (isMapTransitioning)
+			{
+				CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
+				LogMessage("更换地图 %s %s 未执行: 当前地图已过关, 即将切换下一关", votesmaps, votesmapsname);
+				return Plugin_Continue;
+			}
+			// TIMER_FLAG_NO_MAPCHANGE: 地图一旦切换该定时器即被清除, 避免在下一关里误执行换图
+			CreateTimer(5.0, Changelevel_Map, _, TIMER_FLAG_NO_MAPCHANGE);
 			CPrintToChatAll("[{olive}VOTE{default}]{green}5{default}秒后将切换地图为{blue}%s", votesmapsname);
 			LogMessage("更换地图 %s %s 通过", votesmaps, votesmapsname);
 		}
@@ -1179,6 +1205,14 @@ public Action COLD_DOWN(Handle timer, any client)
 
 public Action Changelevel_Map(Handle timer)
 {
+	// 5秒等待期间地图过关(例如幸存者刚关上终点安全室的门) -> 放弃换图, 让服务器正常进入下一关
+	if (isMapTransitioning)
+	{
+		CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
+		LogMessage("更换地图 %s 未执行: 当前地图已过关, 即将切换下一关", votesmaps);
+		return Plugin_Continue;
+	}
+
 	ServerCommand("changelevel %s", votesmaps);
 	return Plugin_Continue;
 }

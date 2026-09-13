@@ -11,8 +11,11 @@
 	[DONE] skill: clears / instaclears are now collected (new plyInstaClears
 	       field, <100ms) and shown in the Special table, together with the
 	       average clear time (in seconds).
-	[DONE] round-end fun fact is pushed to l4d2_scripted_hud's "team fix"
-	       HUD slot (AUTO_FUNFACT_ROUND).
+	[DONE] round-end fun fact is pushed to l4d2_scripted_hud's own fun-fact slot
+	       (slot 2, AUTO_FUNFACT_ROUND); the provider rewrites it every 0.5s and
+	       keeps it past the next round start, so it is not swallowed by the
+	       game's own ticker / round-end scoreboard. Test on demand with
+	       `sm_funfact_hud` (ADMFLAG_CHANGEMAP).
 
 	[HELD / by decision] CMT + teamswap: current g_bCMTSwapped approach kept.
 	       Writing m_bAreTeamsFlipped directly would need serious on-server
@@ -189,6 +192,13 @@
 #define AUTO_MVPCON_MORE_GAME	(1 << 16)
 #define AUTO_INFCON_ROUND		(1 << 17)						// 131072
 #define AUTO_INFCON_GAME		(1 << 18)						// 262144
+
+// DisplayFunFactHUD 的返回状态 (决定趣文 HUD 有没有推出去).
+#define FUNFACT_HUD_OK			1								// 已推送到脚本 HUD
+#define FUNFACT_HUD_NO_LIB		0								// l4d2_scripted_hud 未加载
+#define FUNFACT_HUD_NO_NATIVE	-1								// 原生不可用(scripted_hud 版本过旧)
+#define FUNFACT_HUD_NO_TEXT		-2								// 没有可用趣文数据
+#define FUNFACT_HUD_REJECTED	-3								// 被 scripted_hud 拒绝(修复队伍进行中/GameRules 未就绪)
 
 
 // fun fact
@@ -598,6 +608,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_stats_auto", Cmd_Cookie_SetPrintFlags, "Sets client-side preference for automatic stats-print at end of round");
 
 	RegAdminCmd("statsreset", Cmd_StatsReset, ADMFLAG_CHANGEMAP, "Resets the statistics. Admins only.");
+	RegAdminCmd("sm_funfact_hud", Cmd_FunFactHud, ADMFLAG_CHANGEMAP, "强制把一条回合趣文推送到脚本 HUD (诊断用)");
 
 	/*RegConsoleCmd("say", Cmd_Say);
 	RegConsoleCmd("say_team", Cmd_Say);*/
@@ -6621,9 +6632,13 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 {
 	int iFlags = GetConVarInt((g_bModeCampaign) ? g_hCvarAutoPrintCoop : g_hCvarAutoPrintVs);
 
-	// 把局末趣文推送到 scripted_hud 的"修复队伍"HUD 槽位(全局广播一次), 仅当回合级趣文标志开启.
+	// 把局末趣文推送到 scripted_hud 的专用趣文槽位(全局广播一次), 仅当回合级趣文标志开启.
 	if (iFlags & AUTO_FUNFACT_ROUND) {
-		DisplayFunFactHUD();
+		int iFunFactResult = DisplayFunFactHUD();
+		if (iFunFactResult != FUNFACT_HUD_OK) {
+			// sm_stats_debug 1 时可在 logs/sourcemod 里看到没推出去的原因.
+			PrintDebug(1, "fun fact HUD: 未推送 (result=%d)", iFunFactResult);
+		}
 	}
 
 	// do automatic prints (only for clients that don't have cookie flags set)
@@ -6641,29 +6656,54 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	return Plugin_Stop;
 }
 
-// 局末趣文: 复用在"修复队伍"HUD 槽位显示随机趣闻, 全局广播给所有人.
-void DisplayFunFactHUD(bool bRound = true, bool bTeam = true, int iTeam = -1)
+// 局末趣文: 推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2), 全局广播给所有人.
+// 返回 FUNFACT_HUD_* 状态码, 便于 /sm_funfact_hud 诊断.
+int DisplayFunFactHUD(bool bRound = true, bool bTeam = true, int iTeam = -1)
 {
 	if (!g_bScriptedHudAvailable) {
-		return;
+		return FUNFACT_HUD_NO_LIB;
 	}
 	if (GetFeatureStatus(FeatureType_Native, "ScriptedHud_ShowRoundFunFact") != FeatureStatus_Available) {
-		return;
+		return FUNFACT_HUD_NO_NATIVE;
 	}
 
 	char printBuffer[1024];
 	GetFunFactChatString(printBuffer, sizeof(printBuffer), bRound, bTeam, iTeam);
 	if (!strlen(printBuffer)) {
-		return;
+		return FUNFACT_HUD_NO_TEXT;
 	}
 
-	// 去掉末尾换行, 便于 HUD 紧凑显示.
+	// 去掉末尾换行, 便于 HUD 紧凑显示 (scripted_hud 侧也会再清一次).
 	int len = strlen(printBuffer);
 	while (len > 0 && (printBuffer[len - 1] == '\n' || printBuffer[len - 1] == '\r')) {
 		printBuffer[--len] = '\0';
 	}
 
-	ScriptedHud_ShowRoundFunFact(printBuffer, 8.0);
+	return ScriptedHud_ShowRoundFunFact(printBuffer, 8.0) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
+}
+
+// 诊断命令: 立即把一条趣文推到脚本 HUD, 不用等到回合结束才能验证显示效果.
+Action Cmd_FunFactHud(int client, int args)
+{
+	switch (DisplayFunFactHUD()) {
+		case FUNFACT_HUD_OK: {
+			ReplyToCommand(client, "\x04[提示]\x03已把一条回合趣文推送到脚本 HUD\x05(槽位 2, 显示 8 秒).");
+		}
+		case FUNFACT_HUD_NO_LIB: {
+			ReplyToCommand(client, "\x04[提示]\x05l4d2_scripted_hud 未加载, 趣文 HUD 无法显示.");
+		}
+		case FUNFACT_HUD_NO_NATIVE: {
+			ReplyToCommand(client, "\x04[提示]\x05ScriptedHud_ShowRoundFunFact 原生不可用(scripted_hud 版本过旧?).");
+		}
+		case FUNFACT_HUD_NO_TEXT: {
+			ReplyToCommand(client, "\x04[提示]\x05当前没有可用的趣文数据(本回合还没有达到触发阈值的统计).");
+		}
+		default: {
+			ReplyToCommand(client, "\x04[提示]\x05趣文被 scripted_hud 拒绝: 修复队伍流程进行中, 或游戏规则实体未就绪.");
+		}
+	}
+
+	return Plugin_Handled;
 }
 
 // set iTeam to -2 to force printing for all players (where possible) (-1 = current team) - setting client to -2 prints to file (and never needs a delay)

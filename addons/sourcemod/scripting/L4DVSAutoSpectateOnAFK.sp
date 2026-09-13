@@ -470,6 +470,26 @@ void AFKCountdownWarn(int client, const char[] phrase, int seconds)
 	AFKPlayBlipSound(client);
 }
 
+// 玩家是否适合参与闲置检测
+// 死亡 / 倒地 / 挂边时玩家无法正常行动，位置与视角几乎不会变化，
+// 继续做检测会被误判为 AFK，因此这些状态一律不检测
+bool IsPlayerAfkCheckable(int client)
+{
+	// 死亡（含死亡后跟随队友视角的状态）
+	if (!IsPlayerAlive(client))
+		return false;
+
+	// 倒地（Tank 在死亡动画期间也会返回 true）
+	if (L4D_IsPlayerIncapacitated(client))
+		return false;
+
+	// 挂边：挂在边沿等待救援，无法移动
+	if (L4D_IsPlayerHangingFromLedge(client))
+		return false;
+
+	return true;
+}
+
 int g_iLastTick;
 Action afkCheckThread(Handle timer)
 {
@@ -492,8 +512,9 @@ Action afkCheckThread(Handle timer)
 			// If player is not on spectators team ...
 			if (GetClientTeam(i) > 1)
 			{
-				// If client is alive 
-				if (IsPlayerAlive(i))
+				// 只有存活且能正常行动的玩家才做闲置检测：
+				// 死亡 / 倒地 / 挂边时玩家无法移动，位置与视角不变，继续检测会误判成 AFK
+				if (IsPlayerAfkCheckable(i))
 				{
 					// we get his current coordinates and eyes
 					GetClientAbsOrigin(i, pos);
@@ -569,7 +590,12 @@ Action afkCheckThread(Handle timer)
 					{
 						afkResetTimers(i);
 					}
-				} // player is alive or is infected
+				} // player is alive and able to act
+				else
+				{
+					// 死亡 / 倒地 / 挂边：玩家无法正常行动，不检测闲置，仅重置计时
+					afkResetTimers(i);
+				}
 			} // player is not on spectators ...
 			else if (afkKickEnabled && bTeamsOpen && !bSkipFillDetection) // 旁观检测：仅当对抗双方队伍有空位且不处于"未离开安全区域+有人连接中"时才触发（生还者有AI机器人 / 感染者有空位）
 			{

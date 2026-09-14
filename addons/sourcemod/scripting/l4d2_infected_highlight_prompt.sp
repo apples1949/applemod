@@ -51,6 +51,7 @@ float g_fLastExplodedTime;				// 最近爆炸发生的游戏时间
 bool  g_bBoomerBiledTracked[MAXPLAYERS+1];			// 本轮生命是否已有胆汁命中记录(死亡瞬间类别被重置时的兜底判据)
 bool  g_bBoomerBiled[MAXPLAYERS+1][MAXPLAYERS+1];	// 本轮被胆汁命中过的不重复生还者(主动喷吐 + 死亡爆炸)
 int   g_iBoomerBiledCount[MAXPLAYERS+1];			// 本轮被胆汁命中的不重复生还者数
+int   g_iBoomerSprayMax[MAXPLAYERS+1];				// 本轮已结算喷吐窗口中"一次性喷中"的最大人数(判断累积播报是否与之重复)
 bool  g_bBoomerReportPending[MAXPLAYERS+1];			// 死亡后等待爆炸糊人事件到齐再播报
 float g_fBoomerDeathTime[MAXPLAYERS+1];				// 死亡时刻(游戏时间)
 char  g_sBoomerDeathName[MAXPLAYERS+1][MAX_NAME_LENGTH];	// 死亡时缓存的名字(播报时角色可能已失效)
@@ -297,7 +298,13 @@ public Action Timer_EndSpray(Handle timer, int userid)
 	}
 
 	if (boomer > 0)
+	{
+		// 记下本次"一次性喷中"的人数(取本轮各窗口中最大值), 供死亡播报判断累积数是否与之重复
+		if (g_bSprayActive[boomer] && g_iSprayCount[boomer] > g_iBoomerSprayMax[boomer])
+			g_iBoomerSprayMax[boomer] = g_iSprayCount[boomer];
+
 		ResetSpray(boomer);
+	}
 
 	return Plugin_Continue;
 }
@@ -424,6 +431,16 @@ void PrintBoomerBiled(int boomer)
 	if (g_iBoomerBiledCount[boomer] < g_iBoomerBiledMin)
 		return;
 
+	// 本轮"一次性喷中"的人数: 已结算窗口的最大值, 加上尚未结算的当前窗口(死亡后才关闭的窗口)
+	int spray = g_iBoomerSprayMax[boomer];
+
+	if (g_bSprayActive[boomer] && g_iSprayCount[boomer] > spray)
+		spray = g_iSprayCount[boomer];
+
+	// 累积数与已播报的"一次性喷中N名生还者"完全相同时属于重复内容, 不再输出累积提示
+	if (spray >= g_iBoomerSprayMin && g_iBoomerBiledCount[boomer] == spray)
+		return;
+
 	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01累积对\x04%d\x05名生还者喷射胆汁",
 		g_sBoomerDeathName[boomer], g_iBoomerBiledCount[boomer]);
 }
@@ -432,6 +449,7 @@ void ResetBoomerBiled(int boomer)
 {
 	g_bBoomerBiledTracked[boomer] = false;
 	g_iBoomerBiledCount[boomer] = 0;
+	g_iBoomerSprayMax[boomer] = 0;
 	g_bBoomerReportPending[boomer] = false;
 	g_fBoomerDeathTime[boomer] = 0.0;
 	g_sBoomerDeathName[boomer][0] = '\0';

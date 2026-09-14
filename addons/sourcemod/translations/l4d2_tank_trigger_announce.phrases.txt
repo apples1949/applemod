@@ -1,0 +1,18 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"en"		"{green}[Tank]{default}"
+		"chi"		"{green}[坦克]{default}"
+	}
+	"Triggered"
+	{
+		"en"		"Tank spawned, triggered by {red}%N{default} ({olive}%d%%{default} flow)."
+		"chi"		"坦克已生成，由 {red}%N{default} 触发（触发时路程 {olive}%d%%{default}）。"
+	}
+	"TriggeredBot"
+	{
+		"en"		"Tank spawned, triggered by {red}%N{default} (AI, {olive}%d%%{default} flow)."
+		"chi"		"坦克已生成，由 {red}%N{default}（AI）触发（触发时路程 {olive}%d%%{default}）。"
+	}
+}

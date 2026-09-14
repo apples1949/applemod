@@ -52,6 +52,33 @@ stock int GetInfectedClass(int client)
 
 #define CVAR_FLAG FCVAR_NOTIFY
 
+// 表格列
+enum
+{
+	COL_SI = 0,		// 特感击杀
+	COL_CI,			// 丧尸击杀
+	COL_DAMAGE,		// 特感伤害 (伤害/百分比)
+	COL_FF,			// 黑枪/被黑
+	COL_ACC,		// 爆头率
+	COL_MAX
+}
+
+// 每列最多两个数字子段 (伤害/百分比, 黑枪/被黑)
+#define COL_FIELDS	2
+
+// 对齐方式: 每个数字按"本列最大位数"补前导 0, 使同一列各行的字符构成完全一致 → 0 像素误差
+// 依据: L4D2 聊天字体 ChatFont = Tahoma weight 700 (pak01_dir.vpk 内 resource/chatscheme.res),
+//       实测 tahomabd.ttf: 数字等宽 (1304/2048 em), 空格只有 600 —— 1 个数字宽不是整数个空格宽,
+//       所以"按字符个数补空格"会让位数少的行整格偏窄 (每少 1 位窄 704 单位 ≈ 7px) 并逐列累积;
+//       补 0 后同行同列的字符个数与类别完全相同, 列宽数学上相等, 无需估算字体宽度.
+#define CHAT_CELL_SIZE		48			// 单元格数值文本缓冲
+#define CHAT_CELL_OUT		64			// 单元格输出缓冲 (标签 + 括号 + 数值)
+
+// 已退出玩家记录上限 (本关内每人最多产生 1 条记录, 101 人上限的服务器也够用)
+#define MAX_DEPARTED		32
+// 统计表行数: 1..MaxClients = 在线玩家(行号即 client), MaxClients+1.. = 已退出玩家记录行
+#define MAX_STAT_ROWS		(MAXPLAYERS + MAX_DEPARTED + 1)
+
 enum struct PlayerInfo
 {
 	int totalDamage;
@@ -63,10 +90,22 @@ enum struct PlayerInfo
 	void init() {
 		this.totalDamage = this.siCount = this.ciCount = this.ffCount = this.gotFFCount = this.headShotCount = 0;
 	}
+	// 是否没有任何战绩 (退出玩家空战绩不值得留档)
+	bool isEmpty() {
+		return !this.totalDamage && !this.siCount && !this.ciCount && !this.ffCount && !this.gotFFCount && !this.headShotCount;
+	}
 } 
-PlayerInfo playerInfos[MAXPLAYERS + 1];
+// 统一行索引: 1..MaxClients = 在线玩家, MaxClients+1.. = 已退出玩家记录 (同一套排序/统计逻辑)
+PlayerInfo playerInfos[MAX_STAT_ROWS];
+
+// 已退出玩家记录 (与 playerInfos 高位行 MaxClients+1+i 一一对应)
+static char
+	departedNames[MAX_DEPARTED][MAX_NAME_LENGTH],
+	departedSteamIds[MAX_DEPARTED][32],
+	clientSteamIds[MAXPLAYERS + 1][32];
 
 static int
+	departedCount,
 	failCount;
 
 static bool
@@ -79,9 +118,9 @@ static char
 public Plugin myinfo = 
 {
 	name 			= "Survivor Mvp & Round Status",
-	author 			= "夜羽真白",
+	author 			= "夜羽真白 apples1949",
 	description 	= "生还者 MVP 统计",
-	version 		= "2023-07-26",
+	version 		= "2026-09-14",
 	url 			= "https://steamcommunity.com/id/saku_ra/"
 }
 
@@ -223,9 +262,25 @@ public void playerHurtHandler(Event event, const char[] name, bool dontBroadcast
 
 public void OnClientConnected(int client) {
 	playerInfos[client].init();
+	clientSteamIds[client][0] = '\0';
+}
+
+// 先记下 SteamID, 断开连接时用它把战绩存档与"重进的同一个人"对上
+public void OnClientAuthorized(int client, const char[] auth) {
+	strcopy(clientSteamIds[client], sizeof(clientSteamIds[]), auth);
+}
+
+// 客户端完全进场(名字与 SteamID 都已确定)后, 再尝试接回退出记录
+public void OnClientPostAdminCheck(int client) {
+	if (!IsValidClient(client)) { return; }
+	char name[MAX_NAME_LENGTH];
+	GetClientName(client, name, sizeof(name));
+	restoreDepartedRecord(client, clientSteamIds[client], name);
 }
 
 public void OnClientDisconnect(int client) {
+	// 玩家退出: 战绩转存为"已退出记录", 本关不过关就一直保留, 过关/团灭输出时一并显示
+	saveDepartedRecord(client);
 	playerInfos[client].init();
 }
 
@@ -266,6 +321,11 @@ public void roundEndHandler(Event event, const char[] name, bool dontBroadcast)
 	if (!g_hAllowShowMvp.BoolValue) {
 		return;
 	}
+	// 过关时 round_end 与 map_transition 会先后触发, 只允许打印一次,
+	// 否则第二次会因为 clearStuff() 已清空数据而打出一张全 0 的表 (也避免退出记录被提前清掉)
+	if (g_bHasPrint) {
+		return;
+	}
 
 	roundEndPrint();
 
@@ -275,6 +335,132 @@ public void roundEndHandler(Event event, const char[] name, bool dontBroadcast)
 // 方法
 void clearStuff() {
 	for (int i = 1; i <= MaxClients; i++) { playerInfos[i].init(); }
+	clearDepartedRecords();
+}
+
+/**
+* 清空已退出玩家记录 (过关 / 团灭 / 新关卡时调用)
+* @param 
+* @return void
+**/
+void clearDepartedRecords() {
+	for (int i = 0; i < departedCount; i++) { playerInfos[MaxClients + 1 + i].init(); }
+	departedCount = 0;
+}
+
+/**
+* 玩家退出时把战绩转存为"已退出记录" (BOT 与空战绩不留档)
+* 注: 断开回调里不依赖 IsClientInGame (此时客户端可能已在离场流程中), 只按索引 + 战绩判断
+* @param client 退出的客户端索引
+* @return void
+**/
+void saveDepartedRecord(int client) {
+	if (client < 1 || client > MaxClients || IsFakeClient(client) || playerInfos[client].isEmpty()) { return; }
+	if (departedCount >= MAX_DEPARTED) { return; }
+
+	int row = MaxClients + 1 + departedCount;
+	playerInfos[row] = playerInfos[client];
+	GetClientName(client, departedNames[departedCount], MAX_NAME_LENGTH);
+	departedSteamIds[departedCount][0] = '\0';
+	if (clientSteamIds[client][0] != '\0') {
+		strcopy(departedSteamIds[departedCount], 32, clientSteamIds[client]);
+	} else {
+		GetClientAuthId(client, AuthId_Steam2, departedSteamIds[departedCount], 32, true);
+	}
+	departedCount++;
+}
+
+/**
+* 玩家重进时把退出记录接回本人 (SteamID + 名字都比对, 避免同 ID 服务器张冠李戴)
+* 记录只在同一关内存在, 因此要求名字一致不会误伤改名玩家
+* @param client 重进的客户端索引
+* @param auth   客户端 SteamID
+* @param name   客户端名字
+* @return void
+**/
+void restoreDepartedRecord(int client, const char[] auth, const char[] name) {
+	if (auth[0] == '\0' || StrEqual(auth, "BOT", false)) { return; }
+	for (int i = 0; i < departedCount; i++) {
+		if (!StrEqual(departedSteamIds[i], auth, false)) { continue; }
+		if (!StrEqual(departedNames[i], name, false)) { continue; }
+
+		int row = MaxClients + 1 + i;
+		playerInfos[client].totalDamage += playerInfos[row].totalDamage;
+		playerInfos[client].siCount += playerInfos[row].siCount;
+		playerInfos[client].ciCount += playerInfos[row].ciCount;
+		playerInfos[client].ffCount += playerInfos[row].ffCount;
+		playerInfos[client].gotFFCount += playerInfos[row].gotFFCount;
+		playerInfos[client].headShotCount += playerInfos[row].headShotCount;
+
+		// 用最后一条记录填坑, 保证记录始终占据连续的高位行
+		int last = departedCount - 1;
+		if (i != last) {
+			playerInfos[row] = playerInfos[MaxClients + 1 + last];
+			strcopy(departedNames[i], MAX_NAME_LENGTH, departedNames[last]);
+			strcopy(departedSteamIds[i], 32, departedSteamIds[last]);
+		}
+		playerInfos[MaxClients + 1 + last].init();
+		departedNames[last][0] = '\0';
+		departedSteamIds[last][0] = '\0';
+		departedCount--;
+		return;
+	}
+}
+
+/**
+* 判断某个统计行是否是"已退出玩家记录"
+* @param row 统计行索引
+* @return bool
+**/
+stock bool IsDepartedRow(int row) {
+	return row > MaxClients && row <= MaxClients + departedCount;
+}
+
+/**
+* 收集统计表行: 在线生还者 + 已退出玩家记录
+* @param rows 目标数组 (长度至少 MAX_STAT_ROWS)
+* @return 行数
+**/
+int collectStatRows(int[] rows) {
+	int count = 0;
+	for (int i = 1; i <= MaxClients; i++) {
+		if (!IsValidClient(i) || GetClientTeam(i) != TEAM_SURVIVOR) { continue; }
+		rows[count++] = i;
+	}
+	for (int i = 0; i < departedCount; i++) { rows[count++] = MaxClients + 1 + i; }
+	return count;
+}
+
+/**
+* 取统计表某一行的名字 (已退出玩家标注 [已退出], BOT 标注 [BOT])
+* @param row   统计行索引
+* @param name  名字输出缓冲
+* @param len   缓冲长度
+* @param color 名字颜色前缀
+* @return void
+**/
+void getStatRowName(int row, char[] name, int len, const char[] color = "\x05") {
+	char base[MAX_NAME_LENGTH], suffix[24];
+	suffix[0] = '\0';
+
+	if (IsDepartedRow(row)) {
+		strcopy(base, sizeof(base), departedNames[row - MaxClients - 1]);
+		strcopy(suffix, sizeof(suffix), " \x01[已退出]");
+	} else {
+		FormatEx(base, sizeof(base), "%N", row);
+		if (IsFakeClient(row)) { strcopy(suffix, sizeof(suffix), " \x01[BOT]"); }
+	}
+	FormatEx(name, len, "%s%s%s", color, base, suffix);
+}
+
+/**
+* 计算某个统计行的伤害占团队总伤害的百分比
+* @param row        统计行索引
+* @param teamDamage 团队总伤害
+* @return 百分比(整数)
+**/
+stock int GetDamagePercent(int row, int teamDamage) {
+	return teamDamage <= 0 ? 0 : RoundToNearest(float(playerInfos[row].totalDamage) / float(teamDamage) * 100.0);
 }
 
 void roundEndPrint() {
@@ -322,107 +508,144 @@ void roundEndPrint() {
 }
 
 /**
-* 参考豆瓣酱 l4d2_tank_ranking 的对齐方式: 用空格对称补位, 把字符串居中到指定宽度
-* 用法: 先按列取所有行的最大长度, 每列用本函数补齐到 最大长度+2, 保证各列宽一致
-* @param output 输出缓冲区
-* @param maxlen 缓冲区大小
-* @param value  原字符串
-* @param width  目标总宽度 (含两侧空格)
-* @return void
+* 取非负整数的十进制位数 (用于本列补 0 的位宽)
+* @param value 非负整数
+* @return 位数 (至少 1)
 **/
-stock void CenterAlignString(char[] output, int maxlen, const char[] value, int width)
-{
-	int len = strlen(value);
-	int padLeft = (width - len) / 2;
-	int padRight = width - len - padLeft;
-	int out = 0;
-	for (int i = 0; i < padLeft && out < maxlen - 1; i++)
-		output[out++] = ' ';
-	for (int i = 0; i < len && out < maxlen - 1; i++)
-		output[out++] = value[i];
-	for (int i = 0; i < padRight && out < maxlen - 1; i++)
-		output[out++] = ' ';
-	output[out] = '\0';
+stock int CountDigits(int value) {
+	int digits = 1;
+	while (value >= 10) {
+		value /= 10;
+		digits++;
+	}
+	return digits;
 }
 
 /**
-* 显示主 MVP 信息 (特感击杀, 丧尸击杀, 总伤害, 黑枪/被黑, 爆头率)
+* 把非负整数按指定位宽补前导 0 写入缓冲 (位宽不够时按实际位数输出)
+* @param buffer 输出缓冲
+* @param maxlen 缓冲长度
+* @param value  非负整数
+* @param digits 目标位宽
+* @return void
+**/
+stock void FormatZeroPadded(char[] buffer, int maxlen, int value, int digits) {
+	char num[16];
+	FormatEx(num, sizeof(num), "%d", value);
+
+	int len = strlen(num), out = 0;
+	for (int i = len; i < digits && out < maxlen - 1; i++) { buffer[out++] = '0'; }
+	for (int i = 0; i < len && out < maxlen - 1; i++) { buffer[out++] = num[i]; }
+	buffer[out] = '\0';
+}
+
+/**
+* 显示主 MVP 信息 (特感击杀, 丧尸击杀, 特感伤害/伤害占比, 黑枪/被黑, 爆头率)
+* 已退出且本关未回来的玩家记录会一并列出, 名字后标注 [已退出]
+* 表格按"本列最大位数补前导 0"输出, 同列各行字符构成一致, 因此严格对齐(0 像素误差)
 * @param client 需要显示的客户端索引
 * @return void
 **/
 void printMvpStatus(int client)
 {
-	int i, index = 0;
-	int[] players = new int[MaxClients + 1]; 
-	for (i = 1; i <= MaxClients; i++) {
-		if (!IsValidClient(i) || GetClientTeam(i) != TEAM_SURVIVOR) {
-			continue;
-		}
-		players[index++] = i;
-	}
-	SortCustom1D(players, index, sortByDamageFunction);
+	int[] rows = new int[MAX_STAT_ROWS];
+	int count = collectStatRows(rows);
 
 	PrintToChat(client, "\x03[生还者 MVP 统计]");
 
-	char buffer[128], temp[64], toPrint[256];
-	if (index < 1) { return; }	// 没有生还者不打印表格
+	if (count < 1) { return; }	// 没有生还者(也没有退出记录)不打印表格
 
-	// 参考豆瓣酱 tank_ranking 的对齐方式: ① 先收集所有行数据 ② 按列取最大长度 ③ 每列居中补空格到相同宽度再打印
-	char[][][] sData = new char[index][5][32];	// 5 列: 特感/丧尸/伤害/黑被黑/爆头率
-	int[] iTemp = new int[5];
+	SortCustom1D(rows, count, sortByDamageFunction);
 
-	// ① 收集每行的列数据
-	for (i = 0; i < index; i++) {
-		if (g_hAllowShowSi.BoolValue)
-			FormatEx(sData[i][0], 32, "%d", playerInfos[players[i]].siCount);
-		if (g_hAllowShowCi.BoolValue)
-			FormatEx(sData[i][1], 32, "%d", playerInfos[players[i]].ciCount);
-		if (g_hAllowShowTotalDmg.BoolValue)
-			FormatEx(sData[i][2], 32, "%d", playerInfos[players[i]].totalDamage);
-		if (g_hAllowShowFF.BoolValue)
-			FormatEx(sData[i][3], 32, "%d/%d", playerInfos[players[i]].ffCount, playerInfos[players[i]].gotFFCount);
+	// 团队总伤害, 用于伤害占比 (退出玩家的伤害同样计入)
+	int teamDamage = 0;
+	for (int i = 0; i < count; i++) { teamDamage += playerInfos[rows[i]].totalDamage; }
+
+	// ① 取每列每个数字子段的最大位数, 作为本列补 0 位宽
+	int[][] iDigits = new int[COL_MAX][COL_FIELDS];
+	for (int i = 0; i < count; i++) {
+		int row = rows[i], digits;
+
+		digits = CountDigits(playerInfos[row].siCount);
+		if (digits > iDigits[COL_SI][0]) { iDigits[COL_SI][0] = digits; }
+
+		digits = CountDigits(playerInfos[row].ciCount);
+		if (digits > iDigits[COL_CI][0]) { iDigits[COL_CI][0] = digits; }
+
+		digits = CountDigits(playerInfos[row].totalDamage);
+		if (digits > iDigits[COL_DAMAGE][0]) { iDigits[COL_DAMAGE][0] = digits; }
+		digits = CountDigits(GetDamagePercent(row, teamDamage));
+		if (digits > iDigits[COL_DAMAGE][1]) { iDigits[COL_DAMAGE][1] = digits; }
+
+		digits = CountDigits(playerInfos[row].ffCount);
+		if (digits > iDigits[COL_FF][0]) { iDigits[COL_FF][0] = digits; }
+		digits = CountDigits(playerInfos[row].gotFFCount);
+		if (digits > iDigits[COL_FF][1]) { iDigits[COL_FF][1] = digits; }
+
 		if (g_hAllowShowAccuracy.BoolValue) {
-			float accuracy = playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount == 0 ? 0.0 : float(playerInfos[players[i]].headShotCount) / float(playerInfos[players[i]].siCount + playerInfos[players[i]].ciCount);
-			FormatEx(sData[i][4], 32, "%.0f%%", accuracy * 100.0);
+			int hits = playerInfos[row].siCount + playerInfos[row].ciCount;
+			float accuracy = hits == 0 ? 0.0 : float(playerInfos[row].headShotCount) / float(hits);
+			digits = CountDigits(RoundToNearest(accuracy * 100.0));
+			if (digits > iDigits[COL_ACC][0]) { iDigits[COL_ACC][0] = digits; }
 		}
 	}
 
-	// ② 计算每列的最大长度
-	for (i = 0; i < index; i++)
-		for (int y = 0; y < 5; y++)
-			if (strlen(sData[i][y]) > iTemp[y])
-				iTemp[y] = strlen(sData[i][y]);
-
-	// ③ 每列按 最大长度+2 居中补空格, 并用括号框住分隔 (参考豆瓣酱 tank_ranking 的 [ 数值 ] 风格), 逐行打印
-	for (i = 0; i < index; i++) {
-		FormatEx(toPrint, sizeof(toPrint), "");
+	// ② 按位宽补 0 生成每行的列数据
+	char[][][] sData = new char[count][COL_MAX][CHAT_CELL_SIZE];
+	char part[2][16];
+	for (int i = 0; i < count; i++) {
+		int row = rows[i];
 		if (g_hAllowShowSi.BoolValue) {
-			CenterAlignString(temp, sizeof(temp), sData[i][0], iTemp[0] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03特感[\x04%s\x03] ", temp);
-			StrCat(toPrint, sizeof(toPrint), buffer);
+			FormatZeroPadded(sData[i][COL_SI], CHAT_CELL_SIZE, playerInfos[row].siCount, iDigits[COL_SI][0]);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			CenterAlignString(temp, sizeof(temp), sData[i][1], iTemp[1] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03丧尸[\x04%s\x03] ", temp);
-			StrCat(toPrint, sizeof(toPrint), buffer);
+			FormatZeroPadded(sData[i][COL_CI], CHAT_CELL_SIZE, playerInfos[row].ciCount, iDigits[COL_CI][0]);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			CenterAlignString(temp, sizeof(temp), sData[i][2], iTemp[2] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03伤害[\x04%s\x03] ", temp);
-			StrCat(toPrint, sizeof(toPrint), buffer);
+			FormatZeroPadded(part[0], sizeof(part[]), playerInfos[row].totalDamage, iDigits[COL_DAMAGE][0]);
+			FormatZeroPadded(part[1], sizeof(part[]), GetDamagePercent(row, teamDamage), iDigits[COL_DAMAGE][1]);
+			FormatEx(sData[i][COL_DAMAGE], CHAT_CELL_SIZE, "%s/%s%%", part[0], part[1]);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			CenterAlignString(temp, sizeof(temp), sData[i][3], iTemp[3] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03黑/被黑[\x04%s\x03] ", temp);
-			StrCat(toPrint, sizeof(toPrint), buffer);
+			FormatZeroPadded(part[0], sizeof(part[]), playerInfos[row].ffCount, iDigits[COL_FF][0]);
+			FormatZeroPadded(part[1], sizeof(part[]), playerInfos[row].gotFFCount, iDigits[COL_FF][1]);
+			FormatEx(sData[i][COL_FF], CHAT_CELL_SIZE, "%s/%s", part[0], part[1]);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
-			CenterAlignString(temp, sizeof(temp), sData[i][4], iTemp[4] + 2);
-			FormatEx(buffer, sizeof(buffer), "\x03爆头率[\x04%s\x03] ", temp);
-			StrCat(toPrint, sizeof(toPrint), buffer);
+			int hits = playerInfos[row].siCount + playerInfos[row].ciCount;
+			float accuracy = hits == 0 ? 0.0 : float(playerInfos[row].headShotCount) / float(hits);
+			FormatZeroPadded(sData[i][COL_ACC], CHAT_CELL_SIZE, RoundToNearest(accuracy * 100.0), iDigits[COL_ACC][0]);
+			StrCat(sData[i][COL_ACC], CHAT_CELL_SIZE, "%");
 		}
-		FormatEx(buffer, sizeof(buffer), "\x03%N", players[i]);
-		StrCat(toPrint, sizeof(toPrint), buffer);
+	}
+
+	// ③ 逐行打印: 数值左右各留 1 个空格, 列间 1 个空格, 各行同列字符数完全一致 → 严格对齐
+	char toPrint[1024], temp[CHAT_CELL_OUT], nameBuf[MAX_NAME_LENGTH + 24];
+	for (int i = 0; i < count; i++) {
+		toPrint[0] = '\0';
+		if (g_hAllowShowSi.BoolValue) {
+			FormatEx(temp, sizeof(temp), "\x03特感[\x04 %s \x03] ", sData[i][COL_SI]);
+			StrCat(toPrint, sizeof(toPrint), temp);
+		}
+		if (g_hAllowShowCi.BoolValue) {
+			FormatEx(temp, sizeof(temp), "\x03丧尸[\x04 %s \x03] ", sData[i][COL_CI]);
+			StrCat(toPrint, sizeof(toPrint), temp);
+		}
+		if (g_hAllowShowTotalDmg.BoolValue) {
+			FormatEx(temp, sizeof(temp), "\x03伤害[\x04 %s \x03] ", sData[i][COL_DAMAGE]);
+			StrCat(toPrint, sizeof(toPrint), temp);
+		}
+		if (g_hAllowShowFF.BoolValue) {
+			FormatEx(temp, sizeof(temp), "\x03黑/被黑[\x04 %s \x03] ", sData[i][COL_FF]);
+			StrCat(toPrint, sizeof(toPrint), temp);
+		}
+		if (g_hAllowShowAccuracy.BoolValue) {
+			FormatEx(temp, sizeof(temp), "\x03爆头率[\x04 %s \x03] ", sData[i][COL_ACC]);
+			StrCat(toPrint, sizeof(toPrint), temp);
+		}
+
+		getStatRowName(rows[i], nameBuf, sizeof(nameBuf), "\x03");
+		StrCat(toPrint, sizeof(toPrint), nameBuf);
 
 		// 打印一个玩家的 MVP 信息
 		PrintToChat(client, "%s", toPrint);
@@ -435,49 +658,49 @@ void printMvpStatus(int client)
 * @return void
 **/
 void printParticularMvp(int client) {
-	int siMvpClient, ciMvpClient, ffMvpClient, gotFFMvpClient;
+	int siMvpRow, ciMvpRow, ffMvpRow, gotFFMvpRow;
 	int dmgTotal, siTotal, ciTotal, ffTotal, gotFFTotal;
 
-	int i;
-	for (i = 1; i <= MaxClients; i++) {
-		// 跳过不是生还者的
-		if (!IsValidClient(i) || GetClientTeam(i) != TEAM_SURVIVOR) {
-			continue;
-		}
-		dmgTotal += playerInfos[i].totalDamage;
-		siTotal += playerInfos[i].siCount;
-		ciTotal += playerInfos[i].ciCount;
-		ffTotal += playerInfos[i].ffCount;
-		gotFFTotal += playerInfos[i].gotFFCount;
+	// 在线生还者 + 已退出玩家记录一起参与统计与排名
+	int[] rows = new int[MAX_STAT_ROWS];
+	int count = collectStatRows(rows);
 
-		if (playerInfos[i].siCount > playerInfos[siMvpClient].siCount) {
-			siMvpClient = i;
+	for (int i = 0; i < count; i++) {
+		int row = rows[i];
+		dmgTotal += playerInfos[row].totalDamage;
+		siTotal += playerInfos[row].siCount;
+		ciTotal += playerInfos[row].ciCount;
+		ffTotal += playerInfos[row].ffCount;
+		gotFFTotal += playerInfos[row].gotFFCount;
+
+		if (playerInfos[row].siCount > playerInfos[siMvpRow].siCount) {
+			siMvpRow = row;
 		}
-		if (playerInfos[i].ciCount > playerInfos[ciMvpClient].ciCount) {
-			ciMvpClient = i;
+		if (playerInfos[row].ciCount > playerInfos[ciMvpRow].ciCount) {
+			ciMvpRow = row;
 		}
-		if (playerInfos[i].ffCount > playerInfos[ffMvpClient].ffCount) {
-			ffMvpClient = i;
+		if (playerInfos[row].ffCount > playerInfos[ffMvpRow].ffCount) {
+			ffMvpRow = row;
 		}
-		if (playerInfos[i].gotFFCount > playerInfos[gotFFMvpClient].gotFFCount) {
-			gotFFMvpClient = i;
+		if (playerInfos[row].gotFFCount > playerInfos[gotFFMvpRow].gotFFCount) {
+			gotFFMvpRow = row;
 		}
 	}
 
 	int dmgPercent, killPercent;
-	char clientName[MAX_NAME_LENGTH], buffer[512], temp[256];
+	char clientName[MAX_NAME_LENGTH + 24], buffer[512], temp[320];
 	// 允许显示 SI MVP
 	if (g_hAllowShowSi.BoolValue) {
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 SI: ");
-		if (!IsValidClient(siMvpClient) || siTotal <= 0) {
+		if (siMvpRow < 1 || siTotal <= 0) {
 			StrCat(buffer, sizeof(buffer), "\x04本局还没有击杀任何特感");
 		} else {
 
-			formatMvpClientName(siMvpClient, clientName, sizeof(clientName));
+			getStatRowName(siMvpRow, clientName, sizeof(clientName));
 
-			dmgPercent = RoundToNearest(float(playerInfos[siMvpClient].totalDamage) / float(dmgTotal) * 100.0);
-			killPercent = RoundToNearest(float(playerInfos[siMvpClient].siCount) / float(siTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", clientName, playerInfos[siMvpClient].totalDamage, dmgPercent, playerInfos[siMvpClient].siCount, killPercent);
+			dmgPercent = GetDamagePercent(siMvpRow, dmgTotal);
+			killPercent = RoundToNearest(float(playerInfos[siMvpRow].siCount) / float(siTotal) * 100.0);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", clientName, playerInfos[siMvpRow].totalDamage, dmgPercent, playerInfos[siMvpRow].siCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
 		PrintToChat(client, "%s", buffer);
@@ -485,14 +708,14 @@ void printParticularMvp(int client) {
 	// 允许显示 CI MVP
 	if (g_hAllowShowCi.BoolValue) {
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 CI: ");
-		if (!IsValidClient(ciMvpClient) || ciTotal <= 0) {
+		if (ciMvpRow < 1 || ciTotal <= 0) {
 			StrCat(buffer, sizeof(buffer), "\x04本局还没有击杀任何丧尸");
 		} else {
 
-			formatMvpClientName(ciMvpClient, clientName, sizeof(clientName));
+			getStatRowName(ciMvpRow, clientName, sizeof(clientName));
 
-			killPercent = RoundToNearest(float(playerInfos[ciMvpClient].ciCount) / float(ciTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04丧尸 \x03[\x01%d%%\x03])", clientName, playerInfos[ciMvpClient].ciCount, killPercent);
+			killPercent = RoundToNearest(float(playerInfos[ciMvpRow].ciCount) / float(ciTotal) * 100.0);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04丧尸 \x03[\x01%d%%\x03])", clientName, playerInfos[ciMvpRow].ciCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
 		PrintToChat(client, "%s", buffer);
@@ -500,28 +723,28 @@ void printParticularMvp(int client) {
 	// 允许显示 FF MVP
 	if (g_hAllowShowFF.BoolValue) {
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01LVP\x03]\x01 FF: ");
-		if (!IsValidClient(ffMvpClient) || ffTotal <= 0) {
+		if (ffMvpRow < 1 || ffTotal <= 0) {
 			StrCat(buffer, sizeof(buffer), "\x04大家都没有黑枪");
 		} else {
 
-			formatMvpClientName(ffMvpClient, clientName, sizeof(clientName));
+			getStatRowName(ffMvpRow, clientName, sizeof(clientName));
 
-			killPercent = RoundToNearest(float(playerInfos[ffMvpClient].ffCount) / float(ffTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04友伤 \x03[\x01%d%%\x03])", clientName, playerInfos[ffMvpClient].ffCount, killPercent);
+			killPercent = RoundToNearest(float(playerInfos[ffMvpRow].ffCount) / float(ffTotal) * 100.0);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04友伤 \x03[\x01%d%%\x03])", clientName, playerInfos[ffMvpRow].ffCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
 		PrintToChat(client, "%s", buffer);
 
 		// 被黑 MVP
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 FF Receive: ");
-		if (!IsValidClient(gotFFMvpClient) || gotFFTotal <= 0) {
+		if (gotFFMvpRow < 1 || gotFFTotal <= 0) {
 			StrCat(buffer, sizeof(buffer), "\x04暂时没有倒霉蛋被黑得最惨");
 		} else {
 
-			formatMvpClientName(gotFFMvpClient, clientName, sizeof(clientName));
+			getStatRowName(gotFFMvpRow, clientName, sizeof(clientName));
 
-			killPercent = RoundToNearest(float(playerInfos[gotFFMvpClient].gotFFCount) / float(gotFFTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04被黑 \x03[\x01%d%%\x03])", clientName, playerInfos[gotFFMvpClient].gotFFCount, killPercent);
+			killPercent = RoundToNearest(float(playerInfos[gotFFMvpRow].gotFFCount) / float(gotFFTotal) * 100.0);
+			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04被黑 \x03[\x01%d%%\x03])", clientName, playerInfos[gotFFMvpRow].gotFFCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
 		PrintToChat(client, "%s", buffer);
@@ -533,31 +756,26 @@ void printParticularMvp(int client) {
 			return;
 		}
 		// 你是 SI MVP, 则显示你的 CI 排名, 你是 SI, CI MVP 霸榜了, 除非你想显示你的 FF 排名, 则不显示你的排名
-		if (client == siMvpClient && client == ciMvpClient) {
+		if (client == siMvpRow && client == ciMvpRow) {
 			return;
 		}
 
-		// 开始排名
-		int index = 0, rank;
-		int[] players = new int[MaxClients + 1];
-		for (i = 1; i <= MaxClients; i++) {
-			if (!IsValidClient(i)) {
-				continue;
-			}
-			players[index++] = i;
-		}
+		// 开始排名 (与表格一致: 在线生还者 + 已退出玩家记录)
+		int rank;
+		int[] rankRows = new int[MAX_STAT_ROWS];
+		int rankCount = collectStatRows(rankRows);
 
 		// 是杀特高手 或 不是杀特高手也不是清僵尸高手, 显示他的杀丧尸排名
-		if (client == siMvpClient || client != ciMvpClient) {
+		if (client == siMvpRow || client != ciMvpRow) {
 			// 没有丧尸击杀, 不显示丧尸排名
 			if (ciTotal <= 0) {
 				return;
 			}
 
-			SortCustom1D(players, index, sortByCiCountFunction);
+			SortCustom1D(rankRows, rankCount, sortByCiCountFunction);
 
-			for (i = 0; i < index; i++) {
-				if (players[i] == client) {
+			for (int i = 0; i < rankCount; i++) {
+				if (rankRows[i] == client) {
 					rank = i + 1;
 					break;
 				}
@@ -571,35 +789,20 @@ void printParticularMvp(int client) {
 				return;
 			}
 
-			SortCustom1D(players, index, sortBySiCountFunction);
+			SortCustom1D(rankRows, rankCount, sortBySiCountFunction);
 
-			for (i = 0; i < index; i++) {
-				if (players[i] == client) {
+			for (int i = 0; i < rankCount; i++) {
+				if (rankRows[i] == client) {
 					rank = i + 1;
 					break;
 				}
 			}
 
-			dmgPercent = RoundToNearest(float(playerInfos[client].totalDamage) / float(dmgTotal) * 100.0);
+			dmgPercent = GetDamagePercent(client, dmgTotal);
 			killPercent = RoundToNearest(float(playerInfos[client].siCount) / float(siTotal) * 100.0);
 			FormatEx(buffer, sizeof(buffer), "\x03你的排名 \x04SI: \x05#%d \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", rank, playerInfos[client].totalDamage, dmgPercent, playerInfos[client].siCount, killPercent);
 		}
 		PrintToChat(client, "%s", buffer);
-	}
-}
-
-/**
-* 根据客户端是否为 BOT 在其名字后面添加 [BOT] 字样
-* @param client 需要获取名称的客户端索引
-* @param str 名称字符串
-* @param len 字符串长度
-* @return void
-**/
-void formatMvpClientName(int client, char[] str, int len) {
-	if (IsFakeClient(client)) {
-		FormatEx(str, len, "\x05%N \x01[BOT]", client);
-	} else {
-		FormatEx(str, len, "\x05%N", client);
 	}
 }
 

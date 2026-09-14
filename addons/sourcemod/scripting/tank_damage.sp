@@ -6,6 +6,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <colors>
+#include <Apex>
 
 #define CVAR_FLAG FCVAR_NOTIFY
 #define INVALID_CLIENT -1
@@ -18,8 +19,23 @@
 
 #define SOUND_PATH "ui/pickup_secret01.wav"
 #define PLUGIN_PREFIX "[TankDamage]"
-/* 排名数据单元格字符串大小(参考插件 l4d2_tank_ranking 的 MAX_SIZE) */
+/* 聊天输出前缀(除玩家伤害记录行外, 报告的各行都带此前缀) */
+#define CHAT_PREFIX "{green}[坦克伤害]{default} "
+#define CHAT_PREFIX_RAW "\x04[坦克伤害]\x01 "
+/* 排名数据单元格字符串大小(参考插件 l4d2_tank_ranking 的 MAX_SIZE, 同时满足 MAX_NAME_LENGTH 的玩家名) */
 #define DATA_CELL_SIZE 32
+/* 排名数据的列数: 0=名次, 1=伤害百分比, 2=伤害, 3=名字, 4=拳, 5=石, 6=铁, 7=承伤, 8=承伤百分比 */
+#define DATA_COLUMNS 9
+/* 中途退出玩家的记录存档上限(本局内每人最多一条, 正常对局远用不到) */
+#define MAX_DEPARTED 32
+
+/* 数字位对齐用"数字宽空格"(U+2007 FIGURE SPACE, UTF-8 = E2 80 87)
+   实测(ChatFont = Tahoma Bold, 2048 units/em): 数字 = 1304, 数字宽空格 = 1304, 普通空格只有 600
+   数字宽 1304 不是空格宽 600 的整数倍(1 个数字 ≈ 2.17 个空格), 所以"按字符个数补普通空格"必然对不齐 ——
+   少 1 位数字少 1304 单位, 补 1 个空格只找回 600 单位, 每列欠约 700 单位(约 7 像素), 列一多就整体歪掉。
+   改用等宽于数字的 U+2007 补位后, 每行同列占用的渲染宽度完全相同(实测偏差 0.00 像素),
+   且不依赖具体字体: 萝莉体等替换字体里 U+2007 是定宽空格, 同样比普通空格对齐得多。 */
+#define FIGURE_SPACE "\xE2\x80\x87"
 
 // 日志级别（与旧 logger.inc 行为一致: 按位相加, 1=禁用）
 #define LOG_LEVEL_OFF (1 << 0)
@@ -45,7 +61,7 @@ public Plugin myinfo =
 	name 			= "Tank Damage Announce 3.0",
 	author 			= "apples1949",
 	description 	= "Tank 伤害统计 3.0 版本: 数据跟随 Tank 实例, 控制权多次交接后死亡仍输出全部数据",
-	version 		= "3.2",
+	version 		= "3.4",
 	url 			= "https://steamcommunity.com/id/saku_ra/"
 }
 
@@ -64,6 +80,20 @@ int
 	tankHurt[MAXPLAYERS + 1][MAXPLAYERS + 1],
 	// Tank 血量记录（生成时的满血基准, 百分比分母）
 	tankHealth[MAXPLAYERS + 1];
+
+/* Apex 技能扣血: 技能扣血走 SetEntProp 直接改血量, 不产生伤害事件, 只能靠 Apex 的 forward 通报
+   tankTracCostOpen  = 跟踪石(!trac)开启费累计, tankTracCostThrow = 跟踪石掷石净扣血(掷出预扣 - 命中退还),
+   tankTracThrows    = 跟踪石净扣血发数
+   tankBhopCostOpen  = 连跳(!bhop)开启费累计, tankBhopCostDetect = 未开启技能却连跳被抓的补扣累计
+   tankSkillCost     = Apex 全部技能累计净扣血(跟踪石 + 连跳), 用于修正致死一击补偿(见 playerDeathHandler)
+   以上数据同样跟随 Tank 实例, 换克时随其它数据一起转移 */
+int
+	tankTracCostOpen[MAXPLAYERS + 1],
+	tankTracCostThrow[MAXPLAYERS + 1],
+	tankTracThrows[MAXPLAYERS + 1],
+	tankBhopCostOpen[MAXPLAYERS + 1],
+	tankBhopCostDetect[MAXPLAYERS + 1],
+	tankSkillCost[MAXPLAYERS + 1];
 
 float
 	// 这个 Tank 的存活时间
@@ -94,6 +124,24 @@ enum struct PlayerHurt
 	}
 }
 PlayerHurt playerHurts[MAXPLAYERS + 1][MAXPLAYERS + 1];
+
+/* 中途退出玩家的记录(退出后照常列进报告):
+   - 玩家退出时不清他的数据, 名字/SteamID 早已记了快照(退出后 GetClientName 拿不到名字)
+   - 该索引被新玩家占用(索引复用)时, 旧记录转入存档行 departedHurt/departedHurts, 免得算到新玩家头上
+   - 同一位玩家(SteamID 相同)本局内重进, 存档行会并回他名下, 报告里不会出现两行同名 */
+int
+	departedHurt[MAX_DEPARTED + 1][MAXPLAYERS + 1];		// [存档行][Tank] 该退出玩家对 Tank 造成的伤害
+PlayerHurt departedHurts[MAX_DEPARTED + 1][MAXPLAYERS + 1];	// [存档行][Tank] 拳/石/铁/承伤明细
+char
+	departedNames[MAX_DEPARTED + 1][MAX_NAME_LENGTH],
+	departedAuths[MAX_DEPARTED + 1][32],
+	playerNames[MAXPLAYERS + 1][MAX_NAME_LENGTH],
+	playerAuths[MAXPLAYERS + 1][32];
+int
+	departedCount;
+bool
+	// 该索引上有"已退出玩家"的记录(等新玩家占用该索引时转存档)
+	playerRecordKept[MAXPLAYERS + 1];
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
 
@@ -135,6 +183,9 @@ public void OnPluginStart()
 			if (!IsClientInGame(i))
 				continue;
 			SDKHook(i, SDKHook_OnTakeDamage, onTakeDamageHandler);
+			// 补名字/SteamID 快照: 中途退出后报告要靠它们照常显示/并回记录
+			RecordPlayerName(i);
+			RecordPlayerAuth(i);
 			// 若加载时场上已有 Tank, 从当前时刻开始跟踪
 			if (isTank(i) && IsPlayerAlive(i)) {
 				g_iCurrentTank = i;
@@ -155,6 +206,44 @@ public void OnAllPluginsLoaded() {
 
 public void OnClientPutInServer(int client) {
 	SDKHook(client, SDKHook_OnTakeDamage, onTakeDamageHandler);
+	// 补一次名字/SteamID 快照(某些路径下 OnClientAuthorized 已过, 这里兜底)
+	RecordPlayerName(client);
+	RecordPlayerAuth(client);
+}
+
+/**
+* 客户端连入(早于 OnClientAuthorized): 该索引上一位玩家的记录若还留着(中途退出), 先转存档,
+* 否则新玩家的伤害会记到他的记录上; 转存档时用的仍是旧玩家的名字/SteamID 快照。
+* 之后无论有没有记录, 都把索引上的快照清干净, 免得新玩家用了上一位的名字。
+**/
+public void OnClientConnected(int client) {
+	ArchiveDepartedRecord(client, "索引被新玩家占用");
+	playerNames[client][0] = '\0';
+	playerAuths[client][0] = '\0';
+	playerRecordKept[client] = false;
+}
+
+/**
+* SteamID 就绪: 记快照; 若是本局中途退出的同一位玩家重进, 把他的存档记录并回名下。
+**/
+public void OnClientAuthorized(int client, const char[] auth) {
+	strcopy(playerAuths[client], sizeof(playerAuths[]), auth);
+	RestoreDepartedRecord(client, auth);
+}
+
+/**
+* 玩家中途退出: 不清他的伤害数据(报告照常列出他, 名字用快照),
+* 只做标记; 等该索引被新玩家占用时再转存档, 同一位玩家重进则并回名下。
+**/
+public void OnClientDisconnect(int client) {
+	if (client < 1 || client > MaxClients)
+		return;
+
+	if (!hasPlayerRecord(client))
+		return;
+
+	playerRecordKept[client] = true;
+	debugAndInfoLog("%s: 玩家 %s(%d) 中途退出, 保留他对 Tank 的伤害记录(报告照常显示)", PLUGIN_PREFIX, playerNames[client], client);
 }
 
 public void OnMapStart() {
@@ -214,6 +303,7 @@ public Action checkIronHandler(Handle timer, DataPack pack)
 		return Plugin_Stop;
 	}
 	playerHurts[attacker][victim].iron++;
+	RecordPlayerName(victim);
 	ironCheckTimer[victim][0] = null;
 	ironCheckTimer[victim][1] = null;
 	return Plugin_Stop;
@@ -238,6 +328,10 @@ public void playerHurtHandler(Event event, const char[] name, bool dontBroadcast
 	if (!IsPlayerAlive(attacker) || !IsPlayerAlive(victim))
 		return;
 
+	/* 名字快照: 玩家中途退出后 GetClientName 拿不到名字, 报告要照常显示他 */
+	RecordPlayerName(attacker);
+	RecordPlayerName(victim);
+
 	// Tank 对玩家造成伤害
 	if (isTank(attacker) && IsValidSurvivor(victim)) {
 		playerHurts[attacker][victim].gotDamage += damage;
@@ -247,9 +341,59 @@ public void playerHurtHandler(Event event, const char[] name, bool dontBroadcast
 		else if (strcmp(weapon, "tank_rock") == 0)
 			playerHurts[attacker][victim].rock++;
 	} else if (IsValidSurvivor(attacker) && isTank(victim)) {
-		// 玩家对 Tank 造成伤害（致死一击的补偿在 player_death 中用"满血基准 - 已统计伤害"的差额计算, 不依赖易失的剩余血量记录）
+		// 玩家对 Tank 造成伤害（致死一击的补偿在 player_death 中用"满血基准 - 已统计伤害 - 技能扣血"的差额计算, 不依赖易失的剩余血量记录）
 		tankHurt[victim][attacker] += damage;
 	}
+}
+
+/**
+* Apex 技能扣血回调(Apex.inc 的 Apex_OnSkillCostCharged forward)。
+* 坦克使用 Apex 技能(跟踪石 / 连跳)时, 血量由 Apex 用 SetEntProp 直接扣掉, 不产生伤害事件,
+* 原生伤害统计看不到这部分血量消耗; 这里累计下来, 供报告显示, 并用于修正致死一击补偿。
+* 跟踪石是"掷出预扣、命中生还者退还", 退还时 Apex 会以负数 cost 回调, 因此这里直接相加即得净扣血。
+* 数据跟随 Tank 实例: 正常情况下回调者就是当前 Tank; 若跟踪指针已指向别的实例且本索引没有实例数据
+* (历史遗留不同步), 则记到实例持有者(跟踪值)上, 避免换克后技能扣血记丢。
+* @param client 被扣血的坦克客户端索引
+* @param type   类型(连跳 / 跟踪石开启费 / 跟踪石掷出)
+* @param cost   本次血量变化量: 扣血为正, 退还为负
+**/
+public void Apex_OnSkillCostCharged(int client, ApexSkillCostType type, int cost)
+{
+	if (!IsValidClient(client) || cost == 0)
+		return;
+
+	int holder = client;
+	if (g_iCurrentTank != 0 && g_iCurrentTank != client && !tankDataExists(client) && tankDataExists(g_iCurrentTank))
+		holder = g_iCurrentTank;
+
+	tankSkillCost[holder] += cost;
+	if (type == ApexSkillCost_TracEnable) {
+		tankTracCostOpen[holder] += cost;
+	} else if (type == ApexSkillCost_TracThrow) {
+		tankTracCostThrow[holder] += cost;
+		/* 净扣血发数 = 掷出数 - 命中退还数(退还的石头不扣血, 不该算进"扣血发数") */
+		tankTracThrows[holder] += (cost > 0) ? 1 : -1;
+	} else if (type == ApexSkillCost_Bhop) {
+		tankBhopCostOpen[holder] += cost;
+	} else if (type == ApexSkillCost_BhopDetect) {
+		tankBhopCostDetect[holder] += cost;
+	}
+	/* 防御: 插件中途加载时可能只收到"退还"没收过"预扣", 不让累计值变成负数 */
+	if (tankTracCostOpen[holder] < 0)
+		tankTracCostOpen[holder] = 0;
+	if (tankTracCostThrow[holder] < 0)
+		tankTracCostThrow[holder] = 0;
+	if (tankTracThrows[holder] < 0)
+		tankTracThrows[holder] = 0;
+	if (tankBhopCostOpen[holder] < 0)
+		tankBhopCostOpen[holder] = 0;
+	if (tankBhopCostDetect[holder] < 0)
+		tankBhopCostDetect[holder] = 0;
+	if (tankSkillCost[holder] < 0)
+		tankSkillCost[holder] = 0;
+
+	debugAndInfoLog("%s: Apex 技能扣血 %N(%d), 类型 %d, 本次 %d, 累计技能扣血 %d(跟踪石开启 %d + 掷石净扣 %d, %d 发 | 连跳开启 %d + 连跳被抓 %d)",
+		PLUGIN_PREFIX, client, client, type, cost, tankSkillCost[holder], tankTracCostOpen[holder], tankTracCostThrow[holder], tankTracThrows[holder], tankBhopCostOpen[holder], tankBhopCostDetect[holder]);
 }
 
 public void playerSpawnHandler(Event event, const char[] name, bool dontBroadcast) {
@@ -313,18 +457,23 @@ public void playerDeathHandler(Event event, const char[] name, bool dontBroadcas
 		g_iCurrentTank = 0;
 
 	/* 致死一击通常不触发 player_hurt, 用差额法补偿击杀者:
-	   补偿 = 满血基准 - 已统计的全部生还者伤害。差额法不依赖"最后剩余血量"这种易失状态,
-	   控制权转移、事件时序颠倒都不会造成过度补偿, 且每人伤害永远不会超过满血基准 */
+	   补偿 = 满血基准 - 已统计的全部生还者伤害 - Apex 技能扣血。
+	   差额法不依赖"最后剩余血量"这种易失状态, 控制权转移、事件时序颠倒都不会造成过度补偿,
+	   且每人伤害永远不会超过满血基准。
+	   技能扣血(跟踪石 / 连跳)同样消耗坦克血量却不产生伤害事件, 必须一并减掉,
+	   否则这部分血量会被当成"致死一击"记到击杀者头上, 报告里总伤害也会凭空超出总血量 */
 	if (IsValidSurvivor(attacker) && IsPlayerAlive(attacker)) {
 		int recordedDamage = 0;
 		for (int i = 1; i <= MaxClients; i++)
 			recordedDamage += tankHurt[victim][i];
-		int remainDamage = tankHealth[victim] - recordedDamage;
+		int remainDamage = tankHealth[victim] - recordedDamage - tankSkillCost[victim];
 		if (remainDamage > 0)
 			tankHurt[victim][attacker] += remainDamage;
 	}
-	/* 计算 Tank 存活时间 */
-	tankLiveTime[victim] = GetGameTime() - tankLiveTime[victim];
+	/* 计算 Tank 存活时间(只在首次结算时算): round_end 已经算过并排入报告时(坦克在延迟内死亡),
+	   这里再减一次会把存活时长算成地图时间, 报告就会显示一个离谱的存活时间 */
+	if (!hasPrintDamage[victim])
+		tankLiveTime[victim] = GetGameTime() - tankLiveTime[victim];
 	/* 是否是强制杀死、自杀或被环境杀死（无有效攻击者） */
 	if ((!IsValidClient(attacker) || attacker == victim) && !g_hAllowForceKillAnnounce.BoolValue)
 		return;
@@ -355,6 +504,12 @@ public void roundEndHandler(Event event, const char[] name, bool dontBroadcast) 
 		for (int i = 1; i <= MaxClients; i++) {
 			if (!isTank(i) || !IsPlayerAlive(i))
 				continue;
+			/* 这个 Tank 的伤害报告已经输出或已排入队列(round_end 会重复触发, 死亡路径也可能已排入):
+			   剩余血量属于这份报告, 必须随报告一起走 —— 这里直接跳过, 否则报告打完排名之后
+			   又会冒出一行"剩余血量"; 顺带避免存活时间被二次相减算错 */
+			if (hasPrintDamage[i])
+				continue;
+
 			// 计算 Tank 存活时长
 			tankLiveTime[i] = GetGameTime() - tankLiveTime[i];
 			if (tankLiveTime[i] < 0)
@@ -365,13 +520,9 @@ public void roundEndHandler(Event event, const char[] name, bool dontBroadcast) 
 				continue;
 			int percent = RoundToNearest(float(health) / float(tankHealth[i]) * 100.0);
 
-			CPrintToChatAll("[{green}!{default}] {green}%N {default}剩余 {green}%d{default}({green}%d%%{default}) {blue}血量", i, health, percent);
+			CPrintToChatAll("%s{green}%N {default}剩余 {green}%d{default}({green}%d%%{default}) {blue}血量", CHAT_PREFIX, i, health, percent);
 
-			// 如果已经显示过了 Tank 伤害，则不再显示
-			if (hasPrintDamage[i])
-				continue;
-
-			// 否则创建时钟延迟显示 Tank 伤害(回合结束, 坦克随回合消失)
+			// 创建时钟延迟显示 Tank 伤害(回合结束, 坦克随回合消失)
 			DataPack pack = new DataPack();
 			pack.WriteCell(i);
 			pack.WriteString("消失");
@@ -554,6 +705,181 @@ bool tankDataExists(int client)
 	return tankHealth[client] > 0 || tankLiveTime[client] > 0.0;
 }
 
+/* 记玩家名快照: 中途退出后 GetClientName 拿不到名字, 报告要靠快照照常显示 */
+void RecordPlayerName(int client)
+{
+	if (client < 1 || client > MaxClients || playerNames[client][0] != '\0')
+		return;
+	GetClientName(client, playerNames[client], MAX_NAME_LENGTH);
+}
+
+/* 记 SteamID 快照: 中途退出后重进时用它把记录并回同一个人名下 */
+void RecordPlayerAuth(int client)
+{
+	if (client < 1 || client > MaxClients || playerAuths[client][0] != '\0')
+		return;
+	GetClientAuthId(client, AuthId_Steam2, playerAuths[client], sizeof(playerAuths[]), true);
+}
+
+/**
+* 该索引上是否有玩家伤害记录(有任何一项非零即算; 中途退出判断与转存档都用它)
+* @param client 客户端索引
+* @return bool 有记录返回 true
+**/
+bool hasPlayerRecord(int client)
+{
+	for (int tank = 1; tank <= MaxClients; tank++) {
+		if (tankHurt[tank][client] > 0
+			|| playerHurts[tank][client].punch > 0
+			|| playerHurts[tank][client].rock > 0
+			|| playerHurts[tank][client].iron > 0
+			|| playerHurts[tank][client].gotDamage > 0)
+			return true;
+	}
+	return false;
+}
+
+/* 清掉某客户端索引上的全部伤害记录(转存档后调用, 免得记到新玩家头上) */
+void ClearClientRecord(int client)
+{
+	playerNames[client][0] = '\0';
+	playerAuths[client][0] = '\0';
+	for (int tank = 1; tank <= MaxClients; tank++) {
+		tankHurt[tank][client] = 0;
+		playerHurts[tank][client].init();
+	}
+}
+
+/**
+* 把某索引上"已退出玩家"的记录转入存档行(该索引被新玩家占用时调用)
+* @param client 原客户端索引(记录与名字快照仍在)
+* @param reason 日志用的原因
+* @return void
+**/
+void ArchiveDepartedRecord(int client, const char[] reason)
+{
+	if (client < 1 || client > MaxClients || !playerRecordKept[client])
+		return;
+	playerRecordKept[client] = false;
+
+	if (!hasPlayerRecord(client)) {
+		// 没有任何数据: 不必占存档位
+		ClearClientRecord(client);
+		return;
+	}
+
+	if (departedCount >= MAX_DEPARTED) {
+		// 存档满(正常对局不会发生): 只能丢弃, 至少不让它算到新玩家头上
+		debugAndInfoLog("%s: 中途退出玩家记录存档已满(%d), 丢弃 %s 的记录", PLUGIN_PREFIX, MAX_DEPARTED, playerNames[client]);
+		ClearClientRecord(client);
+		return;
+	}
+
+	int row = departedCount++;
+	strcopy(departedNames[row], MAX_NAME_LENGTH, playerNames[client]);
+	// 机器人没有 SteamID(AuthId 全是 "BOT"), 不留 auth 免得两个机器人互相匹配
+	strcopy(departedAuths[row], sizeof(departedAuths[]), IsFakeClient(client) ? "" : playerAuths[client]);
+	for (int tank = 1; tank <= MaxClients; tank++) {
+		departedHurt[row][tank] = tankHurt[tank][client];
+		departedHurts[row][tank] = playerHurts[tank][client];
+	}
+
+	debugAndInfoLog("%s: %s(%d) 记录转存档行 %d(%s)", PLUGIN_PREFIX, departedNames[row], client, row, reason);
+	ClearClientRecord(client);
+}
+
+/**
+* 同一位玩家(SteamID 相同)本局内重进: 把存档记录并回他名下, 报告里不会出现两行同名
+* @param client 重进的客户端索引
+* @param auth   该客户端的 SteamID
+* @return void
+**/
+void RestoreDepartedRecord(int client, const char[] auth)
+{
+	if (client < 1 || client > MaxClients || auth[0] == '\0' || StrEqual(auth, "BOT", false))
+		return;
+
+	for (int d = 0; d < departedCount; d++) {
+		if (!StrEqual(departedAuths[d], auth, false))
+			continue;
+
+		for (int tank = 1; tank <= MaxClients; tank++) {
+			tankHurt[tank][client] += departedHurt[d][tank];
+			playerHurts[tank][client].punch += departedHurts[d][tank].punch;
+			playerHurts[tank][client].rock += departedHurts[d][tank].rock;
+			playerHurts[tank][client].iron += departedHurts[d][tank].iron;
+			playerHurts[tank][client].gotDamage += departedHurts[d][tank].gotDamage;
+			departedHurt[d][tank] = 0;
+			departedHurts[d][tank].init();
+		}
+		if (playerNames[client][0] == '\0')
+			strcopy(playerNames[client], MAX_NAME_LENGTH, departedNames[d]);
+		debugAndInfoLog("%s: 玩家 %s(%d) 重进, 中途退出的记录已并回名下", PLUGIN_PREFIX, departedNames[d], client);
+
+		/* 用最后一条存档填坑, 保持存档行连续 */
+		int last = departedCount - 1;
+		if (d != last) {
+			for (int tank = 1; tank <= MaxClients; tank++) {
+				departedHurt[d][tank] = departedHurt[last][tank];
+				departedHurts[d][tank] = departedHurts[last][tank];
+				departedHurt[last][tank] = 0;
+				departedHurts[last][tank].init();
+			}
+			strcopy(departedNames[d], MAX_NAME_LENGTH, departedNames[last]);
+			strcopy(departedAuths[d], sizeof(departedAuths[]), departedAuths[last]);
+		}
+		departedNames[last][0] = '\0';
+		departedAuths[last][0] = '\0';
+		departedCount--;
+		return;
+	}
+}
+
+/**
+* 取某统计行对 Tank 造成的伤害
+* 行号 <= MaxClients = 在场玩家(行号即客户端索引); 行号 > MaxClients = 中途退出玩家的存档行
+* @param row  统计行号
+* @param tank Tank 客户端索引
+* @return int 对 Tank 造成的伤害
+**/
+int GetRowHurt(int row, int tank)
+{
+	if (row > MaxClients)
+		return departedHurt[row - MaxClients - 1][tank];
+	return tankHurt[tank][row];
+}
+
+/**
+* 取某统计行的显示名(中途退出玩家用名字快照, 索引已被新玩家占用则用存档行里的名字)
+* @param row    统计行号
+* @param buffer 输出缓冲区
+* @param size   缓冲区大小
+* @return void
+**/
+void GetRowName(int row, char[] buffer, int size)
+{
+	if (row > MaxClients) {
+		strcopy(buffer, size, departedNames[row - MaxClients - 1]);
+		return;
+	}
+	if (IsClientInGame(row)) {
+		/* 机器人接手了中途退出玩家的索引时, 用退出玩家的名字快照, 记录才认得出来是谁打出来的
+		   (纯 AI 队友的快照本来就是它自己的名字, 结果一样) */
+		if (IsFakeClient(row) && playerNames[row][0] != '\0') {
+			strcopy(buffer, size, playerNames[row]);
+			return;
+		}
+		GetClientName(row, buffer, size);
+		return;
+	}
+	// 中途退出、索引还没被占用: 用当时记下的名字快照
+	if (playerNames[row][0] != '\0') {
+		strcopy(buffer, size, playerNames[row]);
+		return;
+	}
+	FormatEx(buffer, size, "离线(%d)", row);
+}
+
 /* 安全的客户端名格式化: 掉线/无效索引时输出 "离线(索引)" 而不是让 %N 抛异常 */
 void FormatClientNameSafe(int client, char[] buffer, int size)
 {
@@ -589,11 +915,24 @@ void transferTankData(int oldTank, int newTank)
 	tankHealth[newTank] = tankHealth[oldTank];
 	tankLiveTime[newTank] = tankLiveTime[oldTank];
 	hasPrintDamage[newTank] = hasPrintDamage[oldTank];
+	// Apex 技能扣血同样跟随 Tank 实例
+	tankTracCostOpen[newTank] = tankTracCostOpen[oldTank];
+	tankTracCostThrow[newTank] = tankTracCostThrow[oldTank];
+	tankTracThrows[newTank] = tankTracThrows[oldTank];
+	tankBhopCostOpen[newTank] = tankBhopCostOpen[oldTank];
+	tankBhopCostDetect[newTank] = tankBhopCostDetect[oldTank];
+	tankSkillCost[newTank] = tankSkillCost[oldTank];
 
 	// 清空旧控制者的数据
 	tankHealth[oldTank] = 0;
 	tankLiveTime[oldTank] = 0.0;
 	hasPrintDamage[oldTank] = false;
+	tankTracCostOpen[oldTank] = 0;
+	tankTracCostThrow[oldTank] = 0;
+	tankTracThrows[oldTank] = 0;
+	tankBhopCostOpen[oldTank] = 0;
+	tankBhopCostDetect[oldTank] = 0;
+	tankSkillCost[oldTank] = 0;
 }
 
 /**
@@ -612,27 +951,40 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 	if (tankHealth[client] < 1)
 		return;
 
-	// 统计在场生还者数量, 汇总总伤害与总承伤
+	/* 收集统计行: 在场生还者(行号 = 客户端索引) + 中途退出玩家的存档行(高位行号)。
+	   中途退出的玩家只要对当前 Tank 有记录就照常列出(数据不清理, 名字用快照), 总伤害也把他算进去 */
 	int i, index, totalDamage, totalGotDamage;
+	int rowIds[MAXPLAYERS + MAX_DEPARTED + 1];
 	for (i = 1; i <= MaxClients; i++) {
-		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
-			continue;
-		index++;
-		totalDamage += tankHurt[client][i];
-		totalGotDamage += playerHurts[client][i].gotDamage;
+		if (IsClientInGame(i) && GetClientTeam(i) == TEAM_SURVIVOR) {
+			rowIds[index++] = i;
+			totalDamage += tankHurt[client][i];
+			totalGotDamage += playerHurts[client][i].gotDamage;
+		} else if (playerRecordKept[i]
+			&& (tankHurt[client][i] > 0 || playerHurts[client][i].gotDamage > 0)) {
+			// 中途退出、索引还没被占用的玩家: 记录留着, 照常列出来
+			rowIds[index++] = i;
+			totalDamage += tankHurt[client][i];
+			totalGotDamage += playerHurts[client][i].gotDamage;
+		}
 	}
-	// 没有生还者在场, 无需统计
+	for (int d = 0; d < departedCount; d++) {
+		// 这个 Tank 跟他没关系(既没打 Tank 也没被 Tank 打)就不用列
+		if (departedHurt[d][client] < 1 && departedHurts[d][client].gotDamage < 1)
+			continue;
+		rowIds[index++] = MaxClients + 1 + d;
+		totalDamage += departedHurt[d][client];
+		totalGotDamage += departedHurts[d][client].gotDamage;
+	}
+	// 一个统计行都没有(没生还者也没退出记录), 无需统计
 	if (index < 1)
 		return;
 
-	// 收集每个生还者的排名数据: 0=客户端索引, 1=对 Tank 的伤害
+	// 收集每行的伤害数据: 0=统计行号, 1=对 Tank 的伤害
 	int[][] survivorDamage = new int[index][2];
-	index = 0;
-	for (i = 1; i <= MaxClients; i++) {
-		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
-			continue;
-		survivorDamage[index][0] = i;
-		survivorDamage[index++][1] = tankHurt[client][i];
+	for (i = 0; i < index; i++) {
+		survivorDamage[i][0] = rowIds[i];
+		survivorDamage[i][1] = GetRowHurt(rowIds[i], client);
 	}
 	// 按照玩家对 Tank 的伤害降序排序
 	SortCustom2D(survivorDamage, index, sortByDamageDesc);
@@ -646,8 +998,8 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		return;
 
 	/* 预格式化每行数据(列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列):
-	   0=名次, 1=伤害百分比(1位小数), 2=伤害, 3=名字, 4=拳, 5=石, 6=铁, 7=承伤, 8=承伤百分比 */
-	char[][][] sData = new char[displayCount][9][DATA_CELL_SIZE];
+	   列号见 DATA_COLUMNS 定义 */
+	char[][][] sData = new char[displayCount][DATA_COLUMNS][DATA_CELL_SIZE];
 	// 百分比分母: 总伤害超过满血基准(含致死一击补偿)时用总伤害, 与参考插件一致
 	int iTotalHealth = totalDamage > tankHealth[client] ? totalDamage : tankHealth[client];
 	int x = 0;
@@ -657,28 +1009,39 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		if (damage < 1 && !g_hAllowPrintZeroDamage.BoolValue)
 			continue;
 
+		// 明细: 在场玩家取索引上的数据, 中途退出玩家取存档行(两个数组的行列方向不同)
+		PlayerHurt hurts;
+		if (survivor > MaxClients)
+			hurts = departedHurts[survivor - MaxClients - 1][client];
+		else
+			hurts = playerHurts[client][survivor];
+
 		FormatEx(sData[x][0], DATA_CELL_SIZE, "%d", x + 1);
 		FormatEx(sData[x][1], DATA_CELL_SIZE, "%.1f", float(damage) / float(iTotalHealth) * 100.0);
 		FormatEx(sData[x][2], DATA_CELL_SIZE, "%d", damage);
-		GetClientName(survivor, sData[x][3], DATA_CELL_SIZE);
-		FormatEx(sData[x][4], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].punch);
-		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].rock);
-		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].iron);
-		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", playerHurts[client][survivor].gotDamage);
-		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(playerHurts[client][survivor].gotDamage) / float(totalGotDamage) * 100.0));
+		GetRowName(survivor, sData[x][3], DATA_CELL_SIZE);
+		FormatEx(sData[x][4], DATA_CELL_SIZE, "%d", hurts.punch);
+		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", hurts.rock);
+		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", hurts.iron);
+		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", hurts.gotDamage);
+		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(hurts.gotDamage) / float(totalGotDamage) * 100.0));
 
-		debugAndInfoLog("%s: %N 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, survivor, client, damage, playerHurts[client][survivor].punch, playerHurts[client][survivor].rock, playerHurts[client][survivor].iron, playerHurts[client][survivor].gotDamage);
+		debugAndInfoLog("%s: %s 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, sData[x][3], client, damage, hurts.punch, hurts.rock, hurts.iron, hurts.gotDamage);
 		x++;
 	}
 
-	// 计算各数据列的最大宽度, 用于居中对齐(与参考插件一致: 左右各补 (最大宽度-本行宽度) 个空格)
-	int iMax[9];
-	for (int y = 0; y < 9; y++)
-		iMax[y] = strlen(sData[0][y]);
-	for (x = 1; x < displayCount; x++)
-		for (int y = 0; y < 9; y++)
-			if (strlen(sData[x][y]) > iMax[y])
-				iMax[y] = strlen(sData[x][y]);
+	/* 每一列按"数字位数"对齐: 取本列最多的数字位数, 谁少几位就用几个数字宽空格(U+2007)补上。
+	   因为 U+2007 的渲染宽度恰好等于数字宽度, 每行在本列占用的宽度完全一致,
+	   不会再出现"数字位数不同(如 1500 与 95)时后面的列跟着左右偏移" */
+	int iDigits[DATA_COLUMNS];
+	for (int y = 0; y < DATA_COLUMNS; y++) {
+		iDigits[y] = 0;
+		for (x = 0; x < displayCount; x++) {
+			int digits = CountDigits(sData[x][y]);
+			if (digits > iDigits[y])
+				iDigits[y] = digits;
+		}
+	}
 
 	// 坦克名字: AI 去掉名字里的 "Tank" 前缀, 人类玩家带队伍色, 与参考插件一致
 	char sIndex[32];
@@ -689,96 +1052,137 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		FormatEx(sIndex, sizeof(sIndex), "\x03%N", client);
 	}
 
-	// 标题行: 坦克{名}{原因},总血量:{血量}{+超额伤害}HP. 换行 显示伤害排名:(总伤害:{总数})
+	// 标题行: [坦克伤害] 坦克{名}{原因},总血量:{血量}{+超额伤害}HP. 换行 显示伤害排名:(总伤害:{总数})
 	char sInfo[128], sTemp[2][64];
 	FormatEx(sTemp[0], sizeof(sTemp[]), "\x05总血量\x04:\x03%d", tankHealth[client]);
 	if (totalDamage > tankHealth[client])
 		FormatEx(sTemp[1], sizeof(sTemp[]), "\x04+\x03%d", totalDamage - tankHealth[client]);
 	ImplodeStrings(sTemp, sizeof(sTemp), "", sInfo, sizeof(sInfo));
-	PrintToChatAll("\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", sIndex, reason, sInfo, totalDamage);
+	PrintToChatAll("%s\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", CHAT_PREFIX_RAW, sIndex, reason, sInfo, totalDamage);
 
 	// 显示 Tank 存活时间
 	if (g_hAllowPrintLiveTime.BoolValue) {
 		if (!IsFakeClient(client))
-			CPrintToChatAll("{green}%N {blue}存活时间：{green}%s", client, getTime(tankLiveTime[client]));
+			CPrintToChatAll("%s{green}%N {blue}存活时间：{green}%s", CHAT_PREFIX, client, getTime(tankLiveTime[client]));
 		else
-			CPrintToChatAll("{green}Tank {blue}存活时间：{green}%s", getTime(tankLiveTime[client]));
+			CPrintToChatAll("%s{green}Tank {blue}存活时间：{green}%s", CHAT_PREFIX, getTime(tankLiveTime[client]));
 	}
 
-	// 逐行输出: 名次(居中):[伤害百分比(居中)%](伤害(居中))[拳(居中)][石(居中)][铁(居中)][承伤(居中)(承伤百分比(居中)%] 名字
-	char row[512], cell[64];
+	/* Apex 跟踪石技能扣血(开启费 + 掷石净扣血): Apex 是"掷出预扣、命中生还者退还", 所以净扣血只算没打中的石头
+	   技能扣血走 SetEntProp 不产生伤害事件, 单独列出便于核对总血量(没装 Apex、或这局没用过跟踪石时不显示) */
+	int tracCostOpen = tankTracCostOpen[client], tracCostThrow = tankTracCostThrow[client];
+	int tracCost = tracCostOpen + tracCostThrow;
+	if (tracCost > 0) {
+		char sDetail[96] = "";
+		if (tracCostOpen > 0 && tracCostThrow > 0)
+			FormatEx(sDetail, sizeof(sDetail), "{default}（{blue}开启费 {green}%d{default} + {blue}未命中掷石 {green}%d{default} 发共 {green}%d{default}）", tracCostOpen, tankTracThrows[client], tracCostThrow);
+		else if (tracCostOpen > 0)
+			FormatEx(sDetail, sizeof(sDetail), "{default}（{blue}开启费{default}）");
+		else if (tankTracThrows[client] > 0)
+			FormatEx(sDetail, sizeof(sDetail), "{default}（{blue}未命中掷石 {green}%d{default} 发{default}）", tankTracThrows[client]);
+		CPrintToChatAll("%s{blue}跟踪石技能扣血：{green}%d%s", CHAT_PREFIX, tracCost, sDetail);
+	}
+
+	/* Apex 连跳技能扣血(开启费 + 未开启技能却连续连跳被抓的补扣), 口径与跟踪石那一行一致, 为 0 时不显示 */
+	int bhopCostOpen = tankBhopCostOpen[client], bhopCostDetect = tankBhopCostDetect[client];
+	int bhopCost = bhopCostOpen + bhopCostDetect;
+	if (bhopCost > 0) {
+		char sBhopDetail[96] = "";
+		if (bhopCostOpen > 0 && bhopCostDetect > 0)
+			FormatEx(sBhopDetail, sizeof(sBhopDetail), "{default}（{blue}开启费 {green}%d{default} + {blue}连跳被抓 {green}%d{default}）", bhopCostOpen, bhopCostDetect);
+		else if (bhopCostOpen > 0)
+			FormatEx(sBhopDetail, sizeof(sBhopDetail), "{default}（{blue}开启费{default}）");
+		else
+			FormatEx(sBhopDetail, sizeof(sBhopDetail), "{default}（{blue}连跳被抓{default}）");
+		CPrintToChatAll("%s{blue}连跳技能扣血：{green}%d%s", CHAT_PREFIX, bhopCost, sBhopDetail);
+	}
+
+	/* 逐行输出: 名次:[伤害百分比%](伤害)[拳][石][铁][承伤(承伤百分比%)] 名字
+	   每个单元格用"数字宽空格"按本列最大位数补位(见 AppendDigitPaddedCell), 所以各行的括号与后续列上下对齐 */
+	char row[512];
 	for (x = 0; x < displayCount; x++) {
 		row[0] = '\0';
-		// 名次(居中) + 冒号 + [伤害百分比(居中)%]
-		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
-		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][0]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[0] - strlen(sData[x][0]));
-		FormatEx(cell, sizeof(cell), "\x05:\x03[");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[1] - strlen(sData[x][1]));
-		FormatEx(cell, sizeof(cell), "\x04%s", sData[x][1]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[1] - strlen(sData[x][1]));
-		FormatEx(cell, sizeof(cell), "\x04%%\x03]");
-		StrCat(row, sizeof(row), cell);
-		// (伤害(居中))
-		FormatEx(cell, sizeof(cell), "\x03(\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[2] - strlen(sData[x][2]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][2]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[2] - strlen(sData[x][2]));
-		FormatEx(cell, sizeof(cell), "\x03)");
-		StrCat(row, sizeof(row), cell);
-		// [拳(居中)] [石(居中)] [铁(居中)]
-		FormatEx(cell, sizeof(cell), "\x03[\x04拳\x03:\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[4] - strlen(sData[x][4]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][4]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[4] - strlen(sData[x][4]));
-		FormatEx(cell, sizeof(cell), "\x03][\x04石\x03:\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][5]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[5] - strlen(sData[x][5]));
-		FormatEx(cell, sizeof(cell), "\x03][\x04铁\x03:\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][6]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[6] - strlen(sData[x][6]));
-		// [承伤(居中)(承伤百分比(居中)%]
-		FormatEx(cell, sizeof(cell), "\x03][\x04承伤\x03:\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][7]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[7] - strlen(sData[x][7]));
-		FormatEx(cell, sizeof(cell), "\x03(\x04");
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
-		FormatEx(cell, sizeof(cell), "%s", sData[x][8]);
-		StrCat(row, sizeof(row), cell);
-		AppendPad(row, sizeof(row), iMax[8] - strlen(sData[x][8]));
-		FormatEx(cell, sizeof(cell), "\x04%%\x03)]");
-		StrCat(row, sizeof(row), cell);
+
+		// 名次(紧跟行首与冒号, 不留普通空格)
+		StrCat(row, sizeof(row), "\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][0], iDigits[0], false, false);
+		// :[伤害百分比%]
+		StrCat(row, sizeof(row), "\x05:\x03[\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][1], iDigits[1]);
+		StrCat(row, sizeof(row), "\x04%\x03](\x04");
+		// (伤害)
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][2], iDigits[2]);
+		// [拳
+		StrCat(row, sizeof(row), "\x03)[\x04拳\x03:\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][4], iDigits[4]);
+		// [石
+		StrCat(row, sizeof(row), "\x03][\x04石\x03:\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][5], iDigits[5]);
+		// [铁
+		StrCat(row, sizeof(row), "\x03][\x04铁\x03:\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][6], iDigits[6]);
+		// [承伤
+		StrCat(row, sizeof(row), "\x03][\x04承伤\x03:\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][7], iDigits[7]);
+		// (承伤百分比%)]
+		StrCat(row, sizeof(row), "\x03(\x04");
+		AppendDigitPaddedCell(row, sizeof(row), sData[x][8], iDigits[8]);
+		StrCat(row, sizeof(row), "\x04%\x03)]\x05");
 		// 名字
-		FormatEx(cell, sizeof(cell), "\x05%s", sData[x][3]);
-		StrCat(row, sizeof(row), cell);
+		StrCat(row, sizeof(row), sData[x][3]);
 
 		PrintToChatAll("%s", row);
 	}
 }
 
-/* 追加 N 个空格(居中对齐填充, 与参考插件 l4d2_tank_ranking 的 IsWritesData 行为一致) */
-void AppendPad(char[] buffer, int size, int count) {
+/**
+* 统计文本里的数字个数(按"数字宽度"补位用; '.' 等更窄的字符不参与补位)
+* @param text 待统计文本
+* @return 数字字符个数
+**/
+int CountDigits(const char[] text)
+{
+	int count = 0;
+	for (int i = 0; text[i] != '\0'; i++)
+		if (text[i] >= '0' && text[i] <= '9')
+			count++;
+	return count;
+}
+
+/**
+* 追加一个按数字宽度对齐的单元格
+* 本列最大数字位数 - 本值数字位数 = 需要补的"数字宽空格"(U+2007)个数, 左右均分(左边略多一个),
+* 于是每一行在本列占用的渲染宽度完全相同, 各列的括号与后续列上下对齐。
+* @param buffer     目标缓冲区
+* @param size       缓冲区大小
+* @param value      单元格文本(数字 / '.')
+* @param digits     本列最大数字位数
+* @param leadSpace  是否在左侧留 1 个普通空格(与前面的括号/文字拉开距离; 名次列紧跟行首时不留)
+* @param trailSpace 是否在右侧留 1 个普通空格(名次列右侧紧跟 ":" 时不留)
+* @return void
+**/
+void AppendDigitPaddedCell(char[] buffer, int size, const char[] value, int digits, bool leadSpace = true, bool trailSpace = true)
+{
+	int pad = digits - CountDigits(value);
+	if (pad < 0)
+		pad = 0;
+	int padLeft = (pad + 1) / 2;		// 数值居中, 左边略多补一个
+
+	if (leadSpace)
+		StrCat(buffer, size, " ");
+	AppendFigureSpaces(buffer, size, padLeft);
+	StrCat(buffer, size, value);
+	AppendFigureSpaces(buffer, size, pad - padLeft);
+	if (trailSpace)
+		StrCat(buffer, size, " ");
+}
+
+/* 追加 N 个"数字宽空格"(U+2007, 渲染宽度等于数字宽度) */
+void AppendFigureSpaces(char[] buffer, int size, int count) {
 	if (count < 0)
 		count = 0;
 	for (int i = 0; i < count; i++)
-		StrCat(buffer, size, " ");
+		StrCat(buffer, size, FIGURE_SPACE);
 }
 
 /* 按照伤害对 survivorDamage[][] 进行降序排序，伤害相同则按照玩家索引降序排序 */
@@ -807,10 +1211,22 @@ void clearTankDamage(int client) {
 	if (client != INVALID_CLIENT)
 	{
 		tankHealth[client] = 0;
+		tankTracCostOpen[client] = 0;
+		tankTracCostThrow[client] = 0;
+		tankTracThrows[client] = 0;
+		tankBhopCostOpen[client] = 0;
+		tankBhopCostDetect[client] = 0;
+		tankSkillCost[client] = 0;
 		for (i = 1; i <= MaxClients; i++)
 		{
 			tankHurt[client][i] = 0;
 			playerHurts[client][i].init();
+		}
+		/* 中途退出玩家的存档里这个 Tank 那一列也要清掉, 免得算进新 Tank 的报告 */
+		for (i = 0; i < departedCount; i++)
+		{
+			departedHurt[i][client] = 0;
+			departedHurts[i][client].init();
 		}
 	}
 	else
@@ -822,12 +1238,33 @@ void clearTankDamage(int client) {
 			hasPrintDamage[i] = false;
 			tankHealth[i] = 0;
 			tankLiveTime[i] = 0.0;
+			tankTracCostOpen[i] = 0;
+			tankTracCostThrow[i] = 0;
+			tankTracThrows[i] = 0;
+			tankBhopCostOpen[i] = 0;
+			tankBhopCostDetect[i] = 0;
+			tankSkillCost[i] = 0;
+			playerNames[i][0] = '\0';
+			playerAuths[i][0] = '\0';
+			playerRecordKept[i] = false;
 			for (j = 1; j <= MaxClients; j++)
 			{
 				tankHurt[i][j] = 0;
 				playerHurts[i][j].init();
 			}
 		}
+		/* 中途退出玩家的存档只统计本回合, 一起清空 */
+		for (i = 0; i <= departedCount && i <= MAX_DEPARTED; i++)
+		{
+			departedNames[i][0] = '\0';
+			departedAuths[i][0] = '\0';
+			for (j = 1; j <= MaxClients; j++)
+			{
+				departedHurt[i][j] = 0;
+				departedHurts[i][j].init();
+			}
+		}
+		departedCount = 0;
 	}
 }
 

@@ -29,8 +29,10 @@ public void OnPluginStart()
 				CvarChg_StaggerTime);
 	
 	CreateConVarHook("charge_interrupt_stagger_except_level",
-				"1",
-				"Whether to stop applying stagger on players having levelled a charger.",
+				"0",
+				"Whether to stop applying stagger on players having levelled a charger.\n"
+			...	"0 = Victim is staggered even if they killed the charging Charger with melee (default).\n"
+			...	"1 = Victim is not staggered when they levelled the Charger.",
 				FCVAR_NONE,
 				true, 0.0, true, 1.0,
 				CvarChg_LevelInvuln);
@@ -112,6 +114,9 @@ void Event_ChargerKilled(Event event, const char[] name, bool dontBroadcast)
 	if (!event.GetBool("melee") || !event.GetBool("charging"))
 		return;
 	
+	// The victim levelled the charging Charger right when the charge hit them.
+	// By default the stagger applied on carry end is kept (same time), so that
+	// they still suffer the same balance loss as any other interrupted charge.
 	if (!g_bLevelInvuln)
 		return;
 	

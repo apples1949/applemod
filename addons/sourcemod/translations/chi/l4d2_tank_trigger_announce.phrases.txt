@@ -1,0 +1,15 @@
+"Phrases"
+{
+	"Tag"
+	{
+		"chi"		"{green}[坦克]{default}"
+	}
+	"Triggered"
+	{
+		"chi"		"坦克已生成，由 {red}%N{default} 触发（触发时路程 {olive}%d%%{default}）。"
+	}
+	"TriggeredBot"
+	{
+		"chi"		"坦克已生成，由 {red}%N{default}（AI）触发（触发时路程 {olive}%d%%{default}）。"
+	}
+}

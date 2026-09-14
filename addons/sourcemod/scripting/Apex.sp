@@ -25,6 +25,17 @@
 
 #define TRAC_ROCK_MAX	   2048 /* 跟踪石相关数组上限(tank_rock 实体索引) */
 
+/* 技能扣血通报类型: 枚举值必须与 Apex.inc 的 ApexSkillCostType 保持一致(消费方包含 Apex.inc) */
+enum ApexSkillCostType
+{
+	ApexSkillCost_Bhop = 0,	  /* !bhop 开启费 */
+	ApexSkillCost_TracEnable, /* !trac 开启费 */
+	ApexSkillCost_TracThrow,  /* 跟踪石掷出预扣(命中生还者退还时为负数) */
+	ApexSkillCost_BhopDetect  /* 未开启 !bhop 却连续连跳被抓的补扣 */
+}
+
+Handle g_hFwdSkillCost;
+
 bool   IsBhop[MAXPLAYERS + 1];
 bool   IsTrac[MAXPLAYERS + 1];
 
@@ -38,7 +49,7 @@ int	   BhopBtn[MAXPLAYERS + 1];	   /* 上一帧按键快照(检测 IN_JUMP 按�
 int	   BhopTick[MAXPLAYERS + 1];   /* 下一次连跳允许的最小 tick(lilac: next_bhop) */
 int	   BhopChain[MAXPLAYERS + 1];  /* 当前连续完美连跳次数(lilac: perfect_bhops) */
 
-ConVar Apex[14];
+ConVar Apex[12];
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -47,10 +58,8 @@ bool  g_bHasTracePlugin;					  /* l4d_tracerock.smx 是否已加载(未加载时
 bool  g_bLateLoad;
 bool  g_bTraceRock[TRAC_ROCK_MAX + 1];		  /* 该 tank_rock 是否为跟踪石 */
 float g_fRockDamage[TRAC_ROCK_MAX + 1];		  /* 跟踪石累计承受的伤害 */
-float g_fTraceHitLock[MAXPLAYERS + 1];		  /* 命中约束: 生还者免疫追踪石的截止时间 */
-int	  g_iCtrlSnapshot[MAXPLAYERS + 1];		  /* 坦克 m_frustration 的上一帧快照 */
-int	  g_iCtrlBase[MAXPLAYERS + 1];			  /* 命中瞬间的 m_frustration 基准值 */
-bool  g_bCtrlPending[MAXPLAYERS + 1];		  /* 本帧已排入控制权换算(同帧多次命中只算一次) */
+int	  g_iRockCharge[TRAC_ROCK_MAX + 1];		  /* 掷出该跟踪石时已扣的血量(命中生还者则退还) */
+int	  g_iLastTracTarget[MAXPLAYERS + 1];	  /* 该坦克上一发跟踪石命中的生还者(禁止连续命中同一人) */
 
 public Plugin myinfo =
 {
@@ -68,8 +77,34 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	RegPluginLibrary("Apex");
 	CreateNative("Apex_IsBhopEnabled", Native_IsBhopEnabled);
 	CreateNative("Apex_IsTracEnabled", Native_IsTracEnabled);
+	CreateNative("Apex_GetTracBlockedTarget", Native_GetTracBlockedTarget);
+	/* 技能扣血 forward: 把不经由伤害事件的技能扣血/退还告知伤害统计类插件(如 tank_damage) */
+	g_hFwdSkillCost = CreateGlobalForward("Apex_OnSkillCostCharged", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 	g_bLateLoad = late;
 	return APLRes_Success;
+}
+
+/* 通报技能扣血/退还: cost 为本次血量变化量(扣血为正, 退还为负), 0 不通报 */
+void FireSkillCost(int client, ApexSkillCostType type, int cost)
+{
+	if (g_hFwdSkillCost == null || cost == 0 || !IsValidClient(client))
+		return;
+
+	Call_StartForward(g_hFwdSkillCost);
+	Call_PushCell(client);
+	Call_PushCell(view_as<int>(type));
+	Call_PushCell(cost);
+	Call_Finish();
+}
+
+/* 供 l4d_tracerock.sp 选人使用: 返回该坦克本发跟踪石应排除的生还者(0=无约束) */
+public int Native_GetTracBlockedTarget(Handle plugin, int numParams)
+{
+	int tank = GetNativeCell(1);
+	if (tank < 1 || tank > MaxClients)
+		return 0;
+
+	return g_iLastTracTarget[tank];
 }
 
 public int Native_IsBhopEnabled(Handle plugin, int numParams)
@@ -100,13 +135,11 @@ public void
 	Apex[4] = CreateConVar("tank_trac_hp", "1000", "开启石头追踪时扣血量.0为禁用");
 	Apex[5] = CreateConVar("tank_trac_throw_hp", "50", "每掷出一发跟踪石头扣除的自身血量.0为禁用");
 	Apex[6] = CreateConVar("l4d_tracerock_health", "40", "跟踪石血量(点). 生还者打掉这些血量即可在空中打碎跟踪石. 0=不接管(用游戏默认血量)");
-	Apex[7] = CreateConVar("l4d_tracerock_hit_lock", "5.0", "命中约束: 生还者被跟踪石命中后, 该秒数内免疫跟踪石伤害(普通石头不受影响). 0=禁用", _, true, 0.0);
-	Apex[8] = CreateConVar("l4d_tracerock_ctrl_base", "5.0", "游戏默认的坦克控制权(m_frustration)变化步长(%), 用于换算. 0=禁用控制权调整", _, true, 0.0);
-	Apex[9] = CreateConVar("l4d_tracerock_ctrl_step", "6.0", "跟踪石命中生还者后希望的控制权变化步长(%): 把游戏的 ctrl_base 换算成该值", _, true, 0.0);
-	Apex[10] = CreateConVar("l4d_tracerock_debug", "0", "跟踪石调试日志 0=关闭 1=输出到服务器控制台", _, true, 0.0, true, 1.0);
-	Apex[11] = CreateConVar("tank_bhop_detect", "1", "坦克连跳检测: 未开启!bhop技能的坦克成功连跳时补扣技能血量并通报全场 0=禁用 1=启用", _, true, 0.0, true, 1.0);
-	Apex[12] = CreateConVar("tank_bhop_detect_count", "10", "连续完美连跳达到该次数即判定为成功连跳(参考liac的min档位).0=禁用", _, true, 0.0);
-	Apex[13] = CreateConVar("tank_bhop_detect_air", "0.3", "两次连跳之间的最小滞空时间(秒), 参考liac的air设置(>1.0按1.0算)", _, true, 0.0, true, 1.0);
+	Apex[7] = CreateConVar("l4d_tracerock_ctrl_step", "6.0", "跟踪石命中生还者后扣除的坦克控制权(m_frustration)百分比. 负数=增加, 0=禁用");
+	Apex[8] = CreateConVar("l4d_tracerock_debug", "0", "跟踪石调试日志 0=关闭 1=输出到服务器控制台", _, true, 0.0, true, 1.0);
+	Apex[9] = CreateConVar("tank_bhop_detect", "1", "坦克连跳检测: 未开启!bhop技能的坦克成功连跳时补扣技能血量并通报全场 0=禁用 1=启用", _, true, 0.0, true, 1.0);
+	Apex[10] = CreateConVar("tank_bhop_detect_count", "10", "连续完美连跳达到该次数即判定为成功连跳(参考liac的min档位).0=禁用", _, true, 0.0);
+	Apex[11] = CreateConVar("tank_bhop_detect_air", "0.3", "两次连跳之间的最小滞空时间(秒), 参考liac的air设置(>1.0按1.0算)", _, true, 0.0, true, 1.0);
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);
@@ -171,6 +204,7 @@ Action Call_Trac(int client, int args)
 		IsTrac[client]	 = true;
 		TracLim[client]	 = 1;
 		SetEntProp(client, Prop_Data, "m_iHealth", hp - mumhp);
+		FireSkillCost(client, ApexSkillCost_TracEnable, mumhp);
 		CPrintToChat(client, "%sTank石头追踪已开启(扣 %d 血)", TAG, mumhp);
 	}
 	else /* 血不足，保持关闭 */
@@ -214,6 +248,7 @@ Action Call_Bohp(int client, int args)
 		IsBhop[client]	= true;
 		BhopLim[client] = 1;
 		SetEntProp(client, Prop_Data, "m_iHealth", hp - mumhp);
+		FireSkillCost(client, ApexSkillCost_Bhop, mumhp);
 		CPrintToChat(client, "%sTank自动连跳已开启(扣 %d 血)", TAG, mumhp);
 	}
 	else /* 血不足，保持关闭 */
@@ -248,11 +283,8 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	CPrintToChat(client, "%sE 键 -> 低手抛石(砸屋檐下)", TAG);
 	CPrintToChat(client, "%s右键 -> 单手抛石(万能姿势)", TAG);
 	CPrintToChat(client, "%sR 键 -> 双手抛石(过高墙)", TAG);
-	CPrintToChat(client, "%s指令{lightgreen}!bhop{darkred}开启自动连跳(扣%d血量)", TAG, Apex[3].IntValue);
-	CPrintToChat(client, "%s指令{lightgreen}!trac{darkred}开启跟踪石头(开启扣%d血, 每发扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
-
-	if (Apex[11].BoolValue && Apex[12].IntValue > 0 && Apex[3].IntValue > 0)
-		CPrintToChat(client, "%s未开启{lightgreen}!bhop{darkred}却连续连跳{lightgreen}%d{darkred}次, 将扣除技能血量{lightgreen}%d{darkred}并通报全场", TAG, Apex[12].IntValue, Apex[3].IntValue);
+	CPrintToChat(client, "%s指令{lightgreen}!bhop{darkred}开启自动连跳", TAG);
+	CPrintToChat(client, "%s指令{lightgreen}!trac{darkred}开启跟踪石头(开启扣%d血, 未命中扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
 }
 
 Action SetTankHealth(Handle timer, any client)
@@ -328,7 +360,7 @@ void BhopDetect_Reset(int client)
 /* tank_bhop_detect_air(秒) 换算成 tick(lilac: tick_rate * air) */
 int BhopDetect_AirTicks()
 {
-	float air = Apex[13].FloatValue;
+	float air = Apex[11].FloatValue;
 	if (air <= 0.0)
 		return 0;
 	if (air > 1.0)
@@ -347,10 +379,10 @@ void BhopDetect_Check(int client, int buttons)
 	int last = BhopBtn[client];
 	BhopBtn[client] = buttons;
 
-	int need = Apex[12].IntValue;
+	int need = Apex[10].IntValue;
 
 	/* 检测关闭 / 阈值非法 / 技能本身不扣血: 不判定 */
-	if (!Apex[11].BoolValue || need <= 0 || Apex[3].IntValue <= 0)
+	if (!Apex[9].BoolValue || need <= 0 || Apex[3].IntValue <= 0)
 	{
 		BhopDetect_Reset(client);
 		return;
@@ -421,6 +453,7 @@ void BhopDetect_Charge(int client, int chain)
 
 	SetEntProp(client, Prop_Data, "m_iHealth", hp - cost);
 
+	FireSkillCost(client, ApexSkillCost_BhopDetect, cost);
 	CPrintToChatAll("%s坦克 {lightgreen}%N{darkred} 未开启{lightgreen}!bhop{darkred}技能却连续连跳{lightgreen}%d{darkred}次, 已扣除技能血量{lightgreen}%d", TAG, client, chain, cost);
 }
 
@@ -459,31 +492,61 @@ public void L4D_OnTraceRockCreated(int client, int &trace)
 {
 	if (IsTank(client))
 		trace = IsTrac[client];
-
-	/* 本次石头会追踪 -> 掷出即扣自身血量 */
-	if (trace)
-		ChargeTracThrow(client);
 }
 
-/* 掷出跟踪石头扣血: 最多扣到只剩 1 血, 技能不会把坦克扣死 */
-void ChargeTracThrow(int client)
+/* 掷出跟踪石头扣血: 最多扣到只剩 1 血, 技能不会把坦克扣死. 返回实际扣除的血量(0=没扣) */
+int ChargeTracThrow(int client)
 {
 	int cost = Apex[5].IntValue;
 	if (cost <= 0 || !IsTank(client))
-		return;
+		return 0;
 
 	int hp = GetEntProp(client, Prop_Data, "m_iHealth");
 	if (hp <= 1)
-		return;
+		return 0;
 
 	if (cost > hp - 1)
 		cost = hp - 1;
 
 	SetEntProp(client, Prop_Data, "m_iHealth", hp - cost);
+
+	FireSkillCost(client, ApexSkillCost_TracThrow, cost);
+
+	return cost;
+}
+
+/* 跟踪石命中生还者: 退还掷出时扣的血(即"命中则不扣血", 只有未命中才真正扣) */
+void RefundTracThrow(int tank, int rock, int victim)
+{
+	int charge = g_iRockCharge[rock];
+	if (charge <= 0)
+		return;
+
+	g_iRockCharge[rock] = 0;
+
+	if (!IsTank(tank))
+		return;
+
+	int hp	  = GetEntProp(tank, Prop_Data, "m_iHealth");
+	int maxhp = GetEntProp(tank, Prop_Data, "m_iMaxHealth");
+
+	int newhp = hp + charge;
+	if (maxhp > 0 && newhp > maxhp)
+		newhp = maxhp;
+
+	if (newhp != hp)
+	{
+		SetEntProp(tank, Prop_Data, "m_iHealth", newhp);
+		/* 通报退还(负数): 命中则不扣血, 伤害统计侧据此把预扣的血扣回去 */
+		FireSkillCost(tank, ApexSkillCost_TracThrow, newhp - hp);
+	}
+
+	if (Apex[8].BoolValue)
+		PrintToServer("[Apex] 跟踪石命中 %N, 退还掷出扣血 %d (坦克 %d -> %d)", victim, charge, hp, newhp);
 }
 
 /* -----------------------------------------------------------
-	跟踪石平衡功能: 血量 / 命中约束 / 控制权步长
+	跟踪石平衡功能: 血量 / 禁止连续命中同一人 / 控制权扣除
 	(石头是否为"跟踪石"在此判定: 出石瞬间坦克开着 !trac)
 ----------------------------------------------------------- */
 
@@ -494,6 +557,16 @@ bool HasTracePlugin()
 		g_bHasTracePlugin = LibraryExists("L4D_OnTraceRockCreated");
 
 	return g_bHasTracePlugin;
+}
+
+/* 跟踪功能当前是否真的生效(插件已加载 且 l4d_tracerock_enable 开着) */
+bool TracFeatureActive()
+{
+	if (!HasTracePlugin())
+		return false;
+
+	ConVar cv = FindConVar("l4d_tracerock_enable");
+	return (cv == null) ? true : cv.BoolValue;
 }
 
 public void OnEntityCreated(int entity, const char[] classname)
@@ -507,14 +580,18 @@ void OnRockSpawnPost(int rock)
 	/* 实体索引会被复用, 先复位状态 */
 	g_bTraceRock[rock]	= false;
 	g_fRockDamage[rock] = 0.0;
+	g_iRockCharge[rock] = 0;
 
 	int owner = GetEntPropEnt(rock, Prop_Data, "m_hOwnerEntity");
 
-	/* 只有"坦克开着跟踪、且跟踪插件确实加载"时掷出的石头才算跟踪石 */
-	if (!HasTracePlugin() || !IsTank(owner) || !IsTrac[owner])
+	/* 只有"坦克开着跟踪、且跟踪功能确实生效"时掷出的石头才算跟踪石 */
+	if (!TracFeatureActive() || !IsTank(owner) || !IsTrac[owner])
 		return;
 
 	g_bTraceRock[rock] = true;
+
+	/* 掷出即扣血, 命中生还者时再退还(见 RefundTracThrow) */
+	g_iRockCharge[rock] = ChargeTracThrow(owner);
 
 	/* 跟踪石血量: 交给引擎 40 点血, 同时自行累计伤害兜底(见 OnRockTakeDamage) */
 	int health = Apex[6].IntValue;
@@ -524,23 +601,6 @@ void OnRockSpawnPost(int rock)
 		SetEntProp(rock, Prop_Data, "m_takedamage", 2);	   // DAMAGE_YES: 确保子弹能打到石头(原本已开启则无影响)
 		SDKHook(rock, SDKHook_OnTakeDamage, OnRockTakeDamage);
 	}
-
-	SDKHook(rock, SDKHook_Think, OnRockThink);
-}
-
-/* 每帧记录石头主人(坦克)的控制权 m_frustration, 命中时用于换算步长 */
-public void OnRockThink(int rock)
-{
-	if (!g_bTraceRock[rock])
-		return;
-
-	float base = Apex[8].FloatValue;
-	if (base <= 0.0 || Apex[9].FloatValue == base)
-		return;
-
-	int owner = GetEntPropEnt(rock, Prop_Data, "m_hOwnerEntity");
-	if (IsTank(owner))
-		g_iCtrlSnapshot[owner] = GetEntProp(owner, Prop_Send, "m_frustration");
 }
 
 public void OnClientPutInServer(int client)
@@ -552,16 +612,14 @@ public void OnClientDisconnect(int client)
 {
 	SDKUnhook(client, SDKHook_OnTakeDamage, OnClientTakeDamage);
 
-	g_fTraceHitLock[client] = 0.0;
-	g_iCtrlSnapshot[client] = 0;
-	g_iCtrlBase[client]		= 0;
-	g_bCtrlPending[client]	= false;
+	g_iLastTracTarget[client] = 0;
 }
 
 /**
  * 跟踪石命中生还者:
- *  1. 命中约束: 刚被跟踪石命中过的生还者, 在免疫时间内不再吃跟踪石伤害(同一人无法被连续命中)
- *  2. 控制权步长: 把引擎本次造成的 m_frustration 变化, 从 ctrl_base% 换算成 ctrl_step%
+ *  1. 命中则不扣血: 退还掷出时预扣的血量
+ *  2. 记下命中目标: 该坦克下一发跟踪石不再选他(禁止连续命中同一人)
+ *  3. 控制权: 扣除 ctrl_step% 的坦克控制权(m_frustration)
  */
 public Action OnClientTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype,
 								 int &weapon, float damageForce[3], float damagePosition[3])
@@ -575,76 +633,49 @@ public Action OnClientTakeDamage(int victim, int &attacker, int &inflictor, floa
 	if (!g_bTraceRock[inflictor])
 		return Plugin_Continue;
 
-	/* 只有真正造成伤害的命中才算命中(被无敌帧等挡掉的擦碰不计入免疫) */
-	if (damage <= 0.0)
-		return Plugin_Continue;
-
 	int tank = GetEntPropEnt(inflictor, Prop_Data, "m_hOwnerEntity");
 	if (!IsTank(tank))
 		return Plugin_Continue;
 
-	float now = GetGameTime();
+	/* 1. 命中生还者 -> 退还掷出时扣的血 */
+	RefundTracThrow(tank, inflictor, victim);
 
-	/* 1. 命中约束 */
-	float lockTime = Apex[7].FloatValue;
-	if (lockTime > 0.0)
-	{
-		if (g_fTraceHitLock[victim] > now)
-		{
-			CPrintToChat(tank, "%s跟踪石被{lightgreen}%N{darkred}免疫(剩 %.1f 秒)", TAG, victim, g_fTraceHitLock[victim] - now);
-			return Plugin_Handled;
-		}
+	/* 2. 下一发跟踪石不再选中他(选人逻辑在 l4d_tracerock.sp, 通过 Apex_GetTracBlockedTarget 查询) */
+	g_iLastTracTarget[tank] = victim;
 
-		g_fTraceHitLock[victim] = now + lockTime;
-	}
-
-	/* 2. 控制权步长换算(读值放到本帧结束, 此时引擎已经改完 m_frustration) */
-	float base = Apex[8].FloatValue;
-	if (base > 0.0 && Apex[9].FloatValue != base && !g_bCtrlPending[tank])
-	{
-		g_bCtrlPending[tank] = true;
-		g_iCtrlBase[tank]	 = g_iCtrlSnapshot[tank];
-		RequestFrame(Frame_ApplyCtrlStep, GetClientUserId(tank));
-	}
+	/* 3. 控制权扣除: 稍等 0.05 秒再写, 避免被同帧其它插件(如 godframes 的怒气覆盖)冲掉 */
+	if (RoundToNearest(Apex[7].FloatValue) != 0)
+		CreateTimer(0.05, Timer_ApplyCtrlLoss, GetClientUserId(tank), TIMER_FLAG_NO_MAPCHANGE);
 
 	return Plugin_Continue;
 }
 
-void Frame_ApplyCtrlStep(any data)
+/* 扣除坦克控制权(负数=增加); m_frustration 取值范围 0-100 */
+public Action Timer_ApplyCtrlLoss(Handle timer, any userid)
 {
-	int tank = GetClientOfUserId(data);
+	int tank = GetClientOfUserId(userid);
 	if (!IsTank(tank))
-		return;
+		return Plugin_Continue;
 
-	g_bCtrlPending[tank] = false;
+	int step = RoundToNearest(Apex[7].FloatValue);
+	if (step == 0)
+		return Plugin_Continue;
 
-	int current = GetEntProp(tank, Prop_Send, "m_frustration");
-	int delta	= current - g_iCtrlBase[tank];
+	int before = GetEntProp(tank, Prop_Send, "m_frustration");
+	int after  = before - step;
 
-	if (delta == 0)
-	{
-		if (Apex[10].BoolValue)
-			PrintToServer("[Apex] 跟踪石命中后未检测到控制权变化(tank=%N, 当前值=%d, 基准值=%d)", tank, current, g_iCtrlBase[tank]);
-		return;
-	}
+	if (after > 100)
+		after = 100;
+	if (after < 0)
+		after = 0;
 
-	/* 引擎步长 delta 对应 ctrl_base%, 多扣/多加的部分 = (ctrl_step/ctrl_base - 1) * delta */
-	float scale = (Apex[9].FloatValue / Apex[8].FloatValue) - 1.0;
-	int	  extra = RoundToNearest(float(delta) * scale);
-	if (extra == 0)
-		extra = (delta > 0) ? 1 : -1;
+	if (after != before)
+		SetEntProp(tank, Prop_Send, "m_frustration", after);
 
-	int result = current + extra;
-	if (result > 100)
-		result = 100;
-	if (result < 0)
-		result = 0;
+	if (Apex[8].BoolValue)
+		PrintToServer("[Apex] 跟踪石命中: 坦克控制权 %d -> %d (扣除 %d%%)", before, after, step);
 
-	if (result != current)
-		SetEntProp(tank, Prop_Send, "m_frustration", result);
-
-	if (Apex[10].BoolValue)
-		PrintToServer("[Apex] 跟踪石控制权 %d -> %d (引擎步长 %d, 目标步长 %.1f%%)", current, result, delta, Apex[9].FloatValue);
+	return Plugin_Continue;
 }
 
 /**
@@ -663,7 +694,7 @@ public Action OnRockTakeDamage(int rock, int &attacker, int &inflictor, float &d
 	if (g_fRockDamage[rock] < float(health))
 		return Plugin_Continue;
 
-	if (Apex[10].BoolValue)
+	if (Apex[8].BoolValue)
 		PrintToServer("[Apex] 跟踪石(实体 %d)累计承受 %.1f 点伤害, 打碎", rock, g_fRockDamage[rock]);
 
 	BreakTraceRock(rock);
@@ -678,8 +709,8 @@ void BreakTraceRock(int rock)
 
 	g_bTraceRock[rock]	= false;
 	g_fRockDamage[rock] = 0.0;
+	g_iRockCharge[rock] = 0;
 
-	SDKUnhook(rock, SDKHook_Think, OnRockThink);
 	SDKUnhook(rock, SDKHook_OnTakeDamage, OnRockTakeDamage);
 
 	SetEntityRenderFx(rock, RENDERFX_FADE_FAST);
@@ -693,6 +724,7 @@ public Action Timer_RemoveRock(Handle timer, any ref)
 	{
 		g_bTraceRock[rock]	= false;
 		g_fRockDamage[rock] = 0.0;
+		g_iRockCharge[rock] = 0;
 		RemoveEntity(rock);
 	}
 
@@ -720,9 +752,6 @@ void Reset(int client)
 	BhopBtn[client] = 0;
 	BhopDetect_Reset(client);
 
-	/* 新一条命/新回合不继承跟踪石的命中免疫 */
-	g_fTraceHitLock[client] = 0.0;
-	g_iCtrlSnapshot[client] = 0;
-	g_iCtrlBase[client]		= 0;
-	g_bCtrlPending[client]	= false;
+	/* 新一条命/新回合不继承跟踪石的连续命中约束 */
+	g_iLastTracTarget[client] = 0;
 }

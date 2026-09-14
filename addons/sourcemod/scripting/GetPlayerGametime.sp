@@ -57,6 +57,8 @@ bool   b_StatsSourceEnabled = false;
 bool   b_ProfileSourceEnabled = false;
 bool   b_WarnedNoSource = false;
 bool   b_WarnedNoKey = false;
+bool   b_ConfigsExecuted = false;
+int	   i_LastSourceState = 0;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
 int	   i_CheckPlayerProfileCount;
@@ -265,14 +267,29 @@ void GetCvars()
 	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0);
 	b_ProfileSourceEnabled = b_SteamWorksAvailable && ((i_QueryMode & QUERY_PROFILE) != 0) && (i_CheckPlayerProfileCount > 0) && (s_APIKey[0] != '\0');
 
+	// 配置还没执行完时(OnPluginStart 阶段)读到的还是 cvar 默认值, 此时不做判断也不报错,
+	// 否则服务器每次启动都会先误报一次"未设置 GetPlayerGametimeAPIKey"
+	if (!b_ConfigsExecuted) return;
+
+	// 数据源启用状态变化时, 往日志里留一条"插件实际读到了什么", 方便对照排查
+	int iSourceState = (b_StatsSourceEnabled ? 1 : 0) | (b_ProfileSourceEnabled ? 2 : 0);
+	if (iSourceState != i_LastSourceState)
+	{
+		i_LastSourceState = iSourceState;
+		LogMessage("[GetPlayerGametime] QueryGametimeMode=%d | 主页时长查询:%s (APIKey 长度=%d, CheckPlayerProfileCount=%d) | 成就时长查询:%s (CheckPlayerGameCount=%d)",
+				   i_QueryMode,
+				   b_ProfileSourceEnabled ? "启用" : "禁用", strlen(s_APIKey), i_CheckPlayerProfileCount,
+				   b_StatsSourceEnabled ? "启用" : "禁用", i_CheckPlayerGameCount);
+	}
+
 	// 没有任何可用数据源时, 关闭时长限制, 否则所有玩家都会被判定成"获取游戏时长失败"
 	if (b_Enable && b_LimitPlayer && !b_StatsSourceEnabled && !b_ProfileSourceEnabled)
 	{
 		if (!b_WarnedNoSource)
 		{
 			b_WarnedNoSource = true;
-			LogError("没有任何可用的游戏时长数据源(QueryGametimeMode=%d, CheckPlayerProfileCount=%d, APIKey=%s), 已暂停因游戏时长而限制玩家的功能.",
-					 i_QueryMode, i_CheckPlayerProfileCount, s_APIKey[0] ? "已设置" : "未设置");
+			LogError("没有任何可用的游戏时长数据源(QueryGametimeMode=%d, CheckPlayerProfileCount=%d, APIKey 长度=%d), 已暂停因游戏时长而限制玩家的功能.",
+					 i_QueryMode, i_CheckPlayerProfileCount, strlen(s_APIKey));
 		}
 	}
 	else
@@ -280,19 +297,28 @@ void GetCvars()
 		b_WarnedNoSource = false;
 	}
 
-	// 想查询玩家主页时长但没有配置好(缺少 API Key / 次数为 0)时给出提示
+	// 没配主页查询不是错误(这是可选项), 只记一条普通日志
 	if (((i_QueryMode & QUERY_PROFILE) != 0) && !b_ProfileSourceEnabled && b_SteamWorksAvailable)
 	{
 		if (!b_WarnedNoKey)
 		{
 			b_WarnedNoKey = true;
-			LogError("玩家主页时长查询未启用: %s, 输出中只会显示成就统计时长.", (i_CheckPlayerProfileCount <= 0) ? "CheckPlayerProfileCount=0" : "未设置 GetPlayerGametimeAPIKey");
+			LogMessage("[GetPlayerGametime] 玩家主页时长查询未启用: %s (QueryGametimeMode=%d, CheckPlayerProfileCount=%d, APIKey 长度=%d), 输出中只会显示成就统计时长. 需要主页时长时把 GetPlayerGametimeAPIKey 写在 server.cfg 或 cfg/sourcemod/GetPlayerGametime.cfg 里.",
+					   (i_CheckPlayerProfileCount <= 0) ? "CheckPlayerProfileCount 不大于 0" : "GetPlayerGametimeAPIKey 读到的值为空",
+					   i_QueryMode, i_CheckPlayerProfileCount, strlen(s_APIKey));
 		}
 	}
 	else
 	{
 		b_WarnedNoKey = false;
 	}
+}
+
+// AutoExecConfig 的 cfg 是在插件加载之后才执行的, 所以"配置是否配好"的判断要放在这里做
+public void OnConfigsExecuted()
+{
+	b_ConfigsExecuted = true;
+	GetCvars();
 }
 
 public void OnClientPostAdminCheck(int client)

@@ -101,7 +101,7 @@ public void OnPluginStart()
 	g_hAfkCheckInterval 	= CreateConVar("l4d_specafk_checkinteral", 			"1", "检测/警告的时间间隔", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", 			"1", "设为1时，当队伍有空位时，旁观状态下的AFK玩家将被踢出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", 		"0", "设为1时，无论幸存者是否离开安全屋，AFK玩家都会被强制旁观（不影响旁观踢出判定）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"z", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
+	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
 	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAutoSpecSteamIds 	= CreateConVar("l4d_specafk_autospec_steamids", 	"76561198760610101", "符合条件的 SteamID64 玩家将自动被移动到旁观，且不会被本插件踢出（多个用逗号分隔）", FCVAR_NOTIFY);
@@ -254,10 +254,11 @@ bool IsImmuneName(int client)
 
 bool TeamsHaveOpenSlots()
 {
-	// 生还者队伍有空位：存在 AI 机器人（玩家加入可顶替）
+	// 生还者队伍有空位：存在"存活"的 AI 机器人（玩家加入可顶替）
+	// 已死亡的生还者 bot 席位（等下一回合复活）不算可补位，避免误警告/踢出旁观玩家
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2)
+		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
 			return true;
 	}
 

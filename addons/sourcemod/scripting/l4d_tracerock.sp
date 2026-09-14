@@ -5,6 +5,7 @@
 #include <sdkhooks>
 #include <sdktools>
 #include <sdktools_functions>
+#include <Apex>
 
 #define FilterSelf				 0
 #define FilterSelfAndPlayer		 1
@@ -277,7 +278,8 @@ void TraceMissile(int ent, float duration)
 
 	NormalizeVector(velocitymissile, velocitymissile);
 
-	int			 enemy = GetEnemy(posmissile, velocitymissile);
+	int			 owner = GetEntPropEnt(ent, Prop_Data, "m_hOwnerEntity");
+	int			 enemy = GetEnemy(posmissile, velocitymissile, owner);
 
 	static float velocityenemy[3];
 	static float vtrace[3];
@@ -469,7 +471,43 @@ void TraceMissile(int ent, float duration)
 	TeleportEntity(ent, NULL_VECTOR, NULL_VECTOR, newvelocitymissile);
 }
 
-int GetEnemy(float pos[3], float vec[3])
+/* 本发跟踪石的选人: 排除 Apex 指定的"上一发已命中的生还者", 除非已无其他可选生还者 */
+int GetEnemy(float pos[3], float vec[3], int tank)
+{
+	int blocked = GetBlockedTarget(tank);	  /* 0 = 无约束 */
+
+	int enemy = FindEnemy(pos, vec, blocked);
+	if (enemy == 0 && blocked > 0 && CountSelectableSurvivors() <= 1)
+		enemy = FindEnemy(pos, vec, 0);			  /* 只剩他一个可选: 允许重复 */
+
+	return enemy;
+}
+
+/* 向 Apex 查询约束; Apex 未加载或版本过旧时视为无约束 */
+int GetBlockedTarget(int tank)
+{
+	if (tank <= 0 || tank > MaxClients)
+		return 0;
+
+	if (GetFeatureStatus(FeatureType_Native, "Apex_GetTracBlockedTarget") != FeatureStatus_Available)
+		return 0;
+
+	return Apex_GetTracBlockedTarget(tank);
+}
+
+/* 可选生还者数量(游戏内/存活/未倒地或挂边) */
+int CountSelectableSurvivors()
+{
+	int count = 0;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (IsClientInGame(client) && GetClientTeam(client) == 2 && IsPlayerAlive(client) && !IsPlayerIncapOrHanging(client))
+			count++;
+	}
+	return count;
+}
+
+int FindEnemy(float pos[3], float vec[3], int exclude)
 {
 	float min = 4.0;
 	float pos2[3];
@@ -478,6 +516,9 @@ int GetEnemy(float pos[3], float vec[3])
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
+		if (client == exclude)
+			continue;
+
 		if (IsClientInGame(client) && GetClientTeam(client) == 2 && IsPlayerAlive(client) && !IsPlayerIncapOrHanging(client))
 		{
 			GetClientEyePosition(client, pos2);

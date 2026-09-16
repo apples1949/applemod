@@ -256,7 +256,10 @@ void UpdatePanel()
 }
 
 // 在准备状态下显示玩家的游戏时长和 Lerp 值 (数据来自 GetPlayerGametime 插件)
-// 格式: " [主页12.57/成就11.98/15.6]" (小时两位小数 / Lerp 毫秒) ; 未获取到的时长不显示
+// 两个时长都拿到: " [12.57/11.98/15.6]"          (主页/成就 顺序固定, 不加文字)
+// 只拿到主页:     " [主页12.57/15.6]"
+// 只拿到成就:     " [成就11.98/15.6]"
+// (时长=小时两位小数, Lerp=毫秒一位小数; 两个时长都没有则不显示)
 void GetPlayerGametimeDisplay(int client, char[] buffer, int maxlen)
 {
 	buffer[0] = '\0';
@@ -272,7 +275,7 @@ void GetPlayerGametimeDisplay(int client, char[] buffer, int maxlen)
 
 	float fLerp = GetPlayerGametime_GetLerp(client) * 1000.0; // 秒 -> 毫秒
 
-	if (iProfile > 0 && iStat > 0) FormatEx(buffer, maxlen, " [主页%.2f/成就%.2f/%.1f]", float(iProfile) / 3600.0, float(iStat) / 3600.0, fLerp);
+	if (iProfile > 0 && iStat > 0) FormatEx(buffer, maxlen, " [%.2f/%.2f/%.1f]", float(iProfile) / 3600.0, float(iStat) / 3600.0, fLerp);
 	else if (iProfile > 0) FormatEx(buffer, maxlen, " [主页%.2f/%.1f]", float(iProfile) / 3600.0, fLerp);
 	else FormatEx(buffer, maxlen, " [成就%.2f/%.1f]", float(iStat) / 3600.0, fLerp);
 }

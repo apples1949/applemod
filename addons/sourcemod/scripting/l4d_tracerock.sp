@@ -5,6 +5,16 @@
 #include <sdkhooks>
 #include <sdktools>
 #include <sdktools_functions>
+/* Apex 是"可选"前置, 必须显式 #undef REQUIRE_PLUGIN 再 include:
+   core.inc 结尾默认 #define REQUIRE_PLUGIN, 不 undef 时 Apex.inc 里的 SharedPlugin 会被编译成
+   required = 1(必需依赖), 加载时找不到已加载的 "Apex" 库就直接失败:
+   Could not find required plugin "Apex"(本插件在 plugins.cfg 第 140 行, 紧跟 Apex 第 139 行之后,
+   一旦两者顺序调换或 Apex 加载失败, 本插件就跟着加载不了)。
+   undef 之后依赖变可选: Apex 没装/没加载都不影响本插件加载; 需要用到的
+   Apex_GetTracBlockedTarget 已在 GetBlockedTarget() 里用 GetFeatureStatus 做了运行时守卫,
+   Apex 不在时按"无选人约束"处理。
+   注意: #undef 会影响其后 include 的文件, 所以这行必须紧跟在 <Apex> 之前。 */
+#undef REQUIRE_PLUGIN
 #include <Apex>
 
 #define FilterSelf				 0

@@ -99,7 +99,7 @@ void ResetAnnounce()
  * 坦克生成时公告触发者。
  *
  * 判定方式：坦克按路程自然刷出时，是"当时路程最靠前"的生还者越过了刷克点，
- * 所以直接取那一刻路程最远的生还者作为触发者，并附带其所在地图路程百分比。
+ * 所以直接取那一刻路程最远的生还者作为触发者，公告只报名字、不报路程数值。
  *
  * 已知边界：若坦克是被指令/脚本强行刷出（z_spawn tank、director_force_tank、终局脚本坦克等），
  * 该次生成与"谁推进到刷克点"无关，此时公告的仍是当时路程最靠前的生还者，
@@ -114,7 +114,7 @@ void AnnounceTankTrigger()
     if (!IsFlowAvailable()) {
         if (!g_bFlowWarned) {
             g_bFlowWarned = true;
-            LogError("Left4DHooks 里程 natives 不可用（L4D2Direct_GetFlowDistance / L4D2Direct_GetMapMaxFlowDistance），本次无法判定坦克触发者。");
+            LogError("Left4DHooks 里程 native 不可用（L4D2Direct_GetFlowDistance），本次无法判定坦克触发者。");
         }
 
         return;
@@ -133,13 +133,8 @@ void AnnounceTankTrigger()
     g_bAnnounced = true;
     g_fLastAnnounce = now;
 
-    int percent = GetSurvivorFlowPercent(triggerer);
-
-    if (IsFakeClient(triggerer)) {
-        CPrintToChatAll("%t %t", "Tag", "TriggeredBot", triggerer, percent);
-    } else {
-        CPrintToChatAll("%t %t", "Tag", "Triggered", triggerer, percent);
-    }
+    // 输出：[坦克触发] XXX触发坦克刷新（AI 生还者同样显示其角色名）
+    CPrintToChatAll("%t %t", "Tag", "Triggered", triggerer);
 }
 
 /**
@@ -170,28 +165,10 @@ int FindFurthestSurvivor()
 }
 
 /**
- * 生还者当前路程占全图最大路程的百分比（0-100）。
+ * Left4DHooks 的里程 native 是否可用。
+ * 本插件按"可选依赖"引入 Left4DHooks，因此调用前必须确认 native 已绑定。
  */
-int GetSurvivorFlowPercent(int client)
-{
-    float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
-    if (maxFlow <= 0.0) {
-        return 0;
-    }
-
-    int percent = RoundToNearest(100.0 * L4D2Direct_GetFlowDistance(client) / maxFlow);
-
-    if (percent < 0) {
-        percent = 0;
-    } else if (percent > 100) {
-        percent = 100;
-    }
-
-    return percent;
-}
-
 bool IsFlowAvailable()
 {
-    return (GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetFlowDistance") == FeatureStatus_Available
-        && GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetMapMaxFlowDistance") == FeatureStatus_Available);
+    return (GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetFlowDistance") == FeatureStatus_Available);
 }

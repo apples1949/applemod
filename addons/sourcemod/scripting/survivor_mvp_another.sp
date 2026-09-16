@@ -432,25 +432,77 @@ int collectStatRows(int[] rows) {
 }
 
 /**
-* 取统计表某一行的名字 (已退出玩家标注 [已退出], BOT 标注 [BOT])
-* @param row   统计行索引
-* @param name  名字输出缓冲
-* @param len   缓冲长度
-* @param color 名字颜色前缀
+* 取统计表某一行的名字
+* 在场玩家用 \x03(队伍色, 配合 PrintChatWithAuthor 的生还者作者 = 蓝色),
+* 已退出玩家用 \x01(默认色 = 无颜色), BOT 追加 [BOT]
+* @param row  统计行索引
+* @param name 名字输出缓冲
+* @param len  缓冲长度
 * @return void
 **/
-void getStatRowName(int row, char[] name, int len, const char[] color = "\x05") {
-	char base[MAX_NAME_LENGTH], suffix[24];
-	suffix[0] = '\0';
-
+void getStatRowName(int row, char[] name, int len) {
 	if (IsDepartedRow(row)) {
-		strcopy(base, sizeof(base), departedNames[row - MaxClients - 1]);
-		strcopy(suffix, sizeof(suffix), " \x01[已退出]");
+		FormatEx(name, len, "\x01%s", departedNames[row - MaxClients - 1]);
+	} else if (IsFakeClient(row)) {
+		FormatEx(name, len, "\x03%N \x01[BOT]", row);
 	} else {
-		FormatEx(base, sizeof(base), "%N", row);
-		if (IsFakeClient(row)) { strcopy(suffix, sizeof(suffix), " \x01[BOT]"); }
+		FormatEx(name, len, "\x03%N", row);
 	}
-	FormatEx(name, len, "%s%s%s", color, base, suffix);
+}
+
+/**
+* 找一个在线的生还者作为 SayText2 作者
+* L4D2 的聊天色 \x03 是"队伍色", 由消息作者(ent_idx)的队伍决定: 生还者 = 蓝色
+* @return 客户端索引, 没有生还者时返回 0
+**/
+stock int FindSurvivorAuthor() {
+	for (int i = 1; i <= MaxClients; i++) {
+		if (IsValidClient(i) && GetClientTeam(i) == TEAM_SURVIVOR) { return i; }
+	}
+	return 0;
+}
+
+/**
+* 以指定作者发送 SayText2 聊天消息 (消息里的 \x03 会按作者队伍着色)
+* 这样"在场玩家名字"才能显示为蓝色; 作者无效时退化为普通 PrintToChat(此时 \x03 不着色)
+* @param client  接收者
+* @param author  SayText2 作者 (生还者 = 蓝色)
+* @param message 消息内容
+* @return void
+**/
+stock void PrintChatWithAuthor(int client, int author, const char[] message) {
+	if (!IsValidClient(author)) {
+		PrintToChat(client, "%s", message);
+		return;
+	}
+
+	Handle msg = StartMessageOne("SayText2", client, USERMSG_RELIABLE | USERMSG_BLOCKHOOKS);
+	if (msg == null) {
+		PrintToChat(client, "%s", message);
+		return;
+	}
+
+#if SOURCEMOD_V_MAJOR >= 1 && SOURCEMOD_V_MINOR >= 5
+	if (GetFeatureStatus(FeatureType_Native, "GetUserMessageType") == FeatureStatus_Available && GetUserMessageType() == UM_Protobuf) {
+		Protobuf pb = UserMessageToProtobuf(msg);
+		pb.SetInt("ent_idx", author);
+		pb.SetBool("chat", true);
+		pb.SetString("msg_name", message);
+		pb.AddString("params", "");
+		pb.AddString("params", "");
+		pb.AddString("params", "");
+		pb.AddString("params", "");
+	} else {
+#endif
+		BfWrite bf = UserMessageToBfWrite(msg);
+		bf.WriteByte(author);
+		bf.WriteByte(true);
+		bf.WriteString(message);
+#if SOURCEMOD_V_MAJOR >= 1 && SOURCEMOD_V_MINOR >= 5
+	}
+#endif
+
+	EndMessage();
 }
 
 /**
@@ -541,7 +593,7 @@ stock void FormatZeroPadded(char[] buffer, int maxlen, int value, int digits) {
 
 /**
 * 显示主 MVP 信息 (特感击杀, 丧尸击杀, 特感伤害/伤害占比, 黑枪/被黑, 爆头率)
-* 已退出且本关未回来的玩家记录会一并列出, 名字后标注 [已退出]
+* 已退出且本关未回来的玩家记录会一并列出 (与在线玩家同样显示, 不加标记)
 * 表格按"本列最大位数补前导 0"输出, 同列各行字符构成一致, 因此严格对齐(0 像素误差)
 * @param client 需要显示的客户端索引
 * @return void
@@ -620,7 +672,9 @@ void printMvpStatus(int client)
 	}
 
 	// ③ 逐行打印: 数值左右各留 1 个空格, 列间 1 个空格, 各行同列字符数完全一致 → 严格对齐
+	// \x03 需要生还者作者才会渲染成蓝色, 所以用 PrintChatWithAuthor 发送
 	char toPrint[1024], temp[CHAT_CELL_OUT], nameBuf[MAX_NAME_LENGTH + 24];
+	int author = FindSurvivorAuthor();
 	for (int i = 0; i < count; i++) {
 		toPrint[0] = '\0';
 		if (g_hAllowShowSi.BoolValue) {
@@ -644,11 +698,11 @@ void printMvpStatus(int client)
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 
-		getStatRowName(rows[i], nameBuf, sizeof(nameBuf), "\x03");
+		getStatRowName(rows[i], nameBuf, sizeof(nameBuf));
 		StrCat(toPrint, sizeof(toPrint), nameBuf);
 
-		// 打印一个玩家的 MVP 信息
-		PrintToChat(client, "%s", toPrint);
+		// 打印一个玩家的 MVP 信息 (在场玩家名字 \x03 = 蓝, 退出玩家 \x01 = 默认色)
+		PrintChatWithAuthor(client, author, toPrint);
 	}
 }
 
@@ -689,6 +743,8 @@ void printParticularMvp(int client) {
 
 	int dmgPercent, killPercent;
 	char clientName[MAX_NAME_LENGTH + 24], buffer[512], temp[320];
+	// \x03 名字(在场玩家)需要生还者作者才会显示为蓝色
+	int mvpAuthor = FindSurvivorAuthor();
 	// 允许显示 SI MVP
 	if (g_hAllowShowSi.BoolValue) {
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 SI: ");
@@ -700,10 +756,10 @@ void printParticularMvp(int client) {
 
 			dmgPercent = GetDamagePercent(siMvpRow, dmgTotal);
 			killPercent = RoundToNearest(float(playerInfos[siMvpRow].siCount) / float(siTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", clientName, playerInfos[siMvpRow].totalDamage, dmgPercent, playerInfos[siMvpRow].siCount, killPercent);
+			FormatEx(temp, sizeof(temp), "%s \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", clientName, playerInfos[siMvpRow].totalDamage, dmgPercent, playerInfos[siMvpRow].siCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		PrintToChat(client, "%s", buffer);
+		PrintChatWithAuthor(client, mvpAuthor, buffer);
 	}
 	// 允许显示 CI MVP
 	if (g_hAllowShowCi.BoolValue) {
@@ -715,10 +771,10 @@ void printParticularMvp(int client) {
 			getStatRowName(ciMvpRow, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[ciMvpRow].ciCount) / float(ciTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04丧尸 \x03[\x01%d%%\x03])", clientName, playerInfos[ciMvpRow].ciCount, killPercent);
+			FormatEx(temp, sizeof(temp), "%s \x03(\x01%d \x04丧尸 \x03[\x01%d%%\x03])", clientName, playerInfos[ciMvpRow].ciCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		PrintToChat(client, "%s", buffer);
+		PrintChatWithAuthor(client, mvpAuthor, buffer);
 	}
 	// 允许显示 FF MVP
 	if (g_hAllowShowFF.BoolValue) {
@@ -730,10 +786,10 @@ void printParticularMvp(int client) {
 			getStatRowName(ffMvpRow, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[ffMvpRow].ffCount) / float(ffTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04友伤 \x03[\x01%d%%\x03])", clientName, playerInfos[ffMvpRow].ffCount, killPercent);
+			FormatEx(temp, sizeof(temp), "%s \x03(\x01%d \x04友伤 \x03[\x01%d%%\x03])", clientName, playerInfos[ffMvpRow].ffCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		PrintToChat(client, "%s", buffer);
+		PrintChatWithAuthor(client, mvpAuthor, buffer);
 
 		// 被黑 MVP
 		FormatEx(buffer, sizeof(buffer), "\x03[\x01MVP\x03]\x01 FF Receive: ");
@@ -744,10 +800,10 @@ void printParticularMvp(int client) {
 			getStatRowName(gotFFMvpRow, clientName, sizeof(clientName));
 
 			killPercent = RoundToNearest(float(playerInfos[gotFFMvpRow].gotFFCount) / float(gotFFTotal) * 100.0);
-			FormatEx(temp, sizeof(temp), "\x05%s \x03(\x01%d \x04被黑 \x03[\x01%d%%\x03])", clientName, playerInfos[gotFFMvpRow].gotFFCount, killPercent);
+			FormatEx(temp, sizeof(temp), "%s \x03(\x01%d \x04被黑 \x03[\x01%d%%\x03])", clientName, playerInfos[gotFFMvpRow].gotFFCount, killPercent);
 			StrCat(buffer, sizeof(buffer), temp);
 		}
-		PrintToChat(client, "%s", buffer);
+		PrintChatWithAuthor(client, mvpAuthor, buffer);
 	}
 	// 允许显示你的排名
 	if (g_hAllowShowRank.BoolValue) {
@@ -802,7 +858,7 @@ void printParticularMvp(int client) {
 			killPercent = RoundToNearest(float(playerInfos[client].siCount) / float(siTotal) * 100.0);
 			FormatEx(buffer, sizeof(buffer), "\x03你的排名 \x04SI: \x05#%d \x03(\x01%d \x04伤害 \x03[\x01%d%%\x03]\x01, %d \x04击杀 \x03[\x01%d%%\x03])", rank, playerInfos[client].totalDamage, dmgPercent, playerInfos[client].siCount, killPercent);
 		}
-		PrintToChat(client, "%s", buffer);
+		PrintChatWithAuthor(client, mvpAuthor, buffer);
 	}
 }
 

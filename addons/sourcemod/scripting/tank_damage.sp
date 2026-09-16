@@ -6,6 +6,14 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <colors>
+/* Apex 是"可选"前置, 必须显式 #undef REQUIRE_PLUGIN 再 include:
+   core.inc 结尾默认 #define REQUIRE_PLUGIN, 不 undef 时 Apex.inc 里的 SharedPlugin 会编译成
+   required = 1(必需依赖); 而本插件在 plugins.cfg 里比 Apex 先加载(第 48 行 vs 第 139 行),
+   启动加载那会儿还找不到 "Apex" 库, 于是直接失败: Could not find required plugin "Apex"
+   —— 表现就是"服务端启动不自动加载, 手动 sm plugins load 却能加载"(那时 Apex 已加载)。
+   undef 之后依赖变为可选: Apex 没装/还没加载都不影响本插件加载, Apex 的 forward 照常能收到。
+   注意: #undef 会影响其后 include 的文件, 所以这行必须紧跟在 <Apex> 之前。 */
+#undef REQUIRE_PLUGIN
 #include <Apex>
 
 #define CVAR_FLAG FCVAR_NOTIFY
@@ -1052,13 +1060,14 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		FormatEx(sIndex, sizeof(sIndex), "\x03%N", client);
 	}
 
-	// 标题行: [坦克伤害] 坦克{名}{原因},总血量:{血量}{+超额伤害}HP. 换行 显示伤害排名:(总伤害:{总数})
+	// 标题行: [坦克伤害] 坦克{名}{原因},总血量:{血量}{+超额伤害}HP. 换行 [坦克伤害] 显示伤害排名:(总伤害:{总数})
+	// (两行在同一条消息里, 换行后的第二行同样带前缀)
 	char sInfo[128], sTemp[2][64];
 	FormatEx(sTemp[0], sizeof(sTemp[]), "\x05总血量\x04:\x03%d", tankHealth[client]);
 	if (totalDamage > tankHealth[client])
 		FormatEx(sTemp[1], sizeof(sTemp[]), "\x04+\x03%d", totalDamage - tankHealth[client]);
 	ImplodeStrings(sTemp, sizeof(sTemp), "", sInfo, sizeof(sInfo));
-	PrintToChatAll("%s\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", CHAT_PREFIX_RAW, sIndex, reason, sInfo, totalDamage);
+	PrintToChatAll("%s\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n%s\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", CHAT_PREFIX_RAW, sIndex, reason, sInfo, CHAT_PREFIX_RAW, totalDamage);
 
 	// 显示 Tank 存活时间
 	if (g_hAllowPrintLiveTime.BoolValue) {

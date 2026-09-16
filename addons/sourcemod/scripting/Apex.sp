@@ -24,6 +24,8 @@
 #define TAG				   "{olive}[{lightred}!{olive}]{orange}"
 
 #define TRAC_ROCK_MAX	   2048 /* 跟踪石相关数组上限(tank_rock 实体索引) */
+#define CTRL_WATCH_TIME	   0.8	/* 命中后观察引擎改动控制权的时长(秒) */
+#define CTRL_HOLD_TIME	   1.0	/* 补正后钉住目标值的时长(秒) */
 
 /* 技能扣血通报类型: 枚举值必须与 Apex.inc 的 ApexSkillCostType 保持一致(消费方包含 Apex.inc) */
 enum ApexSkillCostType
@@ -49,7 +51,7 @@ int	   BhopBtn[MAXPLAYERS + 1];	   /* 上一帧按键快照(检测 IN_JUMP 按�
 int	   BhopTick[MAXPLAYERS + 1];   /* 下一次连跳允许的最小 tick(lilac: next_bhop) */
 int	   BhopChain[MAXPLAYERS + 1];  /* 当前连续完美连跳次数(lilac: perfect_bhops) */
 
-ConVar Apex[12];
+ConVar Apex[13];
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -60,6 +62,16 @@ bool  g_bTraceRock[TRAC_ROCK_MAX + 1];		  /* 该 tank_rock 是否为跟踪石 */
 float g_fRockDamage[TRAC_ROCK_MAX + 1];		  /* 跟踪石累计承受的伤害 */
 int	  g_iRockCharge[TRAC_ROCK_MAX + 1];		  /* 掷出该跟踪石时已扣的血量(命中生还者则退还) */
 int	  g_iLastTracTarget[MAXPLAYERS + 1];	  /* 该坦克上一发跟踪石命中的生还者(禁止连续命中同一人) */
+int	  g_iCtrlSnapMeter[MAXPLAYERS + 1];	  /* 每帧快照: 控制权 m_frustration */
+float g_fCtrlSnapTimer[MAXPLAYERS + 1];		  /* 每帧快照: 怒气计时器剩余时间 */
+int	  g_iCtrlPreMeter[MAXPLAYERS + 1];		  /* 命中前的 m_frustration 基准 */
+float g_fCtrlPreTimer[MAXPLAYERS + 1];		  /* 命中前的怒气计时器基准 */
+int	  g_iCtrlWantMeter[MAXPLAYERS + 1];		  /* 补正后要钉住的 m_frustration */
+bool  g_bCtrlGotMeter[MAXPLAYERS + 1];		  /* 已检测到引擎改了 m_frustration */
+bool  g_bCtrlGotTimer[MAXPLAYERS + 1];		  /* 已检测到引擎改了怒气计时器 */
+bool  g_bCtrlWatch[MAXPLAYERS + 1];			  /* 是否处于命中后的观察窗口 */
+float g_fCtrlWatchUntil[MAXPLAYERS + 1];	  /* 观察窗口截止 */
+float g_fCtrlHoldUntil[MAXPLAYERS + 1];		  /* 钉住截止 */
 
 public Plugin myinfo =
 {
@@ -135,11 +147,12 @@ public void
 	Apex[4] = CreateConVar("tank_trac_hp", "1000", "开启石头追踪时扣血量.0为禁用");
 	Apex[5] = CreateConVar("tank_trac_throw_hp", "50", "每掷出一发跟踪石头扣除的自身血量.0为禁用");
 	Apex[6] = CreateConVar("l4d_tracerock_health", "40", "跟踪石血量(点). 生还者打掉这些血量即可在空中打碎跟踪石. 0=不接管(用游戏默认血量)");
-	Apex[7] = CreateConVar("l4d_tracerock_ctrl_step", "6.0", "跟踪石命中生还者后扣除的坦克控制权(m_frustration)百分比. 负数=增加, 0=禁用");
-	Apex[8] = CreateConVar("l4d_tracerock_debug", "0", "跟踪石调试日志 0=关闭 1=输出到服务器控制台", _, true, 0.0, true, 1.0);
-	Apex[9] = CreateConVar("tank_bhop_detect", "1", "坦克连跳检测: 未开启!bhop技能的坦克成功连跳时补扣技能血量并通报全场 0=禁用 1=启用", _, true, 0.0, true, 1.0);
-	Apex[10] = CreateConVar("tank_bhop_detect_count", "10", "连续完美连跳达到该次数即判定为成功连跳(参考liac的min档位).0=禁用", _, true, 0.0);
-	Apex[11] = CreateConVar("tank_bhop_detect_air", "0.3", "两次连跳之间的最小滞空时间(秒), 参考liac的air设置(>1.0按1.0算)", _, true, 0.0, true, 1.0);
+	Apex[7] = CreateConVar("l4d_tracerock_ctrl_base", "5.0", "游戏默认: 跟踪石命中生还者时坦克控制权的单次变化量(%). 只用于换算比例, 不会写进游戏");
+	Apex[8] = CreateConVar("l4d_tracerock_ctrl_step", "6.0", "期望: 跟踪石命中生还者时坦克控制权的单次变化量(%%). 按 base->step 的比例放大引擎本次改动, 与引擎方向无关. 等于 base 则不调整");
+	Apex[9] = CreateConVar("l4d_tracerock_debug", "0", "跟踪石调试日志 0=关闭 1=输出到服务器控制台", _, true, 0.0, true, 1.0);
+	Apex[10] = CreateConVar("tank_bhop_detect", "1", "坦克连跳检测: 未开启!bhop技能的坦克成功连跳时补扣技能血量并通报全场 0=禁用 1=启用", _, true, 0.0, true, 1.0);
+	Apex[11] = CreateConVar("tank_bhop_detect_count", "10", "连续完美连跳达到该次数即判定为成功连跳(参考liac的min档位).0=禁用", _, true, 0.0);
+	Apex[12] = CreateConVar("tank_bhop_detect_air", "0.3", "两次连跳之间的最小滞空时间(秒), 参考liac的air设置(>1.0按1.0算)", _, true, 0.0, true, 1.0);
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);
@@ -360,7 +373,7 @@ void BhopDetect_Reset(int client)
 /* tank_bhop_detect_air(秒) 换算成 tick(lilac: tick_rate * air) */
 int BhopDetect_AirTicks()
 {
-	float air = Apex[11].FloatValue;
+	float air = Apex[12].FloatValue;
 	if (air <= 0.0)
 		return 0;
 	if (air > 1.0)
@@ -379,10 +392,10 @@ void BhopDetect_Check(int client, int buttons)
 	int last = BhopBtn[client];
 	BhopBtn[client] = buttons;
 
-	int need = Apex[10].IntValue;
+	int need = Apex[11].IntValue;
 
 	/* 检测关闭 / 阈值非法 / 技能本身不扣血: 不判定 */
-	if (!Apex[9].BoolValue || need <= 0 || Apex[3].IntValue <= 0)
+	if (!Apex[10].BoolValue || need <= 0 || Apex[3].IntValue <= 0)
 	{
 		BhopDetect_Reset(client);
 		return;
@@ -541,7 +554,7 @@ void RefundTracThrow(int tank, int rock, int victim)
 		FireSkillCost(tank, ApexSkillCost_TracThrow, newhp - hp);
 	}
 
-	if (Apex[8].BoolValue)
+	if (Apex[9].BoolValue)
 		PrintToServer("[Apex] 跟踪石命中 %N, 退还掷出扣血 %d (坦克 %d -> %d)", victim, charge, hp, newhp);
 }
 
@@ -613,6 +626,16 @@ public void OnClientDisconnect(int client)
 	SDKUnhook(client, SDKHook_OnTakeDamage, OnClientTakeDamage);
 
 	g_iLastTracTarget[client] = 0;
+	g_iCtrlSnapMeter[client]  = 0;
+	g_fCtrlSnapTimer[client]  = 0.0;
+	g_iCtrlPreMeter[client]	  = 0;
+	g_fCtrlPreTimer[client]	  = 0.0;
+	g_iCtrlWantMeter[client]  = 0;
+	g_bCtrlGotMeter[client]	  = false;
+	g_bCtrlGotTimer[client]	  = false;
+	g_bCtrlWatch[client]	  = false;
+	g_fCtrlWatchUntil[client] = 0.0;
+	g_fCtrlHoldUntil[client]  = 0.0;
 }
 
 /**
@@ -643,39 +666,155 @@ public Action OnClientTakeDamage(int victim, int &attacker, int &inflictor, floa
 	/* 2. 下一发跟踪石不再选中他(选人逻辑在 l4d_tracerock.sp, 通过 Apex_GetTracBlockedTarget 查询) */
 	g_iLastTracTarget[tank] = victim;
 
-	/* 3. 控制权扣除: 稍等 0.05 秒再写, 避免被同帧其它插件(如 godframes 的怒气覆盖)冲掉 */
-	if (RoundToNearest(Apex[7].FloatValue) != 0)
-		CreateTimer(0.05, Timer_ApplyCtrlLoss, GetClientUserId(tank), TIMER_FLAG_NO_MAPCHANGE);
+	/* 3. 控制权: 把本次命中的扣除总量钉在 ctrl_step%(覆盖引擎自己的扣除写入, 见 OnGameFrame) */
+	ApplyCtrlLoss(tank);
 
 	return Plugin_Continue;
 }
 
-/* 扣除坦克控制权(负数=增加); m_frustration 取值范围 0-100 */
-public Action Timer_ApplyCtrlLoss(Handle timer, any userid)
+/**
+ * 命中后的"控制权"调整（参考 l4d2_tankrage.sp / l4d2_godframes_control_merge.sp）:
+ *
+ * 坦克控制权由 m_frustration(netprop) 与紧跟其后的 m_frustrationTimer 共同驱动,
+ * 命中时引擎会改动其中之一或两者(本服务器观测到的默认量就是 ctrl_base = 5%)。
+ * 本插件不写死绝对值, 而是:
+ *   1. 命中瞬间记下"命中前"的 m_frustration 与 timer 剩余时间(每帧快照);
+ *   2. 之后 CTRL_WATCH_TIME 秒内观察引擎到底改了哪个(引擎可能是延迟落盘的);
+ *   3. 谁变了就把谁的改动量按 ctrl_step / ctrl_base 放大(5% -> 6%), 并钉住一小段时间。
+ * 这样与引擎方向无关: 引擎扣 5 就变扣 6, 引擎加 5 就变加 6。
+ */
+void ApplyCtrlLoss(int tank)
 {
-	int tank = GetClientOfUserId(userid);
-	if (!IsTank(tank))
-		return Plugin_Continue;
+	if (!CtrlAdjustEnabled())
+		return;
 
-	int step = RoundToNearest(Apex[7].FloatValue);
-	if (step == 0)
-		return Plugin_Continue;
+	/* 窗口内再次命中: 以上一次的目标值为基准, 保证叠加 */
+	if (g_bCtrlWatch[tank])
+	{
+		g_iCtrlPreMeter[tank] = g_iCtrlWantMeter[tank];
+		g_fCtrlPreTimer[tank] = g_fCtrlSnapTimer[tank];
+	}
+	else
+	{
+		g_iCtrlPreMeter[tank] = g_iCtrlSnapMeter[tank];
+		g_fCtrlPreTimer[tank] = g_fCtrlSnapTimer[tank];
+	}
 
-	int before = GetEntProp(tank, Prop_Send, "m_frustration");
-	int after  = before - step;
+	g_bCtrlGotMeter[tank] = false;
+	g_bCtrlGotTimer[tank] = false;
+	g_bCtrlWatch[tank]	  = true;
+	g_fCtrlWatchUntil[tank] = GetGameTime() + CTRL_WATCH_TIME;
+	g_fCtrlHoldUntil[tank]	= 0.0;
 
-	if (after > 100)
-		after = 100;
-	if (after < 0)
-		after = 0;
+	if (Apex[9].BoolValue)
+		PrintToServer("[Apex] 跟踪石命中: 观察控制权改动 (基准 m_frustration=%d, timer=%.2fs, 目标 %.1f%%/默认 %.1f%%)",
+					  g_iCtrlPreMeter[tank], g_fCtrlPreTimer[tank], Apex[8].FloatValue, Apex[7].FloatValue);
+}
 
-	if (after != before)
-		SetEntProp(tank, Prop_Send, "m_frustration", after);
+bool CtrlAdjustEnabled()
+{
+	float base = Apex[7].FloatValue;
+	float step = Apex[8].FloatValue;
 
-	if (Apex[8].BoolValue)
-		PrintToServer("[Apex] 跟踪石命中: 坦克控制权 %d -> %d (扣除 %d%%)", before, after, step);
+	return (base > 0.0 && step > 0.0 && step != base);
+}
 
-	return Plugin_Continue;
+/* 每帧: 给坦克记录快照; 命中后的观察窗口内检测引擎改动并等比放大 */
+public void OnGameFrame()
+{
+	float now = GetGameTime();
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i))
+			continue;
+
+		int	  curMeter = GetEntProp(i, Prop_Send, "m_frustration");
+		float curTimer = FrustrationTimerRemaining(i);
+
+		if (g_bCtrlWatch[i])
+		{
+			float ratio = (Apex[8].FloatValue / Apex[7].FloatValue) - 1.0;	  /* 需要额外补的比例(5->6 即 +20%) */
+
+			/* 引擎改了 m_frustration: 按比例多补一段 */
+			if (!g_bCtrlGotMeter[i] && curMeter != g_iCtrlPreMeter[i])
+			{
+				int delta = curMeter - g_iCtrlPreMeter[i];
+				int extra = RoundToNearest(float(delta) * ratio);
+				if (extra == 0)
+					extra = (delta > 0) ? 1 : -1;
+
+				int want = curMeter + extra;
+				if (want > 100)
+					want = 100;
+				if (want < 0)
+					want = 0;
+
+				g_iCtrlWantMeter[i]	 = want;
+				g_bCtrlGotMeter[i]	 = true;
+				g_fCtrlHoldUntil[i]	 = now + CTRL_HOLD_TIME;
+
+				if (Apex[9].BoolValue)
+					PrintToServer("[Apex] 跟踪石控制权: 引擎 %d -> %d (改动 %d), 补到 %d", g_iCtrlPreMeter[i], curMeter, delta, want);
+			}
+
+			/* 引擎改了怒气计时器: 同样按比例补时间(l4d2_tankrage 同款写法) */
+			if (!g_bCtrlGotTimer[i] && FloatAbs(curTimer - g_fCtrlPreTimer[i]) > 0.01)
+			{
+				float delta = curTimer - g_fCtrlPreTimer[i];
+				float want	= g_fCtrlPreTimer[i] + delta * (1.0 + ratio);
+
+				if (want < 0.0)
+					want = 0.0;
+
+				CTimer_Start(GetFrustrationTimer(i), want);
+				g_bCtrlGotTimer[i] = true;
+
+				if (Apex[9].BoolValue)
+					PrintToServer("[Apex] 跟踪石怒气计时器: 引擎 %.2fs -> %.2fs (改动 %.2fs), 补到 %.2fs", g_fCtrlPreTimer[i], curTimer, delta, want);
+			}
+
+			/* 钉住 m_frustration 目标值, 防止引擎/其它插件随后又改回去 */
+			if (g_bCtrlGotMeter[i] && g_fCtrlHoldUntil[i] > now && curMeter != g_iCtrlWantMeter[i])
+			{
+				SetEntProp(i, Prop_Send, "m_frustration", g_iCtrlWantMeter[i]);
+
+				if (Apex[9].BoolValue)
+					PrintToServer("[Apex] 跟踪石控制权被改写为 %d, 已压回 %d (坦克 %N)", curMeter, g_iCtrlWantMeter[i], i);
+			}
+
+			/* 观察窗口结束 */
+			if (now > g_fCtrlWatchUntil[i] && now > g_fCtrlHoldUntil[i])
+			{
+				g_bCtrlWatch[i] = false;
+
+				if (Apex[9].BoolValue && !g_bCtrlGotMeter[i] && !g_bCtrlGotTimer[i])
+					PrintToServer("[Apex] 跟踪石控制权: %.1f 秒内未检测到引擎改动(m_frustration 仍为 %d) —— 该服务器的控制权可能不由这两个字段驱动",
+								  CTRL_WATCH_TIME, curMeter);
+			}
+
+			continue;
+		}
+
+		g_iCtrlSnapMeter[i] = curMeter;
+		g_fCtrlSnapTimer[i] = curTimer;
+	}
+}
+
+/* 怒气计时器剩余时间(参考 l4d2_tankrage.sp: m_frustration 偏移 +4) */
+float FrustrationTimerRemaining(int client)
+{
+	float remain = CTimer_GetRemainingTime(GetFrustrationTimer(client));
+	return (remain > 0.0) ? remain : 0.0;
+}
+
+CountdownTimer GetFrustrationTimer(int client)
+{
+	static int s_iOffs = -1;
+	if (s_iOffs == -1)
+		s_iOffs = FindSendPropInfo("CTerrorPlayer", "m_frustration") + 4;
+
+	return view_as<CountdownTimer>(GetEntityAddress(client) + view_as<Address>(s_iOffs));
 }
 
 /**
@@ -694,7 +833,7 @@ public Action OnRockTakeDamage(int rock, int &attacker, int &inflictor, float &d
 	if (g_fRockDamage[rock] < float(health))
 		return Plugin_Continue;
 
-	if (Apex[8].BoolValue)
+	if (Apex[9].BoolValue)
 		PrintToServer("[Apex] 跟踪石(实体 %d)累计承受 %.1f 点伤害, 打碎", rock, g_fRockDamage[rock]);
 
 	BreakTraceRock(rock);
@@ -752,6 +891,16 @@ void Reset(int client)
 	BhopBtn[client] = 0;
 	BhopDetect_Reset(client);
 
-	/* 新一条命/新回合不继承跟踪石的连续命中约束 */
+	/* 新一条命/新回合不继承跟踪石的连续命中约束与控制权观察状态 */
 	g_iLastTracTarget[client] = 0;
+	g_iCtrlSnapMeter[client]  = 0;
+	g_fCtrlSnapTimer[client]  = 0.0;
+	g_iCtrlPreMeter[client]	  = 0;
+	g_fCtrlPreTimer[client]	  = 0.0;
+	g_iCtrlWantMeter[client]  = 0;
+	g_bCtrlGotMeter[client]	  = false;
+	g_bCtrlGotTimer[client]	  = false;
+	g_bCtrlWatch[client]	  = false;
+	g_fCtrlWatchUntil[client] = 0.0;
+	g_fCtrlHoldUntil[client]  = 0.0;
 }

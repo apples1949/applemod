@@ -37,13 +37,12 @@
 /* 中途退出玩家的记录存档上限(本局内每人最多一条, 正常对局远用不到) */
 #define MAX_DEPARTED 32
 
-/* 数字位对齐用"数字宽空格"(U+2007 FIGURE SPACE, UTF-8 = E2 80 87)
-   实测(ChatFont = Tahoma Bold, 2048 units/em): 数字 = 1304, 数字宽空格 = 1304, 普通空格只有 600
-   数字宽 1304 不是空格宽 600 的整数倍(1 个数字 ≈ 2.17 个空格), 所以"按字符个数补普通空格"必然对不齐 ——
+/* 数字位对齐: 用 '0' 往左补到本列最大数字位数(零填充)
+   实测(ChatFont = Tahoma Bold, 2048 units/em): 数字与 '0' 一律 1304 单位, 普通空格只有 600
+   数字宽不是空格宽的整数倍(1 个数字 ≈ 2.17 个空格), 所以"按字符个数补普通空格"必然对不齐 ——
    少 1 位数字少 1304 单位, 补 1 个空格只找回 600 单位, 每列欠约 700 单位(约 7 像素), 列一多就整体歪掉。
-   改用等宽于数字的 U+2007 补位后, 每行同列占用的渲染宽度完全相同(实测偏差 0.00 像素),
-   且不依赖具体字体: 萝莉体等替换字体里 U+2007 是定宽空格, 同样比普通空格对齐得多。 */
-#define FIGURE_SPACE "\xE2\x80\x87"
+   用与数字同宽的 '0' 补位后, 每行同列占用的渲染宽度完全相同(实测偏差 0.00 像素);
+   且零填充本身就能一眼看出位数对齐(不再依赖不可见空格)。 */
 
 // 日志级别（与旧 logger.inc 行为一致: 按位相加, 1=禁用）
 #define LOG_LEVEL_OFF (1 << 0)
@@ -69,7 +68,7 @@ public Plugin myinfo =
 	name 			= "Tank Damage Announce 3.0",
 	author 			= "apples1949",
 	description 	= "Tank 伤害统计 3.0 版本: 数据跟随 Tank 实例, 控制权多次交接后死亡仍输出全部数据",
-	version 		= "3.4",
+	version 		= "3.5",
 	url 			= "https://steamcommunity.com/id/saku_ra/"
 }
 
@@ -1008,6 +1007,8 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 	/* 预格式化每行数据(列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列):
 	   列号见 DATA_COLUMNS 定义 */
 	char[][][] sData = new char[displayCount][DATA_COLUMNS][DATA_CELL_SIZE];
+	// 该行玩家现在是否还在服务器里(中途退出的记录行不在线 -> 名字用默认色)
+	bool[] rowOnline = new bool[displayCount];
 	// 百分比分母: 总伤害超过满血基准(含致死一击补偿)时用总伤害, 与参考插件一致
 	int iTotalHealth = totalDamage > tankHealth[client] ? totalDamage : tankHealth[client];
 	int x = 0;
@@ -1033,13 +1034,15 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", hurts.iron);
 		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", hurts.gotDamage);
 		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(hurts.gotDamage) / float(totalGotDamage) * 100.0));
+		// 在线/离线决定名字颜色: 在线蓝色, 中途退出的记录行不显示颜色
+		rowOnline[x] = (survivor <= MaxClients) && IsClientInGame(survivor);
 
 		debugAndInfoLog("%s: %s 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, sData[x][3], client, damage, hurts.punch, hurts.rock, hurts.iron, hurts.gotDamage);
 		x++;
 	}
 
-	/* 每一列按"数字位数"对齐: 取本列最多的数字位数, 谁少几位就用几个数字宽空格(U+2007)补上。
-	   因为 U+2007 的渲染宽度恰好等于数字宽度, 每行在本列占用的宽度完全一致,
+	/* 每一列按"数字位数"对齐: 取本列最多的数字位数, 谁少几位就在左边补几个 '0'。
+	   '0' 与数字同宽, 每行在本列占用的宽度完全一致,
 	   不会再出现"数字位数不同(如 1500 与 95)时后面的列跟着左右偏移" */
 	int iDigits[DATA_COLUMNS];
 	for (int y = 0; y < DATA_COLUMNS; y++) {
@@ -1106,38 +1109,47 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		CPrintToChatAll("%s{blue}连跳技能扣血：{green}%d%s", CHAT_PREFIX, bhopCost, sBhopDetail);
 	}
 
-	/* 逐行输出: 名次:[伤害百分比%](伤害)[拳][石][铁][承伤(承伤百分比%)] 名字
-	   每个单元格用"数字宽空格"按本列最大位数补位(见 AppendDigitPaddedCell), 所以各行的括号与后续列上下对齐 */
+	/* 逐行输出: 名次:伤害百分比% (伤害) 拳:x 石:x 铁:x 承伤:x (承伤百分比%) 名字
+	   数字位用 '0' 左补到本列最大位数(见 AppendZeroPaddedCell): 同列宽度完全一致, 各列上下对齐;
+	   不再套中括号, 列间用单个普通空格分隔(每行空格数固定, 不影响对齐);
+	   名字颜色: 在线玩家蓝色, 中途退出的记录行不显示颜色(默认色) */
 	char row[512];
 	for (x = 0; x < displayCount; x++) {
 		row[0] = '\0';
 
-		// 名次(紧跟行首与冒号, 不留普通空格)
+		// 名次
 		StrCat(row, sizeof(row), "\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][0], iDigits[0], false, false);
-		// :[伤害百分比%]
-		StrCat(row, sizeof(row), "\x05:\x03[\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][1], iDigits[1]);
-		StrCat(row, sizeof(row), "\x04%\x03](\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][0], iDigits[0]);
+		// :伤害百分比%
+		StrCat(row, sizeof(row), "\x05:\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][1], iDigits[1]);
+		StrCat(row, sizeof(row), "\x04%\x01 ");
 		// (伤害)
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][2], iDigits[2]);
-		// [拳
-		StrCat(row, sizeof(row), "\x03)[\x04拳\x03:\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][4], iDigits[4]);
-		// [石
-		StrCat(row, sizeof(row), "\x03][\x04石\x03:\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][5], iDigits[5]);
-		// [铁
-		StrCat(row, sizeof(row), "\x03][\x04铁\x03:\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][6], iDigits[6]);
-		// [承伤
-		StrCat(row, sizeof(row), "\x03][\x04承伤\x03:\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][7], iDigits[7]);
-		// (承伤百分比%)]
 		StrCat(row, sizeof(row), "\x03(\x04");
-		AppendDigitPaddedCell(row, sizeof(row), sData[x][8], iDigits[8]);
-		StrCat(row, sizeof(row), "\x04%\x03)]\x05");
-		// 名字
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][2], iDigits[2]);
+		StrCat(row, sizeof(row), "\x03)\x01 ");
+		// 拳
+		StrCat(row, sizeof(row), "\x04拳\x03:\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][4], iDigits[4]);
+		StrCat(row, sizeof(row), "\x01 ");
+		// 石
+		StrCat(row, sizeof(row), "\x04石\x03:\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][5], iDigits[5]);
+		StrCat(row, sizeof(row), "\x01 ");
+		// 铁
+		StrCat(row, sizeof(row), "\x04铁\x03:\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][6], iDigits[6]);
+		StrCat(row, sizeof(row), "\x01 ");
+		// 承伤
+		StrCat(row, sizeof(row), "\x04承伤\x03:\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][7], iDigits[7]);
+		StrCat(row, sizeof(row), "\x01 ");
+		// (承伤百分比%)
+		StrCat(row, sizeof(row), "\x03(\x04");
+		AppendZeroPaddedCell(row, sizeof(row), sData[x][8], iDigits[8]);
+		StrCat(row, sizeof(row), "\x04%\x03)\x01 ");
+		// 名字: 在线蓝色, 不在线(中途退出)不显示颜色
+		StrCat(row, sizeof(row), rowOnline[x] ? "\x03" : "\x01");
 		StrCat(row, sizeof(row), sData[x][3]);
 
 		PrintToChatAll("%s", row);
@@ -1145,7 +1157,7 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 }
 
 /**
-* 统计文本里的数字个数(按"数字宽度"补位用; '.' 等更窄的字符不参与补位)
+* 统计文本里的数字个数(按"数字宽度"零填充用; '.' 等更窄的字符不参与补位)
 * @param text 待统计文本
 * @return 数字字符个数
 **/
@@ -1159,39 +1171,20 @@ int CountDigits(const char[] text)
 }
 
 /**
-* 追加一个按数字宽度对齐的单元格
-* 本列最大数字位数 - 本值数字位数 = 需要补的"数字宽空格"(U+2007)个数, 左右均分(左边略多一个),
-* 于是每一行在本列占用的渲染宽度完全相同, 各列的括号与后续列上下对齐。
-* @param buffer     目标缓冲区
-* @param size       缓冲区大小
-* @param value      单元格文本(数字 / '.')
-* @param digits     本列最大数字位数
-* @param leadSpace  是否在左侧留 1 个普通空格(与前面的括号/文字拉开距离; 名次列紧跟行首时不留)
-* @param trailSpace 是否在右侧留 1 个普通空格(名次列右侧紧跟 ":" 时不留)
+* 追加一个数字位左补 '0' 的单元格
+* 本列最大数字位数 - 本值数字位数 = 需要补的 '0' 个数; '0' 与任何数字同宽(实测 1304 单位),
+* 所以每一行在本列占用的渲染宽度完全相同(偏差 0.00 像素), 且零填充看得见对齐效果。
+* @param buffer 目标缓冲区
+* @param size   缓冲区大小
+* @param value  单元格文本(数字 / '.')
+* @param digits 本列最大数字位数
 * @return void
 **/
-void AppendDigitPaddedCell(char[] buffer, int size, const char[] value, int digits, bool leadSpace = true, bool trailSpace = true)
+void AppendZeroPaddedCell(char[] buffer, int size, const char[] value, int digits)
 {
-	int pad = digits - CountDigits(value);
-	if (pad < 0)
-		pad = 0;
-	int padLeft = (pad + 1) / 2;		// 数值居中, 左边略多补一个
-
-	if (leadSpace)
-		StrCat(buffer, size, " ");
-	AppendFigureSpaces(buffer, size, padLeft);
+	for (int i = CountDigits(value); i < digits; i++)
+		StrCat(buffer, size, "0");
 	StrCat(buffer, size, value);
-	AppendFigureSpaces(buffer, size, pad - padLeft);
-	if (trailSpace)
-		StrCat(buffer, size, " ");
-}
-
-/* 追加 N 个"数字宽空格"(U+2007, 渲染宽度等于数字宽度) */
-void AppendFigureSpaces(char[] buffer, int size, int count) {
-	if (count < 0)
-		count = 0;
-	for (int i = 0; i < count; i++)
-		StrCat(buffer, size, FIGURE_SPACE);
 }
 
 /* 按照伤害对 survivorDamage[][] 进行降序排序，伤害相同则按照玩家索引降序排序 */

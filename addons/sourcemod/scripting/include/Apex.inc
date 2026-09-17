@@ -17,6 +17,18 @@ enum ApexSkillCostType
 }
 
 /**
+ * @brief 跟踪石命中生还者时触发（掷出的跟踪石打中了某位生还者）。
+ *
+ * Apex 只负责"跟踪石发生了什么"（命中 / 血量退还 / 打碎 / 掷出扣血），
+ * 命中后的坦克控制权调整交给控制权插件自行处理（如修改版 l4d_tank_control_eq），
+ * 因此这里只通报事件, 不规定处理方式。
+ *
+ * @param tank      掷出跟踪石的坦克客户端索引
+ * @param victim    被跟踪石命中的生还者客户端索引
+ */
+forward void Apex_OnTracRockHit(int tank, int victim);
+
+/**
  * @brief 坦克血量因 Apex 技能发生变化时触发（开启技能、掷出跟踪石、命中退还、未开启技能却连跳被抓）。
  *
  * 技能扣血走的是 SetEntProp 直接改血量, 不产生伤害事件, 因此伤害统计类插件无法从

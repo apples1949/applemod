@@ -72,7 +72,9 @@ enum
 //       所以"按字符个数补空格"会让位数少的行整格偏窄 (每少 1 位窄 704 单位 ≈ 7px) 并逐列累积;
 //       补 0 后同行同列的字符个数与类别完全相同, 列宽数学上相等, 无需估算字体宽度.
 #define CHAT_CELL_SIZE		48			// 单元格数值文本缓冲
-#define CHAT_CELL_OUT		64			// 单元格输出缓冲 (标签 + 括号 + 数值)
+#define CHAT_CELL_OUT		64			// 单元格输出缓冲 (标签 + 数值)
+#define CELL_VALUE_COLOR	"\x04"		// 真实数字颜色
+#define CELL_PAD_COLOR		"\x01"		// 补位 0 的颜色 (默认色 = 无颜色, 便于区分补位与真实数字)
 
 // 已退出玩家记录上限 (本关内每人最多产生 1 条记录, 101 人上限的服务器也够用)
 #define MAX_DEPARTED		32
@@ -575,6 +577,7 @@ stock int CountDigits(int value) {
 
 /**
 * 把非负整数按指定位宽补前导 0 写入缓冲 (位宽不够时按实际位数输出)
+* 补位用的 0 用默认色(无颜色), 真实数字切回数值色, 玩家一眼能看出哪几位是补位
 * @param buffer 输出缓冲
 * @param maxlen 缓冲长度
 * @param value  非负整数
@@ -586,7 +589,11 @@ stock void FormatZeroPadded(char[] buffer, int maxlen, int value, int digits) {
 	FormatEx(num, sizeof(num), "%d", value);
 
 	int len = strlen(num), out = 0;
-	for (int i = len; i < digits && out < maxlen - 1; i++) { buffer[out++] = '0'; }
+	if (digits > len) {
+		if (out < maxlen - 1) { buffer[out++] = CELL_PAD_COLOR[0]; }
+		for (int i = len; i < digits && out < maxlen - 1; i++) { buffer[out++] = '0'; }
+		if (out < maxlen - 1) { buffer[out++] = CELL_VALUE_COLOR[0]; }
+	}
 	for (int i = 0; i < len && out < maxlen - 1; i++) { buffer[out++] = num[i]; }
 	buffer[out] = '\0';
 }
@@ -671,30 +678,31 @@ void printMvpStatus(int client)
 		}
 	}
 
-	// ③ 逐行打印: 数值左右各留 1 个空格, 列间 1 个空格, 各行同列字符数完全一致 → 严格对齐
+	// ③ 逐行打印: 每列 = 标签 + 空格 + 数值 + 2 个空格, 不使用括号
+	// 各行同列的字符个数完全一致(数值补 0), 所以列宽数学上相等 → 严格对齐, 0 像素误差
 	// \x03 需要生还者作者才会渲染成蓝色, 所以用 PrintChatWithAuthor 发送
 	char toPrint[1024], temp[CHAT_CELL_OUT], nameBuf[MAX_NAME_LENGTH + 24];
 	int author = FindSurvivorAuthor();
 	for (int i = 0; i < count; i++) {
 		toPrint[0] = '\0';
 		if (g_hAllowShowSi.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03特感[\x04 %s \x03] ", sData[i][COL_SI]);
+			FormatEx(temp, sizeof(temp), "\x03特感 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_SI]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03丧尸[\x04 %s \x03] ", sData[i][COL_CI]);
+			FormatEx(temp, sizeof(temp), "\x03丧尸 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_CI]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03伤害[\x04 %s \x03] ", sData[i][COL_DAMAGE]);
+			FormatEx(temp, sizeof(temp), "\x03伤害 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_DAMAGE]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03黑/被黑[\x04 %s \x03] ", sData[i][COL_FF]);
+			FormatEx(temp, sizeof(temp), "\x03黑/被黑 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_FF]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03爆头率[\x04 %s \x03] ", sData[i][COL_ACC]);
+			FormatEx(temp, sizeof(temp), "\x03爆头率 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_ACC]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 

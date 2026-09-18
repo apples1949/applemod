@@ -20,7 +20,7 @@
 #include <Apex>
 #include <witch_and_tankifier>
 
-#define PLUGIN_VERSION "3.9.1"
+#define PLUGIN_VERSION "3.9.2"
 
 public Plugin myinfo =
 {
@@ -70,7 +70,8 @@ bool bRoundHasFlowTank, bRoundHasFlowWitch, bFlowTankActive, bCustomBossSys;
 bool bScoremod, bHybridScoremod, bNextScoremod;
 int iMaxDistance;
 
-// l4d2_scripted_hud 自带奖励分显示, 开启时本插件不再重复显示奖励分
+// l4d2_scripted_hud 在场时, 奖励分(含路程分)由屏幕上的 scripted HUD 显示, 本面板整块不画;
+// 它不在场时才由本面板显示完整奖励分.
 bool bScriptedHud;
 
 // Tank Control EQ
@@ -913,16 +914,13 @@ void FillScoreInfo(Panel hSpecHud)
 		
 		case GAMEMODE_VERSUS:
 		{
+			// l4d2_scripted_hud 在场: 奖励分/路程分由屏幕 HUD 显示, 面板不显示任何奖励分内容;
+			// 不在场: 面板显示完整奖励分(血量/伤害/药丸/总加成/距离).
+			// (这里是 switch 的最后一个 case, 后面没有别的绘制, 所以直接 return 退出函数.)
 			if (bScriptedHud)
-			{
-				// l4d2_scripted_hud 已显示奖励分, 这里不再重复, 只保留距离
-				DrawPanelText(hSpecHud, " ");
-				
-				FormatEx(info, sizeof(info), "> 距离: %i", iMaxDistance);
-				DrawPanelText(hSpecHud, info);
-			}
+				return;
 			
-			else if (bHybridScoremod)
+			if (bHybridScoremod)
 			{
 				int healthBonus	= SMPlus_GetHealthBonus(),	maxHealthBonus	= SMPlus_GetMaxHealthBonus();
 				int damageBonus	= SMPlus_GetDamageBonus(),	maxDamageBonus	= SMPlus_GetMaxDamageBonus();

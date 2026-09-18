@@ -1111,6 +1111,7 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 
 	/* 逐行输出: 名次:伤害百分比% (伤害) 拳:x 石:x 铁:x 承伤:x (承伤百分比%) 名字
 	   数字位用 '0' 左补到本列最大位数(见 AppendZeroPaddedCell): 同列宽度完全一致, 各列上下对齐;
+	   补位用的 '0' 不显示颜色(默认色), 真实数字是绿色, 一眼能分清补位与数据;
 	   不再套中括号, 列间用单个普通空格分隔(每行空格数固定, 不影响对齐);
 	   名字颜色: 在线玩家蓝色, 中途退出的记录行不显示颜色(默认色) */
 	char row[512];
@@ -1174,6 +1175,8 @@ int CountDigits(const char[] text)
 * 追加一个数字位左补 '0' 的单元格
 * 本列最大数字位数 - 本值数字位数 = 需要补的 '0' 个数; '0' 与任何数字同宽(实测 1304 单位),
 * 所以每一行在本列占用的渲染宽度完全相同(偏差 0.00 像素), 且零填充看得见对齐效果。
+* 补位用的 '0' 用**默认色**(不显示颜色)打印, 补完再把颜色换回数字色(调用方在单元格前给的是 \x04),
+* 这样一眼能分清哪些 0 是补位、哪些是真实数据; 颜色码不占渲染宽度, 对齐不受影响。
 * @param buffer 目标缓冲区
 * @param size   缓冲区大小
 * @param value  单元格文本(数字 / '.')
@@ -1182,8 +1185,16 @@ int CountDigits(const char[] text)
 **/
 void AppendZeroPaddedCell(char[] buffer, int size, const char[] value, int digits)
 {
-	for (int i = CountDigits(value); i < digits; i++)
-		StrCat(buffer, size, "0");
+	int pad = digits - CountDigits(value);
+
+	if (pad > 0)
+	{
+		StrCat(buffer, size, "\x01");   /* 补位字符: 不显示颜色 */
+		for (int i = 0; i < pad; i++)
+			StrCat(buffer, size, "0");
+		StrCat(buffer, size, "\x04");   /* 换回数字的颜色 */
+	}
+
 	StrCat(buffer, size, value);
 }
 

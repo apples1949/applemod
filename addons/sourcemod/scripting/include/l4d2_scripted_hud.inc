@@ -17,17 +17,22 @@
 #define _l4d2_scripted_hud_included
 
 /**
- * Shows a round-end "fun fact" on the scripted HUD, in its own dedicated slot
+ * Shows round-end "fun fact" text on the scripted HUD, in its own dedicated slot
  * (slot 2, boxed single line, positioned below the team-fix prompt).
- * The text is broadcast to every client and re-sent every 0.5s for `hideTime`
- * seconds, so it cannot be wiped by the game's own HUD writes; if the next round
- * starts while it is still showing, it is kept for a few more seconds so that it
- * is readable after the round-end scoreboard/intermission.
+ * The text is broadcast to every client and re-sent every 0.5s, so it cannot be
+ * wiped by the game's own HUD writes.
+ *
+ * One fact is visible at a time. Pass several facts as separate lines (joined
+ * with '\n'): they become a carousel - each line is shown for
+ * FUNFACT_FACT_INTERVAL (1.5s), then swapped for the next line that has not been
+ * shown yet; once every line has been shown the last one is kept until the
+ * window ends. A single line is simply shown for the whole `hideTime` window.
  *
  * Chat colour codes (\x01-\x05) are stripped: the scripted HUD does not parse them.
  *
- * @param text     The fun-fact text to display. Empty/NULL => no-op.
- * @param hideTime Seconds to keep the text visible (<=0 uses a 5s default).
+ * @param text     The fun-fact text to display (multiple facts: one per line).
+ *                 Empty/NULL => no-op.
+ * @param hideTime Total seconds of the display window (<=0 uses a 5s default).
  *
  * @return 1 on success (accepted / shown), 0 otherwise (no text, or a team fix is running).
  */

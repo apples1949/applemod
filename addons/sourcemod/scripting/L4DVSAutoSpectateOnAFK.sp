@@ -10,18 +10,18 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.7-2026/8/20"
+#define PLUGIN_VERSION "2.8-2026/9/19"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
 
 
 // For cvars
 ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
- 	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, 
+ 	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, g_hAfkSafeRoomExitGrace,
 	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
-	afkKickTime, afkCheckInterval;
+	afkKickTime, afkCheckInterval, afkSafeRoomExitGrace;
 bool afkKickEnabled, bAfkSaferoomIgnore, g_bSayResetTime, g_bSpecAfkMsgEnable;
 
 
@@ -30,6 +30,8 @@ int afkPlayerTimeLeftWarn[MAXPLAYERS + 1];
 int afkPlayerTimeLeftAction[MAXPLAYERS + 1];
 float afkPlayerLastPos[MAXPLAYERS + 1][3];
 float afkPlayerLastEyes[MAXPLAYERS + 1][3];
+bool afkPlayerPendingSafeRoomExit[MAXPLAYERS + 1];	// 在安全屋內就走完倒计时、等待他人离开安全区域的闲置玩家
+int afkPlayerSafeRoomExitGrace[MAXPLAYERS + 1];		// 离开安全区域后的最后行动宽限：-1 = 未在宽限中，>=0 = 剩余秒数
 bool g_bLeftSafeRoom;
 bool L4D2Version;
 char g_sAccesslvl[AdminFlags_TOTAL];
@@ -101,6 +103,7 @@ public void OnPluginStart()
 	g_hAfkCheckInterval 	= CreateConVar("l4d_specafk_checkinteral", 			"1", "检测/警告的时间间隔", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", 			"1", "设为1时，当队伍有空位时，旁观状态下的AFK玩家将被踢出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", 		"0", "设为1时，无论幸存者是否离开安全屋，AFK玩家都会被强制旁观（不影响旁观踢出判定）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hAfkSafeRoomExitGrace = CreateConVar("l4d_specafk_saferoom_exit_grace", 	"5", "在安全屋内就被判定闲置的玩家，其他人离开安全区域后给予的最后行动秒数（每秒提示，超时才强制旁观；0 = 离开安全区域后立即强制旁观）", FCVAR_NOTIFY, true, 0.0);
 	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
 	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -116,6 +119,7 @@ public void OnPluginStart()
 	g_hAfkCheckInterval.AddChangeHook(ConVarChanged);
 	g_hAfkKickEnabled.AddChangeHook(ConVarChanged);
 	g_hAfkSaferoomIgnore.AddChangeHook(ConVarChanged);
+	g_hAfkSafeRoomExitGrace.AddChangeHook(ConVarChanged);
 	g_hImmuneAccess.AddChangeHook(ConVarChanged);
 	g_hSayResetTime.AddChangeHook(ConVarChanged);
 	g_hSpecAfkMsgEnable.AddChangeHook(ConVarChanged);
@@ -147,6 +151,7 @@ void ReadCvars()
 	afkWarnKickTime = g_hAfkWarnKickTime.IntValue;
 	afkKickTime = g_hAfkKickTime.IntValue;
 	afkCheckInterval = g_hAfkCheckInterval.IntValue;
+	afkSafeRoomExitGrace = g_hAfkSafeRoomExitGrace.IntValue;
 	afkKickEnabled = g_hAfkKickEnabled.BoolValue;
 	bAfkSaferoomIgnore = g_hAfkSaferoomIgnore.BoolValue;
 
@@ -163,6 +168,13 @@ void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 	ReadCvars();
 }
 
+// 清除"离开安全区域最后行动宽限"相关状态
+void ResetSafeRoomExitState(int client)
+{
+	afkPlayerPendingSafeRoomExit[client] = false;
+	afkPlayerSafeRoomExitGrace[client] = -1;
+}
+
 public void OnMapEnd()
 {
 	ResetPlugin();
@@ -175,6 +187,7 @@ public void OnClientPutInServer(int client)
 
 	afkPlayerTimeLeftWarn[client] = afkWarnKickTime;
 	afkPlayerTimeLeftAction[client] = afkKickTime;
+	ResetSafeRoomExitState(client);
 
 	// 符合自动旁观 cvar 的玩家加入时自动移动到旁观
 	if (IsAutoSpecPlayer(client))
@@ -326,6 +339,8 @@ Action tmrStart(Handle timer)
 
 	for (int client=1;client<=MaxClients;client++)
 	{
+		ResetSafeRoomExitState(client);
+
 		if(IsClientInGame(client) && !IsFakeClient(client))
 		{
 	// If client is not on spec team
@@ -442,6 +457,9 @@ Action afkJoinHint (Handle Timer, int client)
 
 void afkResetTimers (int client)
 {
+	// 玩家已行动 / 状态变化：清掉待旁观与离开安全区域宽限状态
+	ResetSafeRoomExitState(client);
+
 	// If client is not on spec team
 	if (GetClientTeam(client)!=1)
 	{
@@ -561,25 +579,54 @@ Action afkCheckThread(Handle timer)
 							}
 							else // player warn timeout reached ...
 							{
-								// we reduce his action time
-								afkPlayerTimeLeftAction[i] = afkPlayerTimeLeftAction[i] - afkCheckInterval;
-								
-								// if his action time reached 0 ...
-								if (afkPlayerTimeLeftAction[i] <= 0)
+								// 在安全屋内就被判定闲置、倒计时走完的玩家：其他人离开安全区域后
+								// 再给他 afkSafeRoomExitGrace 秒最后行动时间（每秒提示），仍不行动才强制旁观
+								if (afkPlayerPendingSafeRoomExit[i] && g_bLeftSafeRoom && !bAfkSaferoomIgnore)
 								{
-									// If players leaved safe room we force him to spectate
-									if (g_bLeftSafeRoom || bAfkSaferoomIgnore)
+									// 首次进入宽限
+									if (afkPlayerSafeRoomExitGrace[i] < 0)
+										afkPlayerSafeRoomExitGrace[i] = afkSafeRoomExitGrace;
+
+									if (afkPlayerSafeRoomExitGrace[i] > 0)
+									{
+										// 离开安全区域后每秒提示剩余行动时间
+										AFKCountdownWarn(i, "[AFK] Inactivity detected! 6", afkPlayerSafeRoomExitGrace[i]);
+										afkPlayerSafeRoomExitGrace[i] = afkPlayerSafeRoomExitGrace[i] - afkCheckInterval;
+									}
+									else // 宽限时间用尽 ... 强制旁观
 									{
 										afkForceSpectate(i, true);
 									}
-									else // if players haven't leaved safe room ... we warn this player that he will be forced to spectate as soon as a player leaves
-									{
-										PrintHintText(i, "%T", "[AFK] Inactivity detected! 2", i);
-									}
 								}
-								else // we just warn him ...
-									AFKCountdownWarn(i, "[AFK] Inactivity detected! 1", afkPlayerTimeLeftAction[i]);
-								
+								else
+								{
+									// we reduce his action time
+									afkPlayerTimeLeftAction[i] = afkPlayerTimeLeftAction[i] - afkCheckInterval;
+									
+									// if his action time reached 0 ...
+									if (afkPlayerTimeLeftAction[i] <= 0)
+									{
+										// If players leaved safe room we force him to spectate
+										if (g_bLeftSafeRoom || bAfkSaferoomIgnore)
+										{
+											afkForceSpectate(i, true);
+										}
+										else // if players haven't leaved safe room ... we warn this player that he will be forced to spectate as soon as a player leaves
+										{
+											// 记住：该玩家在安全屋内就被判定闲置，离开安全区域后还有最后宽限时间
+											afkPlayerPendingSafeRoomExit[i] = true;
+
+											// 提示里的秒数取自 l4d_specafk_saferoom_exit_grace；
+											// 该 cvar 为 0 时没有宽限（离开安全区域即强制旁观），改用无秒数的提示
+											if (afkSafeRoomExitGrace > 0)
+												PrintHintText(i, "%T", "[AFK] Inactivity detected! 2", i, afkSafeRoomExitGrace);
+											else
+												PrintHintText(i, "%T", "[AFK] Inactivity detected! 7", i);
+										}
+									}
+									else // we just warn him ...
+										AFKCountdownWarn(i, "[AFK] Inactivity detected! 1", afkPlayerTimeLeftAction[i]);
+								}
 							}
 						} // player is not trapped
 						else // player is trapped
@@ -666,6 +713,9 @@ void AFKPrintHintToAll(const char[] phrase, const char[] name)
 
 void afkForceSpectate (int client, bool advertise)
 {
+	// 已强制旁观：清掉待旁观与离开安全区域宽限状态，避免状态残留
+	ResetSafeRoomExitState(client);
+
 	// We force him to spectate
 	ChangeClientTeam(client, 1);
 	

@@ -11,10 +11,14 @@
 	[DONE] skill: clears / instaclears are now collected (new plyInstaClears
 	       field, <100ms) and shown in the Special table, together with the
 	       average clear time (in seconds).
-	[DONE] round-end fun fact is pushed to l4d2_scripted_hud's own fun-fact slot
-	       (slot 2, AUTO_FUNFACT_ROUND); the provider rewrites it every 0.5s and
-	       keeps it past the next round start, so it is not swallowed by the
-	       game's own ticker / round-end scoreboard. Test on demand with
+	[DONE] round-end fun facts go to l4d2_scripted_hud's own fun-fact slot (slot 2)
+	       as a carousel: every type that reaches its threshold is pooled (round
+	       facts first, then full-game ones, most extreme first), one line is
+	       shown per 1.5s (each one only once) while the provider rewrites it
+	       every 0.5s for the whole 8s window, so it is not swallowed by the
+	       game's own ticker / round-end scoreboard. While that HUD is available
+	       the chat copy of a fun fact is suppressed - chat is only the fallback
+	       when l4d2_scripted_hud is not loaded. Test on demand with
 	       `sm_funfact_hud` (ADMFLAG_CHANGEMAP).
 
 	[HELD / by decision] CMT + teamswap: current g_bCMTSwapped approach kept.
@@ -199,6 +203,11 @@
 #define FUNFACT_HUD_NO_NATIVE	-1								// 原生不可用(scripted_hud 版本过旧)
 #define FUNFACT_HUD_NO_TEXT		-2								// 没有可用趣文数据
 #define FUNFACT_HUD_REJECTED	-3								// 被 scripted_hud 拒绝(修复队伍进行中/GameRules 未就绪)
+
+// 趣文 HUD 轮播参数 (每条 1.5 秒换下一条由 scripted_hud 侧控制: FUNFACT_FACT_INTERVAL).
+#define FUNFACT_HUD_SHOW_TIME	8.0								// HUD 轮播窗口总时长(从推送时刻起算).
+#define FUNFACT_HUD_TEXT_MAX	256								// 单条趣文长度上限(与 scripted_hud 单槽长度对齐).
+#define FUNFACT_HUD_POOL_MAX	16								// 最多入池条数(与 scripted_hud 轮播池上限对齐).
 
 
 // fun fact
@@ -515,14 +524,15 @@ char
 	g_sMapName[MAXROUNDS][MAXMAP],
 	g_sConfigName[MAXMAP],
 	g_sConsoleBuf[MAXCHUNKS][CONBUFSIZELARGE],
-	g_sStatsFile[MAXNAME];										// name for the statsfile we should write to
+	g_sStatsFile[MAXNAME],										// name for the statsfile we should write to
+	g_sFunFactHudPool[FUNFACT_HUD_TEXT_MAX * FUNFACT_HUD_POOL_MAX];	// 待推送到趣文 HUD 轮播的整段文本(每条一行)
 
 public Plugin myinfo =
 {
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.4",
+	version = "1.1.5",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -559,14 +569,15 @@ public void OnPluginStart()
 	g_hCvarAutoPrintVs = CreateConVar(
 		"sm_stats_autoprint_vs_round",
 		"8325",									 // default = 1 (mvpchat) + 4 (mvpcon-round) + 128 (special round) = 133 + (funfact round) 8192 = 8325
-		"Flags for automatic print [versus round] (show 1,4:MVP-chat, 4,8,16:MVP-console, 32,64:FF, 128,256:special, 512,1024,2048,4096:accuracy).",
+											 // cfgogl 下各 cfg 用 24756 (8372 + 16384): 再加全场趣文 16384, 回合+全场趣文一起进 HUD 轮播池
+		"Flags for automatic print [versus round] (show 1,4:MVP-chat, 4,8,16:MVP-console, 32,64:FF, 128,256:special, 512,1024,2048,4096:accuracy, 8192,16384:fun fact round/game).",
 		_, true, 0.0, false, 0.0
 	);
 	
 	g_hCvarAutoPrintCoop = CreateConVar(
 		"sm_stats_autoprint_coop_round",
 		"1289",									 // default = 1 (mvpchat) + 8 (mvpcon-all) + 256 (special all) + 1024 (acc all) = 1289
-		"Flags for automatic print [campaign round] (show 1,4:MVP-chat, 4,8,16:MVP-console, 32,64:FF, 128,256:special, 512,1024,2048,4096:accuracy).",
+		"Flags for automatic print [campaign round] (show 1,4:MVP-chat, 4,8,16:MVP-console, 32,64:FF, 128,256:special, 512,1024,2048,4096:accuracy, 8192,16384:fun fact round/game).",
 		_, true, 0.0, false, 0.0
 	);
 	
@@ -3931,7 +3942,9 @@ void DisplayStatsMVP(int client, bool bTank = false, bool bMore = false, bool bR
 	}
 }
 
-// show 1 (randomly selected, but at least relevant) fact about the game
+// 趣文 (fun fact): 本回合/全场统计里最出彩的那些条目
+//   - 聊天: 按权重随机抽 1 条 (只在 l4d2_scripted_hud 不可用时用作回退显示)
+//   - HUD:  所有达到阈值的趣文都进轮播池, 每条 1.5 秒依次换, 直到池内都显示过
 void DisplayStatsFunFactChat(int client, bool bRound = true, bool bTeam = true, int iTeam = -1)
 {
 	char printBuffer[1024], strLines[8][192];
@@ -3976,25 +3989,52 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 {
 	printBuffer[0] = '\0';
 
+	int iType[FFACT_MAXTYPES + 1], iPlayer[FFACT_MAXTYPES + 1], iValue[FFACT_MAXTYPES + 1], iWeight[FFACT_MAXTYPES + 1];
+	int iCount = CollectFunFactCandidates(iType, iPlayer, iValue, iWeight, FFACT_MAXTYPES + 1, bRound, bTeam, iTeam);
+	if (!iCount) {
+		return;
+	}
+
+	// build the weighted pick list: 权重越高占的格子越多, 被抽中的概率越大
+	int wPicks[FFACT_MAXTYPES * FFACT_MAX_WEIGHT];
+	int wTotal = 0, i, j;
+
+	for (i = 0; i < iCount; i++) {
+		for (j = 0; j < iWeight[i]; j++) {
+			wPicks[wTotal++] = i;
+		}
+	}
+
+	if (!wTotal) {
+		return;
+	}
+
+	// pick one, format it
+	int wPick = wPicks[GetRandomInt(0, wTotal - 1)];
+	FormatFunFactLine(printBuffer, iLen, iType[wPick], bRound, iPlayer[wPick], iValue[wPick]);
+}
+
+// 收集某个范围(回合/全场)内所有"达到阈值"的趣文候选: 每类只取该类数值最高的玩家.
+// iType/iPlayer/iValue/iWeight 由调用方提供(容量 iMax), 返回条数; iWeight = 数值的极端程度(<= FFACT_MAX_WEIGHT).
+int CollectFunFactCandidates(int[] iType, int[] iPlayer, int[] iValue, int[] iWeight, int iMax, bool bRound, bool bTeam, int iTeam)
+{
 	// use current survivor team -- or previous team in second half before starting
 	int team = (iTeam != -1) ? iTeam : ((g_bSecondHalf && !g_bPlayersLeftStart) ? ((g_iCurTeam) ? 0 : 1) : g_iCurTeam);
 
-	int i, j, wTotal = 0, wPicks[256];
-
-	int wTypeHighPly[FFACT_MAXTYPES + 1];
-	int wTypeHighVal[FFACT_MAXTYPES + 1];
-	int wTypeHighTeam[FFACT_MAXTYPES + 1];
-
-	// for each type, check whether / and how weighted
+	int i, iCount = 0;
 	int wTmp = 0;
 	int highest, value, iproperty, minval, maxval;
 	bool bInf;
 
-	for (i = 0; i <= FFACT_MAXTYPES; i++) {
+	// for each type, check whether / and how weighted
+	// 从 FFACT_TYPE_CROWN(1) 开始: 0 没有对应的趣文类型, 旧写法多跑一轮 i=0 时属性索引未初始化,
+	// 若它被抽中, 格式化出来是空串 -> 聊天里整条趣文不显示.
+	for (i = FFACT_TYPE_CROWN; i <= FFACT_MAXTYPES && iCount < iMax; i++) {
 		wTmp = 0;
-		wTypeHighPly[i] = -1;
-		wTypeHighTeam[i] = team;
 		bInf = false;
+		iproperty = -1;
+		minval = 0;
+		maxval = 0;
 
 		switch (i) {
 			case FFACT_TYPE_CROWN: {
@@ -4085,9 +4125,13 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 			}
 		}
 
+		if (iproperty < 0) {
+			continue;
+		}
+
 		highest = GetPlayerWithHighestValue(iproperty, bRound, bTeam, team, bInf);
-		if (highest == -1) { 
-			continue; 
+		if (highest == -1) {
+			continue;
 		}
 
 		if (bInf) {
@@ -4098,10 +4142,8 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 			} else {
 				if (g_strRoundPlayerInfData[highest][LTEAM_A][iproperty] > g_strRoundPlayerInfData[highest][LTEAM_B][iproperty]) {
 					value = g_strRoundPlayerInfData[highest][LTEAM_A][iproperty];
-					wTypeHighTeam[i] = LTEAM_A;
 				} else {
 					value = g_strRoundPlayerInfData[highest][LTEAM_B][iproperty];
-					wTypeHighTeam[i] = LTEAM_B;
 				}
 			}
 		} else {
@@ -4112,156 +4154,211 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 			} else {
 				if (g_strRoundPlayerData[highest][LTEAM_A][iproperty] > g_strRoundPlayerData[highest][LTEAM_B][iproperty]) {
 					value = g_strRoundPlayerData[highest][LTEAM_A][iproperty];
-					wTypeHighTeam[i] = LTEAM_A;
 				} else {
 					value = g_strRoundPlayerData[highest][LTEAM_B][iproperty];
-					wTypeHighTeam[i] = LTEAM_B;
 				}
 			}
 		}
 
 		if (value > minval) {
-			wTypeHighPly[i] = highest;
-			wTypeHighVal[i] = value;
+			iType[iCount] = i;
+			iPlayer[iCount] = highest;
+			iValue[iCount] = value;
+
 			// weight for this fact
 			if (value >= maxval) {
 				wTmp = FFACT_MAX_WEIGHT;
 			} else {
 				wTmp = RoundFloat( float(value - minval) / float(maxval - minval) * float(FFACT_MAX_WEIGHT)) + 1;
 			}
-		}
 
-		if (wTmp) {
-			for (j = 0; j < wTmp; j++) { 
-				wPicks[wTotal+j] = i; 
-			}
-			wTotal += wTmp;
+			iWeight[iCount] = wTmp;
+			iCount++;
 		}
 	}
 
-	if (!wTotal) { 
-		return;
-	}
+	return iCount;
+}
 
-	// pick one, format it
-	int wPick = GetRandomInt(0, wTotal-1);
-	wPick = wPicks[wPick];
+// 把一条趣文格式化成通用的一行文本(结尾带 \n: 聊天直接按行发, HUD 侧去掉换行后当轮播条目).
+void FormatFunFactLine(char[] printBuffer, const int iLen, int iType, bool bRound, int iPlayer, int iValue)
+{
+	printBuffer[0] = '\0';
 
-	switch (wPick)
+	switch (iType)
 	{
 		case FFACT_TYPE_CROWN: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01皇冠击杀了 \x05%d \x01只 witch。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_DRAWCROWN: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01惊动皇冠击杀了 \x05%d \x01只 witch。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_SKEETS: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01空中击杀了 \x05%d \x01只 hunter。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_MELEESKEETS: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用近战武器空中击杀了 \x05%d \x01只 hunter。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_M2: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01推开了 \x05%d \x01只特感。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_MELEETANK: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01对 tank 挥出了 \x05%d \x01次近战攻击。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_CUT: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01切断了 \x05%d \x01次 smoker 的舌头。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_POP: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01点爆了 \x05%d \x01只 boomer。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_DEADSTOP: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01空中推停了 \x05%d \x01只 hunter。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_LEVELS: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01被 charger 满级撞击了 \x05%d \x01次。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		// infected
 		case FFACT_TYPE_HUNTERDP: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用 hunter 打出了 \x05%d \x01次高扑。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_JOCKEYDP: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01用 jockey 打出了 \x05%d \x01次高扑。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_DCHARGE: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01死亡冲锋了 \x05%d \x01名生还者。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_SCRATCH: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01抓伤(站立)生还者共造成 \x05%d \x01伤害。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_BOOMDMG: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01喷吐后小僵尸补刀共造成 \x05%d \x01伤害。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
 		case FFACT_TYPE_SPITDMG: {
 			FormatEx(printBuffer, iLen, "[%s趣闻] \x04%s \x01对(站立)生还者共造成 \x05%d \x01酸液伤害。\n",
 				(bRound) ? "本回合" : "全场",
-				g_sPlayerName[ wTypeHighPly[wPick] ],
-				wTypeHighVal[wPick]
+				g_sPlayerName[iPlayer],
+				iValue
 			);
 		}
+	}
+}
+
+// 把某个范围(回合/全场)内所有达阈值的趣文按"数值越极端越先显示"的顺序追加进 HUD 轮播文本(每条一行).
+// iAlready = 池子里已有的条数(回合 + 全场共用 FUNFACT_HUD_POOL_MAX 上限); 返回本次追加的条数.
+int AppendFunFactsToHudPool(bool bRound, bool bTeam, int iTeam, int iAlready)
+{
+	int iType[FFACT_MAXTYPES + 1], iPlayer[FFACT_MAXTYPES + 1], iValue[FFACT_MAXTYPES + 1], iWeight[FFACT_MAXTYPES + 1];
+	int iCount = CollectFunFactCandidates(iType, iPlayer, iValue, iWeight, FFACT_MAXTYPES + 1, bRound, bTeam, iTeam);
+	if (!iCount) {
+		return 0;
+	}
+
+	bool bUsed[FFACT_MAXTYPES + 1] = {false};
+	char sLine[FUNFACT_HUD_TEXT_MAX];
+	int iAdded = 0, j, iBest;
+
+	while (iAdded + iAlready < FUNFACT_HUD_POOL_MAX) {
+		// 每轮挑出"权重最高且还没用过"的一条(同权重保持原有类型顺序).
+		iBest = -1;
+		for (j = 0; j < iCount; j++) {
+			if (bUsed[j]) {
+				continue;
+			}
+			if (iBest == -1 || iWeight[j] > iWeight[iBest]) {
+				iBest = j;
+			}
+		}
+
+		if (iBest == -1) {
+			break;
+		}
+
+		bUsed[iBest] = true;
+
+		FormatFunFactLine(sLine, sizeof(sLine), iType[iBest], bRound, iPlayer[iBest], iValue[iBest]);
+		TrimFunFactLine(sLine);
+
+		if (!strlen(sLine)) {
+			continue;
+		}
+
+		if (iAdded > 0) {
+			StrCat(g_sFunFactHudPool, sizeof(g_sFunFactHudPool), "\n");
+		}
+		StrCat(g_sFunFactHudPool, sizeof(g_sFunFactHudPool), sLine);
+
+		iAdded++;
+	}
+
+	return iAdded;
+}
+
+// 去掉行尾换行/空白: HUD 侧把整段文本按行拆成轮播条目, 每条必须是干净的一行.
+void TrimFunFactLine(char[] sLine)
+{
+	int len = strlen(sLine);
+	while (len > 0 && (sLine[len - 1] == '\n' || sLine[len - 1] == '\r' || sLine[len - 1] == ' ' || sLine[len - 1] == '\t')) {
+		sLine[--len] = '\0';
 	}
 }
 
@@ -6632,9 +6729,10 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 {
 	int iFlags = GetConVarInt((g_bModeCampaign) ? g_hCvarAutoPrintCoop : g_hCvarAutoPrintVs);
 
-	// 把局末趣文推送到 scripted_hud 的专用趣文槽位(全局广播一次), 仅当回合级趣文标志开启.
-	if (iFlags & AUTO_FUNFACT_ROUND) {
-		int iFunFactResult = DisplayFunFactHUD();
+	// 把局末趣文推送到 scripted_hud 的专用趣文槽位轮播(全局广播一次), 回合级/全场级趣文标志任一开启就推.
+	// 聊天框那条趣文在 HUD 可用时不再显示(见 AutomaticPrintPerClient 的 IsFunFactHudUsable 判断).
+	if (iFlags & (AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME)) {
+		int iFunFactResult = DisplayFunFactHUD(iFlags);
 		if (iFunFactResult != FUNFACT_HUD_OK) {
 			// sm_stats_debug 1 时可在 logs/sourcemod 里看到没推出去的原因.
 			PrintDebug(1, "fun fact HUD: 未推送 (result=%d)", iFunFactResult);
@@ -6656,9 +6754,11 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	return Plugin_Stop;
 }
 
-// 局末趣文: 推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2), 全局广播给所有人.
+// 局末趣文: 推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
+// 放哪些趣文由 iFlags 决定: AUTO_FUNFACT_ROUND = 本回合, AUTO_FUNFACT_GAME = 全场
+// (两个都开就都放, 回合的排前面); 池内每条 1.5 秒依次轮换, 窗口 FUNFACT_HUD_SHOW_TIME 秒.
 // 返回 FUNFACT_HUD_* 状态码, 便于 /sm_funfact_hud 诊断.
-int DisplayFunFactHUD(bool bRound = true, bool bTeam = true, int iTeam = -1)
+int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME, bool bTeam = true, int iTeam = -1)
 {
 	if (!g_bScriptedHudAvailable) {
 		return FUNFACT_HUD_NO_LIB;
@@ -6667,27 +6767,41 @@ int DisplayFunFactHUD(bool bRound = true, bool bTeam = true, int iTeam = -1)
 		return FUNFACT_HUD_NO_NATIVE;
 	}
 
-	char printBuffer[1024];
-	GetFunFactChatString(printBuffer, sizeof(printBuffer), bRound, bTeam, iTeam);
-	if (!strlen(printBuffer)) {
+	g_sFunFactHudPool[0] = '\0';
+
+	int iPooled = 0;
+
+	if (iFlags & AUTO_FUNFACT_ROUND) {
+		iPooled += AppendFunFactsToHudPool(true, bTeam, iTeam, iPooled);
+	}
+
+	if (iFlags & AUTO_FUNFACT_GAME) {
+		iPooled += AppendFunFactsToHudPool(false, bTeam, iTeam, iPooled);
+	}
+
+	if (!iPooled) {
 		return FUNFACT_HUD_NO_TEXT;
 	}
 
-	// 去掉末尾换行, 便于 HUD 紧凑显示 (scripted_hud 侧也会再清一次).
-	int len = strlen(printBuffer);
-	while (len > 0 && (printBuffer[len - 1] == '\n' || printBuffer[len - 1] == '\r')) {
-		printBuffer[--len] = '\0';
-	}
+	PrintDebug(2, "fun fact HUD: %d 条入池轮播", iPooled);
 
-	return ScriptedHud_ShowRoundFunFact(printBuffer, 8.0) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
+	return ScriptedHud_ShowRoundFunFact(g_sFunFactHudPool, FUNFACT_HUD_SHOW_TIME) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
 }
 
-// 诊断命令: 立即把一条趣文推到脚本 HUD, 不用等到回合结束才能验证显示效果.
+// 趣文 HUD 是否可用: scripted_hud 已加载并提供了趣文原生. 可用时聊天框不再显示趣文(避免同一回合重复两遍),
+// 不可用时才退回聊天框显示.
+bool IsFunFactHudUsable()
+{
+	return g_bScriptedHudAvailable
+		&& GetFeatureStatus(FeatureType_Native, "ScriptedHud_ShowRoundFunFact") == FeatureStatus_Available;
+}
+
+// 诊断命令: 立即把一批趣文推到脚本 HUD 轮播, 不用等到回合结束才能验证显示效果.
 Action Cmd_FunFactHud(int client, int args)
 {
 	switch (DisplayFunFactHUD()) {
 		case FUNFACT_HUD_OK: {
-			ReplyToCommand(client, "\x04[提示]\x03已把一条回合趣文推送到脚本 HUD\x05(槽位 2, 显示 8 秒).");
+			ReplyToCommand(client, "\x04[提示]\x03已把本回合+全场趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 1.5 秒, 共 8 秒).");
 		}
 		case FUNFACT_HUD_NO_LIB: {
 			ReplyToCommand(client, "\x04[提示]\x05l4d2_scripted_hud 未加载, 趣文 HUD 无法显示.");
@@ -6835,13 +6949,20 @@ void AutomaticPrintPerClient(int iFlags, int client = -1, int iTeam = -1, bool b
 		DisplayStatsMVPChat(client, false);
 	}
 
-	// fun fact
+	// fun fact: l4d2_scripted_hud 可用时趣文只走脚本 HUD 轮播(回合 + 全场都在 HUD 里轮),
+	// 聊天框不再重复显示; HUD 不可用时才退回聊天框.
+	bool bFunFactOnHud = IsFunFactHudUsable();
+
 	if (iFlags & AUTO_FUNFACT_ROUND) {
-		DisplayStatsFunFactChat(client, true, bTeam, iTeam);
+		if (!bFunFactOnHud) {
+			DisplayStatsFunFactChat(client, true, bTeam, iTeam);
+		}
 	}
 	
 	if (iFlags & AUTO_FUNFACT_GAME) {
-		DisplayStatsFunFactChat(client, false, bTeam, iTeam);
+		if (!bFunFactOnHud) {
+			DisplayStatsFunFactChat(client, false, bTeam, iTeam);
+		}
 	}
 
 	// special / skill

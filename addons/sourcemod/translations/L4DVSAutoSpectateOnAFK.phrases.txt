@@ -21,10 +21,18 @@
 	}
 	"[AFK] Inactivity detected! 2"
 	{
-		"en"	"[AFK] Inactivity detected! You'll be moved to spectators as soon as your teammates leave the safe area."
-		"zho"	"[AFK] 偵測閒置! 一旦有人離開安全區域你將強制旁觀."
-		"chi"	"[AFK] 检测到闲置! 一旦有人离开安全区域你将强制旁观."
-		"hu"	"[AFK] Inaktivitás észlelve! Amint csapattársaid elhagyják a biztonságos területet, a nézők közé kerülsz."
+		"#format"		"{1:d}"
+		"en"	"[AFK] Inactivity detected! If you still don't act within {1} seconds after a survivor leaves the safe area, you will be forced to spectate!"
+		"zho"	"[AFK] 檢測到閒置! 當有生還者離開安全區域後{1}秒還未行動。將會被強制旁觀！"
+		"chi"	"[AFK] 检测到闲置! 当有生还者离开安全区域后{1}秒还未行动。将会被强制旁观！"
+		"hu"	"[AFK] Inaktivitás észlelve! Ha egy túlélő elhagyja a biztonságos területet, és {1} másodpercen belül nem cselekszel, a nézők közé kerülsz!"
+	}
+	"[AFK] Inactivity detected! 7"
+	{
+		"en"	"[AFK] Inactivity detected! You'll be moved to spectators as soon as a survivor leaves the safe area!"
+		"zho"	"[AFK] 檢測到閒置! 一旦有生還者離開安全區域你將被強制旁觀！"
+		"chi"	"[AFK] 检测到闲置! 一旦有生还者离开安全区域你将被强制旁观！"
+		"hu"	"[AFK] Inaktivitás észlelve! Amint egy túlélő elhagyja a biztonságos területet, a nézők közé kerülsz!"
 	}
 	"[AFK] Inactivity detected! 3"
 	{
@@ -64,6 +72,14 @@
 		"zho"	"[AFK] {lightgreen}{1} 在相對應的時間無反應而被移動到旁觀!"
 		"chi"	"[AFK] {lightgreen}{1} 在相对应的时间无反应而被移动到旁观!"
 		"hu"	"[AFK] {lightgreen}{1} nem reagált a megadott időben, ezért a nézők közé került!"
+	}
+	"[AFK] Inactivity detected! 6"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Teammates have left the safe area! Act now or you'll be moved to spectators in {1} seconds!"
+		"zho"	"[AFK] 隊友已離開安全區域! 立即行動, 否則将于 {1} 秒後強制旁觀!"
+		"chi"	"[AFK] 队友已离开安全区域! 立即行动, 否则将于 {1} 秒后强制旁观!"
+		"hu"	"[AFK] A csapattársaid elhagyták a biztonságos területet! Cselekedj most, különben {1} másodperc múlva a nézők közé kerülsz!"
 	}
 	"kickplayer"
 	{

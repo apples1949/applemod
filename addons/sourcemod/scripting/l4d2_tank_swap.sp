@@ -890,7 +890,6 @@ bool PerformTankSwap(int oldTank, int newTank)
 	L4D_ReplaceTank(oldTank, newTank);
 
 	// 主动告知其它插件(如 tank_damage)换克已发生: 与引擎 forward 双保险, 幂等
-	LogToFileEx("l4d2_tank_swap.log", "[TankSwap] Tank 控制权转让: %N(%d) -> %N(%d)", oldTank, oldTank, newTank, newTank);
 	Call_StartForward(g_hForwardTankPassed);
 	Call_PushCell(oldTank);
 	Call_PushCell(newTank);

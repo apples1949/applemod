@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.3.0",
+    version     = "1.4.0",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -80,12 +80,19 @@ public Plugin myinfo =
 #define FUNFACT_HUD_HEIGHT             0.05
 #define FUNFACT_HUD_FLAGS              (HUD_FLAG_TEXT | HUD_FLAG_ALIGN_LEFT)
 
+// 趣文轮播: 槽位一次只放一条, 每 FUNFACT_FACT_INTERVAL 秒换成下一条"还没显示过的"
+// (池内都显示过后就停在最后一条, 不回头重播).
+#define FUNFACT_FACT_INTERVAL          1.5     // 单条趣文的显示时长(轮播间隔).
+#define FUNFACT_POOL_MAX               16      // 轮播池上限: 与 l4d2_playstats_tranchi 的 FFACT_MAXTYPES 对齐.
+
 // 趣文显示时长与重写策略.
 #define FUNFACT_REFRESH_INTERVAL       0.5     // 重写间隔: 游戏在回合结束/回合开始会整片重置脚本 HUD.
-#define FUNFACT_HIDE_DEFAULT           5.0     // 调用方没给时长时的默认显示时间.
-#define FUNFACT_ROUNDSTART_SHOW        6.0     // 下一回合开始时补显的时长 (回合结束的记分板会盖住 HUD).
-#define FUNFACT_MAX_DISPLAY            30.0    // 兜底上限: 单条趣文最长显示时间, 避免无限重写.
+#define FUNFACT_HIDE_DEFAULT           5.0     // 调用方没给时长时的默认显示时间(整个轮播窗口).
+#define FUNFACT_ROUNDSTART_SHOW        0.0     // >0: 回合开始后把池内还没显示过的趣文续轮这么多秒;
+                                               // 0 = 不跨回合补显 (需求: 回合结束 8 秒即可).
+#define FUNFACT_MAX_DISPLAY            30.0    // 兜底上限: 单次趣文最长显示时间, 避免无限重写.
 #define FUNFACT_TEXT_MAX               256     // 与本插件 HUD1/HUD2 文本缓冲一致, 与脚本 HUD 单槽字符串长度对齐 (超长截断).
+#define FUNFACT_INPUT_MAX              (FUNFACT_TEXT_MAX * FUNFACT_POOL_MAX) // 调用方一次传入的整段趣文文本上限 (每条一行).
 
 // 修正中/完成提示文字与动画参数.
 #define FIX_MSG_BASE                   "正在修正队伍 非上一轮游戏的玩家请等待位置修正完成再加入游戏"
@@ -120,16 +127,17 @@ static Handle g_hFixAnimTimer;
 static Handle g_hFixDoneTimer;
 static int    g_iFixDotCount;
 
-// 局末趣文 HUD (独立槽位 FUNFACT_HUD) 状态.
+// 局末趣文 HUD (独立槽位 FUNFACT_HUD) 状态: 一个轮播池, 槽位里始终只有当前这一条.
 static bool   g_bFunFactHUDVisible;
-static char   g_sFunFactText[FUNFACT_TEXT_MAX];
+static char   g_sFunFactPool[FUNFACT_POOL_MAX][FUNFACT_TEXT_MAX]; // 待轮播的趣文 (调用方一次给的整段文本按行拆开).
+static int    g_iFunFactPoolCount;                              // 池内条数.
+static int    g_iFunFactPoolIndex;                              // 当前显示的是第几条.
 static Handle g_hFunFactTimer;                                  // 重复重写计时器.
 static float  g_fFunFactExpire;                                 // 计划隐藏时间 (GameTime).
 static float  g_fFunFactHardExpire;                             // 硬性上限 (GameTime).
-// 回合结束~下一回合开始之间屏幕上先是记分板/过渡画面, 趣文这时候可能没人看得到;
-// 因此记下待补显的文字, 在新回合开始时(记分板收起后)再显示一次.
+static float  g_fFunFactNextSwitch;                             // 下一次换条的时间 (GameTime).
+// 池内还有没显示过的条目: 供 FUNFACT_ROUNDSTART_SHOW > 0 时的跨回合续轮用(默认关闭).
 static bool   g_bFunFactPending;
-static char   g_sFunFactPendingText[FUNFACT_TEXT_MAX];
 
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
@@ -259,11 +267,11 @@ public void OnMapEnd()
     delete g_hFunFactTimer;
     g_hFunFactTimer = null;
     g_bFunFactHUDVisible = false;
-    g_sFunFactText[0] = '\0';
+    g_iFunFactPoolCount = 0;
+    g_iFunFactPoolIndex = 0;
 
     // 趣文属于上一张图的回合, 换图后不再补显.
     g_bFunFactPending = false;
-    g_sFunFactPendingText[0] = '\0';
 }
 
 public void OnClientConnected(int client)
@@ -305,12 +313,12 @@ public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
     UpdateFixTeamShuffleHUD();
     UpdateHUD();
 
-    // 回合结束时屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住; 新回合开始时(记分板收起后)
-    // 把上一回合的趣文再显示一次, 保证玩家一定能看到.
-    if (StrEqual(name, "round_start") && g_bFunFactPending && !g_bFixTeamShuffleInProgress)
+    // 回合结束时屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住; 若池内还有没显示过的趣文,
+    // 可在新回合开始时(记分板收起后)接着轮 (FUNFACT_ROUNDSTART_SHOW > 0 才启用, 默认关闭).
+    if (StrEqual(name, "round_start") && g_bFunFactPending && !g_bFixTeamShuffleInProgress
+        && FUNFACT_ROUNDSTART_SHOW > 0.0)
     {
-        g_bFunFactPending = false;
-        StartFunFactHUD(g_sFunFactPendingText, FUNFACT_ROUNDSTART_SHOW);
+        ResumeFunFactHUD(FUNFACT_ROUNDSTART_SHOW);
     }
 }
 
@@ -681,7 +689,7 @@ void StartFixHUD()
     if (g_bFunFactHUDVisible)
         HideFunFactHUD();
 
-    ClearFunFactPending();
+    g_bFunFactPending = false;
 
     ShowFixHUDText(FIX_MSG_BASE);
 
@@ -780,74 +788,101 @@ public void L4D2_FixTeamShuffle_OnFixComplete()
 
 // ====================================================================================================
 // 局末趣文 HUD (独立槽位 FUNFACT_HUD)
-//    由 l4d2_playstats_tranchi 在回合结束时调用, 显示一条随机趣文.
+//    由 l4d2_playstats_tranchi 在回合结束时调用, 一次把多条趣文(每条一行)传进来, 这里轮播.
 //
 //    为什么不能"只写一次":
 //      1) 6 号 HUD_TICKER 是游戏自带 ticker 的槽位, 回合结束时游戏正在往那里写结算/奖励提示,
 //         只写一次会立刻被游戏覆盖;
 //      2) 回合结束~下一回合开始这段时间屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住,
 //         即使写进去了玩家也看不到.
-//    因此这里: 独立槽位 + 每 FUNFACT_REFRESH_INTERVAL 秒重写一次, 并在新回合开始时
-//    (记分板收起后) 补显一次, 直到显示时间用完或到达 FUNFACT_MAX_DISPLAY 上限.
+//    因此这里: 独立槽位 + 每 FUNFACT_REFRESH_INTERVAL 秒重写当前这条, 直到窗口用完
+//    或到达 FUNFACT_MAX_DISPLAY 上限.
+//
+//    轮播规则: 槽位一次只放一条; 每 FUNFACT_FACT_INTERVAL 秒换成池内下一条"还没显示过的"
+//    (池内都显示过后就停在最后一条, 不回头重播); 池内只有一条时整段窗口都显示它, 不换条.
 // ====================================================================================================
 public int Native_ShowRoundFunFact(Handle plugin, int numParams)
 {
     if (numParams < 2)
         return 0;
 
-    int textLen;
-    GetNativeStringLength(1, textLen);
-    if (textLen <= 0)
-        return 0;
-
-    char[] sText = new char[textLen + 1];
-    GetNativeString(1, sText, textLen + 1);
-    float fHideTime = GetNativeCell(2);
-
-    // 聊天颜色控制码(\x01-\x05)脚本 HUD 不解析, 会画成方块/乱码: 去掉.
-    StripFunFactChatColors(sText);
-    TrimFunFactText(sText);
+    // 整段文本: 一行一条趣文 (单条调用方传一行, 与旧版行为一致).
+    static char sText[FUNFACT_INPUT_MAX];
+    GetNativeString(1, sText, sizeof(sText));
 
     if (sText[0] == '\0')
         return 0;
+
+    float fHideTime = GetNativeCell(2);
 
     // 修复队伍进行中时, 趣文跳过(修复提示优先).
     if (g_bFixTeamShuffleInProgress)
         return 0;
 
-    StartFunFactHUD(sText, (fHideTime > 0.0) ? fHideTime : FUNFACT_HIDE_DEFAULT);
-    MarkFunFactPending(g_sFunFactText);
+    if (BuildFunFactPool(sText) <= 0)
+        return 0;
+
+    StartFunFactHUD((fHideTime > 0.0) ? fHideTime : FUNFACT_HIDE_DEFAULT);
 
     return 1;
 }
 
-void StartFunFactHUD(const char[] sText, float fDuration)
+// 把调用方给的整段趣文按行拆成轮播池: 逐条去掉聊天颜色码(\x01-\x05, 脚本 HUD 不解析, 会画成方块)
+// 并裁掉首尾空白. 返回实际入池条数.
+int BuildFunFactPool(const char[] sFacts)
 {
-    strcopy(g_sFunFactText, sizeof(g_sFunFactText), sText);
+    g_iFunFactPoolCount = 0;
+    g_iFunFactPoolIndex = 0;
+
+    // 多出来的行直接丢弃(copyRemainder 默认 false), 只保留前 FUNFACT_POOL_MAX 条.
+    int iLines = ExplodeString(sFacts, "\n", g_sFunFactPool, FUNFACT_POOL_MAX, FUNFACT_TEXT_MAX);
+
+    for (int i = 0; i < iLines; i++)
+    {
+        StripFunFactChatColors(g_sFunFactPool[i]);
+        TrimFunFactText(g_sFunFactPool[i]);
+
+        if (g_sFunFactPool[i][0] == '\0')
+            continue;
+
+        // 跳过空行后往前压紧.
+        if (i != g_iFunFactPoolCount)
+            strcopy(g_sFunFactPool[g_iFunFactPoolCount], FUNFACT_TEXT_MAX, g_sFunFactPool[i]);
+
+        g_iFunFactPoolCount++;
+    }
+
+    return g_iFunFactPoolCount;
+}
+
+// 从池子第一条开始显示(整段窗口重新计时).
+void StartFunFactHUD(float fDuration)
+{
+    if (g_iFunFactPoolCount <= 0)
+        return;
+
+    g_iFunFactPoolIndex = 0;
+    ResumeFunFactHUD(fDuration);
+}
+
+// 开启/重启一次展示窗口: 从当前这条继续轮(跨回合续轮时不重置下标).
+void ResumeFunFactHUD(float fDuration)
+{
+    if (g_iFunFactPoolCount <= 0)
+        return;
 
     float fNow = GetGameTime();
     g_fFunFactExpire = fNow + fDuration;
     g_fFunFactHardExpire = fNow + fDuration + FUNFACT_MAX_DISPLAY;
+    g_fFunFactNextSwitch = fNow + FUNFACT_FACT_INTERVAL;
     g_bFunFactHUDVisible = true;
+    g_bFunFactPending = (g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount);
 
     // 立即显示, 不等第一个 tick.
-    ShowFunFactHUDText(g_sFunFactText);
+    ShowFunFactHUDText(g_sFunFactPool[g_iFunFactPoolIndex]);
 
     delete g_hFunFactTimer;
     g_hFunFactTimer = CreateTimer(FUNFACT_REFRESH_INTERVAL, Timer_FunFactHUD, _, TIMER_REPEAT);
-}
-
-// 记下这条趣文, 等新回合开始时再补显一次.
-void MarkFunFactPending(const char[] sText)
-{
-    strcopy(g_sFunFactPendingText, sizeof(g_sFunFactPendingText), sText);
-    g_bFunFactPending = true;
-}
-
-void ClearFunFactPending()
-{
-    g_bFunFactPending = false;
-    g_sFunFactPendingText[0] = '\0';
 }
 
 public Action Timer_FunFactHUD(Handle timer)
@@ -862,8 +897,19 @@ public Action Timer_FunFactHUD(Handle timer)
         return Plugin_Stop;
     }
 
+    // 到点换下一条"还没显示过的"; 池内都显示过了就停在最后一条.
+    if (fNow >= g_fFunFactNextSwitch && g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount)
+    {
+        g_iFunFactPoolIndex++;
+        g_bFunFactPending = (g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount);
+
+        g_fFunFactNextSwitch += FUNFACT_FACT_INTERVAL;
+        if (g_fFunFactNextSwitch <= fNow) // 卡顿/暂停后别追帧, 从当前时间重新起步.
+            g_fFunFactNextSwitch = fNow + FUNFACT_FACT_INTERVAL;
+    }
+
     // 游戏/其它插件可能已经清掉或改写了该槽位: 每次重新写入整组属性, 保证整段显示时间都可见.
-    ShowFunFactHUDText(g_sFunFactText);
+    ShowFunFactHUDText(g_sFunFactPool[g_iFunFactPoolIndex]);
     return Plugin_Continue;
 }
 
@@ -883,20 +929,37 @@ void ShowFunFactHUDText(const char[] sText)
 
 void HideFunFactHUD()
 {
-    ClearFunFactHUDSlot(g_sFunFactText);
+    ClearFunFactHUDSlot();
 
     g_bFunFactHUDVisible = false;
-    g_sFunFactText[0] = '\0';
+    g_iFunFactPoolCount = 0;
+    g_iFunFactPoolIndex = 0;
+    g_bFunFactPending = false;
 
     delete g_hFunFactTimer;
     g_hFunFactTimer = null;
 }
 
+// 当前正在显示的那条趣文(池空时给空串).
+void GetFunFactCurrentText(char[] sBuffer, int iLen)
+{
+    if (g_iFunFactPoolCount <= 0 || g_iFunFactPoolIndex < 0 || g_iFunFactPoolIndex >= g_iFunFactPoolCount)
+    {
+        sBuffer[0] = '\0';
+        return;
+    }
+
+    strcopy(sBuffer, iLen, g_sFunFactPool[g_iFunFactPoolIndex]);
+}
+
 // 只有当槽位里还是我们写进去的文字时才清空: 若期间游戏/其它插件改写了该槽位, 保持原样不破坏它们.
-void ClearFunFactHUDSlot(const char[] sOurs)
+void ClearFunFactHUDSlot()
 {
     if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
         return;
+
+    char sOurs[FUNFACT_TEXT_MAX];
+    GetFunFactCurrentText(sOurs, sizeof(sOurs));
 
     char sCurrent[FUNFACT_TEXT_MAX];
     GameRules_GetPropString("m_szScriptedHUDStringSet", sCurrent, sizeof(sCurrent), FUNFACT_HUD);
@@ -924,7 +987,7 @@ void StripFunFactChatColors(char[] sText)
     sText[iWrite] = '\0';
 }
 
-// 去掉首尾空白/换行: HUD 是单行框, 换行会撑高并挤掉正文.
+// 去掉首尾空白/换行: HUD 每行是单行框, 换行会撑高并挤掉正文(轮播池里每条都已拆成单独一行).
 void TrimFunFactText(char[] sText)
 {
     int iStart = 0;

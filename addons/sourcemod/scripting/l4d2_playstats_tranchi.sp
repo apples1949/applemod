@@ -11,15 +11,16 @@
 	[DONE] skill: clears / instaclears are now collected (new plyInstaClears
 	       field, <100ms) and shown in the Special table, together with the
 	       average clear time (in seconds).
-	[DONE] round-end fun facts go to l4d2_scripted_hud's own fun-fact slot (slot 2)
-	       as a carousel: every type that reaches its threshold is pooled (round
-	       facts first, then full-game ones, most extreme first), one line is
-	       shown per 1.5s (each one only once) while the provider rewrites it
-	       every 0.5s for the whole 8s window, so it is not swallowed by the
-	       game's own ticker / round-end scoreboard. While that HUD is available
-	       the chat copy of a fun fact is suppressed - chat is only the fallback
-	       when l4d2_scripted_hud is not loaded. Test on demand with
-	       `sm_funfact_hud` (ADMFLAG_CHANGEMAP).
+	[DONE] fun facts at round end (see FUNFACT_* defines / DisplayFunFactHUD):
+	       - with l4d2_scripted_hud loaded the "this round" facts are pooled and
+	         carouselled on the HUD's own slot (slot 2, one line per 0.5s, each
+	         line only once, 8s window, provider rewrites the slot every 0.5s so
+	         the game's own ticker/scoreboard cannot swallow it), while the chat
+	         box only gets a single "full game" fact;
+	       - without that plugin the chat box becomes the carousel: round +
+	         full-game facts, one every FUNFACT_CHAT_INTERVAL (0.75s).
+	       Both queues are de-duplicated and stop once everything was shown.
+	       Test the HUD side on demand with `sm_funfact_hud` (ADMFLAG_CHANGEMAP).
 
 	[HELD / by decision] CMT + teamswap: current g_bCMTSwapped approach kept.
 	       Writing m_bAreTeamsFlipped directly would need serious on-server
@@ -204,10 +205,14 @@
 #define FUNFACT_HUD_NO_TEXT		-2								// 没有可用趣文数据
 #define FUNFACT_HUD_REJECTED	-3								// 被 scripted_hud 拒绝(修复队伍进行中/GameRules 未就绪)
 
-// 趣文 HUD 轮播参数 (每条 1.5 秒换下一条由 scripted_hud 侧控制: FUNFACT_FACT_INTERVAL).
+// 趣文显示参数.
+//   有 l4d2_scripted_hud: HUD 只轮播"本回合趣文"(每条 0.5 秒, 由 scripted_hud 的 FUNFACT_FACT_INTERVAL 控制),
+//                          聊天框只补发一条"全场趣文".
+//   没有 HUD:             聊天框轮播"本回合 + 全场"趣文, 每 FUNFACT_CHAT_INTERVAL 秒一条.
 #define FUNFACT_HUD_SHOW_TIME	8.0								// HUD 轮播窗口总时长(从推送时刻起算).
-#define FUNFACT_HUD_TEXT_MAX	256								// 单条趣文长度上限(与 scripted_hud 单槽长度对齐).
-#define FUNFACT_HUD_POOL_MAX	16								// 最多入池条数(与 scripted_hud 轮播池上限对齐).
+#define FUNFACT_CHAT_INTERVAL	0.75							// 没有 HUD 时聊天框轮播间隔(秒).
+#define FUNFACT_TEXT_MAX		256								// 单条趣文长度上限(与 scripted_hud 单槽长度对齐).
+#define FUNFACT_POOL_MAX		16								// 池子条数上限(与 scripted_hud 轮播池上限对齐).
 
 
 // fun fact
@@ -487,6 +492,7 @@ Handle
 	g_hTriePlayers = null,										// trie for getting player index
 	g_hTrieWeapons = null,										// trie for getting weapon type (from classname)
 	g_hTrieMaps = null,											// trie for getting finale maps
+	g_hFunFactChatTimer = null,									// 没有 HUD 时的聊天框趣文轮播计时器
 	g_hStatsFile = null;												// handle for a statsfile that we write tables to
 
 int
@@ -504,6 +510,8 @@ int
 	g_iPlayerSortedUseTeam[MAXSORTS][MAXTRACKED],				// after sorting: which team to use as the survivor team for player
 	g_iPlayerRoundTeam[3][MAXTRACKED],							// which team is the player 0 = A, 1 = B, -1 = no team; [2] = current survivor round; [0]/[1] = team A / B (anyone who was ever on it)
 	g_iPlayerGameTeam[2][MAXTRACKED],							// for entire game for team A / B if the player was ever on it
+	g_iFunFactChatCount = 0,									// 聊天框轮播的趣文条数
+	g_iFunFactChatIndex = 0,									// 下一条要发的下标
 	g_strGameData[gmMaxSize],
 	g_strAllRoundData[2][rndMaxSize],							// rounddata for ALL rounds, per team
 	g_strRoundData[MAXROUNDS][2][rndMaxSize],					// rounddata per game round, per team
@@ -525,14 +533,15 @@ char
 	g_sConfigName[MAXMAP],
 	g_sConsoleBuf[MAXCHUNKS][CONBUFSIZELARGE],
 	g_sStatsFile[MAXNAME],										// name for the statsfile we should write to
-	g_sFunFactHudPool[FUNFACT_HUD_TEXT_MAX * FUNFACT_HUD_POOL_MAX];	// 待推送到趣文 HUD 轮播的整段文本(每条一行)
+	g_sFunFactPool[FUNFACT_TEXT_MAX * FUNFACT_POOL_MAX],		// 待显示的整段趣文(每条一行: HUD 推送 / 聊天轮播都从这里拆)
+	g_sFunFactChatLines[FUNFACT_POOL_MAX][FUNFACT_TEXT_MAX];	// 聊天框轮播拆好的条目
 
 public Plugin myinfo =
 {
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.5",
+	version = "1.1.6",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -569,7 +578,8 @@ public void OnPluginStart()
 	g_hCvarAutoPrintVs = CreateConVar(
 		"sm_stats_autoprint_vs_round",
 		"8325",									 // default = 1 (mvpchat) + 4 (mvpcon-round) + 128 (special round) = 133 + (funfact round) 8192 = 8325
-											 // cfgogl 下各 cfg 用 24756 (8372 + 16384): 再加全场趣文 16384, 回合+全场趣文一起进 HUD 轮播池
+											 // cfgogl 下各 cfg 用 24756 (8372 + 16384): 再加全场趣文 16384
+											 // (有 HUD 时全场趣文走聊天框那一条, 本回合趣文走 HUD 轮播)
 		"Flags for automatic print [versus round] (show 1,4:MVP-chat, 4,8,16:MVP-console, 32,64:FF, 128,256:special, 512,1024,2048,4096:accuracy, 8192,16384:fun fact round/game).",
 		_, true, 0.0, false, 0.0
 	);
@@ -869,6 +879,12 @@ public void OnMapEnd()
 	//PrintDebug(2, "MapEnd (round %i)", g_iRound);
 	g_bInRound = false;
 	g_iRound++;
+
+	// 聊天框趣文轮播: 换图时清掉, 别把上一张图的趣文刷进新图聊天框.
+	delete g_hFunFactChatTimer;
+	g_hFunFactChatTimer = null;
+	g_iFunFactChatCount = 0;
+	g_iFunFactChatIndex = 0;
 
 	// keep the round counter inside the stats arrays: on long-lived servers the
 	// counter is only reset at a fresh game start, so wrap it into a new game
@@ -3942,9 +3958,8 @@ void DisplayStatsMVP(int client, bool bTank = false, bool bMore = false, bool bR
 	}
 }
 
-// 趣文 (fun fact): 本回合/全场统计里最出彩的那些条目
-//   - 聊天: 按权重随机抽 1 条 (只在 l4d2_scripted_hud 不可用时用作回退显示)
-//   - HUD:  所有达到阈值的趣文都进轮播池, 每条 1.5 秒依次换, 直到池内都显示过
+// 显示一条趣文(聊天用): 从所有达到阈值的候选里按权重随机抽一条(权重 = 数值越极端越大), 保持原"随机但相关"的手感.
+// 有 HUD 时只用它发"全场趣文"那一条; 没有 HUD 时的回合 + 全场轮播见 StartFunFactChatCarousel.
 void DisplayStatsFunFactChat(int client, bool bRound = true, bool bTeam = true, int iTeam = -1)
 {
 	char printBuffer[1024], strLines[8][192];
@@ -4303,9 +4318,9 @@ void FormatFunFactLine(char[] printBuffer, const int iLen, int iType, bool bRoun
 	}
 }
 
-// 把某个范围(回合/全场)内所有达阈值的趣文按"数值越极端越先显示"的顺序追加进 HUD 轮播文本(每条一行).
-// iAlready = 池子里已有的条数(回合 + 全场共用 FUNFACT_HUD_POOL_MAX 上限); 返回本次追加的条数.
-int AppendFunFactsToHudPool(bool bRound, bool bTeam, int iTeam, int iAlready)
+// 把某个范围(回合/全场)内所有达阈值的趣文按"数值越极端越先显示"的顺序追加进趣文池文本(每条一行).
+// iAlready = 池子里已有的条数(多次调用共用 FUNFACT_POOL_MAX 上限); 返回本次追加的条数.
+int AppendFunFactsToPool(bool bRound, bool bTeam, int iTeam, int iAlready)
 {
 	int iType[FFACT_MAXTYPES + 1], iPlayer[FFACT_MAXTYPES + 1], iValue[FFACT_MAXTYPES + 1], iWeight[FFACT_MAXTYPES + 1];
 	int iCount = CollectFunFactCandidates(iType, iPlayer, iValue, iWeight, FFACT_MAXTYPES + 1, bRound, bTeam, iTeam);
@@ -4314,10 +4329,10 @@ int AppendFunFactsToHudPool(bool bRound, bool bTeam, int iTeam, int iAlready)
 	}
 
 	bool bUsed[FFACT_MAXTYPES + 1] = {false};
-	char sLine[FUNFACT_HUD_TEXT_MAX];
+	char sLine[FUNFACT_TEXT_MAX];
 	int iAdded = 0, j, iBest;
 
-	while (iAdded + iAlready < FUNFACT_HUD_POOL_MAX) {
+	while (iAdded + iAlready < FUNFACT_POOL_MAX) {
 		// 每轮挑出"权重最高且还没用过"的一条(同权重保持原有类型顺序).
 		iBest = -1;
 		for (j = 0; j < iCount; j++) {
@@ -4343,9 +4358,9 @@ int AppendFunFactsToHudPool(bool bRound, bool bTeam, int iTeam, int iAlready)
 		}
 
 		if (iAdded > 0) {
-			StrCat(g_sFunFactHudPool, sizeof(g_sFunFactHudPool), "\n");
+			StrCat(g_sFunFactPool, sizeof(g_sFunFactPool), "\n");
 		}
-		StrCat(g_sFunFactHudPool, sizeof(g_sFunFactHudPool), sLine);
+		StrCat(g_sFunFactPool, sizeof(g_sFunFactPool), sLine);
 
 		iAdded++;
 	}
@@ -4353,7 +4368,7 @@ int AppendFunFactsToHudPool(bool bRound, bool bTeam, int iTeam, int iAlready)
 	return iAdded;
 }
 
-// 去掉行尾换行/空白: HUD 侧把整段文本按行拆成轮播条目, 每条必须是干净的一行.
+// 去掉行尾换行/空白: 整段文本要按行拆成轮播条目, 每条必须是干净的一行.
 void TrimFunFactLine(char[] sLine)
 {
 	int len = strlen(sLine);
@@ -6729,14 +6744,20 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 {
 	int iFlags = GetConVarInt((g_bModeCampaign) ? g_hCvarAutoPrintCoop : g_hCvarAutoPrintVs);
 
-	// 把局末趣文推送到 scripted_hud 的专用趣文槽位轮播(全局广播一次), 回合级/全场级趣文标志任一开启就推.
-	// 聊天框那条趣文在 HUD 可用时不再显示(见 AutomaticPrintPerClient 的 IsFunFactHudUsable 判断).
-	if (iFlags & (AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME)) {
-		int iFunFactResult = DisplayFunFactHUD(iFlags);
-		if (iFunFactResult != FUNFACT_HUD_OK) {
-			// sm_stats_debug 1 时可在 logs/sourcemod 里看到没推出去的原因.
-			PrintDebug(1, "fun fact HUD: 未推送 (result=%d)", iFunFactResult);
+	// 趣文显示:
+	//   有 l4d2_scripted_hud —— HUD 轮播"本回合趣文"(每条 0.5 秒, 共 8 秒), 聊天框只补一条"全场趣文"(见
+	//                          AutomaticPrintPerClient 里 AUTO_FUNFACT_GAME 那支).
+	//   没有 HUD           —— 聊天框轮播"本回合 + 全场"趣文, 每 FUNFACT_CHAT_INTERVAL 秒一条.
+	if (IsFunFactHudUsable()) {
+		if (iFlags & AUTO_FUNFACT_ROUND) {
+			int iFunFactResult = DisplayFunFactHUD(iFlags);
+			if (iFunFactResult != FUNFACT_HUD_OK) {
+				// sm_stats_debug 1 时可在 logs/sourcemod 里看到没推出去的原因.
+				PrintDebug(1, "fun fact HUD: 未推送 (result=%d)", iFunFactResult);
+			}
 		}
+	} else if (iFlags & (AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME)) {
+		StartFunFactChatCarousel(iFlags);
 	}
 
 	// do automatic prints (only for clients that don't have cookie flags set)
@@ -6754,11 +6775,11 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	return Plugin_Stop;
 }
 
-// 局末趣文: 推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
-// 放哪些趣文由 iFlags 决定: AUTO_FUNFACT_ROUND = 本回合, AUTO_FUNFACT_GAME = 全场
-// (两个都开就都放, 回合的排前面); 池内每条 1.5 秒依次轮换, 窗口 FUNFACT_HUD_SHOW_TIME 秒.
+// 局末趣文(有 HUD): 把"本回合趣文"推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
+// 全场趣文不占 HUD(有 HUD 时由聊天框补发一条, 见 AutomaticPrintPerClient).
+// 池内每条 0.5 秒依次轮换(scripted_hud 的 FUNFACT_FACT_INTERVAL), 窗口 FUNFACT_HUD_SHOW_TIME 秒.
 // 返回 FUNFACT_HUD_* 状态码, 便于 /sm_funfact_hud 诊断.
-int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME, bool bTeam = true, int iTeam = -1)
+int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iTeam = -1)
 {
 	if (!g_bScriptedHudAvailable) {
 		return FUNFACT_HUD_NO_LIB;
@@ -6766,42 +6787,105 @@ int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME, bool 
 	if (GetFeatureStatus(FeatureType_Native, "ScriptedHud_ShowRoundFunFact") != FeatureStatus_Available) {
 		return FUNFACT_HUD_NO_NATIVE;
 	}
-
-	g_sFunFactHudPool[0] = '\0';
-
-	int iPooled = 0;
-
-	if (iFlags & AUTO_FUNFACT_ROUND) {
-		iPooled += AppendFunFactsToHudPool(true, bTeam, iTeam, iPooled);
+	if (!(iFlags & AUTO_FUNFACT_ROUND)) {
+		// HUD 只放本回合趣文: 回合趣文标志没开就没内容可推.
+		return FUNFACT_HUD_NO_TEXT;
 	}
 
-	if (iFlags & AUTO_FUNFACT_GAME) {
-		iPooled += AppendFunFactsToHudPool(false, bTeam, iTeam, iPooled);
-	}
+	g_sFunFactPool[0] = '\0';
 
+	int iPooled = AppendFunFactsToPool(true, bTeam, iTeam, 0);
 	if (!iPooled) {
 		return FUNFACT_HUD_NO_TEXT;
 	}
 
-	PrintDebug(2, "fun fact HUD: %d 条入池轮播", iPooled);
+	PrintDebug(2, "fun fact HUD: %d 条本回合趣文入池轮播", iPooled);
 
-	return ScriptedHud_ShowRoundFunFact(g_sFunFactHudPool, FUNFACT_HUD_SHOW_TIME) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
+	return ScriptedHud_ShowRoundFunFact(g_sFunFactPool, FUNFACT_HUD_SHOW_TIME) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
 }
 
-// 趣文 HUD 是否可用: scripted_hud 已加载并提供了趣文原生. 可用时聊天框不再显示趣文(避免同一回合重复两遍),
-// 不可用时才退回聊天框显示.
+// 没有 HUD 时的聊天框轮播: 本回合 + 全场趣文都发, 每 FUNFACT_CHAT_INTERVAL 秒一条(池内不重复, 发完即停).
+void StartFunFactChatCarousel(int iFlags, bool bTeam = true, int iTeam = -1)
+{
+	g_sFunFactPool[0] = '\0';
+
+	int iPooled = 0;
+
+	if (iFlags & AUTO_FUNFACT_ROUND) {
+		iPooled += AppendFunFactsToPool(true, bTeam, iTeam, iPooled);
+	}
+
+	if (iFlags & AUTO_FUNFACT_GAME) {
+		iPooled += AppendFunFactsToPool(false, bTeam, iTeam, iPooled);
+	}
+
+	if (!iPooled) {
+		return;
+	}
+
+	g_iFunFactChatCount = ExplodeString(g_sFunFactPool, "\n", g_sFunFactChatLines, FUNFACT_POOL_MAX, FUNFACT_TEXT_MAX);
+	g_iFunFactChatIndex = 0;
+
+	if (g_iFunFactChatCount <= 0) {
+		return;
+	}
+
+	PrintDebug(2, "fun fact chat: %d 条入队轮播 (%.2f 秒一条)", g_iFunFactChatCount, FUNFACT_CHAT_INTERVAL);
+
+	// 第一条立即发, 之后每 FUNFACT_CHAT_INTERVAL 秒一条; 不用 NO_MAPCHANGE, 换图时在 OnMapEnd 里清.
+	Timer_FunFactChat(null);
+
+	delete g_hFunFactChatTimer;
+	g_hFunFactChatTimer = CreateTimer(FUNFACT_CHAT_INTERVAL, Timer_FunFactChat, _, TIMER_REPEAT);
+}
+
+// 聊天框轮播: 一次发一条, 发完(池空)即停.
+public Action Timer_FunFactChat(Handle timer)
+{
+	if (g_iFunFactChatIndex >= g_iFunFactChatCount) {
+		// 不能在回调里 delete 自己; 只清句柄与队列.
+		g_hFunFactChatTimer = null;
+		g_iFunFactChatCount = 0;
+		g_iFunFactChatIndex = 0;
+		return Plugin_Stop;
+	}
+
+	char sLine[FUNFACT_TEXT_MAX];
+	strcopy(sLine, sizeof(sLine), g_sFunFactChatLines[g_iFunFactChatIndex]);
+	g_iFunFactChatIndex++;
+
+	PrintFunFactLine(sLine);
+
+	return Plugin_Continue;
+}
+
+// 广播一条趣文: 与其它自动打印一致 —— 只发给没有自定义 /stats_auto 标志的玩家, 同时写进服务器控制台.
+void PrintFunFactLine(const char[] sLine)
+{
+	PrintToServer("\x01%s", sLine);
+
+	for (int client = 1; client <= MaxClients; client++) {
+		if (!IsClientInGame(client) || g_iCookieValue[client] != 0) {
+			continue;
+		}
+
+		PrintToChat(client, "\x01%s", sLine);
+	}
+}
+
+// 趣文 HUD 是否可用: scripted_hud 已加载并提供了趣文原生.
 bool IsFunFactHudUsable()
 {
 	return g_bScriptedHudAvailable
 		&& GetFeatureStatus(FeatureType_Native, "ScriptedHud_ShowRoundFunFact") == FeatureStatus_Available;
 }
 
-// 诊断命令: 立即把一批趣文推到脚本 HUD 轮播, 不用等到回合结束才能验证显示效果.
+// 诊断命令: 立即把一批"本回合趣文"推到脚本 HUD 轮播, 不用等到回合结束才能验证显示效果.
 Action Cmd_FunFactHud(int client, int args)
 {
 	switch (DisplayFunFactHUD()) {
 		case FUNFACT_HUD_OK: {
-			ReplyToCommand(client, "\x04[提示]\x03已把本回合+全场趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 1.5 秒, 共 8 秒).");
+			ReplyToCommand(client, "\x04[提示]\x03已把本回合趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 0.5 秒, 共 8 秒).");
 		}
 		case FUNFACT_HUD_NO_LIB: {
 			ReplyToCommand(client, "\x04[提示]\x05l4d2_scripted_hud 未加载, 趣文 HUD 无法显示.");
@@ -6949,20 +7033,10 @@ void AutomaticPrintPerClient(int iFlags, int client = -1, int iTeam = -1, bool b
 		DisplayStatsMVPChat(client, false);
 	}
 
-	// fun fact: l4d2_scripted_hud 可用时趣文只走脚本 HUD 轮播(回合 + 全场都在 HUD 里轮),
-	// 聊天框不再重复显示; HUD 不可用时才退回聊天框.
-	bool bFunFactOnHud = IsFunFactHudUsable();
-
-	if (iFlags & AUTO_FUNFACT_ROUND) {
-		if (!bFunFactOnHud) {
-			DisplayStatsFunFactChat(client, true, bTeam, iTeam);
-		}
-	}
-	
-	if (iFlags & AUTO_FUNFACT_GAME) {
-		if (!bFunFactOnHud) {
-			DisplayStatsFunFactChat(client, false, bTeam, iTeam);
-		}
+	// fun fact: 有 HUD 时 HUD 负责轮播"本回合趣文", 聊天框只补发一条"全场趣文"(每个客户端一条);
+	// 没有 HUD 时由 StartFunFactChatCarousel 统一在聊天框轮播(回合 + 全场), 这里不重复发.
+	if (IsFunFactHudUsable() && (iFlags & AUTO_FUNFACT_GAME)) {
+		DisplayStatsFunFactChat(client, false, bTeam, iTeam);
 	}
 
 	// special / skill

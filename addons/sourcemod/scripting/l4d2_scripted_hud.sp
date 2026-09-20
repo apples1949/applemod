@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.4.0",
+    version     = "1.4.1",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -81,8 +81,9 @@ public Plugin myinfo =
 #define FUNFACT_HUD_FLAGS              (HUD_FLAG_TEXT | HUD_FLAG_ALIGN_LEFT)
 
 // 趣文轮播: 槽位一次只放一条, 每 FUNFACT_FACT_INTERVAL 秒换成下一条"还没显示过的"
-// (池内都显示过后就停在最后一条, 不回头重播).
-#define FUNFACT_FACT_INTERVAL          1.5     // 单条趣文的显示时长(轮播间隔).
+// (池内都显示过后就停在最后一条, 不回头重播). 池子内容由 l4d2_playstats_tranchi 决定:
+// 当前是"本回合趣文"(全场趣文走聊天框那一条, 不占 HUD).
+#define FUNFACT_FACT_INTERVAL          0.5     // 单条趣文的显示时长(轮播间隔), 与 FUNFACT_REFRESH_INTERVAL 相等.
 #define FUNFACT_POOL_MAX               16      // 轮播池上限: 与 l4d2_playstats_tranchi 的 FFACT_MAXTYPES 对齐.
 
 // 趣文显示时长与重写策略.
@@ -798,8 +799,9 @@ public void L4D2_FixTeamShuffle_OnFixComplete()
 //    因此这里: 独立槽位 + 每 FUNFACT_REFRESH_INTERVAL 秒重写当前这条, 直到窗口用完
 //    或到达 FUNFACT_MAX_DISPLAY 上限.
 //
-//    轮播规则: 槽位一次只放一条; 每 FUNFACT_FACT_INTERVAL 秒换成池内下一条"还没显示过的"
+//    轮播规则: 槽位一次只放一条; 每 FUNFACT_FACT_INTERVAL 秒(0.5 秒)换成池内下一条"还没显示过的"
 //    (池内都显示过后就停在最后一条, 不回头重播); 池内只有一条时整段窗口都显示它, 不换条.
+//    池子内容由调用方决定 —— l4d2_playstats_tranchi 当前只送"本回合趣文", 全场趣文走它自己的聊天那一条.
 // ====================================================================================================
 public int Native_ShowRoundFunFact(Handle plugin, int numParams)
 {
@@ -898,14 +900,14 @@ public Action Timer_FunFactHUD(Handle timer)
     }
 
     // 到点换下一条"还没显示过的"; 池内都显示过了就停在最后一条.
-    if (fNow >= g_fFunFactNextSwitch && g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount)
+    // FUNFACT_FACT_INTERVAL 与重写间隔相等时每次 tick 都该换下一条, 所以放宽 0.01 秒兜住浮点/帧抖动.
+    if (fNow + 0.01 >= g_fFunFactNextSwitch && g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount)
     {
         g_iFunFactPoolIndex++;
         g_bFunFactPending = (g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount);
 
-        g_fFunFactNextSwitch += FUNFACT_FACT_INTERVAL;
-        if (g_fFunFactNextSwitch <= fNow) // 卡顿/暂停后别追帧, 从当前时间重新起步.
-            g_fFunFactNextSwitch = fNow + FUNFACT_FACT_INTERVAL;
+        // 从当前时间重新起步(不追帧): 卡顿/暂停后不会连跳好几条.
+        g_fFunFactNextSwitch = fNow + FUNFACT_FACT_INTERVAL;
     }
 
     // 游戏/其它插件可能已经清掉或改写了该槽位: 每次重新写入整组属性, 保证整段显示时间都可见.

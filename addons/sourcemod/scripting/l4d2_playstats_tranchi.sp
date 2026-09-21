@@ -214,6 +214,10 @@
 #define FUNFACT_TEXT_MAX		256								// 单条趣文长度上限(与 scripted_hud 单槽长度对齐).
 #define FUNFACT_POOL_MAX		16								// 池子条数上限(与 scripted_hud 轮播池上限对齐).
 
+// 趣文链路诊断日志: 单独的日志文件(与控制台/通用日志分开), 开关 sm_funfact_debug 默认开.
+// 路径相对游戏目录 -> <服务器>/left4dead2/addons/sourcemod/logs/l4d2_funfact.log, 行首自带时间戳与插件名.
+#define FUNFACT_LOG_FILE		"addons/sourcemod/logs/l4d2_funfact.log"
+
 
 // fun fact
 #define FFACT_MAX_WEIGHT		10
@@ -493,6 +497,7 @@ Handle
 	g_hTrieWeapons = null,										// trie for getting weapon type (from classname)
 	g_hTrieMaps = null,											// trie for getting finale maps
 	g_hFunFactChatTimer = null,									// 没有 HUD 时的聊天框趣文轮播计时器
+	g_hCvarFunFactDebug = null,									// 趣文诊断日志开关(sm_funfact_debug)
 	g_hStatsFile = null;												// handle for a statsfile that we write tables to
 
 int
@@ -541,7 +546,7 @@ public Plugin myinfo =
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.6",
+	version = "1.1.7",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -567,6 +572,18 @@ public void OnPluginStart()
 		"Debug mode",
 		_, true, 0.0, false, 0.0
 	);
+
+	// 趣文链路专用诊断开关(默认开): 只写专用文件 addons/sourcemod/logs/l4d2_funfact.log, 不污染通用日志.
+	// 两个插件(playstats / scripted_hud)共用这一个 cvar: 谁先加载谁创建, 另一个 FindConVar 拿到.
+	g_hCvarFunFactDebug = FindConVar("sm_funfact_debug");
+	if (g_hCvarFunFactDebug == null) {
+		g_hCvarFunFactDebug = CreateConVar(
+			"sm_funfact_debug",
+			"1",
+			"趣文诊断日志开关: 1=写 addons/sourcemod/logs/l4d2_funfact.log, 0=关.",
+			_, true, 0.0, true, 1.0
+		);
+	}
 	
 	g_hCvarMVPBrevityFlags = CreateConVar(
 		"sm_survivor_mvp_brevity_latest",
@@ -967,6 +984,7 @@ void HandleRoundEnd(bool bFailed = false)
 
 	// only do once
 	if (!g_bInRound && !g_bModeCampaign) {
+		FunFactLog("HandleRoundEnd 跳过: 这回合没被正常开始(!g_bInRound)且不是战役模式 -> 整段自动打印(含趣文)都不做.");
 		return;
 	}
 
@@ -1000,6 +1018,10 @@ void HandleRoundEnd(bool bFailed = false)
 		if (g_iLastRoundEndPrint == 0 || GetTime() - g_iLastRoundEndPrint > PRINT_REPEAT_DELAY) {
 			// false == no delay
 			AutomaticRoundEndPrint(false);
+		} else {
+			// 诊断: 15 秒保护命中时整段(含趣文推送)都不执行, 以前这里一行日志都没有 -> 看起来像"趣文没显示".
+			FunFactLog("自动回合末打印跳过: 距上次仅 %d 秒 (< %d 秒保护) -> 本回合不推趣文.",
+				GetTime() - g_iLastRoundEndPrint, PRINT_REPEAT_DELAY);
 		}
 	}
 
@@ -6748,16 +6770,28 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	//   有 l4d2_scripted_hud —— HUD 轮播"本回合趣文"(每条 0.5 秒, 共 8 秒), 聊天框只补一条"全场趣文"(见
 	//                          AutomaticPrintPerClient 里 AUTO_FUNFACT_GAME 那支).
 	//   没有 HUD           —— 聊天框轮播"本回合 + 全场"趣文, 每 FUNFACT_CHAT_INTERVAL 秒一条.
+	// 每回合一行总结, 直接看专用日志就知道这次"为什么有/没有" (logs/l4d2_funfact.log).
+	FunFactLog("回合末趣文判定: flags=%d (回合位%s, 全场位%s), scripted_hud=%s.",
+		iFlags,
+		(iFlags & AUTO_FUNFACT_ROUND) ? "开" : "关",
+		(iFlags & AUTO_FUNFACT_GAME) ? "开" : "关",
+		IsFunFactHudUsable() ? "可用" : "不可用");
+
 	if (IsFunFactHudUsable()) {
 		if (iFlags & AUTO_FUNFACT_ROUND) {
 			int iFunFactResult = DisplayFunFactHUD(iFlags);
 			if (iFunFactResult != FUNFACT_HUD_OK) {
-				// sm_stats_debug 1 时可在 logs/sourcemod 里看到没推出去的原因.
-				PrintDebug(1, "fun fact HUD: 未推送 (result=%d)", iFunFactResult);
+				LogFunFactHudResult("HUD 未推送", iFunFactResult);
 			}
+		} else {
+			FunFactLog("HUD 不推送: 本回合趣文标志(%d)未开启.", AUTO_FUNFACT_ROUND);
 		}
 	} else if (iFlags & (AUTO_FUNFACT_ROUND | AUTO_FUNFACT_GAME)) {
+		FunFactLog("l4d2_scripted_hud 不可用 -> 趣文改走聊天框轮播.");
 		StartFunFactChatCarousel(iFlags);
+	} else {
+		FunFactLog("趣文完全不显示: 两个趣文标志都没开 (%d=回合 / %d=全场), flags=%d.",
+			AUTO_FUNFACT_ROUND, AUTO_FUNFACT_GAME, iFlags);
 	}
 
 	// do automatic prints (only for clients that don't have cookie flags set)
@@ -6773,6 +6807,36 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	}
 
 	return Plugin_Stop;
+}
+
+// 趣文链路诊断: 追加一行到专用日志文件(LogToFile 自带时间戳 + 插件名标签).
+// 开关 sm_funfact_debug(默认 1); 与 sm_stats_debug / 通用 SourceMod 日志完全分开, 免得被其它调试信息淹没.
+void FunFactLog(const char[] fmt, any ...)
+{
+	if (g_hCvarFunFactDebug != null && !GetConVarBool(g_hCvarFunFactDebug)) {
+		return;
+	}
+
+	char sMsg[512];
+	VFormat(sMsg, sizeof(sMsg), fmt, 2);
+
+	LogToFile(FUNFACT_LOG_FILE, "%s", sMsg);
+}
+
+// 把 DisplayFunFactHUD 的返回码翻成中文原因并写进专用日志, 省得回头查代码.
+void LogFunFactHudResult(const char[] sWhere, int iResult)
+{
+	char sReason[128];
+
+	switch (iResult) {
+		case FUNFACT_HUD_OK:        strcopy(sReason, sizeof(sReason), "已推送");
+		case FUNFACT_HUD_NO_LIB:    strcopy(sReason, sizeof(sReason), "l4d2_scripted_hud 未加载");
+		case FUNFACT_HUD_NO_NATIVE: strcopy(sReason, sizeof(sReason), "原生不可用(scripted_hud 版本过旧)");
+		case FUNFACT_HUD_NO_TEXT:   strcopy(sReason, sizeof(sReason), "本回合没有任何达阈值的趣文(数据不够)");
+		default:                    strcopy(sReason, sizeof(sReason), "被 scripted_hud 拒绝(修复队伍流程进行中, 或 GameRules 未就绪)");
+	}
+
+	FunFactLog("%s: result=%d (%s).", sWhere, iResult, sReason);
 }
 
 // 局末趣文(有 HUD): 把"本回合趣文"推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
@@ -6800,6 +6864,8 @@ int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iT
 	}
 
 	PrintDebug(2, "fun fact HUD: %d 条本回合趣文入池轮播", iPooled);
+
+	FunFactLog("HUD 推送成功: %d 条本回合趣文入池, 窗口 %.1f 秒 (每条 0.5 秒).", iPooled, FUNFACT_HUD_SHOW_TIME);
 
 	return ScriptedHud_ShowRoundFunFact(g_sFunFactPool, FUNFACT_HUD_SHOW_TIME) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
 }
@@ -6831,6 +6897,8 @@ void StartFunFactChatCarousel(int iFlags, bool bTeam = true, int iTeam = -1)
 	}
 
 	PrintDebug(2, "fun fact chat: %d 条入队轮播 (%.2f 秒一条)", g_iFunFactChatCount, FUNFACT_CHAT_INTERVAL);
+
+	FunFactLog("聊天框轮播: %d 条(回合+全场)入队, 每条 %.2f 秒.", g_iFunFactChatCount, FUNFACT_CHAT_INTERVAL);
 
 	// 第一条立即发, 之后每 FUNFACT_CHAT_INTERVAL 秒一条; 不用 NO_MAPCHANGE, 换图时在 OnMapEnd 里清.
 	Timer_FunFactChat(null);
@@ -6883,7 +6951,12 @@ bool IsFunFactHudUsable()
 // 诊断命令: 立即把一批"本回合趣文"推到脚本 HUD 轮播, 不用等到回合结束才能验证显示效果.
 Action Cmd_FunFactHud(int client, int args)
 {
-	switch (DisplayFunFactHUD()) {
+	int iResult = DisplayFunFactHUD();
+
+	FunFactLog("手动 /sm_funfact_hud: 被调用.");
+	LogFunFactHudResult("手动 /sm_funfact_hud", iResult);
+
+	switch (iResult) {
 		case FUNFACT_HUD_OK: {
 			ReplyToCommand(client, "\x04[提示]\x03已把本回合趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 0.5 秒, 共 8 秒).");
 		}

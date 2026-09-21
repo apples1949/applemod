@@ -14,6 +14,10 @@
 #define MAX_CAMPAIGN_LIMIT      64
 #define READY_RESTART_MAP_DELAY 2
 
+// 过关检测相关
+#define MAP_END_FLAG_TIME     20.0	// 过关事件标记的有效时长(秒), 到时自动失效, 防止状态残留
+#define MAP_END_MIN_PLAY_TIME 20.0	// 地图/回合开始后多久内忽略过关事件(过滤开局过场动画的误报)
+
 // 投票广播范围
 enum VoteBroadcast
 {
@@ -88,7 +92,8 @@ Handle	MapCountdownTimer;
 bool	isMapRestartPending = false;
 
 // 地图是否已过关/正在过关(服务器即将切换下一关)
-bool isMapTransitioning = false;
+bool  isMapTransitioning = false;
+float g_fRoundStartTime	 = 0.0;	   // 本回合/本地图开始时刻, 用于过滤开局过场动画的误报
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -208,6 +213,9 @@ bool IsGameLive()
 
 public void event_Round_Start(Event event, const char[] name, bool dontBroadcast)
 {
+	g_fRoundStartTime	= GetGameTime();
+	isMapTransitioning	= false;	// 新回合开始, 上一回合的过关标记失效
+
 	// 回合开始后重置强制旁观计时器
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -215,16 +223,68 @@ public void event_Round_Start(Event event, const char[] name, bool dontBroadcast
 	}
 }
 
-// 战役过关: 幸存者已进入终点安全室, 服务器即将切换下一关(过场动画开始)
+// 战役过关: 幸存者已进入终点安全室 / 终局胜利, 服务器即将切换下一关
 public void event_Map_Transition(Event event, const char[] name, bool dontBroadcast)
 {
-	isMapTransitioning = true;
+	MarkMapEnding();
 }
 
-// 终局过关: 同样属于"已过关", 之后会切换下一关/结算
 public void event_Finale_Win(Event event, const char[] name, bool dontBroadcast)
 {
+	MarkMapEnding();
+}
+
+// 打上"已过关"标记, 并安排它在 MAP_END_FLAG_TIME 秒后自动失效
+void MarkMapEnding()
+{
+	// 地图/回合刚开始时的过场动画(片头)会误报过关, 过滤掉
+	if (GetGameTime() - g_fRoundStartTime < MAP_END_MIN_PLAY_TIME)
+	{
+		return;
+	}
+
 	isMapTransitioning = true;
+	CreateTimer(MAP_END_FLAG_TIME, Timer_ClearMapEnding, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_ClearMapEnding(Handle timer)
+{
+	isMapTransitioning = false;
+	return Plugin_Continue;
+}
+
+// ====================================================
+// 过关检测: 地图是否已过关、服务器即将切换到下一关
+// ====================================================
+// 对抗模式一张图分两个回合(半场): 第一回合打完只是换边重打同一张图, 不算
+// "过关切下一关", 所以不阻止投票换图; 换边后的第二回合结束才是真的过关。
+bool IsLevelAdvancingToNextMap()
+{
+	// 对抗第一回合(尚未换边)结束: 换边重打同一张图, 不视为过关
+	if (L4D_IsVersusMode() && !GameRules_GetProp("m_bInSecondHalfOfRound"))
+	{
+		return false;
+	}
+
+	// 引擎自身状态: 服务器正在切换到下一关(最可靠的实时信号)
+	if (GameRules_GetProp("m_bIsTransitioningToNextMap"))
+	{
+		return true;
+	}
+
+	// 过关事件已触发, 且尚未开始新回合/新地图
+	return isMapTransitioning;
+}
+
+// 记录"放弃换图"的原因, 便于进服核对是哪个信号判定为已过关
+void ReportMapChangeSkipped()
+{
+	LogMessage("更换地图 %s %s 未执行: 当前地图已过关, 即将切换下一关 (引擎切换状态=%d, 过关事件标记=%d, 对抗=%d, 第二回合=%d)",
+			   votesmaps, votesmapsname,
+			   GameRules_GetProp("m_bIsTransitioningToNextMap"),
+			   isMapTransitioning ? 1 : 0,
+			   L4D_IsVersusMode() ? 1 : 0,
+			   GameRules_GetProp("m_bInSecondHalfOfRound"));
 }
 
 // 开局提示
@@ -251,6 +311,7 @@ public void OnMapStart()
 {
 	isMapRestartPending = false;
 	isMapTransitioning	 = false;
+	g_fRoundStartTime	 = GetGameTime();
 	MapCountdownTimer	= INVALID_HANDLE;
 
 	if (IsBuiltinVoteInProgress())
@@ -1125,15 +1186,14 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 		case map:
 		{
-			// 执行换图前检测: 地图已过关并即将切换下一关时, 不切换投票的地图
-			if (isMapTransitioning)
+			// 执行换图前检测: 地图已过关、服务器即将切换下一关时, 不切换投票的地图
+			if (IsLevelAdvancingToNextMap())
 			{
 				CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
-				LogMessage("更换地图 %s %s 未执行: 当前地图已过关, 即将切换下一关", votesmaps, votesmapsname);
+				ReportMapChangeSkipped();
 				return Plugin_Continue;
 			}
-			// TIMER_FLAG_NO_MAPCHANGE: 地图一旦切换该定时器即被清除, 避免在下一关里误执行换图
-			CreateTimer(5.0, Changelevel_Map, _, TIMER_FLAG_NO_MAPCHANGE);
+			CreateTimer(5.0, Changelevel_Map);
 			CPrintToChatAll("[{olive}VOTE{default}]{green}5{default}秒后将切换地图为{blue}%s", votesmapsname);
 			LogMessage("更换地图 %s %s 通过", votesmaps, votesmapsname);
 		}
@@ -1206,10 +1266,10 @@ public Action COLD_DOWN(Handle timer, any client)
 public Action Changelevel_Map(Handle timer)
 {
 	// 5秒等待期间地图过关(例如幸存者刚关上终点安全室的门) -> 放弃换图, 让服务器正常进入下一关
-	if (isMapTransitioning)
+	if (IsLevelAdvancingToNextMap())
 	{
 		CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
-		LogMessage("更换地图 %s 未执行: 当前地图已过关, 即将切换下一关", votesmaps);
+		ReportMapChangeSkipped();
 		return Plugin_Continue;
 	}
 

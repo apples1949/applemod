@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.4.1",
+    version     = "1.4.3",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -92,8 +92,15 @@ public Plugin myinfo =
 #define FUNFACT_ROUNDSTART_SHOW        0.0     // >0: 回合开始后把池内还没显示过的趣文续轮这么多秒;
                                                // 0 = 不跨回合补显 (需求: 回合结束 8 秒即可).
 #define FUNFACT_MAX_DISPLAY            30.0    // 兜底上限: 单次趣文最长显示时间, 避免无限重写.
+#define FUNFACT_FIX_DEFER_MAX          20.0    // 因修复队伍提示暂缓时最长等多久(秒), 超时放弃补放.
+#define FUNFACT_DEFER_SHOW             8.0     // 补放时的窗口(秒): 0.5 秒一条, 正好铺满池子.
 #define FUNFACT_TEXT_MAX               256     // 与本插件 HUD1/HUD2 文本缓冲一致, 与脚本 HUD 单槽字符串长度对齐 (超长截断).
 #define FUNFACT_INPUT_MAX              (FUNFACT_TEXT_MAX * FUNFACT_POOL_MAX) // 调用方一次传入的整段趣文文本上限 (每条一行).
+
+// 趣文链路诊断日志: 单独的日志文件(与 SourceMod 通用日志分开), 开关 sm_funfact_debug 默认开.
+// 路径相对游戏目录 -> <服务器>/left4dead2/addons/sourcemod/logs/l4d2_funfact.log, 行首自带时间戳与插件名.
+// 与 l4d2_playstats_tranchi 写同一个文件(同一个开关), 两边的行按时间交错, 直接看时间线.
+#define FUNFACT_LOG_FILE               "addons/sourcemod/logs/l4d2_funfact.log"
 
 // 修正中/完成提示文字与动画参数.
 #define FIX_MSG_BASE                   "正在修正队伍 非上一轮游戏的玩家请等待位置修正完成再加入游戏"
@@ -130,6 +137,7 @@ static int    g_iFixDotCount;
 
 // 局末趣文 HUD (独立槽位 FUNFACT_HUD) 状态: 一个轮播池, 槽位里始终只有当前这一条.
 static bool   g_bFunFactHUDVisible;
+static bool   g_bFunFactNoGameRulesWarned;                      // GameRules 未就绪的日志每窗口只打一次.
 static char   g_sFunFactPool[FUNFACT_POOL_MAX][FUNFACT_TEXT_MAX]; // 待轮播的趣文 (调用方一次给的整段文本按行拆开).
 static int    g_iFunFactPoolCount;                              // 池内条数.
 static int    g_iFunFactPoolIndex;                              // 当前显示的是第几条.
@@ -139,6 +147,14 @@ static float  g_fFunFactHardExpire;                             // 硬性上限 
 static float  g_fFunFactNextSwitch;                             // 下一次换条的时间 (GameTime).
 // 池内还有没显示过的条目: 供 FUNFACT_ROUNDSTART_SHOW > 0 时的跨回合续轮用(默认关闭).
 static bool   g_bFunFactPending;
+
+// "修复队伍提示优先"不再等于丢弃趣文: 撞上修复流程时把池子暂缓, 等修复提示结束后补放.
+static bool   g_bFunFactDeferred;                               // 正在暂缓(等修复提示结束).
+static float  g_fFunFactDeferDeadline;                          // 暂缓截止(GameTime), 超时放弃补放.
+static Handle g_hFunFactDeferTimer;                             // 修复提示结束后的补放计时器.
+
+// 趣文诊断日志开关(sm_funfact_debug, 与 playstats 共用同一个 cvar; 谁先加载谁创建).
+static ConVar g_hCvarFunFactDebug;
 
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
@@ -170,6 +186,17 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
     g_hVsBossBuffer = FindConVar("versus_boss_buffer");
+
+    // 趣文诊断开关(默认开): 与 l4d2_playstats_tranchi 共用一个 cvar, 谁先加载谁创建.
+    g_hCvarFunFactDebug = FindConVar("sm_funfact_debug");
+    if (g_hCvarFunFactDebug == null)
+    {
+        g_hCvarFunFactDebug = CreateConVar(
+            "sm_funfact_debug",
+            "1",
+            "趣文诊断日志开关: 1=写 addons/sourcemod/logs/l4d2_funfact.log, 0=关.",
+            _, true, 0.0, true, 1.0);
+    }
 
     LoadTranslations("common.phrases");
 
@@ -264,15 +291,13 @@ public void OnMapEnd()
     g_bHUDSendProxyHooked = false;
     HideFixHUD();
 
-    // 局末趣文 timer 未加 NO_MAPCHANGE: 换图时清掉并复位状态, 避免句柄悬垂.
-    delete g_hFunFactTimer;
-    g_hFunFactTimer = null;
-    g_bFunFactHUDVisible = false;
-    g_iFunFactPoolCount = 0;
-    g_iFunFactPoolIndex = 0;
+    // 诊断: 换图把还在展示的趣文清掉了(最后一张图那回合常见"没看到就没了").
+    if (g_bFunFactHUDVisible)
+        FunFactLog("[HUD] 趣文被换图清理: 停在第 %d/%d 条.", g_iFunFactPoolIndex + 1, g_iFunFactPoolCount);
 
-    // 趣文属于上一张图的回合, 换图后不再补显.
-    g_bFunFactPending = false;
+    // 局末趣文 timer 未加 NO_MAPCHANGE: 换图时清掉并复位状态, 避免句柄悬垂.
+    // HideFunFactHUD() 会把重写计时器、池子、"暂缓补放"计时器一起收掉.
+    HideFunFactHUD();
 }
 
 public void OnClientConnected(int client)
@@ -313,6 +338,21 @@ public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
     TryHookHUDSendProxy();
     UpdateFixTeamShuffleHUD();
     UpdateHUD();
+
+    // 诊断: 回合开始这条时间线最关键 —— 趣文窗口是一次性的(回合结束起算),
+    // 如果这里显示"没有正在显示的趣文", 而玩家只在活局里看得见 HUD, 那就是"放过了但没人看到".
+    if (StrEqual(name, "round_start"))
+    {
+        if (g_bFunFactHUDVisible)
+        {
+            FunFactLog("[HUD] 回合开始: 趣文仍在显示 (第 %d/%d 条, t=%.1f).",
+                g_iFunFactPoolIndex + 1, g_iFunFactPoolCount, GetGameTime());
+        }
+        else
+        {
+            FunFactLog("[HUD] 回合开始: 没有正在显示的趣文 (没推送, 或 8 秒窗口已在记分板/过渡期间结束).");
+        }
+    }
 
     // 回合结束时屏幕上先是记分板/过渡画面, 脚本 HUD 会被盖住; 若池内还有没显示过的趣文,
     // 可在新回合开始时(记分板收起后)接着轮 (FUNFACT_ROUNDSTART_SHOW > 0 才启用, 默认关闭).
@@ -687,10 +727,16 @@ void StartFixHUD()
     g_iFixDotCount = 0;
 
     // 修复队伍提示优先: 结束仍在展示的局末趣文 (两者位置接近, 同时显示会互相压字).
+    // 但池子要留着 —— 等修复提示结束后补放, 这样"半场结束推的趣文"不会被白白丢掉.
     if (g_bFunFactHUDVisible)
-        HideFunFactHUD();
+    {
+        // 诊断: 修复提示把趣文顶掉(回合开始瞬间触发修复时, 趣文刚显示就被撤).
+        FunFactLog("[HUD] 趣文被修复队伍提示打断: 停在第 %d/%d 条 -> 暂缓, 等修复提示结束后补放.",
+            g_iFunFactPoolIndex + 1, g_iFunFactPoolCount);
 
-    g_bFunFactPending = false;
+        HideFunFactHUDSlotOnly();
+        DeferFunFactHUD();
+    }
 
     ShowFixHUDText(FIX_MSG_BASE);
 
@@ -746,6 +792,13 @@ void CompleteFixHUD()
     delete g_hFixDoneTimer;
     g_hFixDoneTimer = null;
     g_hFixDoneTimer = CreateTimer(FIX_DONE_HIDE_TIME, Timer_HideFixHUD);
+
+    // 刚才因修复提示暂缓的趣文: 等"修正完成"提示消失后再补放(两个槽位位置接近, 不能叠着显示).
+    if (g_bFunFactDeferred)
+    {
+        delete g_hFunFactDeferTimer;
+        g_hFunFactDeferTimer = CreateTimer(FIX_DONE_HIDE_TIME + 0.2, Timer_ResumeDeferredFunFact);
+    }
 }
 
 public Action Timer_HideFixHUD(Handle timer)
@@ -788,6 +841,21 @@ public void L4D2_FixTeamShuffle_OnFixComplete()
 }
 
 // ====================================================================================================
+// 趣文链路诊断: 追加一行到专用日志文件(LogToFile 自带时间戳 + 插件名标签).
+// 开关 sm_funfact_debug(默认 1); 与 SourceMod 通用日志分开, 免得被其它调试信息淹没.
+// ====================================================================================================
+void FunFactLog(const char[] fmt, any ...)
+{
+    if (g_hCvarFunFactDebug != null && !g_hCvarFunFactDebug.BoolValue)
+        return;
+
+    char sMsg[512];
+    VFormat(sMsg, sizeof(sMsg), fmt, 2);
+
+    LogToFile(FUNFACT_LOG_FILE, "%s", sMsg);
+}
+
+// ====================================================================================================
 // 局末趣文 HUD (独立槽位 FUNFACT_HUD)
 //    由 l4d2_playstats_tranchi 在回合结束时调用, 一次把多条趣文(每条一行)传进来, 这里轮播.
 //
@@ -817,16 +885,79 @@ public int Native_ShowRoundFunFact(Handle plugin, int numParams)
 
     float fHideTime = GetNativeCell(2);
 
-    // 修复队伍进行中时, 趣文跳过(修复提示优先).
+    // 修复队伍进行中时, 修复提示优先 —— 但不再直接丢弃趣文:
+    // 先把池子建好、暂缓显示, 等修复提示结束后自动补放(见 Timer_ResumeDeferredFunFact).
     if (g_bFixTeamShuffleInProgress)
-        return 0;
+    {
+        if (BuildFunFactPool(sText) <= 0)
+        {
+            FunFactLog("[HUD] 趣文被拒: 拆行后没有有效条目.");
+            return 0;
+        }
+
+        DeferFunFactHUD();
+        FunFactLog("[HUD] 趣文暂缓: 修复队伍流程进行中 -> 池内 %d 条等修复提示结束后补放 (最多等 %.0f 秒).",
+            g_iFunFactPoolCount, FUNFACT_FIX_DEFER_MAX);
+        return 1;
+    }
 
     if (BuildFunFactPool(sText) <= 0)
+    {
+        FunFactLog("[HUD] 趣文被拒: 拆行后没有有效条目.");
         return 0;
+    }
 
+    ClearFunFactDeferral();
     StartFunFactHUD((fHideTime > 0.0) ? fHideTime : FUNFACT_HIDE_DEFAULT);
 
     return 1;
+}
+
+// 暂缓显示: 池子已建好(或被打断时保留着), 等修复提示结束后补放.
+void DeferFunFactHUD()
+{
+    g_bFunFactDeferred = true;
+    g_fFunFactDeferDeadline = GetGameTime() + FUNFACT_FIX_DEFER_MAX;
+}
+
+// 取消暂缓(有新的正常推送时调用, 免得旧的暂缓把新池子又放一遍).
+void ClearFunFactDeferral()
+{
+    g_bFunFactDeferred = false;
+
+    delete g_hFunFactDeferTimer;
+    g_hFunFactDeferTimer = null;
+}
+
+// 修复提示结束后补放: "修正完成"提示会占 5 秒(FIX_DONE_HIDE_TIME), 之后才轮到趣文.
+public Action Timer_ResumeDeferredFunFact(Handle timer)
+{
+    g_hFunFactDeferTimer = null;
+
+    if (!g_bFunFactDeferred)
+        return Plugin_Stop;
+
+    g_bFunFactDeferred = false;
+
+    if (g_iFunFactPoolCount <= 0)
+        return Plugin_Stop;
+
+    // 修复流程又开始了 / 等太久了: 放弃补放, 清掉池子.
+    if (g_bFixTeamShuffleInProgress || GetGameTime() > g_fFunFactDeferDeadline)
+    {
+        FunFactLog("[HUD] 趣文放弃补放: %s (停在第 %d/%d 条).",
+            g_bFixTeamShuffleInProgress ? "修复流程又开始了" : "超过暂缓上限",
+            g_iFunFactPoolIndex + 1, g_iFunFactPoolCount);
+
+        ResetFunFactPool();
+        return Plugin_Stop;
+    }
+
+    FunFactLog("[HUD] 修复提示结束, 补放趣文: 第 %d/%d 条起, 窗口 %.1f 秒.",
+        g_iFunFactPoolIndex + 1, g_iFunFactPoolCount, FUNFACT_DEFER_SHOW);
+
+    ResumeFunFactHUD(FUNFACT_DEFER_SHOW);
+    return Plugin_Stop;
 }
 
 // 把调用方给的整段趣文按行拆成轮播池: 逐条去掉聊天颜色码(\x01-\x05, 脚本 HUD 不解析, 会画成方块)
@@ -874,14 +1005,25 @@ void ResumeFunFactHUD(float fDuration)
         return;
 
     float fNow = GetGameTime();
+
+    // 诊断: 上一轮展示还在进行时被新的推送替换(会丢掉剩余时间).
+    if (g_bFunFactHUDVisible)
+        FunFactLog("[HUD] 趣文被新的推送替换: 原来停在第 %d/%d 条.", g_iFunFactPoolIndex + 1, g_iFunFactPoolCount);
+
     g_fFunFactExpire = fNow + fDuration;
     g_fFunFactHardExpire = fNow + fDuration + FUNFACT_MAX_DISPLAY;
     g_fFunFactNextSwitch = fNow + FUNFACT_FACT_INTERVAL;
     g_bFunFactHUDVisible = true;
     g_bFunFactPending = (g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount);
+    g_bFunFactNoGameRulesWarned = false; // 新窗口可以再提醒一次.
 
     // 立即显示, 不等第一个 tick.
     ShowFunFactHUDText(g_sFunFactPool[g_iFunFactPoolIndex]);
+
+    // 诊断: 定位"有的时候不显示"的关键时间线 —— 窗口从第几条开始, 多长, 游戏时间多少.
+    FunFactLog("[HUD] 趣文开始轮播: 第 %d/%d 条起, 窗口 %.1f 秒, 每条 %.1f 秒 (t=%.1f, GameRules=%s).",
+        g_iFunFactPoolIndex + 1, g_iFunFactPoolCount, fDuration, FUNFACT_FACT_INTERVAL, fNow,
+        (FindGameRulesEntity() == INVALID_ENT_REFERENCE) ? "未就绪!" : "OK");
 
     delete g_hFunFactTimer;
     g_hFunFactTimer = CreateTimer(FUNFACT_REFRESH_INTERVAL, Timer_FunFactHUD, _, TIMER_REPEAT);
@@ -893,6 +1035,13 @@ public Action Timer_FunFactHUD(Handle timer)
 
     if (!g_bFunFactHUDVisible || fNow >= g_fFunFactExpire || fNow >= g_fFunFactHardExpire)
     {
+        // 诊断: 窗口正常到点结束(或已被别处隐藏) —— 看它一共放到第几条, 用来判断是否够玩家看到.
+        if (g_bFunFactHUDVisible)
+        {
+            FunFactLog("[HUD] 趣文窗口结束: 停在第 %d/%d 条 (t=%.1f, 计划结束 %.1f).",
+                g_iFunFactPoolIndex + 1, g_iFunFactPoolCount, fNow, g_fFunFactExpire);
+        }
+
         // 不能在回调里 delete 自己; 只清句柄和槽位.
         g_hFunFactTimer = null;
         HideFunFactHUD();
@@ -918,7 +1067,16 @@ public Action Timer_FunFactHUD(Handle timer)
 void ShowFunFactHUDText(const char[] sText)
 {
     if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
+    {
+        // 诊断: GameRules 没就绪时整组属性都写不进去(换图瞬间会这样), 每个窗口只提醒一次, 别每 0.5 秒刷.
+        if (!g_bFunFactNoGameRulesWarned)
+        {
+            g_bFunFactNoGameRulesWarned = true;
+            FunFactLog("[HUD] 趣文写入被跳过: GameRules 实体未就绪 (本窗口只提醒一次).");
+        }
+
         return;
+    }
 
     GameRules_SetProp("m_iScriptedHUDFlags", FUNFACT_HUD_FLAGS, _, FUNFACT_HUD);
     GameRules_SetPropFloat("m_fScriptedHUDPosX", FUNFACT_HUD_X, FUNFACT_HUD);
@@ -929,17 +1087,31 @@ void ShowFunFactHUDText(const char[] sText)
     g_bFunFactHUDVisible = true;
 }
 
-void HideFunFactHUD()
+// 只撤下槽位与重写计时器, 保留池子和当前下标(暂缓补放要用).
+void HideFunFactHUDSlotOnly()
 {
     ClearFunFactHUDSlot();
 
     g_bFunFactHUDVisible = false;
-    g_iFunFactPoolCount = 0;
-    g_iFunFactPoolIndex = 0;
-    g_bFunFactPending = false;
 
     delete g_hFunFactTimer;
     g_hFunFactTimer = null;
+}
+
+// 清空轮播池状态.
+void ResetFunFactPool()
+{
+    g_iFunFactPoolCount = 0;
+    g_iFunFactPoolIndex = 0;
+    g_bFunFactPending = false;
+}
+
+// 彻底收尾: 槽位 + 池子 + 暂缓状态.
+void HideFunFactHUD()
+{
+    HideFunFactHUDSlotOnly();
+    ResetFunFactPool();
+    ClearFunFactDeferral();
 }
 
 // 当前正在显示的那条趣文(池空时给空串).

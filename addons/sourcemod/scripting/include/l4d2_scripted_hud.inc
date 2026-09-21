@@ -34,7 +34,9 @@
  *                 Empty/NULL => no-op.
  * @param hideTime Total seconds of the display window (<=0 uses a 5s default).
  *
- * @return 1 on success (accepted / shown), 0 otherwise (no text, or a team fix is running).
+ * @return 1 when the text was accepted (shown right away, or deferred while the
+ *         team-fix prompt is up and shown once that prompt is gone), 0 otherwise
+ *         (no text).
  */
 native int ScriptedHud_ShowRoundFunFact(const char[] text, float hideTime);
 

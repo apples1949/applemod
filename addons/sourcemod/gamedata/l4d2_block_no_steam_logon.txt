@@ -31,6 +31,25 @@
          */
         "Functions"
         {
+            /*
+             * The real function is
+             *     void __thiscall CSteam3Server::OnValidateAuthTicketResponseHelper(CBaseClient *, EAuthSessionResponse)
+             * i.e. TWO stack arguments (engine.dll: `retn 8`, verified in IDA).
+             *
+             * An earlier revision declared a phantom third argument ("a1"). DHooks builds its parameter
+             * description from this list, so a third entry describes a frame one argument wider than the real
+             * one - that is what made a SourcePawn Get(3) fail at runtime with
+             * "Invalid param number 3 max params is 2" (observed live). The entry is removed because the
+             * description has to match the function (retn 8, two stack arguments), NOT because a crash was
+             * traced to it: a recorded Windows crash inside steam_api's callback pump was checked against that
+             * theory and does not fit. Its five frames form an intact direct call chain (every recorded return
+             * address lands exactly at call+5), the fault is a `mov eax, [esi]` pointer dereference in
+             * steam_api's own container code, and no SourceMod / DHooks / engine frame appears in it at all.
+             * A Supercede that had unbalanced the stack would have destroyed those return addresses.
+             *
+             * The plugin source has always used Get(1) = client and Get(2) = response, so dropping the phantom
+             * argument needs no .sp change.
+             */
             "CSteam3Server::OnValidateAuthTicketResponseHelper"
             {
                 "signature" "CSteam3Server::OnValidateAuthTicketResponseHelper"
@@ -39,19 +58,14 @@
                 "this"      "ignore"
                 "arguments"
                 {
-                    "a1"
-                    {
-                        "type"  "int"   // visible class pointer so be it.
-                    }
-
                     "CBaseClient"
                     {
-                        "type"  "int"   // pointer address
+                        "type"  "int"   // complete object pointer the engine passes (the helper adds +4 itself)
                     }
 
                     "EAuthSessionResponse"
                     {
-                        "type"  "int"   // enum EAuthSessionResponse
+                        "type"  "int"   // enum EAuthSessionResponse; the engine only calls this on non-zero (failure)
                     }
                 }
             }

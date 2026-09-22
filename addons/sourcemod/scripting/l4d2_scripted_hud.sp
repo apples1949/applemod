@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.4.3",
+    version     = "1.4.4",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -350,7 +350,7 @@ public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
         }
         else
         {
-            FunFactLog("[HUD] 回合开始: 没有正在显示的趣文 (没推送, 或 8 秒窗口已在记分板/过渡期间结束).");
+            FunFactLog("[HUD] 回合开始: 当前没有正在显示的趣文 (没推送, 或窗口已在记分板/过渡期间结束).");
         }
     }
 

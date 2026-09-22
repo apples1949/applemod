@@ -38,6 +38,11 @@ int tankNoTargetRetries               = 0;
 float menuRefreshUntil                = 0.0;
 bool tankMenuChosen                   = false;
 
+// 给克时被 ReplaceWithBot 顶替出来的那只 AI 特感: 玩家去开坦克了, 不能把它留在场上占特感位
+int g_iSwapLeftoverBotUserId          = 0;
+// 被顶替玩家的原特感职业: 换克后玩家的 m_zombieClass 已经变成 Tank(8), 必须换克前先记下来做兜底匹配
+int g_iSwapLeftoverZombieClass        = 0;
+
 public Plugin myinfo =
 {
 	name = "L4D Tank Swap",
@@ -82,6 +87,7 @@ public void OnPluginStart()
 	HookEvent("tank_spawn", TC_ev_TankSpawn);
 	HookEvent("player_now_it", TC_ev_PlayerNowIt);
 	HookEvent("bot_player_replace", TC_ev_BotPlayerReplace);
+	HookEvent("player_bot_replace", TC_ev_PlayerBotReplace);
 	HookEvent("round_start", TC_ev_RoundStart);
 	HookEvent("entity_killed", TC_ev_EntityKilled);
 
@@ -281,6 +287,19 @@ public Action TC_ev_BotPlayerReplace(Event event, const char[] name, bool dontBr
 		pack.WriteCell(GetClientUserId(player));
 		CreateTimer(CONTROL_RETRY_DELAY, TS_TakeoverRecheck, pack);
 	}
+
+	return Plugin_Continue;
+}
+
+/* 给克时 ReplaceWithBot 会在玩家原地生成一只同职业 AI 特感顶替他,
+   这里记下它的 userid, 换克结束后把这只"残留特感"清掉(不留在场上占特感位)。
+   注意方向: player_bot_replace = "机器人替换了玩家"。 */
+public Action TC_ev_PlayerBotReplace(Event event, const char[] name, bool dontBroadcast)
+{
+	int bot = GetClientOfUserId(event.GetInt("bot"));
+
+	if (bot > 0 && bot <= MaxClients)
+		g_iSwapLeftoverBotUserId = GetClientUserId(bot);
 
 	return Plugin_Continue;
 }
@@ -879,8 +898,20 @@ bool PerformTankSwap(int oldTank, int newTank)
 	if (!IsHumanTank(oldTank) || !IsEligibleSwapTarget(newTank))
 		return false;
 
+	// 目标正骑着人(Jockey)/扛着人(Charger)时: 先解控。把人质留着被 SI 拖走/卡住,
+	// 或让带着"骑乘中"状态的玩家被顶替, 都会留下烂摊子。
+	ReleasePinnedSurvivor(newTank);
+
+	g_iSwapLeftoverBotUserId = 0;
+	g_iSwapLeftoverZombieClass = 0;
+	CacheInfectedBots(); // 记录换克前在场的感染者 bot, 供兜底查找"新出现的 bot"
+
 	if (GetClientHealth(newTank) > 1 && !IsPlayerGhost(newTank))
+	{
+		// 顶替出来的 bot 与玩家同职业; 换克后玩家已变成 Tank, 这里必须先记
+		g_iSwapLeftoverZombieClass = GetEntProp(newTank, Prop_Send, "m_zombieClass");
 		L4D_ReplaceWithBot(newTank);
+	}
 
 	// Preserves the original manual-menu behavior: after ReplaceWithBot a live
 	// target is a ghost, so this is intentionally checked again.
@@ -888,6 +919,9 @@ bool PerformTankSwap(int oldTank, int newTank)
 		ForcePlayerSuicide(newTank);
 
 	L4D_ReplaceTank(oldTank, newTank);
+
+	// 玩家已经去开坦克, 那只被顶替出来的 AI 特感就地清掉(处死+移除), 不再留在场上
+	RemoveSwapLeftoverBot(newTank);
 
 	// 主动告知其它插件(如 tank_damage)换克已发生: 与引擎 forward 双保险, 幂等
 	Call_StartForward(g_hForwardTankPassed);
@@ -911,6 +945,145 @@ bool PerformTankSwap(int oldTank, int newTank)
 	StopMenuRefresh();
 
 	return true;
+}
+
+/* 目标特感正控制着某个生还者时, 先彻底解除控制, 再走"顶替 → 处死 → 移除"流程。
+   不先解控就顶替/处死: 被 Jockey 骑着的玩家状态错乱(见 l4dinfectedbots 的同款注释),
+   被 Charger 扛走/压制的生还者会带着"被扛"状态留在原地卡住。
+   顺序: Jockey 骑乘 → Charger 扛走(carry 与 pummel 互斥, 扛走优先) → Charger 压制。 */
+void ReleasePinnedSurvivor(int si)
+{
+	if (!IsValidClient(si) || !IsPlayerAlive(si))
+		return;
+
+	// Jockey: 正骑着人 → 立即用引擎原生结束骑乘(同步生效), 再补一条 dismount 指令兜底
+	int jockeyVictim = GetEntPropEnt(si, Prop_Send, "m_jockeyVictim");
+	if (IsValidClient(jockeyVictim))
+		EndJockeyRide(jockeyVictim, si);
+
+	int carryVictim = GetEntPropEnt(si, Prop_Send, "m_carryVictim");
+	if (IsValidClient(carryVictim))
+	{
+		L4D2_Charger_EndCarry(carryVictim, si);
+		FinishSurvivorRelease(carryVictim, si, MOVETYPE_WALK);
+	}
+	else
+	{
+		int pummelVictim = GetEntPropEnt(si, Prop_Send, "m_pummelVictim");
+		if (IsValidClient(pummelVictim))
+		{
+			L4D2_Charger_EndPummel(pummelVictim, si);
+			FinishSurvivorRelease(pummelVictim, si, MOVETYPE_WALK);
+		}
+	}
+
+	// 解控后残留在特感身上的"我在控人"引用一并清掉: 它马上要变成 bot, 不能带着旧状态
+	// (Jockey 的 m_jockeyVictim 由引擎结束骑乘时清理, 不在这里硬置 -1)
+	SetEntPropEnt(si, Prop_Send, "m_carryVictim", -1);
+	SetEntPropEnt(si, Prop_Send, "m_pummelVictim", -1);
+}
+
+/* Jockey 解控: 先用引擎原生同步结束骑乘(立刻生效, 不依赖下一帧的指令队列),
+   再补一条 dismount 指令走引擎自己的松手流程兜底。 */
+void EndJockeyRide(int victim, int jockey)
+{
+	L4D2_Jockey_EndRide(victim, jockey);
+
+	FinishSurvivorRelease(victim, jockey, MOVETYPE_WALK);
+	DismountJockey(jockey);
+}
+
+/* 解控收尾: 断开 Charger 的 parent 关系并恢复行走, 否则生还者会被吊在空中/保持被扛的动画。
+   (原生内部已做 ClearParent, 这里再兜一次; move type 参考 AI_HardSI/ai_charger.sp 的做法) */
+void FinishSurvivorRelease(int survivor, int si, MoveType moveType)
+{
+	AcceptEntityInput(survivor, "ClearParent");
+	SetEntityMoveType(survivor, moveType);
+
+	if (IsValidClient(si) && IsPlayerAlive(si))
+		SetEntityMoveType(si, moveType);
+}
+
+/* dismount 是 FCVAR_CHEAT 的玩家指令: 临时摘掉 cheat 标记再以客户端身份发指令,
+   引擎就会走它自己的"跳蚤松手"流程(本仓库 l4d2_charge_target_fix / l4d2_rock_trace_unblock 同款做法)。 */
+void DismountJockey(int jockey)
+{
+	int flags = GetCommandFlags("dismount");
+	SetCommandFlags("dismount", flags & ~FCVAR_CHEAT);
+	FakeClientCommand(jockey, "dismount");
+	SetCommandFlags("dismount", flags);
+}
+
+/* 清掉给克时被顶替出来的那只 AI 特感。
+   正常路径: player_bot_replace 事件里记下了它的 userid;
+   兜底路径: 万一事件没来(以 userid 找回失败), 就在感染者队伍里找那只"和玩家同职业、且不属于换克前就在场的 bot"。 */
+void RemoveSwapLeftoverBot(int newTank)
+{
+	int bot = GetClientOfUserId(g_iSwapLeftoverBotUserId);
+	g_iSwapLeftoverBotUserId = 0;
+
+	if (bot <= 0)
+		bot = FindLeftoverBot(newTank);
+
+	if (bot <= 0)
+		return;
+
+	// 处死(让引擎走正常的 SI 死亡流程, 不留下半死实体) → 再移除, 确保它不再占着特感名额
+	ForcePlayerSuicide(bot);
+
+	if (IsClientInGame(bot))
+		KickClient(bot, "Tank swap: victim's special infected removed");
+}
+
+/* 兜底查找: 顶替出来的 bot 与玩家换克前的职业(g_iSwapLeftoverZombieClass)一致,
+   且换克前不在场。换克前的快照必须在 ReplaceWithBot / ReplaceTank 之前取, 见 PerformTankSwap。 */
+int g_iBotsBeforeSwap[MAXPLAYERS + 1];
+int g_iBotsBeforeSwapCount = 0;
+
+void CacheInfectedBots()
+{
+	g_iBotsBeforeSwapCount = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsValidClient(i) && IsFakeClient(i) && GetClientTeam(i) == TEAM_INFECTED)
+			g_iBotsBeforeSwap[g_iBotsBeforeSwapCount++] = i;
+	}
+}
+
+bool WasBotPresentBeforeSwap(int client)
+{
+	for (int i = 0; i < g_iBotsBeforeSwapCount; i++)
+	{
+		if (g_iBotsBeforeSwap[i] == client)
+			return true;
+	}
+
+	return false;
+}
+
+int FindLeftoverBot(int newTank)
+{
+	if (!IsValidClient(newTank) || g_iSwapLeftoverZombieClass <= 0)
+		return 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsValidClient(i) || !IsFakeClient(i))
+			continue;
+		if (GetClientTeam(i) != TEAM_INFECTED)
+			continue;
+		if (IsPlayerTank(i))
+			continue;
+		if (WasBotPresentBeforeSwap(i))
+			continue;
+		if (GetEntProp(i, Prop_Send, "m_zombieClass") != g_iSwapLeftoverZombieClass)
+			continue;
+
+		return i;
+	}
+
+	return 0;
 }
 
 float GetSurrenderTimeLimit()

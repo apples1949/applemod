@@ -214,6 +214,10 @@
 #define FUNFACT_TEXT_MAX		256								// 单条趣文长度上限(与 scripted_hud 单槽长度对齐).
 #define FUNFACT_POOL_MAX		16								// 池子条数上限(与 scripted_hud 轮播池上限对齐).
 
+// 兜底: 本回合确实没有任何达阈值的趣文时, 也让 HUD 说一句(否则玩家分不清"没趣文"和"插件坏了").
+#define FUNFACT_EMPTY_TEXT		"本回合无趣文"
+#define FUNFACT_EMPTY_SHOW		5.0								// 兜底文案显示时长(秒).
+
 // 趣文链路诊断日志: 单独的日志文件(与控制台/通用日志分开), 开关 sm_funfact_debug 默认开.
 // 路径相对游戏目录 -> <服务器>/left4dead2/addons/sourcemod/logs/l4d2_funfact.log, 行首自带时间戳与插件名.
 #define FUNFACT_LOG_FILE		"addons/sourcemod/logs/l4d2_funfact.log"
@@ -546,7 +550,7 @@ public Plugin myinfo =
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.7",
+	version = "1.1.8",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -4051,12 +4055,30 @@ void GetFunFactChatString(char[] printBuffer, const int iLen, bool bRound = true
 	FormatFunFactLine(printBuffer, iLen, iType[wPick], bRound, iPlayer[wPick], iValue[wPick]);
 }
 
+// ====================================================================================================
+// 趣文诊断(值/门槛): 回合末收集每个类型的实际值, 连同几个参考统计一起写进专用日志.
+// 用来一次性区分"统计数据没进来"(值≈0) 和 "门槛太高"(值接近门槛) 这两种完全不同的原因.
+// ====================================================================================================
+bool g_bFunFactDiagCollect = false;                             // 本次收集是否记录(只在回合末/手动推送时开).
+int  g_iFunFactDiagTeam = -1;                                   // 最近一次收集用的队伍索引(参考值取同一队).
+char g_sFunFactDiagBuf[1024];                                   // " 皇冠=0/2 空中击杀=1/3 ..."
+
+char g_sFunFactTypeNames[FFACT_MAXTYPES + 1][24] =
+{
+	"未知",
+	"皇冠", "惊动皇冠", "空中击杀", "近战空中击杀", "hunter高扑", "jockey高扑",
+	"推开特感", "tank近战", "断舌", "点爆boomer", "空中推停", "满级撞",
+	"抓伤", "死亡冲锋", "boomer补刀", "酸液伤害"
+};
+
 // 收集某个范围(回合/全场)内所有"达到阈值"的趣文候选: 每类只取该类数值最高的玩家.
 // iType/iPlayer/iValue/iWeight 由调用方提供(容量 iMax), 返回条数; iWeight = 数值的极端程度(<= FFACT_MAX_WEIGHT).
 int CollectFunFactCandidates(int[] iType, int[] iPlayer, int[] iValue, int[] iWeight, int iMax, bool bRound, bool bTeam, int iTeam)
 {
 	// use current survivor team -- or previous team in second half before starting
 	int team = (iTeam != -1) ? iTeam : ((g_bSecondHalf && !g_bPlayersLeftStart) ? ((g_iCurTeam) ? 0 : 1) : g_iCurTeam);
+
+	g_iFunFactDiagTeam = team; // 诊断: 参考统计取同一支队伍.
 
 	int i, iCount = 0;
 	int wTmp = 0;
@@ -4168,6 +4190,7 @@ int CollectFunFactCandidates(int[] iType, int[] iPlayer, int[] iValue, int[] iWe
 
 		highest = GetPlayerWithHighestValue(iproperty, bRound, bTeam, team, bInf);
 		if (highest == -1) {
+			FunFactDiagAppend(i, -1, minval); // 诊断: 该类型没人上榜(值记 -1)
 			continue;
 		}
 
@@ -4197,11 +4220,13 @@ int CollectFunFactCandidates(int[] iType, int[] iPlayer, int[] iValue, int[] iWe
 			}
 		}
 
+		// 诊断: 记录该类型的实际值与门槛(不管有没有达标), 用来判断"没趣文"是统计数据没进来还是门槛太高.
+		FunFactDiagAppend(i, value, minval);
+
 		if (value > minval) {
 			iType[iCount] = i;
 			iPlayer[iCount] = highest;
 			iValue[iCount] = value;
-
 			// weight for this fact
 			if (value >= maxval) {
 				wTmp = FFACT_MAX_WEIGHT;
@@ -4338,6 +4363,35 @@ void FormatFunFactLine(char[] printBuffer, const int iLen, int iType, bool bRoun
 			);
 		}
 	}
+}
+
+// 诊断: 收集本轮每个趣文类型的实际值/门槛(开关 g_bFunFactDiagCollect), 回合末写进专用日志.
+void FunFactDiagAppend(int iType, int iValue, int iMin)
+{
+	if (!g_bFunFactDiagCollect || iType < 0 || iType > FFACT_MAXTYPES) {
+		return;
+	}
+
+	char sItem[48];
+
+	if (iValue < 0) {
+		FormatEx(sItem, sizeof(sItem), " %s=无/%d", g_sFunFactTypeNames[iType], iMin);
+	} else {
+		FormatEx(sItem, sizeof(sItem), " %s=%d/%d", g_sFunFactTypeNames[iType], iValue, iMin);
+	}
+
+	StrCat(g_sFunFactDiagBuf, sizeof(g_sFunFactDiagBuf), sItem);
+}
+
+// 诊断: 本回合某统计项的最高值(校验统计到底有没有在累加).
+int MaxRoundPlayerStat(int iproperty)
+{
+	int iPlayer = GetPlayerWithHighestValue(iproperty, true, true, g_iFunFactDiagTeam, false);
+	if (iPlayer == -1) {
+		return 0;
+	}
+
+	return g_strRoundPlayerData[iPlayer][g_iFunFactDiagTeam][iproperty];
 }
 
 // 把某个范围(回合/全场)内所有达阈值的趣文按"数值越极端越先显示"的顺序追加进趣文池文本(每条一行).
@@ -6832,7 +6886,7 @@ void LogFunFactHudResult(const char[] sWhere, int iResult)
 		case FUNFACT_HUD_OK:        strcopy(sReason, sizeof(sReason), "已推送");
 		case FUNFACT_HUD_NO_LIB:    strcopy(sReason, sizeof(sReason), "l4d2_scripted_hud 未加载");
 		case FUNFACT_HUD_NO_NATIVE: strcopy(sReason, sizeof(sReason), "原生不可用(scripted_hud 版本过旧)");
-		case FUNFACT_HUD_NO_TEXT:   strcopy(sReason, sizeof(sReason), "本回合没有任何达阈值的趣文(数据不够)");
+		case FUNFACT_HUD_NO_TEXT:   strcopy(sReason, sizeof(sReason), "回合趣文标志(8192)未开启, 不推送");
 		default:                    strcopy(sReason, sizeof(sReason), "被 scripted_hud 拒绝(修复队伍流程进行中, 或 GameRules 未就绪)");
 	}
 
@@ -6842,6 +6896,7 @@ void LogFunFactHudResult(const char[] sWhere, int iResult)
 // 局末趣文(有 HUD): 把"本回合趣文"推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
 // 全场趣文不占 HUD(有 HUD 时由聊天框补发一条, 见 AutomaticPrintPerClient).
 // 池内每条 0.5 秒依次轮换(scripted_hud 的 FUNFACT_FACT_INTERVAL), 窗口 FUNFACT_HUD_SHOW_TIME 秒.
+// 一条都没达标时推 FUNFACT_EMPTY_TEXT 兜底, HUD 不会空着.
 // 返回 FUNFACT_HUD_* 状态码, 便于 /sm_funfact_hud 诊断.
 int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iTeam = -1)
 {
@@ -6858,9 +6913,31 @@ int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iT
 
 	g_sFunFactPool[0] = '\0';
 
+	// 诊断开关: 收集时顺带记录每个类型的实际值/门槛(不管有没有达标).
+	g_bFunFactDiagCollect = true;
+	g_sFunFactDiagBuf[0] = '\0';
+
 	int iPooled = AppendFunFactsToPool(true, bTeam, iTeam, 0);
+
+	g_bFunFactDiagCollect = false;
+
+	// 诊断: 一行"值/门槛", 一行参考统计 —— 没趣文时看这两行就能定性.
+	FunFactLog("本回合候选(值/门槛):%s", g_sFunFactDiagBuf);
+	FunFactLog("本回合参考值(最高): 特感伤害=%d 特感击杀=%d 小僵尸=%d 推开=%d 空中击杀=%d 点爆boomer=%d (队%d, 玩家数=%d)",
+		MaxRoundPlayerStat(plySIDamage), MaxRoundPlayerStat(plySIKilled), MaxRoundPlayerStat(plyCommon),
+		MaxRoundPlayerStat(plyShoves), MaxRoundPlayerStat(plySkeets), MaxRoundPlayerStat(plyPops),
+		g_iFunFactDiagTeam, g_iPlayers);
+
 	if (!iPooled) {
-		return FUNFACT_HUD_NO_TEXT;
+		// 兜底: 没有达阈值的趣文时也推一条"本回合无趣文", 让玩家知道是这回合太平淡而不是插件没工作.
+		// (诊断日志里的"候选(值/门槛)"行照常记录, 门槛调优不受影响.)
+		FunFactLog("HUD 兜底: 本回合没有达阈值的趣文 -> 显示 \"%s\" (%.1f 秒).", FUNFACT_EMPTY_TEXT, FUNFACT_EMPTY_SHOW);
+
+		if (ScriptedHud_ShowRoundFunFact(FUNFACT_EMPTY_TEXT, FUNFACT_EMPTY_SHOW)) {
+			return FUNFACT_HUD_OK;
+		}
+
+		return FUNFACT_HUD_REJECTED;
 	}
 
 	PrintDebug(2, "fun fact HUD: %d 条本回合趣文入池轮播", iPooled);

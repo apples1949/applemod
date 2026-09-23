@@ -24,7 +24,7 @@
  *
  * One fact is visible at a time. Pass several facts as separate lines (joined
  * with '\n'): they become a carousel - each line is shown for
- * FUNFACT_FACT_INTERVAL (0.5s), then swapped for the next line that has not been
+ * FUNFACT_FACT_INTERVAL (1s), then swapped for the next line that has not been
  * shown yet; once every line has been shown the last one is kept until the
  * window ends. A single line is simply shown for the whole `hideTime` window.
  *

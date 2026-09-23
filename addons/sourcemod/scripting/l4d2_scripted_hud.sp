@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.4.4",
+    version     = "1.4.5",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -83,7 +83,7 @@ public Plugin myinfo =
 // 趣文轮播: 槽位一次只放一条, 每 FUNFACT_FACT_INTERVAL 秒换成下一条"还没显示过的"
 // (池内都显示过后就停在最后一条, 不回头重播). 池子内容由 l4d2_playstats_tranchi 决定:
 // 当前是"本回合趣文"(全场趣文走聊天框那一条, 不占 HUD).
-#define FUNFACT_FACT_INTERVAL          0.5     // 单条趣文的显示时长(轮播间隔), 与 FUNFACT_REFRESH_INTERVAL 相等.
+#define FUNFACT_FACT_INTERVAL          1.0     // 单条趣文的显示时长(轮播间隔): 1 秒 = 每 2 次重写换一条.
 #define FUNFACT_POOL_MAX               16      // 轮播池上限: 与 l4d2_playstats_tranchi 的 FFACT_MAXTYPES 对齐.
 
 // 趣文显示时长与重写策略.
@@ -93,7 +93,7 @@ public Plugin myinfo =
                                                // 0 = 不跨回合补显 (需求: 回合结束 8 秒即可).
 #define FUNFACT_MAX_DISPLAY            30.0    // 兜底上限: 单次趣文最长显示时间, 避免无限重写.
 #define FUNFACT_FIX_DEFER_MAX          20.0    // 因修复队伍提示暂缓时最长等多久(秒), 超时放弃补放.
-#define FUNFACT_DEFER_SHOW             8.0     // 补放时的窗口(秒): 0.5 秒一条, 正好铺满池子.
+#define FUNFACT_DEFER_SHOW             8.0     // 补放时的窗口(秒): 1 秒一条, 8 条铺满窗口.
 #define FUNFACT_TEXT_MAX               256     // 与本插件 HUD1/HUD2 文本缓冲一致, 与脚本 HUD 单槽字符串长度对齐 (超长截断).
 #define FUNFACT_INPUT_MAX              (FUNFACT_TEXT_MAX * FUNFACT_POOL_MAX) // 调用方一次传入的整段趣文文本上限 (每条一行).
 
@@ -867,7 +867,7 @@ void FunFactLog(const char[] fmt, any ...)
 //    因此这里: 独立槽位 + 每 FUNFACT_REFRESH_INTERVAL 秒重写当前这条, 直到窗口用完
 //    或到达 FUNFACT_MAX_DISPLAY 上限.
 //
-//    轮播规则: 槽位一次只放一条; 每 FUNFACT_FACT_INTERVAL 秒(0.5 秒)换成池内下一条"还没显示过的"
+//    轮播规则: 槽位一次只放一条; 每 FUNFACT_FACT_INTERVAL 秒(1 秒)换成池内下一条"还没显示过的"
 //    (池内都显示过后就停在最后一条, 不回头重播); 池内只有一条时整段窗口都显示它, 不换条.
 //    池子内容由调用方决定 —— l4d2_playstats_tranchi 当前只送"本回合趣文", 全场趣文走它自己的聊天那一条.
 // ====================================================================================================
@@ -1049,7 +1049,7 @@ public Action Timer_FunFactHUD(Handle timer)
     }
 
     // 到点换下一条"还没显示过的"; 池内都显示过了就停在最后一条.
-    // FUNFACT_FACT_INTERVAL 与重写间隔相等时每次 tick 都该换下一条, 所以放宽 0.01 秒兜住浮点/帧抖动.
+    // FUNFACT_FACT_INTERVAL 是重写间隔的整数倍, 到点了才换下一条, 所以放宽 0.01 秒兜住浮点/帧抖动.
     if (fNow + 0.01 >= g_fFunFactNextSwitch && g_iFunFactPoolIndex + 1 < g_iFunFactPoolCount)
     {
         g_iFunFactPoolIndex++;

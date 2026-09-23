@@ -206,7 +206,7 @@
 #define FUNFACT_HUD_REJECTED	-3								// 被 scripted_hud 拒绝(修复队伍进行中/GameRules 未就绪)
 
 // 趣文显示参数.
-//   有 l4d2_scripted_hud: HUD 只轮播"本回合趣文"(每条 0.5 秒, 由 scripted_hud 的 FUNFACT_FACT_INTERVAL 控制),
+//   有 l4d2_scripted_hud: HUD 只轮播"本回合趣文"(每条 1 秒, 由 scripted_hud 的 FUNFACT_FACT_INTERVAL 控制),
 //                          聊天框只补发一条"全场趣文".
 //   没有 HUD:             聊天框轮播"本回合 + 全场"趣文, 每 FUNFACT_CHAT_INTERVAL 秒一条.
 #define FUNFACT_HUD_SHOW_TIME	8.0								// HUD 轮播窗口总时长(从推送时刻起算).
@@ -243,37 +243,44 @@
 #define FFACT_TYPE_SPITDMG		16
 #define FFACT_MAXTYPES			16
 
-#define FFACT_MIN_CROWN			1
+// 门槛: 判定条件是 "值 > MIN", 即 MIN+1 起算达标; MAX 只用于算权重(越接近 MAX 越"出彩", 排序越靠前).
+// 2026-09-23 一天实测(80 个半场, 见 logs/l4d2_funfact.log 的"候选(值/门槛)"行)后下调:
+//   实测区间: 皇冠0-1 惊动皇冠0-1 空中击杀0-3 近战空中击杀0-1 hunter高扑0-2 jockey高扑恒0
+//             推开0-10 tank近战0-4 断舌0-2 点爆0-4 空中推停0-2 满级撞恒0
+//             抓伤0-105 boomer补刀0-50 酸液0-159 死亡冲锋0-2
+//   原门槛(皇冠≥2/推开≥16/抓伤≥51/boomer≥41/酸液≥61…)几乎只有"酸液"偶尔够, 所以整天 80% 回合是"无趣文".
+//   jockey高扑 / 满级撞 是 skill_detect 这两个事件在本服几乎不触发(实测恒 0), 门槛再低也没用, 先保持稀有.
+#define FFACT_MIN_CROWN			0
 #define FFACT_MAX_CROWN			10
-#define FFACT_MIN_DRAWCROWN		1
+#define FFACT_MIN_DRAWCROWN		0
 #define FFACT_MAX_DRAWCROWN		10
-#define FFACT_MIN_SKEET			2
+#define FFACT_MIN_SKEET			1
 #define FFACT_MAX_SKEET			20
-#define FFACT_MIN_MELEESKEET	1
+#define FFACT_MIN_MELEESKEET	0
 #define FFACT_MAX_MELEESKEET	10
-#define FFACT_MIN_HUNTERDP		2
+#define FFACT_MIN_HUNTERDP		1
 #define FFACT_MAX_HUNTERDP		10
-#define FFACT_MIN_JOCKEYDP		2
+#define FFACT_MIN_JOCKEYDP		1
 #define FFACT_MAX_JOCKEYDP		10
-#define FFACT_MIN_M2			15
+#define FFACT_MIN_M2			4
 #define FFACT_MAX_M2			50
-#define FFACT_MIN_MELEETANK		4
+#define FFACT_MIN_MELEETANK		2
 #define FFACT_MAX_MELEETANK		10
-#define FFACT_MIN_CUT			4
+#define FFACT_MIN_CUT			1
 #define FFACT_MAX_CUT			10
-#define FFACT_MIN_POP			4
+#define FFACT_MIN_POP			2
 #define FFACT_MAX_POP			10
-#define FFACT_MIN_DEADSTOP		7
+#define FFACT_MIN_DEADSTOP		1
 #define FFACT_MAX_DEADSTOP		20
-#define FFACT_MIN_LEVEL			3
+#define FFACT_MIN_LEVEL			1
 #define FFACT_MAX_LEVEL			10
-#define FFACT_MIN_SCRATCH		50
+#define FFACT_MIN_SCRATCH		25
 #define FFACT_MAX_SCRATCH		200
-#define FFACT_MIN_DCHARGE		1
+#define FFACT_MIN_DCHARGE		0
 #define FFACT_MAX_DCHARGE		4
-#define FFACT_MIN_BOOMDMG		40
+#define FFACT_MIN_BOOMDMG		15
 #define FFACT_MAX_BOOMDMG		200
-#define FFACT_MIN_SPITDMG		60
+#define FFACT_MIN_SPITDMG		35
 #define FFACT_MAX_SPITDMG		200
 
 // writing
@@ -550,7 +557,7 @@ public Plugin myinfo =
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.8",
+	version = "1.1.10",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -6821,7 +6828,7 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 	int iFlags = GetConVarInt((g_bModeCampaign) ? g_hCvarAutoPrintCoop : g_hCvarAutoPrintVs);
 
 	// 趣文显示:
-	//   有 l4d2_scripted_hud —— HUD 轮播"本回合趣文"(每条 0.5 秒, 共 8 秒), 聊天框只补一条"全场趣文"(见
+	//   有 l4d2_scripted_hud —— HUD 轮播"本回合趣文"(每条 1 秒, 共 8 秒), 聊天框只补一条"全场趣文"(见
 	//                          AutomaticPrintPerClient 里 AUTO_FUNFACT_GAME 那支).
 	//   没有 HUD           —— 聊天框轮播"本回合 + 全场"趣文, 每 FUNFACT_CHAT_INTERVAL 秒一条.
 	// 每回合一行总结, 直接看专用日志就知道这次"为什么有/没有" (logs/l4d2_funfact.log).
@@ -6895,7 +6902,7 @@ void LogFunFactHudResult(const char[] sWhere, int iResult)
 
 // 局末趣文(有 HUD): 把"本回合趣文"推送到 l4d2_scripted_hud 的专用趣文槽位(槽位 2)轮播, 全局广播给所有人.
 // 全场趣文不占 HUD(有 HUD 时由聊天框补发一条, 见 AutomaticPrintPerClient).
-// 池内每条 0.5 秒依次轮换(scripted_hud 的 FUNFACT_FACT_INTERVAL), 窗口 FUNFACT_HUD_SHOW_TIME 秒.
+// 池内每条 1 秒依次轮换(scripted_hud 的 FUNFACT_FACT_INTERVAL), 窗口 FUNFACT_HUD_SHOW_TIME 秒.
 // 一条都没达标时推 FUNFACT_EMPTY_TEXT 兜底, HUD 不会空着.
 // 返回 FUNFACT_HUD_* 状态码, 便于 /sm_funfact_hud 诊断.
 int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iTeam = -1)
@@ -6942,7 +6949,7 @@ int DisplayFunFactHUD(int iFlags = AUTO_FUNFACT_ROUND, bool bTeam = true, int iT
 
 	PrintDebug(2, "fun fact HUD: %d 条本回合趣文入池轮播", iPooled);
 
-	FunFactLog("HUD 推送成功: %d 条本回合趣文入池, 窗口 %.1f 秒 (每条 0.5 秒).", iPooled, FUNFACT_HUD_SHOW_TIME);
+	FunFactLog("HUD 推送成功: %d 条本回合趣文入池, 窗口 %.1f 秒 (每条 1 秒).", iPooled, FUNFACT_HUD_SHOW_TIME);
 
 	return ScriptedHud_ShowRoundFunFact(g_sFunFactPool, FUNFACT_HUD_SHOW_TIME) ? FUNFACT_HUD_OK : FUNFACT_HUD_REJECTED;
 }
@@ -7035,7 +7042,7 @@ Action Cmd_FunFactHud(int client, int args)
 
 	switch (iResult) {
 		case FUNFACT_HUD_OK: {
-			ReplyToCommand(client, "\x04[提示]\x03已把本回合趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 0.5 秒, 共 8 秒).");
+			ReplyToCommand(client, "\x04[提示]\x03已把本回合趣文推送到脚本 HUD 轮播\x05(槽位 2, 每条 1 秒, 共 8 秒).");
 		}
 		case FUNFACT_HUD_NO_LIB: {
 			ReplyToCommand(client, "\x04[提示]\x05l4d2_scripted_hud 未加载, 趣文 HUD 无法显示.");

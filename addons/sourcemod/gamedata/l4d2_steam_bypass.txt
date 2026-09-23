@@ -1,0 +1,261 @@
+"Games"
+{
+	"Offsets"
+	{
+		"OS"
+		{
+			"linux"		"1"
+			"windows"	"0"
+		}
+	}
+
+	"left4dead2"
+	{
+		"Offsets"
+		{
+			/*
+			 * How this plugin reaches the IClient virtuals (GetNetChannel, Disconnect) differs per
+			 * platform, because the two builds are laid out differently:
+			 *   windows - IClient is the subobject at +4 (RTTI base class mdisp = 4) and GetNetChannel
+			 *             is slot 18 of that frame (CBaseServer::CheckTimeouts, engine.dll RVA 0x135880,
+			 *             calls (*(client+4))[18]).
+			 *   linux   - the plugin uses the primary CBaseClient vtable instead, where GetNetChannel is
+			 *             slot 8 (_ZTV11CBaseClient, verified) and Disconnect resolves through its own
+			 *             symbol, so no adjustment is applied.
+			 * This is therefore this plugin's frame offset, not the engine's mdisp.
+			 */
+			"CBaseClient->IClient->frame_offset"
+			{
+				"linux"		"0"
+				"windows"	"4"
+			}
+
+			/*
+			 * The engine's "fully authenticated" byte, +0x217 on BOTH platforms. The success branch
+			 * of the auth callback writes 1 into it and the failure branch jumps past that write:
+			 *   linux   0x20137C  mov byte ptr [ebx+217h], 1   (failure path jumps to 0x2013F0)
+			 *   windows 0x12E78E  mov byte ptr [ebx+217h], 1
+			 * and it is exactly what SourceMod's auth gate reads:
+			 *   CVEngineServer::IsClientFullyAuthenticated -> movzx eax, byte ptr [edx+217h]
+			 * So code 0 => flag 1 => SourceMod authorises the client and fires OnClientAuthorized /
+			 * OnClientPostAdminCheck. The plugin logs the flag around its rewrite, which turns that
+			 * log line into an end-to-end proof.
+			 */
+			"CBaseClient->m_bFullyAuthenticated"
+			{
+				"linux"		"535"
+				"windows"	"535"
+			}
+
+			/*
+			 * ValidateAuthTicketResponse_t { CSteamID m_SteamID; EAuthSessionResponse m_eAuthSessionResponse; CSteamID m_OwnerSteamID; }
+			 * id (8 bytes) is at +0, the verdict is at +8. Both platforms verified:
+			 *   windows engine.dll RVA 0x12E622   mov esi, [esi+8]                       ; then jz <success path>
+			 *   linux  engine_srv.so  RVA 0x201301  mov eax, [esi+8] ; test ; jnz <failure path>
+			 * This engine build never reads m_OwnerSteamID (checked every [esi+..] access in the callback).
+			 */
+			"ValidateAuthTicketResponse_t->m_eAuthSessionResponse"
+			{
+				"linux"		"8"
+				"windows"	"8"
+			}
+
+			/*
+			 * CBaseClient::m_SteamID - 8 bytes: low dword first, then the high dword.
+			 *   windows: CBaseClient::GetSteamID = IClient frame slot 16 (engine.dll RVA 0x4E2E0)
+			 *            mov edx, [ecx+79h]        ; ecx is the IClient subobject = complete object + 4
+			 *   linux:   CBaseClient::SetSteamID (engine_srv.so RVA 0xEA0B0)
+			 *            mov [ecx+81h], edx / mov [ecx+7Dh], eax   ; ecx is the complete object
+			 * => 0x7D from the complete object on BOTH platforms (this is also what l4dtoolz's
+			 *    steam_off 0x7D uses; the engine itself reaches it as IClient+0x79).
+			 */
+			"CBaseClient->m_SteamID"
+			{
+				"linux"		"125"
+				"windows"	"125"
+			}
+
+			/*
+			 * char m_Name[32] inside CBaseClient, read straight from the complete object pointer.
+			 * windows verified: the same buffer a name getter returns (engine.dll RVA 0x4FCD0: lea eax,[ecx+38h]).
+			 */
+			"CBaseClient->m_Name"
+			{
+				"linux"		"60"
+				"windows"	"60"
+			}
+
+			/*
+			 * CNetChan::IsTimingOut - virtual index 7. Called on the CNetChan* that GetNetChannel
+			 * returns, so no IClient frame adjustment.
+			 * windows verified (engine.dll RVA 0x1B1D50): last != -1.0 && now > last + 4.0
+			 */
+			"CNetChan::IsTimingOut"
+			{
+				"linux"		"7"
+				"windows"	"7"
+			}
+
+			/*
+			 * CBaseClient::GetNetChannel - IClient frame virtual, windows index verified as 18
+			 * (engine.dll RVA 0x4FCE0: mov eax, [ecx+0E4h] ; ret = m_NetChannel). The old value 9
+			 * counted the __purecall slots of the +0 frame's vtable instead.
+			 * Must be called with (complete object + 4) on windows; slot 18 of the +0 frame is a
+			 * nullstub for CBaseClient/CHLTVClient and an unrelated sound helper for CGameClient.
+			 */
+			"CBaseClient::GetNetChannel"
+			{
+				"linux"		"8"
+				"windows"	"18"
+			}
+		}
+
+		"Functions"
+		{
+			/*
+			 * void __thiscall CSteam3Server::OnValidateAuthTicketResponse(ValidateAuthTicketResponse_t *)
+			 * This is the function the engine registers as CCallback<CSteam3Server, ValidateAuthTicketResponse_t, 1>
+			 * inside the CSteam3Server instance (object +0x70, m_Func at +0x80) - see engine.dll RVA 0x12E8FA..
+			 * It looks the client up by the response's SteamID and then:
+			 *   code == 0 -> success path (client is marked authorised)
+			 *   code != 0 -> calls OnValidateAuthTicketResponseHelper (the "No Steam logon" kick)
+			 * So rewriting "code" in a pre hook lets the engine run its own success path.
+			 */
+			"CSteam3Server::OnValidateAuthTicketResponse"
+			{
+				"signature" "CSteam3Server::OnValidateAuthTicketResponse"
+				"callconv"  "thiscall"
+				"return"    "void"
+				"this"      "ignore"
+				"arguments"
+				{
+					"response"
+					{
+						"type"	"int"	// ValidateAuthTicketResponse_t*, verdict at +8
+					}
+				}
+			}
+
+			/*
+			 * bool __thiscall CBaseServer::CheckChallengeType(CBaseClient *, int, netadr_s &, int, const char *, int)
+			 * CBaseServer vtable slot 0x39. Validates the client's authentication certificate
+			 * (32 hex chars) and only then creates the local Steam user for that client
+			 * ("Invalid authentication certificate length...", "GSCreateLocalUser failed").
+			 * Linux keeps the full mangled signature, which is where the argument list was read from.
+			 */
+			"CBaseServer::CheckChallengeType"
+			{
+				"signature" "CBaseServer::CheckChallengeType"
+				"callconv"  "thiscall"
+				"return"    "bool"
+				"this"      "ignore"
+				"arguments"
+				{
+					/* every argument MUST have a unique name: duplicate keys are collapsed by the
+					 * KeyValues parser, which silently shortens the argument list and makes DHooks
+					 * compute the wrong stack size (it then aborts the server with
+					 * "Failed to find return address of original function"). */
+					"client"
+					{
+						"type"	"int"	// complete client object, m_SteamID at +0x7D
+					}
+
+					"a2"
+					{
+						"type"	"int"
+					}
+
+					"address"
+					{
+						"type"	"int"	// netadr_s & (unused here)
+					}
+
+					"mode"
+					{
+						"type"	"int"	// 1..3
+					}
+
+					"certificate"
+					{
+						"type"	"int"	// const char * - the hex certificate the client sent
+					}
+
+					"length"
+					{
+						"type"	"int"
+					}
+				}
+			}
+
+			/*
+			 * void __thiscall CSteam3Server::OnValidateAuthTicketResponseHelper(CBaseClient *, EAuthSessionResponse)
+			 * engine.dll RVA 0x12D750, retn 8, ONLY called when the verdict is non-zero.
+			 * Two stack arguments - a previous revision of the sibling plugin declared a phantom third one.
+			 */
+			"CSteam3Server::OnValidateAuthTicketResponseHelper"
+			{
+				"signature" "CSteam3Server::OnValidateAuthTicketResponseHelper"
+				"callconv"  "thiscall"
+				"return"    "void"
+				"this"      "ignore"
+				"arguments"
+				{
+					"CBaseClient"
+					{
+						"type"	"int"	// complete object pointer the engine passes
+					}
+
+					"EAuthSessionResponse"
+					{
+						"type"	"int"
+					}
+				}
+			}
+		}
+
+		"Signatures"
+		{
+			/* windows pattern: engine.dll RVA 0x12E5E0, unique (verified with l4d2_sigcheck.py) */
+			"CSteam3Server::OnValidateAuthTicketResponse"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN13CSteam3Server28OnValidateAuthTicketResponseEP28ValidateAuthTicketResponse_t"
+				"windows"	"\x55\x8B\xEC\x81\xEC\x1C\x02\x00\x00\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x56\x8B\x75\x08\x57\x8B\xF9\x83\x7F\x04\x00\x0F\x84\x2A\x2A\x2A\x2A\x83\xBF\x84\x00\x00\x00\x01\x0F\x8C\x2A\x2A\x2A\x2A\x53\x56\xE8\x2A\x2A\x2A\x2A\x8B\xD8\x85\xDB\x0F\x84\x2A\x2A\x2A\x2A"
+			}
+
+			/* windows pattern: engine.dll RVA 0x133F80, unique (verified with l4d2_sigcheck.py) */
+			"CBaseServer::CheckChallengeType"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN11CBaseServer18CheckChallengeTypeEP11CBaseClientiR8netadr_siPKci"
+				"windows"	"\x55\x8B\xEC\x83\xEC\x1C\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x8B\x45\x14\x53\x8B\x5D\x08\x56\x8B\xF1\x8B\x4D\x18\x8D\x50\xFF\x57\x8B\x7D\x10\x89\x4D\xEC\x83\xFA\x02\x0F\x87\x2A\x2A\x2A\x2A\x83\xF8\x02\x2A\x2A\x51\xE8\x2A\x2A\x2A\x2A\x83\xC4\x04\x85\xC0"
+			}
+
+			"CSteam3Server::OnValidateAuthTicketResponseHelper"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN13CSteam3Server34OnValidateAuthTicketResponseHelperEP11CBaseClient20EAuthSessionResponse"
+				"windows"	"\x55\x8B\xEC\x53\x56\x8B\x75\x2A\x8B\x46\x2A\x8B\x50\x2A\x57\x8B\x7D\x2A\x83\xC6\x2A\x8B\xD9\x57\x8B\xCE\xFF\xD2\x50\x68\x2A\x2A\x2A\x2A\xFF\x15\x2A\x2A\x2A\x2A\x8B\x06\x8B\x50\x2A\x83\xC4\x2A\x57\x8B\xCE\xFF\xD2"
+			}
+
+			/* CBaseServer::GetClient(int index) -> IClient*, the engine's client array lookup (0 based).
+			 * Both platforms do `add eax, 4` on the stored pointer, so the complete client object is
+			 * (return - 4): windows engine.dll RVA 0x4E870, linux engine_srv.so RVA 0x100490. */
+			"CBaseServer::GetClient"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN11CBaseServer9GetClientEi"
+				"windows"	"\x55\x8B\xEC\x8B\x81\x2A\x2A\x2A\x2A\x8B\x4D\x2A\x8B\x04\x88\x85\xC0\x74\x2A\x83\xC0\x2A\x5D\xC2\x2A\x2A\x33\xC0\x5D\xC2"
+			}
+
+			/* IClient::Disconnect - IClient frame slot 13 (engine.dll RVA 0x4EC60).
+			 * windows: call it on (complete object + 4), the implementation expects the IClient subobject. */
+			"CBaseClient::Disconnect"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN11CBaseClient10DisconnectEPKcz"
+				"windows"	"\x55\x8B\xEC\x81\xEC\x2A\x2A\x2A\x2A\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\x2A\x57\x8B\x7D\x2A\x83\xBF"
+			}
+		}
+	}
+}

@@ -24,7 +24,7 @@
  *
  * One fact is visible at a time. Pass several facts as separate lines (joined
  * with '\n'): they become a carousel - each line is shown for
- * FUNFACT_FACT_INTERVAL (1s), then swapped for the next line that has not been
+ * FUNFACT_FACT_INTERVAL (1.5s), then swapped for the next line that has not been
  * shown yet; once every line has been shown the last one is kept until the
  * window ends. A single line is simply shown for the whole `hideTime` window.
  *
@@ -39,6 +39,28 @@
  *         (no text).
  */
 native int ScriptedHud_ShowRoundFunFact(const char[] text, float hideTime);
+
+/**
+ * Shows arbitrary text in the very same slot the round-end fun fact uses
+ * (slot 2: same box, position, size and behaviour), so other plugins can reuse
+ * that place on screen.
+ *
+ * Everything is shared with the fun-fact slot:
+ *   - multiple lines ('\n' separated) become the same carousel (one line per
+ *     FUNFACT_FACT_INTERVAL = 1.5s, each line only once);
+ *   - the slot is re-sent every 0.5s, so the game cannot wipe it;
+ *   - chat colour codes (\x01-\x05) are stripped and leading/trailing blanks trimmed;
+ *   - while the team-fix prompt is up the text is deferred and shown after it.
+ * Last writer wins: a new call (from any plugin, including the fun fact itself)
+ * replaces whatever is currently in that slot.
+ *
+ * @param text     Text to display (multiple lines: one per line). Empty/NULL => no-op.
+ * @param hideTime Total seconds of the display window (<=0 uses a 5s default).
+ *
+ * @return 1 when the text was accepted (shown right away, or deferred while the
+ *         team-fix prompt is up), 0 otherwise (no text).
+ */
+native int ScriptedHud_ShowText(const char[] text, float hideTime);
 
 public SharedPlugin __pl_l4d2_scripted_hud =
 {
@@ -55,5 +77,6 @@ public SharedPlugin __pl_l4d2_scripted_hud =
 public void __pl_l4d2_scripted_hud_SetNTVOptional()
 {
 	MarkNativeAsOptional("ScriptedHud_ShowRoundFunFact");
+	MarkNativeAsOptional("ScriptedHud_ShowText");
 }
 #endif

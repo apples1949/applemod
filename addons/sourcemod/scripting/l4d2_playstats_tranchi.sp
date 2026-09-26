@@ -562,7 +562,7 @@ public Plugin myinfo =
 	name = "Player Statistics (tranchi)",
 	author = "apples1949",
 	description = "Tracks statistics, even when clients disconnect. MVP, Skills, Accuracy, etc.",
-	version = "1.1.12",
+	version = "1.1.13",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -6877,10 +6877,11 @@ Action Timer_AutomaticRoundEndPrint(Handle hTimer)
 }
 
 // 趣文链路诊断: 追加一行到专用日志文件(LogToFile 自带时间戳 + 插件名标签).
-// 开关 sm_funfact_debug(默认 1); 与 sm_stats_debug / 通用 SourceMod 日志完全分开, 免得被其它调试信息淹没.
+// 开关 sm_funfact_debug(默认关 0); 与 sm_stats_debug / 通用 SourceMod 日志完全分开, 免得被其它调试信息淹没.
 void FunFactLog(const char[] fmt, any ...)
 {
-	if (g_hCvarFunFactDebug != null && !GetConVarBool(g_hCvarFunFactDebug)) {
+	// 取不到开关时也当关闭处理(日志默认关, 免得 cvar 异常时反而开始写文件).
+	if (g_hCvarFunFactDebug == null || !GetConVarBool(g_hCvarFunFactDebug)) {
 		return;
 	}
 
@@ -8132,15 +8133,19 @@ void stripUnicode(char testString[MAXNAME], int maxLength = 20)
 	strcopy(testString, maxLength, tmpString);
 }
 
+// 调试输出: sm_stats_debug <= 0 时完全静默(既不写 SourceMod 通用日志, 也不打服务端控制台).
+// 注意这里把"级别 0"的调用也一起关掉了 —— 默认配置下本插件不再产生任何日志行.
 void PrintDebug(int debugLevel, const char[] Message, any ...)
 {
-	if (debugLevel <= GetConVarInt(g_hCvarDebug)) {
-		char DebugBuff[256];
-		VFormat(DebugBuff, sizeof(DebugBuff), Message, 3);
-		LogMessage(DebugBuff);
-		PrintToServer(DebugBuff);
-		//PrintToServer(DebugBuff);
+	int iDebug = (g_hCvarDebug != null) ? GetConVarInt(g_hCvarDebug) : 0;
+	if (iDebug <= 0 || debugLevel > iDebug) {
+		return;
 	}
+
+	char DebugBuff[256];
+	VFormat(DebugBuff, sizeof(DebugBuff), Message, 3);
+	LogMessage(DebugBuff);
+	PrintToServer(DebugBuff);
 }
 
 // --------------------------------

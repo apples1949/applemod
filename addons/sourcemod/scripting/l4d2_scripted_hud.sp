@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.5.0",
+    version     = "1.5.1",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -844,11 +844,12 @@ public void L4D2_FixTeamShuffle_OnFixComplete()
 
 // ====================================================================================================
 // 趣文链路诊断: 追加一行到专用日志文件(LogToFile 自带时间戳 + 插件名标签).
-// 开关 sm_funfact_debug(默认 1); 与 SourceMod 通用日志分开, 免得被其它调试信息淹没.
+// 开关 sm_funfact_debug(默认关 0); 与 SourceMod 通用日志分开, 免得被其它调试信息淹没.
 // ====================================================================================================
 void FunFactLog(const char[] fmt, any ...)
 {
-    if (g_hCvarFunFactDebug != null && !g_hCvarFunFactDebug.BoolValue)
+    // 取不到开关时也当关闭处理(日志默认关, 免得 cvar 异常时反而开始写文件).
+    if (g_hCvarFunFactDebug == null || !g_hCvarFunFactDebug.BoolValue)
         return;
 
     char sMsg[512];

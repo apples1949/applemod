@@ -45,4 +45,14 @@
 		"type"	"S"
 		"text"	"{GREEN}[提示] !hats{TEAM}设置头顶帽子, {GREEN}!pt{TEAM}查看所有玩家时长, {GREEN}!ip{TEAM}查看所有玩家地区, {GREEN}!wpn{TEAM}安全屋选武器, {GREEN}!zs{TEAM}生还者倒地自杀, {GREEN}!g{TEAM}丢武器"
 	}
+	"10"
+	{
+		"type"	"S"
+		"text"	"{GREEN}[公告]包抗大舞台  有活你就来"
+	}
+	"11"
+	{
+		"type"	"S"
+		"text"	"{GREEN}[公告]卡位不规范  队友两行泪"
+	}
 }

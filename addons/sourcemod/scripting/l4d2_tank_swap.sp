@@ -6,7 +6,7 @@
 #include <left4dhooks>
 #include <colors>
 
-#define PLUGIN_VERSION "1.6"
+#define PLUGIN_VERSION "1.7"
 
 float CONTROL_DELAY_SAFETY             = 0.3;
 float CONTROL_RETRY_DELAY              = 2.0;
@@ -42,6 +42,8 @@ bool tankMenuChosen                   = false;
 int g_iSwapLeftoverBotUserId          = 0;
 // 被顶替玩家的原特感职业: 换克后玩家的 m_zombieClass 已经变成 Tank(8), 必须换克前先记下来做兜底匹配
 int g_iSwapLeftoverZombieClass        = 0;
+// 只在 PerformTankSwap 执行期间为真: 保证 player_bot_replace 只会记下"本次换克自己顶替出来的 bot"
+bool g_bSwapInProgress                = false;
 
 public Plugin myinfo =
 {
@@ -293,9 +295,14 @@ public Action TC_ev_BotPlayerReplace(Event event, const char[] name, bool dontBr
 
 /* 给克时 ReplaceWithBot 会在玩家原地生成一只同职业 AI 特感顶替他,
    这里记下它的 userid, 换克结束后把这只"残留特感"清掉(不留在场上占特感位)。
-   注意方向: player_bot_replace = "机器人替换了玩家"。 */
+   注意方向: player_bot_replace = "机器人替换了玩家"。
+   只在 g_bSwapInProgress 期间记录: 其它顶替(AFK 接管、玩家断线变 bot 等)与换克无关,
+   记错了就会在换克时清掉一只无辜的在用特感。 */
 public Action TC_ev_PlayerBotReplace(Event event, const char[] name, bool dontBroadcast)
 {
+	if (!g_bSwapInProgress)
+		return Plugin_Continue;
+
 	int bot = GetClientOfUserId(event.GetInt("bot"));
 
 	if (bot > 0 && bot <= MaxClients)
@@ -910,7 +917,12 @@ bool PerformTankSwap(int oldTank, int newTank)
 	{
 		// 顶替出来的 bot 与玩家同职业; 换克后玩家已变成 Tank, 这里必须先记
 		g_iSwapLeftoverZombieClass = GetEntProp(newTank, Prop_Send, "m_zombieClass");
+
+		// 只在这次 ReplaceWithBot 期间记录 player_bot_replace:
+		// 别的顶替(AFK 接管、玩家断线变 bot 等)与换克无关, 记错了会误伤一只在用的特感
+		g_bSwapInProgress = true;
 		L4D_ReplaceWithBot(newTank);
+		g_bSwapInProgress = false;
 	}
 
 	// Preserves the original manual-menu behavior: after ReplaceWithBot a live
@@ -920,7 +932,7 @@ bool PerformTankSwap(int oldTank, int newTank)
 
 	L4D_ReplaceTank(oldTank, newTank);
 
-	// 玩家已经去开坦克, 那只被顶替出来的 AI 特感就地清掉(处死+移除), 不再留在场上
+	// 玩家已经去开坦克, 那只被顶替出来的 AI 特感就地清掉(只处死, 由引擎回收其客户端)
 	RemoveSwapLeftoverBot(newTank);
 
 	// 主动告知其它插件(如 tank_damage)换克已发生: 与引擎 forward 双保险, 幂等
@@ -947,7 +959,7 @@ bool PerformTankSwap(int oldTank, int newTank)
 	return true;
 }
 
-/* 目标特感正控制着某个生还者时, 先彻底解除控制, 再走"顶替 → 处死 → 移除"流程。
+/* 目标特感正控制着某个生还者时, 先彻底解除控制, 再走"顶替 → 处死"流程。
    不先解控就顶替/处死: 被 Jockey 骑着的玩家状态错乱(见 l4dinfectedbots 的同款注释),
    被 Charger 扛走/压制的生还者会带着"被扛"状态留在原地卡住。
    顺序: Jockey 骑乘 → Charger 扛走(carry 与 pummel 互斥, 扛走优先) → Charger 压制。 */
@@ -1014,25 +1026,40 @@ void DismountJockey(int jockey)
 	SetCommandFlags("dismount", flags);
 }
 
-/* 清掉给克时被顶替出来的那只 AI 特感。
-   正常路径: player_bot_replace 事件里记下了它的 userid;
-   兜底路径: 万一事件没来(以 userid 找回失败), 就在感染者队伍里找那只"和玩家同职业、且不属于换克前就在场的 bot"。 */
+/* 清掉给克时被顶替出来的那只 AI 特感: 只处死, 绝不 KickClient。
+   正常路径: player_bot_replace 事件里记下了它的 userid(只认本次换克, 见 g_bSwapInProgress);
+   兜底路径: 万一事件没来(以 userid 找回失败), 就在感染者队伍里找那只"和玩家同职业、且不属于换克前就在场的 bot"。
+
+   【为什么不能用 KickClient 踢感染者 bot】
+   踢掉感染者 bot 会让引擎自己的特感职业名额记录错位, 玩家看到的现象就是"某几个特感职业整张图再也刷不出来"。
+   本仓库 l4d2_nospitterduringtank.sp 头部就记录了同类事故:
+     "If the bot tank is kicked via sourcemod, you won't get any more spitters for the rest of the map."
+   本服(竞技套件)已在用的 l4d2_nosecondchances.smx 处理同一件事(玩家被 bot 顶替后不能留在场上)时,
+   同样只做 ForcePlayerSuicide, 把 bot 客户端交给引擎自己回收 —— 引擎会走正常的"灵魂 → 按名额重生/回收"流程,
+   特感名额与各职业刷新都不会错乱。 */
 void RemoveSwapLeftoverBot(int newTank)
 {
+	g_bSwapInProgress = false;
+
 	int bot = GetClientOfUserId(g_iSwapLeftoverBotUserId);
 	g_iSwapLeftoverBotUserId = 0;
 
 	if (bot <= 0)
 		bot = FindLeftoverBot(newTank);
 
-	if (bot <= 0)
+	// 只碰"感染者 bot": 人、坦克、已断线的都不动
+	if (!IsValidClient(bot) || !IsFakeClient(bot))
 		return;
 
-	// 处死(让引擎走正常的 SI 死亡流程, 不留下半死实体) → 再移除, 确保它不再占着特感名额
-	ForcePlayerSuicide(bot);
+	if (GetClientTeam(bot) != TEAM_INFECTED || IsPlayerTank(bot))
+		return;
 
-	if (IsClientInGame(bot))
-		KickClient(bot, "Tank swap: victim's special infected removed");
+	// 已经躺下/已经是灵魂(引擎或 l4d2_nosecondchances 这类插件已经处死过)就不用补刀:
+	// 同一个 bot 触发第二次 player_death 只会打扰职业队列与统计
+	if (!IsPlayerAlive(bot) || IsPlayerGhost(bot))
+		return;
+
+	ForcePlayerSuicide(bot);
 }
 
 /* 兜底查找: 顶替出来的 bot 与玩家换克前的职业(g_iSwapLeftoverZombieClass)一致,

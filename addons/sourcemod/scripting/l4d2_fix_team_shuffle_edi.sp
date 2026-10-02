@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.0.0"
+#define PLUGIN_VERSION "2.1.0"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -25,6 +25,9 @@ bool g_bRoundEnd;         // 当前回合是否已经结束（事件去重）
 bool g_bFinalMap;         // 当前地图是否为章节最后一关
 bool g_bOldTeamFlipped;   // 记录时游戏规则的 m_bAreTeamsFlipped
 bool g_bNewTeamFlipped;   // 新地图该属性值，两者不同即代表发生了换边
+bool g_bRecordedAtRoundEnd;    // 记录是否由回合结束触发（回合结束游戏必换边；中途换图不换边）
+bool g_bMapChangedSinceRecord; // 记录之后是否真的换过图（OnMapStart 消费换图标记时置位）
+char g_sRecordedMap[64];       // 记录时所在的地图名（同图重开不算跨战役）
 
 bool g_bChecked[MAXPLAYERS + 1];      // 某玩家是否正在等待自己的还原计时器
 int g_iFailureCount[MAXPLAYERS + 1];  // 某玩家还原失败的次数
@@ -161,12 +164,12 @@ public void OnPluginStart()
 	g_cvTime.AddChangeHook(OnCvarChange_Time);
 	g_cvEnabled.AddChangeHook(OnCvarChange_Enabled);
 
-	g_cvFinalMapDisable = CreateConVar("l4d2_fix_team_shuffle_final_map_disable", "1",
-		"为 1 时章节最后一关结束不记录队伍，下一章按游戏默认分边（0=记录并还原）",
+	g_cvFinalMapDisable = CreateConVar("l4d2_fix_team_shuffle_final_map_disable", "0",
+		"为 1 时章节最后一关结束不记录队伍，下一章按游戏默认分边；0=记录并在下一章还原（跨战役按换边处理）",
 		FCVAR_NONE, true, 0.0, true, 1.0);
 
-	g_cvChangeMapDisable = CreateConVar("l4d2_fix_team_shuffle_change_map_disable", "1",
-		"为 1 时回合中途（未到回合结束）换图不记录队伍（0=记录并还原）",
+	g_cvChangeMapDisable = CreateConVar("l4d2_fix_team_shuffle_change_map_disable", "0",
+		"为 1 时回合中途（未到回合结束）换图不记录队伍；0=记录并在新图还原（中途换图不发生换边，按原队伍还原）",
 		FCVAR_NONE, true, 0.0, true, 1.0);
 
 	g_cvIgnoreOffline = CreateConVar("l4d2_fix_team_shuffle_ignore_offline", "1",
@@ -366,7 +369,8 @@ void OnVersusRoundEnd()
 	if (g_bRoundEnd)
 		return;
 
-	KeepTeams();
+	// 回合结束记录：游戏随后必然换边，跨战役时也按换边处理
+	KeepTeams(true);
 	g_bRoundEnd = true;
 }
 
@@ -404,14 +408,17 @@ public Action Command_Changelevel(int client, const char[] command, int argc)
 	// 记录过（g_bRoundEnd 为真）；这里只兜底记录“事件未捕获”与“允许中途记录”的情况。
 	if (!g_bRoundEnd)
 	{
-		KeepTeams();
+		// 中途换图：游戏不会换边，按原队伍还原
+		KeepTeams(false);
 		g_bRoundEnd = true;
 	}
 
 	return Plugin_Continue;
 }
 
-void KeepTeams()
+// roundEnded：本次记录是否由回合结束触发（回合结束游戏必换边，中途换图不换边）
+// inGameOnly：只记录"确实在游戏中"的玩家（换图兜底记录用，避免读不到实体时把人记成旁观）
+void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 {
 	if (!g_bCvarEnabled)
 		return;
@@ -427,6 +434,10 @@ void KeepTeams()
 
 	g_bOldTeamFlipped = view_as<bool>(GameRules_GetProp("m_bAreTeamsFlipped"));
 	g_bMapTransition = true;
+
+	g_bRecordedAtRoundEnd = roundEnded;
+	g_bMapChangedSinceRecord = false;
+	GetCurrentMap(g_sRecordedMap, sizeof(g_sRecordedMap));
 
 	bool connectedOnly = true;
 
@@ -450,7 +461,11 @@ void KeepTeams()
 		}
 		else
 		{
-			// 尚未进游戏但已连接的玩家默认记为旁观
+			// 尚未进游戏但已连接的玩家默认记为旁观；
+			// 换图兜底记录时改为跳过：此时可能读不到实体，记成旁观会把玩家误送去旁观
+			if (inGameOnly)
+				continue;
+
 			team = TEAM_SPECTATOR;
 		}
 
@@ -505,6 +520,10 @@ public void OnMapStart()
 	// 0.5 秒后读取新地图的换边标志；个人还原计时器 1 秒后才第一次执行
 	CreateTimer(0.5, Timer_UpdateTeamFlipped, _, TIMER_FLAG_NO_MAPCHANGE);
 
+	// 本图确实是由上一张图换过来的（KeepTeams 置位、Start 消费）：跨战役判定的前提
+	if (g_bMapTransition)
+		g_bMapChangedSinceRecord = true;
+
 	Start();
 
 	// 消费本次换图标记：Start 执行时它必须仍为真
@@ -513,6 +532,18 @@ public void OnMapStart()
 
 public void OnMapEnd()
 {
+	// 兜底记录：地图要换了，但本次没走"回合结束记录"——换图插件/管理员用
+	// ForceChangeLevel、或引擎自动过关都不经过 changelevel 命令监听。
+	// 仅在允许中途记录时补一次；读不到实体就放弃（宁可不记录，也不能记错）。
+	if (g_bCvarEnabled && L4D_IsVersusMode() && !g_bRoundEnd && !g_bCvarChangeMapDisable
+		&& !(g_bFinalMap && g_bCvarFinalMapDisable))
+	{
+		KeepTeams(false, true);
+
+		if (g_iPendingCount > 0)
+			LogMessage("[队伍修正] 换图前兜底记录 %d 人（本次未走回合结束）", g_iPendingCount);
+	}
+
 	// NO_MAPCHANGE 计时器在换图时被引擎销毁，句柄不再有效
 	g_hCheckTimer = INVALID_HANDLE;
 	g_hTimeoutTimer = INVALID_HANDLE;
@@ -787,8 +818,30 @@ void MarkClientRestored(int client)
 		ForceToUnlock();
 }
 
+// 本张图是否为跨战役换图后的新战役：换到了别的地图，且新图是所在战役的第一关。
+// 同一张图重开（半场重打同一关）不算跨战役。
+bool IsNewCampaignMap()
+{
+	char sMap[64];
+	GetCurrentMap(sMap, sizeof(sMap));
+	if (strcmp(sMap, g_sRecordedMap, false) == 0)
+		return false;
+
+	return L4D_IsFirstMapInScenario();
+}
+
 bool IsTeamSwapped()
 {
+	// 中途换图（回合没结束、游戏没换边）：不对调
+	if (!g_bRecordedAtRoundEnd)
+		return false;
+
+	// 跨战役换图：游戏开新比赛会把 m_bAreTeamsFlipped 重置为 0，而不是像同战役内那样翻转，
+	// 单看标志会把"被重置"误判成"没换边"；而回合结束后游戏必然换边，因此跨战役一律
+	// 按"已换边"处理（上一章的生还者，下一章开局去特感）。
+	if (g_bMapChangedSinceRecord && IsNewCampaignMap())
+		return true;
+
 	return g_bOldTeamFlipped != g_bNewTeamFlipped;
 }
 
@@ -922,6 +975,8 @@ void ClearVars()
 	g_bTeamLock = false;
 	g_iPendingCount = 0;
 	g_bMapTransition = false;
+	g_bRecordedAtRoundEnd = false;
+	g_bMapChangedSinceRecord = false;
 
 	CancelProcessTimers();
 	ResetClientFlags();

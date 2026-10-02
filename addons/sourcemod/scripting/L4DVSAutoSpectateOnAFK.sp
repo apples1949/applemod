@@ -10,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.8-2026/9/19"
+#define PLUGIN_VERSION "2.9-2026/10/2"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
 
@@ -18,7 +18,7 @@
 // For cvars
 ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
  	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, g_hAfkSafeRoomExitGrace,
-	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds;
+	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds, g_hImmuneSteamIds, g_hImmuneIps, g_hImmuneNames;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
 	afkKickTime, afkCheckInterval, afkSafeRoomExitGrace;
@@ -36,6 +36,9 @@ bool g_bLeftSafeRoom;
 bool L4D2Version;
 char g_sAccesslvl[AdminFlags_TOTAL];
 char g_sAutoSpecSteamIds[AUTOSPEC_IDS_MAX];
+char g_sImmuneSteamIds[AUTOSPEC_IDS_MAX];
+char g_sImmuneIps[AUTOSPEC_IDS_MAX];
+char g_sImmuneNames[AUTOSPEC_IDS_MAX];
 int g_iPlayerSpawn, g_iRoundStart;
 Handle PlayerLeftStartTimer, afkCheckThreadTimer;
 
@@ -104,10 +107,13 @@ public void OnPluginStart()
 	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", 			"1", "设为1时，当队伍有空位时，旁观状态下的AFK玩家将被踢出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", 		"0", "设为1时，无论幸存者是否离开安全屋，AFK玩家都会被强制旁观（不影响旁观踢出判定）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkSafeRoomExitGrace = CreateConVar("l4d_specafk_saferoom_exit_grace", 	"5", "在安全屋内就被判定闲置的玩家，其他人离开安全区域后给予的最后行动秒数（每秒提示，超时才强制旁观；0 = 离开安全区域后立即强制旁观）", FCVAR_NOTIFY, true, 0.0);
-	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"", "拥有这些权限标志的玩家在旁观时不会被踢出（留空 = 所有人，-1 = 无人）", FCVAR_NOTIFY);
+	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"-1", "拥有这些权限标志的玩家在旁观时不会被踢出（默认 -1 = 不按权限免疫，所有玩家都会被警告/踢出；填权限标志如 z = 拥有该标志的玩家免疫；留空 = 所有人免疫，会关闭旁观踢人功能）", FCVAR_NOTIFY);
 	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAutoSpecSteamIds 	= CreateConVar("l4d_specafk_autospec_steamids", 	"76561198760610101", "符合条件的 SteamID64 玩家将自动被移动到旁观，且不会被本插件踢出（多个用逗号分隔）", FCVAR_NOTIFY);
+	g_hImmuneSteamIds 		= CreateConVar("l4d_specafk_immune_steamids", 	"76561198760610101", "这些 SteamID 玩家在旁观时不会被本插件警告/踢出（多个用逗号分隔；支持 SteamID64 / STEAM_1:0:x / [U:1:x] 三种写法，可直接照抄 auth 日志；默认值与 l4d_specafk_autospec_steamids 相同）", FCVAR_NOTIFY);
+	g_hImmuneIps 			= CreateConVar("l4d_specafk_immune_ips", 			"", "这些 IP（或 IP 前缀，如 192.168.1.）的玩家在旁观时不会被本插件警告/踢出（多个用逗号分隔；不使用 Steam 认证，用于 NoSteam 客户端兜底）", FCVAR_NOTIFY);
+	g_hImmuneNames 		= CreateConVar("l4d_specafk_immune_names", 		"", "这些显示名在旁观时不会被本插件警告/踢出（多个用逗号分隔；默认空 = 关闭）。注意：显示名由玩家自行修改，任何人改成同名即可绕过踢出，仅在 SteamID/IP 都取不到时（如 NoSteam 客户端）才建议填写", FCVAR_NOTIFY);
 	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "L4D VS 自动AFK旁观插件的版本", FCVAR_DONTRECORD|FCVAR_NOTIFY);
 	
 
@@ -124,6 +130,9 @@ public void OnPluginStart()
 	g_hSayResetTime.AddChangeHook(ConVarChanged);
 	g_hSpecAfkMsgEnable.AddChangeHook(ConVarChanged);
 	g_hAutoSpecSteamIds.AddChangeHook(ConVarChanged);
+	g_hImmuneSteamIds.AddChangeHook(ConVarChanged);
+	g_hImmuneIps.AddChangeHook(ConVarChanged);
+	g_hImmuneNames.AddChangeHook(ConVarChanged);
 
 	if(g_bLate)
 	{
@@ -161,6 +170,9 @@ void ReadCvars()
 	g_bSpecAfkMsgEnable = g_hSpecAfkMsgEnable.BoolValue;
 
 	g_hAutoSpecSteamIds.GetString(g_sAutoSpecSteamIds, sizeof(g_sAutoSpecSteamIds));
+	g_hImmuneSteamIds.GetString(g_sImmuneSteamIds, sizeof(g_sImmuneSteamIds));
+	g_hImmuneIps.GetString(g_sImmuneIps, sizeof(g_sImmuneIps));
+	g_hImmuneNames.GetString(g_sImmuneNames, sizeof(g_sImmuneNames));
 }
 
 void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -213,28 +225,45 @@ bool HasAccess(int client, char[] sAcclvl)
 	return false;
 }
 
-bool IsAutoSpecPlayer(int client)
+// 玩家的 SteamID 是否命中逗号分隔的名单
+// 名单项支持三种写法，方便直接照抄 l4d2_steam_bypass.log / OnClientAuthorized 打印的 auth：
+//   SteamID64 "76561197960265728"、Steam2 "STEAM_1:0:123456"、Steam3 "[U:1:123456]"
+bool IsSteamIdInList(int client, const char[] sList)
 {
-	if (strlen(g_sAutoSpecSteamIds) == 0)
+	if (strlen(sList) == 0)
 		return false;
 
-	char sSteamId[32];
-	if (!GetClientAuthId(client, AuthId_SteamID64, sSteamId, sizeof(sSteamId)))
+	// NoSteam 客户端在认证完成前可能取不到 auth，此时返回 false（不影响其它免疫名单）
+	char sAuth64[32], sAuth2[32], sAuth3[32];
+	bool bHas64 = GetClientAuthId(client, AuthId_SteamID64, sAuth64, sizeof(sAuth64));
+	bool bHas2 = GetClientAuthId(client, AuthId_Steam2, sAuth2, sizeof(sAuth2));
+	bool bHas3 = GetClientAuthId(client, AuthId_Steam3, sAuth3, sizeof(sAuth3));
+	if (!bHas64 && !bHas2 && !bHas3)
 		return false;
 
 	char sIds[AUTOSPEC_IDS_MAX];
-	strcopy(sIds, sizeof(sIds), g_sAutoSpecSteamIds);
+	strcopy(sIds, sizeof(sIds), sList);
 
-	char sParts[16][32];
+	char sParts[16][48];
 	int iCount = ExplodeString(sIds, ",", sParts, sizeof(sParts), sizeof(sParts[]));
 	for (int i = 0; i < iCount; i++)
 	{
 		TrimString(sParts[i]);
-		if (StrEqual(sParts[i], sSteamId, false))
+		if (sParts[i][0] == '\0')
+			continue;
+
+		if ((bHas64 && StrEqual(sParts[i], sAuth64, false))
+			|| (bHas2 && StrEqual(sParts[i], sAuth2, false))
+			|| (bHas3 && StrEqual(sParts[i], sAuth3, false)))
 			return true;
 	}
 
 	return false;
+}
+
+bool IsAutoSpecPlayer(int client)
+{
+	return IsSteamIdInList(client, g_sAutoSpecSteamIds);
 }
 
 void ForceAutoSpec(int client)
@@ -256,13 +285,80 @@ Action tmrForceAutoSpec(Handle timer, int userid)
 	return Plugin_Continue;
 }
 
+// 旁观免疫名单：不再使用玩家可自行修改的显示名做免疫，避免改名绕过踢出
+bool IsImmuneSteamId(int client)
+{
+	return IsSteamIdInList(client, g_sImmuneSteamIds);
+}
+
+// 玩家的 IP 是否命中逗号分隔的名单：名单项以 '.' 结尾时按前缀匹配（如 "192.168.1."），
+// 否则要求完全相等。IP 与 Steam 认证无关，用于给 NoSteam 客户端（暖服机器人等）兜底
+bool IsIpInList(int client, const char[] sList)
+{
+	if (strlen(sList) == 0)
+		return false;
+
+	char sIP[32];
+	if (!GetClientIP(client, sIP, sizeof(sIP)))
+		return false;
+
+	char sIds[AUTOSPEC_IDS_MAX];
+	strcopy(sIds, sizeof(sIds), sList);
+
+	char sParts[16][48];
+	int iCount = ExplodeString(sIds, ",", sParts, sizeof(sParts), sizeof(sParts[]));
+	for (int i = 0; i < iCount; i++)
+	{
+		TrimString(sParts[i]);
+		int iLen = strlen(sParts[i]);
+		if (iLen == 0)
+			continue;
+
+		if (sParts[i][iLen - 1] == '.')
+		{
+			// 前缀匹配（例如 192.168.1.）
+			if (StrContains(sIP, sParts[i], false) == 0)
+				return true;
+		}
+		else if (StrEqual(sParts[i], sIP, false))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool IsImmuneIp(int client)
+{
+	return IsIpInList(client, g_sImmuneIps);
+}
+
+// 按显示名的免疫名单（可选，默认空）。显示名是玩家可自行修改的，所以它只是 SteamID / IP 都不可用
+// 时（例如 NoSteam 客户端拿不到 auth）的兜底手段，填了就等于接受"改名即可绕过"这个代价
 bool IsImmuneName(int client)
 {
+	if (strlen(g_sImmuneNames) == 0)
+		return false;
+
 	char sName[MAX_NAME_LENGTH];
 	GetClientName(client, sName, sizeof(sName));
 
-	// 硬编码：名称为"暖服机器人"的玩家不警告不踢出（同64id免疫由 l4d_specafk_autospec_steamids 提供）
-	return StrEqual(sName, "暖服机器人", false);
+	char sIds[AUTOSPEC_IDS_MAX];
+	strcopy(sIds, sizeof(sIds), g_sImmuneNames);
+
+	char sParts[16][48];
+	int iCount = ExplodeString(sIds, ",", sParts, sizeof(sParts), sizeof(sParts[]));
+	for (int i = 0; i < iCount; i++)
+	{
+		TrimString(sParts[i]);
+		if (sParts[i][0] == '\0')
+			continue;
+		if (StrEqual(sParts[i], sName, false))
+			return true;
+	}
+
+	return false;
 }
 
 bool TeamsHaveOpenSlots()
@@ -396,7 +492,8 @@ void afkPlayerAction (Event event, const char[] name, bool dontBroadcast)
 	else if (strcmp(name, "player_hurt", false)==0)
 		client = GetClientOfUserId(event.GetInt("attacker"));
 	else if (strcmp(name, "player_hurt_concise", false)==0)
-		client = GetClientOfUserId(event.GetInt("attacker"));
+		// 该事件没有 attacker 字段，只有攻击者实体下标（攻击者为玩家时即为客户端下标）
+		client = event.GetInt("attackerentid");
 	else 
 		client = GetClientOfUserId(event.GetInt("userid"));
 	
@@ -440,7 +537,9 @@ Action afkJoinHint (Handle Timer, int client)
 
 	client = GetClientOfUserId(client);
 	// If player is valid
-	if (client && IsClientInGame(client) && afkPlayerTimeLeftWarn[client] > 0)
+	// 不再要求"警告计时 > 0"：旁观者的警告计时取自 l4d_specafk_warnkicktime，默认为 0，
+	// 旧条件会让本提示每次都立刻 Plugin_Stop，导致 l4d_specafk_join_hint_msg 1 完全无效
+	if (client && IsClientInGame(client))
 	{
 		// If player is still on spectators ...
 		if (GetClientTeam(client) == 1)
@@ -548,7 +647,7 @@ Action afkCheckThread(Handle timer)
 					
 					if(isAFK)
 					{
-						if(eyes[0] != afkPlayerLastEyes[i][0] && 
+						if(eyes[0] != afkPlayerLastEyes[i][0] || 
 							eyes[1] != afkPlayerLastEyes[i][1]) 
 						{
 							isAFK = false;
@@ -648,7 +747,7 @@ Action afkCheckThread(Handle timer)
 			else if (afkKickEnabled && bTeamsOpen && !bSkipFillDetection) // 旁观检测：仅当对抗双方队伍有空位且不处于"未离开安全区域+有人连接中"时才触发（生还者有AI机器人 / 感染者有空位）
 			{
 				// If the player is not registered ...
-				if (HasAccess(i, g_sAccesslvl) == false && !IsAutoSpecPlayer(i) && !IsImmuneName(i)) // 有权限、符合自动旁观 cvar 或名称匹配免疫列表的玩家不警告不踢出
+				if (HasAccess(i, g_sAccesslvl) == false && !IsAutoSpecPlayer(i) && !IsImmuneSteamId(i) && !IsImmuneIp(i) && !IsImmuneName(i)) // 有权限、符合自动旁观 cvar 或在免疫 SteamID / IP / 名字名单里的玩家不警告不踢出
 				{
 					// If player has not been warned ...
 					if (afkPlayerTimeLeftWarn[i] > 0) // warn time ...

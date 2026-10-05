@@ -1,0 +1,58 @@
+/*
+ * gamedata: l4d2_block_no_steam_logon_all.txt
+ *
+ * 目标: engine_srv.so (md5 0ee571682d63f798ac07d4bc238beb4f, 45/103 同款)
+ * CSteam3Server::OnValidateAuthTicketResponseHelper  @ 0x2010e0 (linux)
+ *
+ * Patch1 (SkipNoSteamLogonKick): offset 0x6F 处 je 0x201170 -> jmp
+ *   linux 原始: 74 1F      (je +0x1F)
+ *   linux 修改: EB 1F      (jmp +0x1F)
+ *   作用: auth codes 1/6/7/8 全部走 m_bShuttingDown==1 的"不踢"路径
+ *
+ * Patch2 (SkipClientTimedOut): offset 0xF0 处 5 字节改写 jmp 0x201170
+ *   linux 原始: 8B 03 89 5D 08  (mov eax,[ebx]; mov [ebp+8],ebx)
+ *   linux 修改: E9 9B FF FF FF  (jmp 0x201170, rel -0x65)
+ *   作用: auth code 5 (VACCheckTimedOut, "Client timed out") 不踢
+ *
+ * windows 待逆向确认后补充。
+ */
+"Games"
+{
+	"left4dead2"
+	{
+		"Signatures"
+		{
+			"CSteam3Server::OnValidateAuthTicketResponseHelper"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN13CSteam3Server34OnValidateAuthTicketResponseHelperEP11CBaseClient20EAuthSessionResponse"
+				"windows"	"\\x55\\x8B\\xEC\\x53\\x56\\x8B\\x75\\x2A\\x8B\\x46\\x2A\\x8B\\x50\\x2A\\x57\\x8B\\x7D\\x2A\\x83\\xC6\\x2A\\x8B\\xD9\\x57\\x8B\\xCE\\xFF\\xD2\\x50\\x68\\x2A\\x2A\\x2A\\x2A\\xFF\\x15\\x2A\\x2A\\x2A\\x2A\\x8B\\x06\\x8B\\x50\\x2A\\x83\\xC4\\x2A\\x57\\x8B\\xCE\\xFF\\xD2"
+			}
+		}
+
+		"MemPatches"
+		{
+			"OnValidateAuthTicketResponseHelper::SkipNoSteamLogonKick"
+			{
+				"signature"	"CSteam3Server::OnValidateAuthTicketResponseHelper"
+				"linux"
+				{
+					"offset"	"6Fh"
+					"verify"	"\\x74\\x1F"
+					"patch"		"\\xEB\\x1F"
+				}
+			}
+
+			"OnValidateAuthTicketResponseHelper::SkipClientTimedOut"
+			{
+				"signature"	"CSteam3Server::OnValidateAuthTicketResponseHelper"
+				"linux"
+				{
+					"offset"	"F0h"
+					"verify"	"\\x8B\\x03\\x89\\x5D\\x08"
+					"patch"		"\\xE9\\x9B\\xFF\\xFF\\xFF"
+				}
+			}
+		}
+	}
+}

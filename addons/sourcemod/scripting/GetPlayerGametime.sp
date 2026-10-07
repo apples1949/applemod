@@ -58,6 +58,9 @@ bool   b_ProfileSourceEnabled = false;
 bool   b_WarnedNoSource = false;
 bool   b_WarnedNoKey = false;
 bool   b_ConfigsExecuted = false;
+bool   b_SteamCheck;
+bool   b_ClientAuthorized[MAXPLAYERS + 1];	// 已经过 OnClientAuthorized(SteamID 验证成功)
+bool   b_ClientPostAdminCheck[MAXPLAYERS + 1];	// 已经过 OnClientPostAdminCheck
 int	   i_LastSourceState = 0;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
@@ -90,6 +93,7 @@ ConVar c_SPLMode;
 ConVar c_IfNeedLogKickMsg;
 ConVar c_QueryMode;
 ConVar c_CheckPlayerProfileCount;
+ConVar c_SteamCheck;
 ConVar c_APIKey;
 
 char   chatFile[128];
@@ -116,11 +120,22 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	return APLRes_Success;
 }
 
+public void OnClientDisconnect(int client)
+{
+	if (client > 0 && client <= MaxClients)
+	{
+		b_ClientAuthorized[client]	   = false;
+		b_ClientPostAdminCheck[client] = false;
+	}
+}
+
 // 返回玩家的游戏时长(秒), <=0 表示未获取到/未知
 any Native_GetPlayerGametime_GetTime(Handle plugin, int numParams)
 {
 	int client = GetNativeCell(1);
 	if (client < 1 || client > MaxClients)
+		return 0;
+	if (!IsClientSteamVerified(client))
 		return 0;
 	return i_PlayerTime[client];
 }
@@ -140,6 +155,8 @@ any Native_GetPlayerGametime_GetProfileTime(Handle plugin, int numParams)
 	int client = GetNativeCell(1);
 	if (client < 1 || client > MaxClients)
 		return 0;
+	if (!IsClientSteamVerified(client))
+		return 0;
 	return i_ProfileTime[client];
 }
 
@@ -149,6 +166,8 @@ any Native_GetPlayerGametime_GetStatTime(Handle plugin, int numParams)
 	int client = GetNativeCell(1);
 	if (client < 1 || client > MaxClients)
 		return 0;
+	if (!IsClientSteamVerified(client))
+		return 0;
 	return i_StatTime[client];
 }
 
@@ -157,6 +176,8 @@ any Native_GetPlayerGametime_GetSource(Handle plugin, int numParams)
 {
 	int client = GetNativeCell(1);
 	if (client < 1 || client > MaxClients)
+		return 0;
+	if (!IsClientSteamVerified(client))
 		return 0;
 	if (i_StatTime[client] > 0) return 2;
 	if (i_ProfileTime[client] > 0) return 1;
@@ -192,6 +213,7 @@ public void OnPluginStart()
 	c_IfNeedLogKickMsg		 = CreateConVar("IfNeedLogKickMsg", "1", "是否记录自动踢出玩家的消息？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_QueryMode				 = CreateConVar("QueryGametimeMode", "3", "查询哪些来源的玩家游戏时长？1=玩家主页 2=成就统计 3=两者都查询", FCVAR_NOTIFY, true, 1.0, true, 3.0);
 	c_CheckPlayerProfileCount = CreateConVar("CheckPlayerProfileCount", "3", "查询玩家主页游戏时长的次数？0=禁用玩家主页查询", FCVAR_NOTIFY, true, 0.0);
+	c_SteamCheck				 = CreateConVar("GetPlayerGametimeSteamCheck", "1", "开启后检测玩家 SteamID 是否验证成功：必须经过 OnClientAuthorized 和 OnClientPostAdminCheck 两个验证流程，否则不返回获取的玩家游戏时长。0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_APIKey				 = CreateConVar("GetPlayerGametimeAPIKey", "", "Steam Web API Key(查询玩家主页游戏时长用)，留空则禁用玩家主页查询，申请: https://steamcommunity.com/dev/apikey", FCVAR_NOTIFY);
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
@@ -215,6 +237,7 @@ public void OnPluginStart()
 	c_IfNeedLogKickMsg.AddChangeHook(ConVarChanged);
 	c_QueryMode.AddChangeHook(ConVarChanged);
 	c_CheckPlayerProfileCount.AddChangeHook(ConVarChanged);
+	c_SteamCheck.AddChangeHook(ConVarChanged);
 	c_APIKey.AddChangeHook(ConVarChanged);
 
 	HookEvent("player_team", Event_PlayerTeam);
@@ -262,6 +285,7 @@ void GetCvars()
 	b_IfNeedLogKickMsg		 = c_IfNeedLogKickMsg.BoolValue;
 	i_QueryMode				 = c_QueryMode.IntValue;
 	i_CheckPlayerProfileCount = c_CheckPlayerProfileCount.IntValue;
+	b_SteamCheck			  = c_SteamCheck.BoolValue;
 	c_APIKey.GetString(s_APIKey, sizeof(s_APIKey));
 
 	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0);
@@ -321,8 +345,31 @@ public void OnConfigsExecuted()
 	GetCvars();
 }
 
+// SteamID 验证开关: 开启时只有 SteamID 验证成功且经过 OnClientAuthorized + OnClientPostAdminCheck
+// 两个验证流程的玩家, 才会返回/播报获取到的游戏时长
+bool IsClientSteamVerified(int client)
+{
+	if (!b_SteamCheck) return true;
+	if (b_ClientAuthorized[client] && b_ClientPostAdminCheck[client] && IsClientAuthorized(client)) return true;
+	return false;
+}
+
+public void OnClientAuthorized(int client, const char[] auth)
+{
+	if (client > 0 && client <= MaxClients && auth[0] != '\0' && !StrEqual(auth, "STEAM_ID_PENDING") && !IsFakeClient(client))
+	{
+		b_ClientAuthorized[client] = true;
+	}
+}
+
 public void OnClientPostAdminCheck(int client)
 {
+	// 经过 OnClientPostAdminCheck 验证流程(与 b_Enable 无关, 验证状态始终记录)
+	if (client > 0 && client <= MaxClients && !IsFakeClient(client))
+	{
+		b_ClientPostAdminCheck[client] = true;
+	}
+
 	if (!b_Enable) return;
 	if (!IsValidClient(client) || IsFakeClient(client) || !IsClientConnected(client)) return;
 
@@ -349,6 +396,9 @@ void OnSourceUpdate(int client, bool bNewData = false)
 	if (!IsValidClient(client)) return;
 
 	UpdatePlayerTimeState(client);
+
+	// SteamID 未通过两个验证流程的玩家: 不播报时长, 也不做任何限制
+	if (!IsClientSteamVerified(client)) return;
 
 	if (i_PlayerTime[client] > 0 && (!b_Announced[client] || bNewData))
 	{
@@ -733,6 +783,8 @@ void LimitPlayer(int client)
 	if (b_IsProcessingLimitPlayer[client]) return;
 	if (!IsValidClient(client)) return;
 	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
+	// SteamID 未通过两个验证流程的玩家, 不返回时长也不做限制(不误判为获取失败)
+	if (!IsClientSteamVerified(client)) return;
 	// 无可用数据源时不做任何限制
 	if (!b_StatsSourceEnabled && !b_ProfileSourceEnabled) return;
 
@@ -809,6 +861,8 @@ void AnnouncePlayerTime(int client)
 {
 	if (!b_Enable) return;
 	if (!IsClientInGame(client)) return;
+	// SteamID 未通过两个验证流程的玩家, 不播报获取到的游戏时长
+	if (!IsClientSteamVerified(client)) return;
 
 	if (i_PlayerTime[client] > 0)
 	{
@@ -879,6 +933,8 @@ void lateload()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
+		// 晚加载时 OnClientAuthorized 不会再触发, 已验证 SteamID 的在线玩家直接补记状态, 否则他们的时长会一直不返回
+		if (IsClientAuthorized(i) && IsClientInGame(i) && !IsFakeClient(i)) b_ClientAuthorized[i] = true;
 		if (IsClientAuthorized(i) && IsClientInGame(i)) OnClientPostAdminCheck(i);
 	}
 }

@@ -10,9 +10,13 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.9-2026/10/2"
+#define PLUGIN_VERSION "2.10-2026/10/11"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
+
+// 可选依赖 l4d2_fix_team_shuffle_edi：正在锁队还原队伍时，跳过对旁观玩家的闲置警告与踢出
+//（修正期间 jointeam 被拦截，旁观玩家无法自行补位）。该插件未加载时本插件照常运行。
+native bool L4D2_FixTeamShuffle_IsFixComplete();
 
 
 // For cvars
@@ -34,6 +38,8 @@ bool afkPlayerPendingSafeRoomExit[MAXPLAYERS + 1];	// 在安全屋內就走完�
 int afkPlayerSafeRoomExitGrace[MAXPLAYERS + 1];		// 离开安全区域后的最后行动宽限：-1 = 未在宽限中，>=0 = 剩余秒数
 bool g_bLeftSafeRoom;
 bool L4D2Version;
+bool g_bFixTeamShuffleLoaded;	// 可选依赖 l4d2_fix_team_shuffle_edi 是否已加载
+bool g_bFixTeamShuffleRunning;	// 队伍修正插件是否正处于锁队还原期间（每次闲置检测时缓存，供旁观检测判断）
 char g_sAccesslvl[AdminFlags_TOTAL];
 char g_sAutoSpecSteamIds[AUTOSPEC_IDS_MAX];
 char g_sImmuneSteamIds[AUTOSPEC_IDS_MAX];
@@ -70,8 +76,42 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	return APLRes_Success;
 }
 
+public void OnAllPluginsLoaded()
+{
+	// 可选依赖：晚于本插件加载 / 卸载重载时在此同步
+	g_bFixTeamShuffleLoaded = LibraryExists("l4d2_fix_team_shuffle_edi");
+	g_bFixTeamShuffleRunning = false;
+}
+
+public void OnLibraryAdded(const char[] name)
+{
+	if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
+		g_bFixTeamShuffleLoaded = true;
+}
+
+public void OnLibraryRemoved(const char[] name)
+{
+	if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
+	{
+		g_bFixTeamShuffleLoaded = false;
+		g_bFixTeamShuffleRunning = false;
+	}
+}
+
+// 队伍修正插件是否正处于锁队还原期间（未加载 = 否）
+// 还原期间 jointeam 被拦截，旁观玩家无法自行补位，此时不应警告/踢出旁观闲置玩家
+bool IsFixTeamShuffleRunning()
+{
+	if (!g_bFixTeamShuffleLoaded)
+		return false;
+
+	return !L4D2_FixTeamShuffle_IsFixComplete();
+}
+
 public void OnPluginStart()
 {
+	g_bFixTeamShuffleLoaded = LibraryExists("l4d2_fix_team_shuffle_edi");
+
 	LoadTranslations("L4DVSAutoSpectateOnAFK.phrases");
 	// We register the spectate command
 	//RegConsoleCmd("spectate", cmd_spectate);
@@ -618,6 +658,8 @@ Action afkCheckThread(Handle timer)
 	bool bTeamsOpen = TeamsHaveOpenSlots(); // 本次检测时对抗双方队伍是否有空位（仅当有空位时才检测旁观闲置）
 	// 补位检测跳过：幸存者未离开安全区域且有玩家正在连接中时，不检测/踢出旁观AFK（连接中的玩家即将补位）
 	bool bSkipFillDetection = !g_bLeftSafeRoom && IsPlayerConnecting();
+	// 队伍修正插件正在锁队还原队伍时不检测/踢出旁观AFK：此时 jointeam 被拦截，旁观玩家无法自行补位
+	g_bFixTeamShuffleRunning = IsFixTeamShuffleRunning();
 
 	float pos[3];
 	float eyes[3];
@@ -744,7 +786,9 @@ Action afkCheckThread(Handle timer)
 					afkResetTimers(i);
 				}
 			} // player is not on spectators ...
-			else if (afkKickEnabled && bTeamsOpen && !bSkipFillDetection) // 旁观检测：仅当对抗双方队伍有空位且不处于"未离开安全区域+有人连接中"时才触发（生还者有AI机器人 / 感染者有空位）
+			// 旁观检测：仅在对抗双方队伍有空位、不处于"未离开安全区域+有人连接中"、
+		// 且队伍修正插件没有正在锁队还原时才触发（生还者有AI机器人 / 感染者有空位）
+		else if (afkKickEnabled && bTeamsOpen && !bSkipFillDetection && !g_bFixTeamShuffleRunning)
 			{
 				// If the player is not registered ...
 				if (HasAccess(i, g_sAccesslvl) == false && !IsAutoSpecPlayer(i) && !IsImmuneSteamId(i) && !IsImmuneIp(i) && !IsImmuneName(i)) // 有权限、符合自动旁观 cvar 或在免疫 SteamID / IP / 名字名单里的玩家不警告不踢出

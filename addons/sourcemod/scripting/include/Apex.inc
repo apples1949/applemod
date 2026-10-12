@@ -13,7 +13,8 @@ enum ApexSkillCostType
 	ApexSkillCost_Bhop = 0,   /** !bhop 开启费 */
 	ApexSkillCost_TracEnable, /** !trac 开启费 */
 	ApexSkillCost_TracThrow,  /** 跟踪石掷出预扣的血量（命中生还者时退还, 见 cost 说明） */
-	ApexSkillCost_BhopDetect  /** 未开启 !bhop 却连续连跳被抓的补扣 */
+	ApexSkillCost_BhopDetect, /** 未开启 !bhop 却连续连跳被抓的补扣 */
+	ApexSkillCost_PredEnable  /** !pred 开启费（坦克石头轨迹预测） */
 }
 
 /**
@@ -59,6 +60,14 @@ native bool Apex_IsBhopEnabled(int client);
 native bool Apex_IsTracEnabled(int client);
 
 /**
+ * @brief 查询当前玩家是否开启了 Apex 坦克石头轨迹预测。
+ *
+ * @param client    Client index
+ * @return          true 为开启，false 为关闭。
+ */
+native bool Apex_IsPredEnabled(int client);
+
+/**
  * @brief 取某辆坦克本发跟踪石应当排除的生还者：即"上一发跟踪石命中的生还者"。
  *        跟踪石选人时用它保证"两次选中的生还者不一样"，当只剩这一个可选时允许重复。
  *
@@ -83,6 +92,7 @@ public void __pl_Apex_SetNTVOptional()
 {
 	MarkNativeAsOptional("Apex_IsBhopEnabled");
 	MarkNativeAsOptional("Apex_IsTracEnabled");
+	MarkNativeAsOptional("Apex_IsPredEnabled");
 	MarkNativeAsOptional("Apex_GetTracBlockedTarget");
 }
 #endif

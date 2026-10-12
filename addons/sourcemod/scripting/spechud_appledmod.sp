@@ -82,6 +82,7 @@ bool bTankifier;
 bool bStaticTank, bStaticWitch;
 
 bool bApex;
+bool bApexPred; // Apex 是否提供 Apex_IsPredEnabled(旧版 Apex.smx 没有, 不能直接调, 否则刷 native 未找到的报错)
 
 int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 
@@ -219,6 +220,7 @@ void FindTankifier()
 void FindApex()
 {
 	bApex = LibraryExists("Apex") || (GetFeatureStatus(FeatureType_Native, "Apex_IsBhopEnabled") != FeatureStatus_Unknown);
+	bApexPred = (GetFeatureStatus(FeatureType_Native, "Apex_IsPredEnabled") == FeatureStatus_Available);
 }
 
 // ======================================================================
@@ -1176,12 +1178,20 @@ stock void GetToggleStatus(bool enabled, char[] buffer, int maxlen)
 
 stock void GetApexSkillStatus(int client, char[] buffer, int maxlen)
 {
-	char szBhop[8], szTrac[8];
+	char szBhop[8], szTrac[8], szPred[8];
 
 	GetToggleStatus(Apex_IsBhopEnabled(client), szBhop, sizeof(szBhop));
 	GetToggleStatus(Apex_IsTracEnabled(client), szTrac, sizeof(szTrac));
 
-	FormatEx(buffer, maxlen, "连跳: %s | 跟踪石头: %s", szBhop, szTrac);
+	/* 旧版 Apex.smx 没有 !pred, 这里不能调它的 native, 直接显示"无" */
+	if (bApexPred)
+		GetToggleStatus(Apex_IsPredEnabled(client), szPred, sizeof(szPred));
+	else
+		strcopy(szPred, sizeof(szPred), "无");
+
+	/* 三个技能要挤在坦克面板同一行(坦克面板一行放得下约 34 列), 所以:
+	   标签取短的(跟踪 = 跟踪石头 !trac, 轨迹 = 石头轨迹预测 !pred), 分隔只用单空格 */
+	FormatEx(buffer, maxlen, "连跳: %s 跟踪: %s 轨迹: %s", szBhop, szTrac, szPred);
 }
 
 bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
@@ -1314,6 +1324,11 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		if ((cvar = FindConVar("tank_trac_hp")) != null)
 		{
 			FormatEx(info, sizeof(info), "!gz/!trac开启跟踪石头(扣%d血量)", cvar.IntValue);
+			DrawPanelText(hSpecHud, info);
+		}
+		if ((cvar = FindConVar("tank_pred_hp")) != null)
+		{
+			FormatEx(info, sizeof(info), "!yc/!pred开启石头轨迹预测(扣%d血量)", cvar.IntValue);
 			DrawPanelText(hSpecHud, info);
 		}
 

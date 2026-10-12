@@ -33,26 +33,86 @@ enum ApexSkillCostType
 	ApexSkillCost_Bhop = 0,	  /* !bhop 开启费 */
 	ApexSkillCost_TracEnable, /* !trac 开启费 */
 	ApexSkillCost_TracThrow,  /* 跟踪石掷出预扣(命中生还者退还时为负数) */
-	ApexSkillCost_BhopDetect  /* 未开启 !bhop 却连续连跳被抓的补扣 */
+	ApexSkillCost_BhopDetect, /* 未开启 !bhop 却连续连跳被抓的补扣 */
+	ApexSkillCost_PredEnable  /* !pred 开启费(坦克石头轨迹预测) */
 }
+
+/* 石头轨迹预测(!pred)的物理参数
+   全部取自 Linux 服务端二进制 server_srv.so 的实测(不是猜的):
+     * 出石位置 = 坦克 "debris" 骨骼附着点(引擎在 CTankRock::OnRelease 里用
+       CBaseAnimating::GetAttachment 取这个点; 这里用左4死钩子提供的
+       GetAttachmentVectors(tank, "debris", ...) 取同一个点)。
+       实际掷出点确实在这里(调试日志已逐位核对), **但画线起点不用它**: 这个点跟着投掷手臂
+       动画走, 站着不动线也会来回抖; 只影响起点位置几十点, 对落点影响可忽略,
+       所以画线改用稳定的"眼睛位置 + 前向偏移"(见 GetPredStart)。
+       注意: 蓄力期间石头实体本身"并不在手上"——引擎只是把石头 SetParent 到坦克
+       (CTankRock::Create 里 FollowEntity(坦克, true), EF_BONEMERGE 的骨骼合并只是
+       客户端渲染), 服务端石头的坐标不是出手点, 所以起点也不能用石头坐标。
+     * 出石方向 = 坦克眼睛前向 (CBasePlayer::EyeVectors @0x4064D0, 在
+       CThrow::UpdateAbility @0x4CF0C1 被调用)
+     * 出石初速 = 眼睛前向 * z_tank_throw_force(默认 800) + 坦克自身速度
+       (引擎加的是 m_vecAbsVelocity, 偏移 +0x274, 见 0x4CF427; 对没有父实体的玩家
+        它与 m_vecVelocity 相等 —— 引擎的 GetAbsVelocity 是"脏标记 + 惰性计算",
+        而 SourceMod 直接读属性不会触发那次计算, 所以这里读引擎每帧维护的
+        m_vecVelocity, 与引擎行为一致且一定是最新值)
+     * 石头重力倍率 m_flGravity = 0.4 (CTankRock::Create 写 +0x2C0),
+       即加速度 = sv_gravity * 0.4 (默认 800 * 0.4 = 320 点/秒^2)
+     * 石头碰撞盒 ±4 点 (CTankRock::Spawn 写入)
+     * 石头凡命中即碎(不反弹, CTankRock::Detonate), 所以只需要算到第一次碰撞 */
+#define PRED_HULL_SIZE	   4.0	  /* 石头碰撞盒半径(引擎值 ±4 点) */
+#define PRED_FALLBACK_SPEED 800.0 /* 取不到 z_tank_throw_force 时的兜底出石初速 */
+#define PRED_PHYS_STEP	   0.02	  /* 物理推进步长(秒): 越小越不容易漏掉薄墙 */
+#define PRED_BEAM_LIFE	   0.055 /* 每段光束存活时间(秒): 配合 tank_pred_emit(0.033s) 只叠 1~2 份,
+									   刚好连成一条线. 太长会叠出一堆残影(服务器 100tick, 每帧都发的话叠 4~8 份) */
+#define PRED_BEAM_SPRITE   "materials/sprites/laserbeam.vmt"
+#define PRED_WINDOW		   1.2	  /* 坦克起手扔石后, 预测线最多持续多久(秒); 掷出/取消/超时都会结束 */
+#define PRED_MIN_STEP_DIST 2.0	  /* 一步推进不足这个距离就当成"起点自撞(startsolid)"处理, 不算命中 */
+#define PRED_SEG_MAX	   64	  /* tank_pred_seg 上限, 也是画线采样点数组尺寸 */
+/* 世界几何那一次碰撞检测用的掩码: MASK_SOLID 去掉 CONTENTS_MONSTER
+   —— 石头的碰撞是 MASK_SOLID 级别, 但会从感染者/普通僵尸身上穿过去(实战验证: 预测在这儿停下而石头继续飞),
+   所以感染者不算阻挡; 生还者单独用射线查(见 Pred_SurvivorFilter) */
+#define PRED_WORLD_MASK	   ((MASK_SOLID & ~CONTENTS_MONSTER) & ~CONTENTS_PLAYERCLIP)
+#define PRED_FORCE_INTERVAL 0.15  /* 即使瞄准/位置完全没变, 也至少这么久重算一次抛物线 */
+#define PRED_VIS_UP		   0.0	  /* 画线视觉偏移: 向下让开视线(参考 miwuki 的 Offset_Up) */
+#define PRED_OFF_MAX	   150.0 /* 出手偏移的安全上限(点): 实测三种姿势为 41/92/109, 超过这个值一定是取样出了问题,
+								   直接夹住, 免得预测线被拉到脚下/天上 */
+#define PRED_OFF_SAMPLE_TOL 60.0  /* 同姿势的出手偏移样本与均值差超过这个值(点)就丢弃, 防止被异常样本带偏 */
+#define PRED_IMPACT_LIFT   2.0	  /* 落点标记抬高一点, 免得插进地面看不见(参考 miwuki 光圈) */
+#define PRED_MARK_WIDTH	   2.0	  /* 落点竖线(光柱)的粗细: 细一点更像"升天光柱" */
+#define PRED_MARK_R		   0
+#define PRED_MARK_G		   140
+#define PRED_MARK_B		   255
+#define PRED_COLOR_R	   255
+#define PRED_COLOR_G	   96
+#define PRED_COLOR_B	   0
+
+/* tank_pred_debug 档位 */
+#define PRED_DEBUG_OFF	  0 /* 关 */
+#define PRED_DEBUG_KEY	  1 /* 关键事件: !pred 命令结果、掷出时的预测/实际对比 */
+#define PRED_DEBUG_FULL	  2 /* 详细: 起手/结束、贴图索引、画了几段、命中与否(写日志+发给玩家) */
+
+/* 调试日志版本标记: 进服看服务器日志里这一行就知道跑的是哪个 build */
+#define PRED_BUILD		  "2026-10-13p-hints"
 
 Handle g_hFwdSkillCost;
 Handle g_hFwdTracRockHit;
 
 bool   IsBhop[MAXPLAYERS + 1];
 bool   IsTrac[MAXPLAYERS + 1];
+bool   IsPred[MAXPLAYERS + 1];
 
 int	   Dir[MAXPLAYERS + 1];
 int	   Posture[MAXPLAYERS + 1];
 int	   BhopLim[MAXPLAYERS + 1];
 int	   TracLim[MAXPLAYERS + 1];
+int	   PredLim[MAXPLAYERS + 1];
 
 /* 坦克连跳检测(参考 lilac_bhop.sp 的连跳判定) */
 int	   BhopBtn[MAXPLAYERS + 1];	   /* 上一帧按键快照(检测 IN_JUMP 按下沿) */
 int	   BhopTick[MAXPLAYERS + 1];   /* 下一次连跳允许的最小 tick(lilac: next_bhop) */
 int	   BhopChain[MAXPLAYERS + 1];  /* 当前连续完美连跳次数(lilac: perfect_bhops) */
 
-ConVar Apex[11];
+ConVar Apex[28];
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -63,6 +123,63 @@ bool  g_bTraceRock[TRAC_ROCK_MAX + 1];		  /* 该 tank_rock 是否为跟踪石 */
 float g_fRockDamage[TRAC_ROCK_MAX + 1];		  /* 跟踪石累计承受的伤害 */
 int	  g_iRockCharge[TRAC_ROCK_MAX + 1];		  /* 掷出该跟踪石时已扣的血量(命中生还者则退还) */
 int	  g_iLastTracTarget[MAXPLAYERS + 1];	  /* 该坦克上一发跟踪石命中的生还者(禁止连续命中同一人) */
+
+/* -----------------------------------------------------------
+	石头轨迹预测(!pred)状态
+----------------------------------------------------------- */
+/* 坦克出生提示: 一次性推 6 条聊天会被聊天框挤掉(只看到最后一条), 所以按 0.35 秒一条逐条发 */
+int	   g_iHintLine[MAXPLAYERS + 1];
+bool   g_bHintActive[MAXPLAYERS + 1];
+int	   g_iHeldRock[MAXPLAYERS + 1]; /* 该坦克当前握在手里(还没掷出)的 tank_rock 的 entref, 无则 INVALID_ENT_REFERENCE */
+int	   g_iBeamSprite;				/* materials/sprites/laserbeam.vmt 的预缓存索引 */
+float  g_fPredLogAt[MAXPLAYERS + 1];	/* 调试日志节流时间戳 */
+float  g_fPredTestUntil[MAXPLAYERS + 1]; /* !predtest 测试线截止时间(任何玩家可用) */
+float  g_fPredUntil[MAXPLAYERS + 1];	 /* "坦克正在扔石头"窗口截止时间(由起手动作开启, 掷出/超时结束) */
+bool   g_bPredActive[MAXPLAYERS + 1];	 /* 上一帧是否处于扔石过程(用于只记一次开始/结束日志) */
+/* 按投掷姿势学到的"出手偏移"(车身坐标系: 右/上/前), 下标 = 动作号-48 (49/50/51 -> 1/2/3);
+   0 号槽 = 本发起手瞬间的快照。用固定值而不是实时跟随手臂, 线才不会跟挥臂动画一起摆。 */
+float  g_fPredPoseOff[MAXPLAYERS + 1][4][3];
+bool   g_bPredPoseOk[MAXPLAYERS + 1][4];
+int	   g_iPredPoseSlot[MAXPLAYERS + 1];
+float  g_fPredVelSmooth[MAXPLAYERS + 1][3]; /* 坦克自身速度平滑值(同样在车身坐标系里) */
+bool   g_bPredVelInit[MAXPLAYERS + 1];
+float  g_fPredDbgUntil[MAXPLAYERS + 1];	/* 逐帧抖动诊断的输出截止时间 */
+float  g_fPredEmitAt[MAXPLAYERS + 1];	/* 上次发射光束的时间(用于发射节流) */
+float  g_fPredLockout[MAXPLAYERS + 1];	/* 掷出后的锁定期: 收招阶段引擎还会重选投掷动作, 这段时间不许重开窗口 */
+bool   g_bPredStartLogged[MAXPLAYERS + 1];
+float  g_fPredPrevStart[MAXPLAYERS + 1][3];
+float  g_fPredPrevAng[MAXPLAYERS + 1][3];
+float  g_fPredPrevVel[MAXPLAYERS + 1];
+bool   g_bPredSmoothInit[MAXPLAYERS + 1];
+/* 抛物线缓存: 每帧只重发光束, 重算按 tank_pred_interval 节流(参考 miwuki 的 Calc_Interval)。
+   缓存的就是"画线用的采样点", 所以一帧的重发光束开销是固定的十几段, 不含任何 trace。 */
+float  g_fPredDraw[MAXPLAYERS + 1][PRED_SEG_MAX + 1][3]; /* 采样后的线段端点 */
+int	   g_iPredDrawCount[MAXPLAYERS + 1];				 /* 端点数(>=2 才画) */
+float  g_fPredImpact[MAXPLAYERS + 1][3];				 /* 命中点(落点标记用) */
+bool   g_bPredHasImpact[MAXPLAYERS + 1];				 /* 是否真的撞到东西(没撞就不画落点标记) */
+float  g_fPredCalcAt[MAXPLAYERS + 1];					 /* 上次重算时间 */
+float  g_fPredImpactTime[MAXPLAYERS + 1];			 /* 预测的飞行时间(命中时刻, 没命中=最长预测时间) */
+int	   g_iPredHitEnt[MAXPLAYERS + 1];				 /* 预测停在哪: 命中的实体索引(0=世界) */
+/* 隐形物理阻挡体名单(env_physics_blocker): 只挡物理道具, 石头直接穿过去, 所以预测里要忽略。
+   在真实命中时按类名学习, 学到一个就记下来, 之后所有 trace 的过滤器都会跳过它 */
+bool   g_bPredIgnoreEnt[2049];
+int	   g_iPredIgnored;
+bool   g_bPredMarkLogged[MAXPLAYERS + 1];		 /* 本发是否已经记过"落点标记"日志 */
+int	   g_iPredSeq[MAXPLAYERS + 1];				 /* 本发的投掷动作号(49/50/51 = 不同姿势) */
+float  g_fPredGravity[MAXPLAYERS + 1];			 /* 本次计算用的重力(调试: 确认 sv_gravity*倍率) */
+/* 石头实飞记录(调试用): 掷出后逐帧采位置, 石头碎裂时打印"实际落点/实飞时间"与预测的对比 */
+int	   g_iFlyRock[MAXPLAYERS + 1];					 /* 在飞的石头 entref */
+bool   g_bFlyActive[MAXPLAYERS + 1];
+float  g_fFlyStartTime[MAXPLAYERS + 1];
+float  g_fFlyLastPos[MAXPLAYERS + 1][3];
+float  g_fFlyPredPos[MAXPLAYERS + 1][3];
+float  g_fFlyPredTime[MAXPLAYERS + 1];
+bool   g_bFlyPredHit[MAXPLAYERS + 1];
+float  g_fPredLastStart[MAXPLAYERS + 1][3];				 /* 上次重算时的起点 */
+float  g_fPredLastVel[MAXPLAYERS + 1][3];				 /* 上次重算时的初速 */
+float  g_fPredLastAng[MAXPLAYERS + 1][3];				 /* 上次重算时的瞄准角度 */
+ConVar g_hSvGravity;				/* sv_gravity: 石头重力 = sv_gravity * 0.4 */
+ConVar g_hThrowForce;				/* z_tank_throw_force: 石头出石初速 */
 
 public Plugin myinfo =
 {
@@ -80,6 +197,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	RegPluginLibrary("Apex");
 	CreateNative("Apex_IsBhopEnabled", Native_IsBhopEnabled);
 	CreateNative("Apex_IsTracEnabled", Native_IsTracEnabled);
+	CreateNative("Apex_IsPredEnabled", Native_IsPredEnabled);
 	CreateNative("Apex_GetTracBlockedTarget", Native_GetTracBlockedTarget);
 	/* 技能扣血 forward: 把不经由伤害事件的技能扣血/退还告知伤害统计类插件(如 tank_damage) */
 	g_hFwdSkillCost = CreateGlobalForward("Apex_OnSkillCostCharged", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
@@ -142,6 +260,15 @@ public int Native_IsTracEnabled(Handle plugin, int numParams)
 	return IsTrac[client] ? 1 : 0;
 }
 
+public int Native_IsPredEnabled(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients)
+		return 0;
+
+	return IsPred[client] ? 1 : 0;
+}
+
 public void
 	OnPluginStart()
 {
@@ -156,6 +283,43 @@ public void
 	Apex[8] = CreateConVar("tank_bhop_detect_count", "10", "连续完美连跳达到该次数即判定为成功连跳(参考liac的min档位).0=禁用", _, true, 0.0);
 	Apex[9] = CreateConVar("tank_bhop_detect_air", "0.3", "两次连跳之间的最小滞空时间(秒), 参考liac的air设置(>1.0按1.0算)", _, true, 0.0, true, 1.0);
 	Apex[10] = CreateConVar("l4d_tracerock_fly_sound", "2.0", "跟踪石飞行音效最长播放时间(秒): 超时强制停止石头飞行循环音效(防止绕圈时一直响). 0=不处理", _, true, 0.0);
+	Apex[11] = CreateConVar("tank_pred_hp", "500", "开启坦克石头轨迹预测(!pred)时扣血量. 0=禁用");
+	Apex[12] = CreateConVar("tank_pred_speed", "0", "石头轨迹预测用的出石初速(点/秒). 0=自动取 z_tank_throw_force", _, true, 0.0);
+	Apex[13] = CreateConVar("tank_pred_gravity", "0.4", "石头轨迹预测用的重力倍率(加速度 = sv_gravity * 该值). 实测石头为 0.4", _, true, 0.0, true, 10.0);
+	Apex[14] = CreateConVar("tank_pred_time", "4.5", "石头轨迹预测的最长飞行时间(秒)", _, true, 0.1, true, 5.0);
+	Apex[15] = CreateConVar("tank_pred_seg", "16", "石头轨迹线最多分几段(段数越多越平滑, 也越耗带宽)", _, true, 2.0, true, 64.0);
+	Apex[16] = CreateConVar("tank_pred_debug", "0", "石头轨迹预测调试输出: 0=关 1=关键(命令结果/掷出对比/掷出后实际轨迹回显) 2=详细(每次蓄力是否识别/贴图索引/画线详情)", _, true, 0.0, true, 2.0);
+	Apex[17] = CreateConVar("tank_pred_width", "3.0", "石头轨迹线宽度", _, true, 1.0, true, 20.0);
+	Apex[18] = CreateConVar("tank_pred_forward", "24.0", "轨迹线起点从眼睛往前推的距离(点): 让线不像从脸上冒出来, 同时避开坦克自身碰撞盒. 0=就从眼睛起", _, true, 0.0, true, 64.0);
+	Apex[19] = CreateConVar("tank_pred_smooth", "0.75", "保留项(用于坦克速度平滑权重): 0=不平滑, 越大越稳. 出手偏移已改为按姿势学习, 不再跟手臂动画", _, true, 0.0, true, 0.9);
+	Apex[20] = CreateConVar("tank_pred_skip_len", "120.0", "轨迹线靠坦克这一端不画的长度(点): 默认 120(约一个坦克身位), 只挡掉贴脸那一段, 不再按比例砍整条线. 0=全画", _, true, 0.0, true, 600.0);
+	Apex[21] = CreateConVar("tank_pred_mark_h", "400.0", "落点标记: 命中处向上的蓝色垂直线(光柱)高度(点). 0=不画", _, true, 0.0, true, 1024.0);
+	Apex[22] = CreateConVar("tank_pred_ring", "36.0", "落点标记: 命中处白色圆圈的半径(点). 0=不画", _, true, 0.0, true, 128.0);
+	Apex[23] = CreateConVar("tank_pred_interval", "0.01", "抛物线重算最小间隔(秒): 每帧只重发光束, 重算受此节流(越大越省性能)", _, true, 0.0, true, 0.5);
+	Apex[24] = CreateConVar("tank_pred_batch", "6.0", "抛物线批量检测步数: 空域一次扫 6 步, 疑似碰撞再逐步精查; 1=禁用批量(最费但最稳)", _, true, 1.0, true, 8.0);
+	Apex[27] = CreateConVar("tank_pred_lockout", "0.6", "掷出后的锁定期(秒): 收招阶段引擎还会重选投掷动作, 这段时间内不重开预测窗口(否则石头离手后线会再出现, 而且会取到收招姿势让线画在脚边)", _, true, 0.0, true, 3.0);
+	Apex[26] = CreateConVar("tank_pred_emit", "0.033", "光束发射间隔(秒): 越小越跟手但残影越多(残影=多条线叠在一起). 30Hz 配光束寿命 0.055 秒刚好一条线", _, true, 0.01, true, 0.2);
+	Apex[25] = CreateConVar("tank_pred_off_r", "14.0", "画线视觉右移(点): 整条线往准星右侧让开避免挡视线, 末端收敛到真实落点. 0=不偏移", _, true, 0.0, true, 64.0);
+
+	/* 石头轨迹预测用到的游戏 cvar: 缓存句柄, 避免每帧 FindConVar */
+	g_hSvGravity  = FindConVar("sv_gravity");		 /* 引擎 cvar, L4D2 恒存在; 取不到时按 800 兜底 */
+	g_hThrowForce = FindConVar("z_tank_throw_force"); /* 服务端 cvar, 默认 800; 取不到时按 800 兜底 */
+
+	/* 版本标记 + 重力自检: 只在 tank_pred_debug >= 1 时写日志。
+	   默认 0 时插件完全静默(不写日志、不发聊天), 部署核对时临时 sm_cvar tank_pred_debug 1 看一眼再设回 0。 */
+	if (Apex[16].IntValue >= PRED_DEBUG_KEY)
+	{
+		LogMessage("[!pred] 坦克石头轨迹预测 build %s 已加载(tank_pred_debug=%d)", PRED_BUILD, Apex[16].IntValue);
+
+		if (g_hSvGravity == null)
+			LogMessage("[!pred] 警告: 没找到 sv_gravity, 重力按 800 兜底(可能与实际不符!)");
+		else
+			LogMessage("[!pred] sv_gravity=%.1f -> 石头重力=%.1f (倍率 tank_pred_gravity=%.2f)",
+					   g_hSvGravity.FloatValue, g_hSvGravity.FloatValue * Apex[13].FloatValue, Apex[13].FloatValue);
+	}
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_iHeldRock[i] = INVALID_ENT_REFERENCE;
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);
@@ -164,8 +328,12 @@ public void
 
 	RegConsoleCmd("sm_trac", Call_Trac);
 	RegConsoleCmd("sm_bhop", Call_Bohp);
+	RegConsoleCmd("sm_pred", Call_Pred);
 	RegConsoleCmd("sm_gz", Call_Trac);
 	RegConsoleCmd("sm_lt", Call_Bohp);
+	RegConsoleCmd("sm_yc", Call_Pred);
+	/* 调试用: 不看技能/不看蓄力, 直接按当前瞄准画线, 用来单独验证"线能不能画出来"(管理员) */
+	RegAdminCmd("sm_predtest", Call_PredTest, ADMFLAG_ROOT, "石头轨迹预测自检: 立即画 N 秒预测线 (默认 3 秒)");
 
 	if (g_bLateLoad)
 	{
@@ -200,6 +368,14 @@ Action Call_Trac(int client, int args)
 		CPrintToChat(client, "%sTank石头追踪已关闭", TAG);
 
 		return Plugin_Handled;
+	}
+
+	/* 与"轨迹预测"互斥: 开跟踪石头就把预测关掉(用户要求: 跟踪开着时不显示预测) */
+	if (IsPred[client])
+	{
+		IsPred[client] = false;
+		CPrintToChat(client, "%s已开启跟踪石头, 轨迹预测自动关闭", TAG);
+		LogMessage("[!pred] %N: 开启跟踪石头 -> 自动关闭轨迹预测", client);
 	}
 
 	/* 已关 */
@@ -275,6 +451,108 @@ Action Call_Bohp(int client, int args)
 	return Plugin_Handled;
 }
 
+/* 石头轨迹预测: 本命首次开启扣 tank_pred_hp 血, 之后同一命内开关不再扣血 */
+Action Call_Pred(int client, int args)
+{
+	if (!IsTank(client))
+	{
+		/* 非坦克时静默返回(与 !trac/!bhop 一致), 但调试档位下要说清楚, 免得以为"插件没反应" */
+		if (IsValidClient(client) && Apex[16].IntValue >= PRED_DEBUG_KEY)
+		{
+			CPrintToChat(client, "%s{olive}[pred]{default} 只有坦克能开这个技能(你现在不是坦克)", TAG);
+			LogMessage("[!pred] %N 用了 !pred 但不是坦克, 已忽略", client);
+		}
+		return Plugin_Handled;
+	}
+
+	int mumhp = Apex[11].IntValue;
+	int hp	  = GetEntProp(client, Prop_Data, "m_iHealth");
+
+	/* 已开，那么关闭 */
+	if (IsPred[client])
+	{
+		IsPred[client] = false;
+		PredLog(client, PRED_DEBUG_KEY, "Tank石头轨迹预测已关闭");
+		CPrintToChat(client, "%sTank石头轨迹预测已关闭", TAG);
+
+		return Plugin_Handled;
+	}
+
+	/* 与"跟踪石头"互斥: 开预测就把跟踪关掉 */
+	if (IsTrac[client])
+	{
+		IsTrac[client] = false;
+		CPrintToChat(client, "%s已开启轨迹预测, 跟踪石头自动关闭", TAG);
+		LogMessage("[!pred] %N: 开启轨迹预测 -> 自动关闭跟踪石头", client);
+	}
+
+	/* 已关 */
+	if (PredLim[client] == 1) /* 本命已经付过开启费，随时开关，不再扣血 */
+	{
+		IsPred[client] = true;
+		PredLog(client, PRED_DEBUG_KEY, "Tank石头轨迹预测已开启(本命已扣过开启费)");
+		CPrintToChat(client, "%sTank石头轨迹预测已开启(本命已扣过开启费)", TAG);
+	}
+	else if (mumhp <= 0) /* 开启费为 0，直接开启 */
+	{
+		IsPred[client]	= true;
+		PredLim[client] = 1;
+		PredLog(client, PRED_DEBUG_KEY, "Tank石头轨迹预测已开启(开启费为 0)");
+		CPrintToChat(client, "%sTank石头轨迹预测已开启", TAG);
+	}
+	else if (hp - mumhp > 0) /* 血足，扣开启费后开启 */
+	{
+		IsPred[client]	= true;
+		PredLim[client] = 1;
+		SetEntProp(client, Prop_Data, "m_iHealth", hp - mumhp);
+		FireSkillCost(client, ApexSkillCost_PredEnable, mumhp);
+		PredLog(client, PRED_DEBUG_KEY, "Tank石头轨迹预测已开启(扣 %d 血, 剩 %d)", mumhp, hp - mumhp);
+		CPrintToChat(client, "%sTank石头轨迹预测已开启(扣 %d 血)", TAG, mumhp);
+	}
+	else /* 血不足，保持关闭 */
+	{
+		IsPred[client] = false;
+		PredLog(client, PRED_DEBUG_KEY, "Tank石头轨迹预测未开启(血 %d 不足以扣 %d)", hp, mumhp);
+		CPrintToChat(client, "%sTank石头轨迹预测未开启(当前血量不足以扣除 %d 血)", TAG, mumhp);
+	}
+
+	return Plugin_Handled;
+}
+
+/* 自检指令: 不看技能、不看是否在蓄力, 直接按当前瞄准画 N 秒预测线。
+   用来把"线画不出来"和"蓄力/技能判定没通过"两种情况分开。 */
+Action Call_PredTest(int client, int args)
+{
+	if (!IsValidClient(client))
+		return Plugin_Handled;
+
+	float duration = (args >= 1) ? float(GetCmdArgInt(1)) : 3.0;
+	if (duration < 1.0)
+		duration = 1.0;
+	if (duration > 10.0)
+		duration = 10.0;
+
+	g_fPredTestUntil[client] = GetGameTime() + duration;
+	g_bPredSmoothInit[client] = false;
+	g_fPredCalcAt[client]	 = 0.0; /* 强制立刻重算一次(自检要马上出线) */
+	g_iPredDrawCount[client] = 0;
+
+	float angles[3], start[3], vel[3];
+	GetClientEyeAngles(client, angles);
+	GetPredStart(client, angles, start);
+	GetPredVelocity(client, angles, vel);
+
+	LogMessage("[!pred] %N 自检: %.1f 秒, 起点(%.0f,%.0f,%.0f) 初速(%.0f,%.0f,%.0f) 贴图索引=%d 宽=%.1f 前推=%.0f 平滑=%.2f",
+			   client, duration, start[0], start[1], start[2], vel[0], vel[1], vel[2],
+			   g_iBeamSprite, Apex[17].FloatValue, Apex[18].FloatValue, Apex[19].FloatValue);
+	CPrintToChat(client, "%s{olive}[pred]{default} 自检线开启 %.0f 秒: 起点(%.0f, %.0f, %.0f) 贴图=%d",
+				 TAG, duration, start[0], start[1], start[2], g_iBeamSprite);
+	if (g_iBeamSprite <= 0)
+		CPrintToChat(client, "%s{lightred}[pred]{default} 警告: 光束贴图索引为 0, 线不会显示(需要换图或重启服务器让预缓存生效)", TAG);
+
+	return Plugin_Handled;
+}
+
 /* -----------------------------------------------------------
 	事件钩子
 ----------------------------------------------------------- */
@@ -287,6 +565,62 @@ void Event_PlayerJumpApex(Event event, const char[] name, bool dontBroadcast)
 {
 	// 不需要处理横向速度
 }
+/* 坦克出生提示的第 line 条 */
+void TankHint_Send(int client, int line)
+{
+	switch (line)
+	{
+		case 0:
+			CPrintToChat(client, "%sE 键 -> 低手抛石(砸屋檐下)", TAG);
+		case 1:
+			CPrintToChat(client, "%s右键 -> 单手抛石(万能姿势)", TAG);
+		case 2:
+			CPrintToChat(client, "%sR 键 -> 双手抛石(过高墙)", TAG);
+		case 3:
+			CPrintToChat(client, "%s指令{lightgreen}!lt/!bhop{darkred}开启自动连跳(开启扣%d血)", TAG, Apex[3].IntValue);
+		case 4:
+			CPrintToChat(client, "%s指令{lightgreen}!gz/!trac{darkred}开启跟踪石头(开启扣%d血, 未命中扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
+		case 5:
+			CPrintToChat(client, "%s指令{lightgreen}!yc/!pred{darkred}开启石头轨迹预测(开启扣%d血)", TAG, Apex[11].IntValue);
+	}
+}
+
+#define TANK_HINT_LINES 6
+
+Action Timer_TankHint(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	if (!IsValidClient(client) || !IsTank(client))
+	{
+		if (IsValidClient(client))
+			g_bHintActive[client] = false;
+		return Plugin_Stop;
+	}
+
+	TankHint_Send(client, g_iHintLine[client]);
+	g_iHintLine[client]++;
+
+	if (g_iHintLine[client] >= TANK_HINT_LINES)
+	{
+		g_bHintActive[client] = false;
+		return Plugin_Stop;
+	}
+
+	return Plugin_Continue;
+}
+
+/* 坦克出生时逐条发提示(避免一次推 6 条被聊天框挤掉) */
+void TankHints_Start(int client)
+{
+	if (g_bHintActive[client])
+		return; /* 已经有一串在发, 不重复 */
+
+	g_iHintLine[client]	 = 0;
+	g_bHintActive[client] = true;
+	CreateTimer(0.35, Timer_TankHint, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
 void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
@@ -295,11 +629,8 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 
 	Reset(client);
 	if (Apex[2].IntValue > 0) CreateTimer(0.1, SetTankHealth, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-	CPrintToChat(client, "%sE 键 -> 低手抛石(砸屋檐下)", TAG);
-	CPrintToChat(client, "%s右键 -> 单手抛石(万能姿势)", TAG);
-	CPrintToChat(client, "%sR 键 -> 双手抛石(过高墙)", TAG);
-	CPrintToChat(client, "%s指令{lightgreen}!bhop{darkred}开启自动连跳", TAG);
-	CPrintToChat(client, "%s指令{lightgreen}!trac{darkred}开启跟踪石头(开启扣%d血, 未命中扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
+	/* 姿势提示 + 技能提示(含缩写)统一交给定时器逐条发 */
+	TankHints_Start(client);
 }
 
 Action SetTankHealth(Handle timer, any client)
@@ -327,6 +658,10 @@ public void OnMapEnd()
 ----------------------------------------------------------- */
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
+	/* 石头轨迹预测放在最前面: 除了坦克的常规预测, 还有"掷出后回显"和"!predtest 自检"两种情况,
+	   它们对非坦克也要能画(函数内部自己做判定, 未开启时立即返回, 开销可忽略) */
+	Pred_Update(client, angles);
+
 	if (!IsTank(client))
 		return Plugin_Continue;
 
@@ -494,6 +829,47 @@ public Action L4D_OnCThrowActivate(int ability)
 
 public Action L4D2_OnSelectTankAttack(int client, int &sequence)
 {
+	/* 坦克起手"扔石头"(投掷动作 49/50/51)的一瞬间就开预测窗口, 让线在整个蓄力瞄准期间都在。
+	   这里不依赖 tank_rock 实体: 实测它可能创建与掷出几乎同帧(甚至只有一帧),
+	   靠"石头还在手上"来判断会完全抓不到蓄力阶段。 */
+	if (sequence > 48 && IsTank(client) && !IsTrac[client] && GetGameTime() >= g_fPredLockout[client])
+	{
+		/* 引擎在准备投掷的整段时间里每一帧都会重选这个动作, 所以:
+		   - 窗口只要续时间(不能每帧都当"新一发", 否则缓存被清空、日志刷屏)
+		   - 只在"窗口从关闭 -> 打开"这一瞬间清缓存/平滑/记日志 */
+		bool fresh = (GetGameTime() > g_fPredUntil[client]);
+
+		g_fPredUntil[client] = GetGameTime() + PRED_WINDOW;
+		g_iPredSeq[client]	 = sequence; /* 每次重选都记: 保证掷出时学到的是这一发的姿势 */
+
+		if (fresh)
+		{
+			g_bPredMarkLogged[client]  = false;
+			g_bPredStartLogged[client] = false;
+			g_bPredSmoothInit[client] = false; /* 新一发: 起点平滑从本发重新开始, 不从上发的位置滑过来 */
+			g_bPredVelInit[client] = false;
+			g_fPredDbgUntil[client] = GetGameTime() + 0.5;
+			g_fPredEmitAt[client]  = 0.0; /* 新一发第一帧立刻出线 */
+			g_bPredStartLogged[client] = false;
+
+			/* 用当前瞄准预置一次上一帧值, 免得第一帧的"帧间差"是个假的大数 */
+			float aim[3];
+			GetClientEyeAngles(client, aim);
+
+			/* 本发起手瞬间的手部偏移快照(slot 0): 这个姿势还没学到时用它兜底(同样是固定值, 不跟动画) */
+			g_bPredPoseOk[client][0] = GetPredPhysOffset(client, aim, g_fPredPoseOff[client][0]);
+
+			GetPredStart(client, aim, g_fPredPrevStart[client]);
+			for (int i = 0; i < 3; i++)
+				g_fPredPrevAng[client][i] = aim[i];
+			g_fPredPrevVel[client] = 0.0;
+			g_fPredCalcAt[client]	  = 0.0;   /* 新一发强制重算, 避免复用上一发的旧轨迹 */
+			g_iPredDrawCount[client]  = 0;
+			PredLog(client, PRED_DEBUG_FULL, "坦克起手扔石头(动作=%d): 预测窗口 %.1f 秒(技能=%s)",
+					sequence, PRED_WINDOW, IsPred[client] ? "开启" : "未开启");
+		}
+	}
+
 	if (sequence > 48 && Posture[client])
 	{
 		sequence = Posture[client] + 48;
@@ -507,6 +883,100 @@ public void L4D_OnTraceRockCreated(int client, int &trace)
 {
 	if (IsTank(client))
 		trace = IsTrac[client];
+}
+
+/**
+ * 石头掷出(引擎刚给石头赋了初速):
+ *  1. 收线: 清掉"手里那颗石头"并关掉预测窗口(预测线只画瞄准/蓄力阶段, 掷出即停)
+ *  2. tank_pred_debug >= 1 时, 打一条"我们算的初速/出石点 vs 引擎真正用的"对比(写日志 + 发给坦克)
+ */
+public void L4D_TankRock_OnRelease_Post(int tank, int rock, const float vecPos[3], const float vecAng[3], const float vecVel[3], const float vecRot[3])
+{
+	if (IsValidClient(tank) && EntRefToEntIndex(g_iHeldRock[tank]) == rock)
+		g_iHeldRock[tank] = INVALID_ENT_REFERENCE;
+
+	if (IsValidClient(tank))
+	{
+		g_fPredUntil[tank]	= 0.0; /* 掷出即收线 */
+		g_fPredLockout[tank] = GetGameTime() + Apex[27].FloatValue; /* 收招期间不许重开窗口 */
+	}
+
+	if (!IsTank(tank))
+		return;
+
+	float angles[3], pred[3], handPos[3], handAng[3];
+	GetClientEyeAngles(tank, angles);
+	GetPredVelocity(tank, angles, pred, false); /* 核对用: 用原始速度, 和平滑无关 */
+	bool handOk = GetAttachmentVectors(tank, "debris", handPos, handAng);
+
+	/* 校验用: 引擎真正用的点是"debris"附着点(手部); 画线用的是眼睛位置(为了不抖), 两者相差几十点 */
+	PredLog(tank, PRED_DEBUG_KEY, "掷出石头(动作=%d): 技能=%s 手部出石点%s(%.1f,%.1f,%.1f) 引擎出石点(%.1f,%.1f,%.1f)",
+			g_iPredSeq[tank], IsPred[tank] ? "开启" : "关闭", handOk ? "" : "取不到/", handPos[0], handPos[1], handPos[2],
+			vecPos[0], vecPos[1], vecPos[2]);
+	PredLog(tank, PRED_DEBUG_KEY, "掷出石头: 预测初速 |%.0f|(%.1f,%.1f,%.1f) 引擎初速 |%.0f|(%.1f,%.1f,%.1f)",
+			GetVectorLength(pred), pred[0], pred[1], pred[2],
+			GetVectorLength(vecVel), vecVel[0], vecVel[1], vecVel[2]);
+
+	if (Apex[16].IntValue < PRED_DEBUG_KEY)
+		return;
+
+	/* 学到这个姿势真正的出手偏移(车身坐标系): 引擎给的出石点 - 眼睛锚点。
+	   同姿势多次投掷做加权平均(0.7/0.3), 越用越准; 之后预测就用这个固定值, 不再跟手臂动画。 */
+	if (g_iPredSeq[tank] >= 49 && g_iPredSeq[tank] <= 51)
+	{
+		int	  pose = g_iPredSeq[tank] - 48;
+		float vis[3], fwd[3], right[3], up[3], d[3];
+
+		GetPredStart(tank, angles, vis);
+		GetAngleVectors(angles, fwd, right, up);
+		NormalizeVector(fwd, fwd);
+		NormalizeVector(right, right);
+		NormalizeVector(up, up);
+
+		d[0] = vecPos[0] - vis[0];
+		d[1] = vecPos[1] - vis[1];
+		d[2] = vecPos[2] - vis[2];
+
+		float l0 = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
+		float l1 = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+		float l2 = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
+
+		float sampleLen = GetVectorLength(d);
+		float avgLen	= GetVectorLength(g_fPredPoseOff[tank][pose]);
+
+		if (g_bPredPoseOk[tank][pose] && FloatAbs(sampleLen - avgLen) > PRED_OFF_SAMPLE_TOL)
+		{
+			PredLog(tank, PRED_DEBUG_KEY, "姿势%d 出手偏移样本异常(本次|%.0f| vs 均值|%.0f|), 已丢弃", g_iPredSeq[tank], sampleLen, avgLen);
+		}
+		else if (g_bPredPoseOk[tank][pose])
+		{
+			g_fPredPoseOff[tank][pose][0] = g_fPredPoseOff[tank][pose][0] * 0.7 + l0 * 0.3;
+			g_fPredPoseOff[tank][pose][1] = g_fPredPoseOff[tank][pose][1] * 0.7 + l1 * 0.3;
+			g_fPredPoseOff[tank][pose][2] = g_fPredPoseOff[tank][pose][2] * 0.7 + l2 * 0.3;
+		}
+		else
+		{
+			g_fPredPoseOff[tank][pose][0] = l0;
+			g_fPredPoseOff[tank][pose][1] = l1;
+			g_fPredPoseOff[tank][pose][2] = l2;
+			g_bPredPoseOk[tank][pose]	  = true;
+		}
+
+		PredLog(tank, PRED_DEBUG_KEY, "学到姿势%d 出手偏移(车身系): 右%.0f 上%.0f 前%.0f |均值%.0f| 本次测得|%.0f|",
+				g_iPredSeq[tank], g_fPredPoseOff[tank][pose][0], g_fPredPoseOff[tank][pose][1],
+				g_fPredPoseOff[tank][pose][2], GetVectorLength(g_fPredPoseOff[tank][pose]), GetVectorLength(d));
+	}
+
+	/* 开始记录石头实飞: 记下这一发的预测结果, 等石头碎裂时对比 */
+	g_iFlyRock[tank]	   = EntIndexToEntRef(rock);
+	g_bFlyActive[tank]	   = true;
+	g_fFlyStartTime[tank]  = GetGameTime();
+	g_bFlyPredHit[tank]	   = g_bPredHasImpact[tank];
+	g_fFlyPredTime[tank]   = g_fPredImpactTime[tank];
+	g_fFlyPredPos[tank][0] = g_fPredImpact[tank][0];
+	g_fFlyPredPos[tank][1] = g_fPredImpact[tank][1];
+	g_fFlyPredPos[tank][2] = g_fPredImpact[tank][2];
+	GetEntPropVector(rock, Prop_Send, "m_vecOrigin", g_fFlyLastPos[tank]);
 }
 
 /* 掷出跟踪石头扣血: 最多扣到只剩 1 血, 技能不会把坦克扣死. 返回实际扣除的血量(0=没扣) */
@@ -594,6 +1064,17 @@ void OnRockSpawnPost(int rock)
 	g_iRockCharge[rock] = 0;
 
 	int owner = GetEntPropEnt(rock, Prop_Data, "m_hOwnerEntity");
+
+	/* 记下"该坦克手上有一颗还没掷出的石头": !pred 轨迹预测就靠这个判断"正在蓄力掷石"。
+	   引擎在蓄力开始时就生成 tank_rock(CTankRock::Create: MOVETYPE_NONE + SOLID_NONE +
+	   FollowEntity 坦克), 直到 CThrow::UpdateAbility 走完蓄力才调 CTankRock::OnRelease 赋予初速;
+	   这里在 SpawnPost 记下, 在 L4D_TankRock_OnRelease_Post 清除。
+	   (注意: 蓄力期间石头的坐标并不是出手点, 出手点要另外取坦克 "debris" 附着点。
+	    实测某些情况下石头几乎与掷出同帧, 所以预测线的触发以"起手动作"为主, 这里只作辅助/日志) */
+	if (IsValidClient(owner))
+		g_iHeldRock[owner] = EntIndexToEntRef(rock);
+	if (IsTank(owner))
+		PredLog(owner, PRED_DEBUG_FULL, "tank_rock #%d 已生成(owner=%N): 石头存在期间=蓄力期", rock, owner);
 
 	/* 只有"坦克开着跟踪、且跟踪功能确实生效"时掷出的石头才算跟踪石 */
 	if (!TracFeatureActive() || !IsTank(owner) || !IsTrac[owner])
@@ -695,12 +1176,28 @@ public void OnMapStart()
 	g_bRockFlySoundPrecached = false;
 	g_bRockFlySoundFailed	 = false;
 	PrecacheRockFlySound();
+
+	/* 提示定时器带 TIMER_FLAG_NO_MAPCHANGE, 换图时会被引擎关掉; 标记必须一并清掉,
+	   否则那之后坦克出生提示再也不会发(标记一直停在"正在发") */
+	for (int i = 0; i <= MaxClients; i++)
+		g_bHintActive[i] = false;
+
+	/* 轨迹预测线的贴图(临时光束 TE_SetupBeamPoints 用) */
+	g_iBeamSprite = PrecacheModel(PRED_BEAM_SPRITE);
+
+	/* 换图后实体索引全变, 隐形阻挡体名单要重新学 */
+	for (int i = 0; i < sizeof(g_bPredIgnoreEnt); i++)
+		g_bPredIgnoreEnt[i] = false;
+	g_iPredIgnored = 0;
 }
 
 /* 插件中途加载(手动 sm plugins load、热重载)收不到本图的 OnMapStart, 这里补一次 */
 public void OnConfigsExecuted()
 {
 	PrecacheRockFlySound();
+
+	if (g_iBeamSprite <= 0)
+		g_iBeamSprite = PrecacheModel("materials/sprites/laserbeam.vmt");
 }
 
 public void OnClientPutInServer(int client)
@@ -714,6 +1211,21 @@ public void OnClientDisconnect(int client)
 
 	/* 跟踪石的连续命中约束(控制权状态已移交 l4d_tank_control_eq 修改版) */
 	g_iLastTracTarget[client] = 0;
+
+	/* 掉线后不该再保留"手里那颗石头"/预测窗口/平滑状态 */
+	g_iHeldRock[client]	  = INVALID_ENT_REFERENCE;
+	g_bPredActive[client] = false;
+	g_fPredUntil[client]  = 0.0;
+	g_fPredTestUntil[client] = 0.0;
+	g_bPredSmoothInit[client] = false;
+	g_bFlyActive[client]  = false;
+	g_iFlyRock[client]	  = INVALID_ENT_REFERENCE;
+	g_bPredVelInit[client] = false;
+	g_bHintActive[client]  = false;
+	g_fPredDbgUntil[client] = 0.0;
+	g_fPredLockout[client]	= 0.0;
+	g_bPredStartLogged[client] = false;
+	Pred_ResetCache(client);
 }
 
 /**
@@ -818,16 +1330,864 @@ bool IsSurvivor(int client)
 }
 
 /* -----------------------------------------------------------
+	石头轨迹预测(!pred / !yc)
+	坦克按下右键(起手扔石头)的那一刻开一个 1.2 秒窗口, 窗口内每帧画一次预测抛物线;
+	掷出石头 / 取消 / 窗口到期都会立刻收线(石头离手后不再显示)。
+	  起点   = 坦克眼睛位置 + 准星前向 24 点(可用 tank_pred_forward 调, 做时间平滑防抖)
+	           —— 不用引擎那个"debris"手部附着点: 它跟着投掷手臂动画摆, 站着不动线也会抖
+	  初速   = 眼睛前向 * z_tank_throw_force + 坦克自身速度
+	  加速度 = -sv_gravity * 0.4
+	石头命中即碎(不反弹), 所以扫到第一次碰撞就收线, 不做反弹预测。
+----------------------------------------------------------- */
+
+/* 取该坦克握在手里(还没掷出)的石头, 没有则返回 -1 */
+int GetHeldRock(int tank)
+{
+	int ref = g_iHeldRock[tank];
+	if (ref <= 0) /* 0 = 从未记录, -1 = 已清空 */
+		return -1;
+
+	int rock = EntRefToEntIndex(ref);
+	if (rock == INVALID_ENT_REFERENCE || !IsValidEntity(rock))
+		return -1;
+
+	/* 石头必须仍属于这辆坦克(实体索引会被复用, 这里再核一次归属) */
+	if (GetEntPropEnt(rock, Prop_Data, "m_hOwnerEntity") != tank)
+		return -1;
+
+	return rock;
+}
+
+/* 出石初速: 与引擎 CTankRock::OnRelease 的算法一致(眼睛前向 * 出石速度 + 坦克自身速度) */
+void GetPredVelocity(int tank, const float angles[3], float vel[3], bool smooth = true)
+{
+	float fwd[3], right[3], up[3];
+	GetAngleVectors(angles, fwd, right, up);
+	NormalizeVector(fwd, fwd);
+	NormalizeVector(right, right);
+	NormalizeVector(up, up);
+
+	float speed = Apex[12].FloatValue;
+	if (speed <= 0.0)
+		speed = (g_hThrowForce == null) ? PRED_FALLBACK_SPEED : g_hThrowForce.FloatValue;
+
+	ScaleVector(fwd, speed);
+
+	float tankVel[3];
+	GetEntPropVector(tank, Prop_Data, "m_vecVelocity", tankVel);
+
+	/* 站着不动时 m_vecVelocity 也不是 0, 会有几到几十 u/s 的来回抖动;
+	   它直接叠加进初速 = 方向抖 1~3 度 = 整条线在摆("站着不动都抖"就是它)。
+	   所以在车身坐标系里平滑: 抖动被压掉, 真走路(几百 u/s)照样跟得上。 */
+	if (smooth && Apex[19].FloatValue > 0.0)
+	{
+		float keep = Apex[19].FloatValue;
+		float loc[3];
+
+		loc[0] = tankVel[0] * right[0] + tankVel[1] * right[1] + tankVel[2] * right[2];
+		loc[1] = tankVel[0] * up[0] + tankVel[1] * up[1] + tankVel[2] * up[2];
+		loc[2] = tankVel[0] * fwd[0] + tankVel[1] * fwd[1] + tankVel[2] * fwd[2];
+
+		if (!g_bPredVelInit[tank])
+		{
+			g_fPredVelSmooth[tank][0] = loc[0];
+			g_fPredVelSmooth[tank][1] = loc[1];
+			g_fPredVelSmooth[tank][2] = loc[2];
+			g_bPredVelInit[tank]	 = true;
+		}
+		else
+		{
+			for (int i = 0; i < 3; i++)
+			{
+				loc[i] = loc[i] * (1.0 - keep) + g_fPredVelSmooth[tank][i] * keep;
+				g_fPredVelSmooth[tank][i] = loc[i];
+			}
+		}
+
+		tankVel[0] = right[0] * loc[0] + up[0] * loc[1] + fwd[0] * loc[2];
+		tankVel[1] = right[1] * loc[0] + up[1] * loc[1] + fwd[1] * loc[2];
+		tankVel[2] = right[2] * loc[0] + up[2] * loc[1] + fwd[2] * loc[2];
+	}
+
+	AddVectors(fwd, tankVel, vel);
+}
+
+/**
+ * 画线起点: 坦克眼睛位置 + 准星前向偏移(默认 24 点)。
+ *
+ * 为什么不用引擎掷出时那个"debris"骨骼附着点(手部): 它跟着投掷手臂动画走,
+ * 站着不动手臂一抬一放, 起点就来回摆, 整条预测线跟着甩(实测抖动很大);
+ * 而这个点只影响起点位置(几十点), 对整条抛物线的形状/落点几乎没有贡献,
+ * 所以画线用稳定的眼睛位置, 手部点只在调试日志里与引擎实际出石点做对比核对。
+ */
+void GetPredStart(int client, const float angles[3], float start[3])
+{
+	float fwd[3];
+	GetAngleVectors(angles, fwd, NULL_VECTOR, NULL_VECTOR);
+	NormalizeVector(fwd, fwd);
+
+	GetClientEyePosition(client, start);
+
+	float advance = Apex[18].FloatValue;
+	if (advance > 0.0)
+	{
+		start[0] += fwd[0] * advance;
+		start[1] += fwd[1] * advance;
+		start[2] += fwd[2] * advance;
+	}
+}
+
+/**
+ * 手部出石点相对"眼睛锚点"的偏移, 拆到坦克自身坐标系(右/上/前)输出。
+ *
+ * 引擎真正用的出石点是手部 "debris" 附着点: 不同姿势(49/50/51)它离眼睛的高度/前后都不同,
+ * 抬手姿势在头顶之上 —— 用眼睛点算落点会差出上百点(实测"预测 0.09 秒/误差 700+")。
+ * 但手部跟着投掷动画抖, 直接当起点画线会抖到看不清。于是把偏移放在"车身坐标系"里平滑:
+ * 动画抖动被压掉、各姿势的平均偏移保留, 而转视角时基向量一起转 -> 零滞后。
+ * @return false = 取不到手部附着点(老 left4dhooks / 缺 lux_library.txt), 调用方退回纯眼睛起点
+ */
+bool GetPredPhysOffset(int client, const float angles[3], float local[3])
+{
+	float hand[3], vis[3], ang[3];
+	float fwd[3], right[3], up[3];
+
+	if (!GetAttachmentVectors(client, "debris", hand, ang))
+		return false;
+
+	GetPredStart(client, angles, vis);
+	GetAngleVectors(angles, fwd, right, up);
+	NormalizeVector(fwd, fwd);
+	NormalizeVector(right, right);
+	NormalizeVector(up, up);
+
+	float d[3];
+	d[0] = hand[0] - vis[0];
+	d[1] = hand[1] - vis[1];
+	d[2] = hand[2] - vis[2];
+
+	local[0] = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
+	local[1] = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+	local[2] = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
+
+	return true;
+}
+
+/* 拼出真正用于计算的起点: 眼睛锚点 + 平滑后的手部偏移(转回世界坐标) */
+void Pred_ComposeStart(const float vis[3], const float angles[3], const float local[3], float out[3])
+{
+	float fwd[3], right[3], up[3];
+	GetAngleVectors(angles, fwd, right, up);
+	NormalizeVector(fwd, fwd);
+	NormalizeVector(right, right);
+	NormalizeVector(up, up);
+
+	out[0] = vis[0] + right[0] * local[0] + up[0] * local[1] + fwd[0] * local[2];
+	out[1] = vis[1] + right[1] * local[0] + up[1] * local[1] + fwd[1] * local[2];
+	out[2] = vis[2] + right[2] * local[0] + up[2] * local[1] + fwd[2] * local[2];
+}
+/**
+ * 石头实飞记录(调试): 掷出后逐帧记住石头位置; 石头碎裂消失(或超过 6 秒)时,
+ * 用最后位置当作实际落点, 打印"实际落点/实飞时间 vs 预测落点/预测时间/误差"。
+ * 这是唯一能客观回答"预测线准不准、够不够长"的办法, 不靠肉眼判断。
+ */
+void Pred_TrackFlight(int client)
+{
+	if (!g_bFlyActive[client])
+		return;
+
+	float flight = GetGameTime() - g_fFlyStartTime[client];
+	int	  rock	 = EntRefToEntIndex(g_iFlyRock[client]);
+
+	if (rock != INVALID_ENT_REFERENCE && IsValidEntity(rock) && flight < 6.0)
+	{
+		GetEntPropVector(rock, Prop_Send, "m_vecOrigin", g_fFlyLastPos[client]);
+		return;
+	}
+
+	g_bFlyActive[client] = false;
+
+	if (flight < 0.05)
+		return;
+
+	float err = g_bFlyPredHit[client] ? GetVectorDistance(g_fFlyLastPos[client], g_fFlyPredPos[client]) : -1.0;
+
+	PredLog(client, PRED_DEBUG_KEY, "石头实飞(动作=%d 重力=%.0f): 实际落点(%.0f,%.0f,%.0f) 实飞 %.2f 秒%s | 预测落点(%.0f,%.0f,%.0f) 预测 %.2f 秒 命中=%s | 落点误差 %.0f 点",
+			g_iPredSeq[client], g_fPredGravity[client],
+			g_fFlyLastPos[client][0], g_fFlyLastPos[client][1], g_fFlyLastPos[client][2], flight,
+			(flight >= 6.0) ? "(石头一直没消失, 采到 6 秒)" : "",
+			g_fFlyPredPos[client][0], g_fFlyPredPos[client][1], g_fFlyPredPos[client][2], g_fFlyPredTime[client],
+			g_bFlyPredHit[client] ? "是" : "否", err);
+}
+
+/* 清掉这一发的抛物线缓存与节流时间戳(新一发/重生/掉线/自检开始都调) */
+void Pred_ResetCache(int client)
+{
+	g_iPredDrawCount[client] = 0;
+	g_bPredHasImpact[client] = false;
+	g_fPredCalcAt[client]	 = 0.0;
+	g_fPredEmitAt[client]	 = 0.0;
+	g_fPredImpactTime[client] = 0.0;
+	g_iPredHitEnt[client]	 = 0;
+	g_fPredLastAng[client][0] = 0.0;
+	g_fPredLastAng[client][1] = 0.0;
+	g_fPredLastAng[client][2] = 0.0;
+	g_fPredLastStart[client][0] = 0.0;
+	g_fPredLastStart[client][1] = 0.0;
+	g_fPredLastStart[client][2] = 0.0;
+	g_fPredLastVel[client][0] = 0.0;
+	g_fPredLastVel[client][1] = 0.0;
+	g_fPredLastVel[client][2] = 0.0;
+}
+
+/* 轨迹预测的碰撞过滤: 只忽略坦克自己(线从坦克身上出发, 不忽略的话一出手就撞自己) */
+bool TraceFilter_Pred(int entity, int contentsMask, any data)
+{
+	if (entity == data)
+		return false;
+
+	if (entity > 0 && entity < sizeof(g_bPredIgnoreEnt) && g_bPredIgnoreEnt[entity])
+		return false; /* 隐形物理阻挡体: 玩家看不见, 石头也穿得过 */
+
+	return true;
+}
+
+/**
+ * 调试日志: 同时写进服务器日志(可在 addons/sourcemod/logs/L<日期>.log 里 grep "[!pred]")
+ * 和发给该玩家(颜色用 CPrintToChat, 会正确解析 TAG 里的 {olive} 标签)。
+ * @param level 需要的 tank_pred_debug 档位(PRED_DEBUG_KEY / PRED_DEBUG_FULL)
+ */
+void PredLog(int client, int level, const char[] fmt, any ...)
+{
+	if (Apex[16].IntValue < level)
+		return;
+
+	char buf[256];
+	VFormat(buf, sizeof(buf), fmt, 4);
+
+	LogMessage("[!pred] %N: %s", client, buf);
+
+	if (IsValidClient(client))
+		CPrintToChat(client, "%s{olive}[pred]{default} %s", TAG, buf);
+}
+
+/* 高频路径(每帧)上的日志节流: 同一玩家每秒最多一条 */
+bool PredLogCanSpam(int client)
+{
+	float now = GetGameTime();
+	if (now < g_fPredLogAt[client])
+		return false;
+
+	g_fPredLogAt[client] = now + 1.0;
+	return true;
+}
+
+/* 抛物线求值: start + vel*t - 0.5*gravity*t^2 (重力沿 Z 轴向下) */
+void Pred_EvalAt(const float start[3], const float vel[3], float gravity, float t, float out[3])
+{
+	out[0] = start[0] + vel[0] * t;
+	out[1] = start[1] + vel[1] * t;
+	out[2] = start[2] + vel[2] * t - 0.5 * gravity * t * t;
+}
+
+/**
+ * 单步碰撞检测(石头 ±4 碰撞盒)
+ * @return true = 真撞上了, 此时 to 被改写成命中点
+ *   命中点贴在起点上时视为 startsolid(起点被坦克自己的碰撞盒/命中盒包住):
+ *   换只擦世界几何的 MASK_SOLID 重试一次, 仍贴住就当这一步没撞, 让后面几步去撞真墙。
+ */
+bool Pred_StepTrace(int client, const float from[3], float to[3], const float hullMin[3], const float hullMax[3])
+{
+	/* 最多重试 4 次: 每次可能学会一个新的"隐形阻挡体"并把它从这一扫里排除掉 */
+	for (int attempt = 0; attempt < 4; attempt++)
+	{
+		if (Pred_StepTraceOnce(client, from, to, hullMin, hullMax))
+			return true;
+	}
+
+	return false;
+}
+
+/* 单次扫描(不含学习重试) */
+bool Pred_StepTraceOnce(int client, const float from[3], float to[3], const float hullMin[3], const float hullMax[3])
+{
+	float endpos[3];
+	float best	 = -1.0; /* 本次命中的距离, -1 = 没命中 */
+	int	  bestEnt = 0;
+
+	/* 1) 世界几何: ±4 石头碰撞盒扫; 掩码已排除感染者(石头从感染者身上穿过去) */
+	TR_TraceHullFilter(from, to, hullMin, hullMax, PRED_WORLD_MASK, TraceFilter_Pred, client);
+	if (TR_DidHit())
+	{
+		TR_GetEndPosition(endpos);
+		float d = GetVectorDistance(from, endpos);
+		if (d >= PRED_MIN_STEP_DIST)
+		{
+			best	= d;
+			bestEnt = TR_GetEntityIndex();
+			to[0]	= endpos[0];
+			to[1]	= endpos[1];
+			to[2]	= endpos[2];
+		}
+	}
+
+	/* 2) 生还者: 单独用射线查命中盒。
+	   不能用"hull 对命中盒"——引擎对 hull 会把每个 hitbox 摊成 AABB, 擦边也会判成命中,
+	   实测就是这样让预测线提前停下的(石头其实从旁边飞过去了)。 */
+	TR_TraceRayFilter(from, to, MASK_SHOT, RayType_EndPoint, Pred_SurvivorFilter, 0);
+	if (TR_DidHit())
+	{
+		TR_GetEndPosition(endpos);
+		float d = GetVectorDistance(from, endpos);
+		if (d >= PRED_MIN_STEP_DIST && (best < 0.0 || d < best))
+		{
+			best	= d;
+			bestEnt = TR_GetEntityIndex();
+			to[0]	= endpos[0];
+			to[1]	= endpos[1];
+			to[2]	= endpos[2];
+		}
+	}
+
+	if (best < 0.0)
+		return false; /* 没撞, 或者命中点贴着起点(卡在几何里): 这一步当没撞, 交给后面几步 */
+
+	/* 学到新的隐形阻挡体: 记进忽略名单, 让上层重扫这一步(石头其实会穿过去) */
+	if (bestEnt > 0 && bestEnt < sizeof(g_bPredIgnoreEnt) && !g_bPredIgnoreEnt[bestEnt] && bestEnt > MaxClients)
+	{
+		char cls[64];
+		GetEntityClassname(bestEnt, cls, sizeof(cls));
+
+		if (strcmp(cls, "env_physics_blocker") == 0)
+		{
+			g_bPredIgnoreEnt[bestEnt] = true;
+			g_iPredIgnored++;
+
+			PredLog(client, PRED_DEBUG_FULL, "发现隐形物理阻挡体 %s #%d (只挡物理道具, 石头会穿过去), 已加入忽略名单(共 %d 个)",
+					cls, bestEnt, g_iPredIgnored);
+			return false; /* 让 Pred_StepTrace 重扫 */
+		}
+	}
+
+	g_iPredHitEnt[client] = bestEnt;
+	return true;
+}
+
+/* 生还者过滤器: 只有生还者的命中盒挡石头(感染者/世界几何不走这一路) */
+bool Pred_SurvivorFilter(int entity, int contentsMask, any data)
+{
+	return (entity > 0 && entity <= MaxClients && GetClientTeam(entity) == 2);
+}
+
+/**
+ * 重算抛物线并缓存"画线采样点"——开销都在这一步, 由 tank_pred_interval 节流
+ * (每帧只做 Pred_Emit 重发光束, 不含任何 trace, 参考 miwuki 的 Calc_Interval 思路)
+ *
+ * 推进采用"批量空域 + 疑似逐步精查": 空域一次弦扫 tank_pred_batch 步;
+ * 弦上扫到东西就退化成逐步精确检查, 所以既不会漏薄墙, 也不会被抛物线拱起部分骗到
+ * (弦在抛物线上方, 弦撞到不代表抛物线会撞)。石头命中即碎, 只算到第一次碰撞。
+ */
+void Pred_Calc(int client, const float angles[3], const float start[3], const float vel[3])
+{
+	g_iPredDrawCount[client] = 0;
+	g_bPredHasImpact[client] = false;
+
+	float gravityScale = Apex[13].FloatValue;
+	if (gravityScale < 0.0)
+		return;
+
+	float gravity = ((g_hSvGravity == null) ? 800.0 : g_hSvGravity.FloatValue) * gravityScale;
+	float maxTime = Apex[14].FloatValue;
+
+	g_fPredGravity[client] = gravity; /* 调试: 用来确认 sv_gravity 到底读到多少 */
+
+	/* 光束贴图索引: 插件"中途加载"(sm plugins load / reload)会错过 OnMapStart 与 OnConfigsExecuted,
+	   这里再兜一次 PrecacheModel —— 该模型若已被其它插件预缓存, 引擎会直接返回已有索引 */
+	if (g_iBeamSprite <= 0)
+	{
+		g_iBeamSprite = PrecacheModel(PRED_BEAM_SPRITE);
+		if (PredLogCanSpam(client))
+			PredLog(client, PRED_DEBUG_FULL, "光束贴图索引为 0, 已在本图重新预缓存 -> %d (0=画不出来)", g_iBeamSprite);
+	}
+
+	float hullMin[3] = { -PRED_HULL_SIZE, -PRED_HULL_SIZE, -PRED_HULL_SIZE };
+	float hullMax[3] = { PRED_HULL_SIZE, PRED_HULL_SIZE, PRED_HULL_SIZE };
+
+	int batch = RoundToNearest(Apex[24].FloatValue);
+	if (batch < 1)
+		batch = 1;
+	if (batch > 8)
+		batch = 8;
+
+	/* ---- 1) 求第一次碰撞发生的时间(没撞到就是 maxTime), 顺便拿到命中点 ---- */
+	float tHit = maxTime;
+	bool  hit  = false;
+	float hitPos[3];
+	float cur[3], probe[3];
+
+	cur[0] = start[0];
+	cur[1] = start[1];
+	cur[2] = start[2];
+
+	for (float t = 0.0; t < maxTime;)
+	{
+		float tNext = t + PRED_PHYS_STEP * float(batch);
+		if (tNext > maxTime)
+			tNext = maxTime;
+
+		Pred_EvalAt(start, vel, gravity, tNext, probe);
+
+		/* 空域快速通道: 这一段连"拱起的弦"都扫不到东西, 抛物线自然也能过 */
+		TR_TraceHullFilter(cur, probe, hullMin, hullMax, PRED_WORLD_MASK, TraceFilter_Pred, client);
+		if (!TR_DidHit())
+		{
+			cur[0] = probe[0];
+			cur[1] = probe[1];
+			cur[2] = probe[2];
+			t	   = tNext;
+			continue;
+		}
+
+		/* 弦上疑似有东西 -> 逐步精查这一段 */
+		bool  segHit = false;
+		float ts	 = t;
+		for (int s = 1; s <= batch && ts < maxTime; s++)
+		{
+			ts = t + PRED_PHYS_STEP * float(s);
+			if (ts > maxTime)
+				ts = maxTime;
+
+			Pred_EvalAt(start, vel, gravity, ts, probe);
+
+			if (Pred_StepTrace(client, cur, probe, hullMin, hullMax))
+			{
+				hit		  = true;
+				tHit	  = ts;
+				hitPos[0] = probe[0];
+				hitPos[1] = probe[1];
+				hitPos[2] = probe[2];
+				segHit	  = true;
+				break;
+			}
+
+			cur[0] = probe[0];
+			cur[1] = probe[1];
+			cur[2] = probe[2];
+		}
+
+		if (segHit)
+			break;
+
+		t = ts;
+	}
+
+	/* ---- 2) 沿抛物线均匀采样成画线端点(有命中时, 末端直接落在真实命中点上) ---- */
+	int seg = Apex[15].IntValue;
+	if (seg < 1)
+		seg = 1;
+
+	float span = hit ? tHit : maxTime;
+
+	/* 长弹道自动加密采样(每 0.25 秒至少一个端点), 保证 5 秒的弹道也是平滑曲线 */
+	int autoSeg = RoundToNearest(span / 0.25);
+	if (autoSeg > seg)
+		seg = autoSeg;
+	if (seg > PRED_SEG_MAX)
+		seg = PRED_SEG_MAX;
+	for (int k = 0; k <= seg; k++)
+		Pred_EvalAt(start, vel, gravity, span * float(k) / float(seg), g_fPredDraw[client][k]);
+
+	if (hit)
+	{
+		g_fPredDraw[client][seg][0] = hitPos[0];
+		g_fPredDraw[client][seg][1] = hitPos[1];
+		g_fPredDraw[client][seg][2] = hitPos[2];
+
+		g_bPredHasImpact[client] = true;
+		g_fPredImpact[client][0] = hitPos[0];
+		g_fPredImpact[client][1] = hitPos[1];
+		g_fPredImpact[client][2] = hitPos[2];
+	}
+
+	g_iPredDrawCount[client] = seg + 1;
+	g_fPredImpactTime[client] = span;
+
+	/* 记下本次输入, 供"瞄准/位置/速度没变就不重算"判断 */
+	g_fPredCalcAt[client]	  = GetGameTime();
+	g_fPredLastStart[client][0] = start[0];
+	g_fPredLastStart[client][1] = start[1];
+	g_fPredLastStart[client][2] = start[2];
+	g_fPredLastVel[client][0] = vel[0];
+	g_fPredLastVel[client][1] = vel[1];
+	g_fPredLastVel[client][2] = vel[2];
+	g_fPredLastAng[client][0] = angles[0];
+	g_fPredLastAng[client][1] = angles[1];
+	g_fPredLastAng[client][2] = angles[2];
+}
+
+/* 该重算了吗(参考 miwuki: 最小间隔 + 瞄准/位置/速度变化检测 + 强制重算上限) */
+bool Pred_NeedCalc(int client, const float angles[3], const float start[3], const float vel[3])
+{
+	if (g_fPredCalcAt[client] <= 0.0)
+		return true; /* 还没算过(刚开技能/刚进入扔石过程/自检) */
+
+	float since = GetGameTime() - g_fPredCalcAt[client];
+	if (since < 0.0)
+		return true; /* 换图等时间回退保护 */
+
+	if (since < Apex[23].FloatValue)
+		return false; /* 还没到最小重算间隔: 用缓存重发光束就行 */
+
+	if (since >= PRED_FORCE_INTERVAL)
+		return true; /* 再拖就跟不上瞄准了 */
+
+	return (GetVectorDistance(angles, g_fPredLastAng[client]) >= 0.1
+			|| GetVectorDistance(start, g_fPredLastStart[client]) >= 1.0
+			|| GetVectorDistance(vel, g_fPredLastVel[client]) >= 4.0);
+}
+
+/**
+ * 用缓存把线发出去(每帧调用, 不含 trace):
+ *  1. 前 tank_pred_skip_len 点(默认 120)不画, 避免线条顶在脸上挡视线
+ *  2. 整条线往准星右侧让开 tank_pred_off_r 点(参考 miwuki 的视觉起点偏移), 末端收敛回真实落点
+ *  3. 命中处画白色落点标记: 向上竖线(仿生还者死亡升天光柱) + 外圈 + 中心小圈
+ */
+void Pred_Emit(int client)
+{
+	int count = g_iPredDrawCount[client];
+	if (count < 2)
+	{
+		if (PredLogCanSpam(client))
+			PredLog(client, PRED_DEBUG_FULL, "没画线: 采样点只有 %d 个(计算被跳过或重力倍率<0)", count);
+		return;
+	}
+
+	/* 发射节流: 服务器 100 tick 时 OnPlayerRunCmd 每秒会来 100~200 次, 每帧都发的话
+	   同一条线上会同时叠着 4~8 份残影(错开一点就是"一堆光线")。
+	   按 tank_pred_emit(默认 0.033 秒 ≈ 30Hz)节流, 配合光束寿命 0.055 秒刚好连成一条。 */
+	float now = GetGameTime();
+	if (g_fPredEmitAt[client] > 0.0 && (now - g_fPredEmitAt[client]) < Apex[26].FloatValue)
+		return;
+
+	g_fPredEmitAt[client] = now;
+
+	/* 光束寿命跟随发射间隔(1.6 倍): 刚好连成一条线, 又只会叠 1~2 份残影.
+	   调大 tank_pred_emit 时残影会同步变少、线更干净 */
+	float life = Apex[26].FloatValue * 1.6;
+	if (life < 0.02)
+		life = 0.02;
+
+	int	  last	  = count - 1;
+	int	  first	  = 0;
+	float skipLen = Apex[20].FloatValue;
+
+	/* 前 tank_pred_skip_len 点(默认 120)不画: 只挡掉贴脸那一段, 不按比例砍掉整条线 */
+	if (skipLen > 0.0)
+	{
+		float acc = 0.0;
+		for (int k = 1; k <= last; k++)
+		{
+			acc += GetVectorDistance(g_fPredDraw[client][k - 1], g_fPredDraw[client][k]);
+			if (acc >= skipLen)
+			{
+				first = k;
+				break;
+			}
+		}
+	}
+
+	if (first < 1)
+		first = 1;
+	if (first > last - 1)
+		first = last - 1;
+	if (first < 0)
+		return;
+
+	int drawn = last - first + 1;
+
+	/* 视觉偏移用的"右/上"基向量: 由起点朝第一段的方向推出来, 不依赖本帧的瞄准角 */
+	float dir[3], right[3], up[3] = { 0.0, 0.0, 1.0 }, shift[3];
+	dir[0] = g_fPredDraw[client][1][0] - g_fPredDraw[client][0][0];
+	dir[1] = g_fPredDraw[client][1][1] - g_fPredDraw[client][0][1];
+	dir[2] = g_fPredDraw[client][1][2] - g_fPredDraw[client][0][2];
+
+	float offR = Apex[25].FloatValue;
+	if (GetVectorLength(dir) < 0.001 || offR <= 0.0)
+		offR = 0.0;
+	else
+	{
+		NormalizeVector(dir, dir);
+		GetVectorCrossProduct(dir, up, right);
+		NormalizeVector(right, right);
+		GetVectorCrossProduct(right, dir, up);
+		NormalizeVector(up, up);
+	}
+
+	static float line[PRED_SEG_MAX + 1][3];
+	int			 n = 0;
+
+	for (int k = first; k <= last; k++)
+	{
+		float f = 1.0 - float(k - first) / float(drawn - 1); /* 起点处 1 -> 末端 0 */
+
+		/* 右偏(观感, 末端收敛到准星线) + 手部->眼睛的整体位移(平滑后整条线一起平移, 线不抖) */
+		shift[0] = right[0] * offR * f + up[0] * PRED_VIS_UP * f;
+		shift[1] = right[1] * offR * f + up[1] * PRED_VIS_UP * f;
+		shift[2] = right[2] * offR * f + up[2] * PRED_VIS_UP * f;
+
+		line[n][0] = g_fPredDraw[client][k][0] + shift[0];
+		line[n][1] = g_fPredDraw[client][k][1] + shift[1];
+		line[n][2] = g_fPredDraw[client][k][2] + shift[2];
+		n++;
+	}
+
+	int	  color[4]	 = { PRED_COLOR_R, PRED_COLOR_G, PRED_COLOR_B, 255 };
+	int	  white[4]	 = { 255, 255, 255, 255 };
+	int	  whiteDim[4] = { 255, 255, 255, 190 };
+	float width		 = Apex[17].FloatValue;
+
+	for (int i = 1; i < n; i++)
+	{
+		TE_SetupBeamPoints(line[i - 1], line[i], g_iBeamSprite, 0, 0, 0, life,
+						   width, width, 0, 0.0, color, 0);
+		TE_SendToClient(client);
+	}
+
+	if (PredLogCanSpam(client))
+		PredLog(client, PRED_DEBUG_FULL, "已画线: 端点=%d 段=%d(隐藏前 %d 点) 线长=%.0f 点 起点(%.0f,%.0f,%.0f) 命中=%s 落点(%.0f,%.0f,%.0f) 预测飞行 %.2f 秒",
+			   count, n - 1, first, GetVectorDistance(line[0], line[n - 1]),
+			   line[0][0], line[0][1], line[0][2],
+			   g_bPredHasImpact[client] ? "是" : "否(到最长预测时间)",
+			   g_fPredImpact[client][0], g_fPredImpact[client][1], g_fPredImpact[client][2],
+			   g_fPredImpactTime[client]);
+
+	if (!g_bPredHasImpact[client])
+		return;
+
+	/* 光柱/圆圈贴在"画线末端"上(而不是未平移的物理落点), 保证线尾和光柱是一体的 */
+	float pos[3];
+	pos[0] = line[n - 1][0];
+	pos[1] = line[n - 1][1];
+	pos[2] = line[n - 1][2] + PRED_IMPACT_LIFT;
+
+	float markH	 = Apex[21].FloatValue;
+	float markW	 = (width > PRED_MARK_WIDTH) ? width : PRED_MARK_WIDTH;
+
+	/* 向上的白色竖线(光柱): 仿生还者死亡升天的那道光柱, 所以给得高一点粗一点, 远距离也看得见 */
+	if (markH > 0.0)
+	{
+		float top[3];
+		top[0] = pos[0];
+		top[1] = pos[1];
+		top[2] = pos[2] + markH;
+
+		int markColor[4] = { PRED_MARK_R, PRED_MARK_G, PRED_MARK_B, 255 };
+
+		TE_SetupBeamPoints(pos, top, g_iBeamSprite, 0, 0, 0, life,
+						   markW, markW, 0, 0.0, markColor, 0);
+		TE_SendToClient(client);
+
+		/* 每发只记一条: 确认光柱发出去了、发在哪个坐标、预测停在了什么东西上 */
+		if (!g_bPredMarkLogged[client])
+		{
+			g_bPredMarkLogged[client] = true;
+
+			char hitName[64];
+			int	 hitEnt = g_iPredHitEnt[client];
+
+			if (hitEnt > 0 && hitEnt <= MaxClients)
+				FormatEx(hitName, sizeof(hitName), "玩家 %N", hitEnt);
+			else if (hitEnt > MaxClients && IsValidEntity(hitEnt))
+			{
+				char cls[64];
+				GetEntityClassname(hitEnt, cls, sizeof(cls));
+				FormatEx(hitName, sizeof(hitName), "%s #%d", cls, hitEnt);
+			}
+			else
+				strcopy(hitName, sizeof(hitName), "世界几何");
+
+			PredLog(client, PRED_DEBUG_FULL, "落点标记: 动作=%d 光柱高=%.0f 粗=%.0f 圈半径=%.0f 位置(%.0f,%.0f,%.0f)[物理落点(%.0f,%.0f,%.0f) 位移%.0f] 距起点 %.0f 点 预测飞行 %.2f 秒 重力=%.0f 忽略阻挡=%d 停在=%s",
+					g_iPredSeq[client], markH, markW, Apex[22].FloatValue, pos[0], pos[1], pos[2],
+					g_fPredImpact[client][0], g_fPredImpact[client][1], g_fPredImpact[client][2],
+					GetVectorDistance(pos, g_fPredImpact[client]),
+					GetVectorDistance(pos, g_fPredDraw[client][0]), g_fPredImpactTime[client],
+					g_fPredGravity[client], g_iPredIgnored, hitName);
+		}
+	}
+
+	/* 落点圆圈: 外圈(细) + 中心小圈(粗), 形态参考 miwuki 的落点光圈 */
+	float ringR = Apex[22].FloatValue;
+	if (ringR >= 10.0)
+	{
+		TE_SetupBeamRingPoint(pos, ringR - 1.0, ringR, g_iBeamSprite, 0, 0, 0, life,
+							  1.8, 0.0, whiteDim, 0, 0);
+		TE_SendToClient(client);
+	}
+	if (ringR > 0.0)
+	{
+		TE_SetupBeamRingPoint(pos, 3.0, 4.0, g_iBeamSprite, 0, 0, 0, life,
+							  2.5, 0.0, white, 0, 0);
+		TE_SendToClient(client);
+	}
+}
+
+/* 画预测轨迹: 抛物线受间隔节流重算, 光束每帧重发(所以线不会闪) */
+void Pred_DrawPath(int client, const float angles[3], const float start[3], const float vel[3])
+{
+	if (Pred_NeedCalc(client, angles, start, vel))
+		Pred_Calc(client, angles, start, vel);
+
+	Pred_Emit(client);
+}
+
+/* 蓄力掷石期间画预测轨迹(angles 为本帧指令的视角角度); 对任何玩家每帧调用一次 */
+void Pred_Update(int client, const float angles[3])
+{
+	/* 0) 调试: 掷出后的石头实飞采样(与预测对比用) */
+	Pred_TrackFlight(client);
+
+	/* 1) 自检(!predtest): 不看技能、不看蓄力, 直接按当前瞄准画线 */
+	if (GetGameTime() <= g_fPredTestUntil[client])
+	{
+		float s[3], vis[3], v[3], local[3];
+
+		GetPredStart(client, angles, vis);
+		GetPredPhysOffset(client, angles, local); /* 自检: 直接用当前手部偏移, 方便对照 */
+		Pred_ComposeStart(vis, angles, local, s);
+		GetPredVelocity(client, angles, v);
+
+		Pred_DrawPath(client, angles, s, v);
+		return;
+	}
+
+	/* 与跟踪石头互斥(双保险): 跟踪开着时不画预测, 并顺手把状态清掉 */
+	if (IsTrac[client] && IsPred[client])
+	{
+		IsPred[client] = false;
+		PredLog(client, PRED_DEBUG_KEY, "检测到跟踪石头技能已开启, 自动关闭轨迹预测");
+	}
+
+	/* 2) 是否正在"扔石头": 起手动作开的窗口(主判据) 或 手里确实捏着那颗石头(辅助) */
+	int	 rock	 = GetHeldRock(client);
+	bool inThrow = (GetGameTime() <= g_fPredUntil[client]) || (rock != -1);
+
+	/* 石头还在手上就续窗(有的情况起手动作不触发/动画不同步) */
+	if (rock != -1 && GetGameTime() > g_fPredUntil[client])
+		g_fPredUntil[client] = GetGameTime() + PRED_WINDOW;
+
+	/* 进入/离开"扔石头"过程各记一条: 一眼能看出识别到没有、技能开了没有 */
+	if (inThrow != g_bPredActive[client])
+	{
+		g_bPredActive[client] = inThrow;
+		if (inThrow)
+			PredLog(client, PRED_DEBUG_FULL, "开始预测: 技能=%s, 石头=%s, 贴图=%d, 线宽=%.1f",
+					IsPred[client] ? "开启" : "未开启(需先输入 !pred 或 !yc)",
+					(rock != -1) ? "已在手上" : "还没生成", g_iBeamSprite, Apex[17].FloatValue);
+		else
+			PredLog(client, PRED_DEBUG_FULL, "预测结束(掷出/取消/窗口到期)");
+	}
+
+	if (!inThrow || !IsPred[client])
+		return;
+
+	/* 物理起点用引擎真正的出石点(手部), 落点才准; 画线锚点用稳定的眼睛位置,
+	   两者的差值作为"整体位移"平滑后只作用于画面 —— 这样转视角不会滞后, 也不会因为
+	   手感抖动把落点算歪(姿势越高手部离眼睛越远, 位移越大, 但落点始终按手部算) */
+	float start[3], vis[3], local[3], vel[3];
+
+	GetPredStart(client, angles, vis); /* 稳定的眼睛锚点 */
+
+	/* 出手偏移用"固定值": 优先这个姿势学到过的(来自引擎真实出石点), 否则用本发起手快照。
+	   绝不实时跟随手臂动画 —— 挥臂会让起点绕着眼点转约 90 度, 那正是线的抖动来源。 */
+	g_iPredPoseSlot[client] = 0;
+
+	if (g_iPredSeq[client] >= 49 && g_iPredSeq[client] <= 51)
+	{
+		int pose = g_iPredSeq[client] - 48;
+		if (g_bPredPoseOk[client][pose])
+			g_iPredPoseSlot[client] = pose;
+	}
+
+	int slot = g_iPredPoseSlot[client];
+
+	if (g_bPredPoseOk[client][slot])
+	{
+		local[0] = g_fPredPoseOff[client][slot][0];
+		local[1] = g_fPredPoseOff[client][slot][1];
+		local[2] = g_fPredPoseOff[client][slot][2];
+	}
+	else
+	{
+		local[0] = 0.0; /* 什么都没有(极罕见): 退回纯眼睛锚点, 至少不抖 */
+		local[1] = 0.0;
+		local[2] = 0.0;
+	}
+
+	/* 安全上限: 实测三种姿势偏移 41/92/109 点, 超出 150 一定是取样或状态出了问题, 夹住 */
+	float offLen = GetVectorLength(local);
+	if (offLen > PRED_OFF_MAX)
+	{
+		ScaleVector(local, PRED_OFF_MAX / offLen);
+		PredLog(client, PRED_DEBUG_FULL, "警告: 出手偏移 |%.0f| 超过上限 %.0f, 已夹住(用%s)", offLen, PRED_OFF_MAX,
+				(g_iPredPoseSlot[client] > 0) ? "学到的姿势值" : "起手快照");
+	}
+
+	Pred_ComposeStart(vis, angles, local, start);
+
+	if (!g_bPredStartLogged[client])
+	{
+		g_bPredStartLogged[client] = true;
+		PredLog(client, PRED_DEBUG_KEY, "本发起点: 动作=%d 偏移|%.0f|(右%.0f 上%.0f 前%.0f, 用%s) 起点(%.0f,%.0f,%.0f) 眼位(%.0f,%.0f,%.0f)",
+				g_iPredSeq[client], GetVectorLength(local), local[0], local[1], local[2],
+				(g_iPredPoseSlot[client] > 0) ? "学到的姿势值" : "起手快照",
+				start[0], start[1], start[2], vis[0], vis[1], vis[2]);
+	}
+
+	GetPredVelocity(client, angles, vel);
+
+	/* 逐帧抖动诊断: 扔石窗口刚开始的 0.5 秒内, 每帧把"起点/角度/速度"的帧间变化打出来,
+	   这样残余抖动到底来自哪一项, 一条日志就能定案(debug=2) */
+	if (Apex[16].IntValue >= PRED_DEBUG_FULL && GetGameTime() <= g_fPredDbgUntil[client])
+	{
+		float dStart = GetVectorDistance(start, g_fPredPrevStart[client]);
+		float dAng	 = GetVectorDistance(angles, g_fPredPrevAng[client]);
+		float dVel	 = FloatAbs(GetVectorLength(vel) - g_fPredPrevVel[client]);
+		float rawVel[3], loc2[3];
+
+		GetEntPropVector(client, Prop_Data, "m_vecVelocity", rawVel);
+		GetAngleVectors(angles, loc2, NULL_VECTOR, NULL_VECTOR);
+		NormalizeVector(loc2, loc2);
+		float vAlong = rawVel[0] * loc2[0] + rawVel[1] * loc2[1] + rawVel[2] * loc2[2];
+
+		PredLog(client, PRED_DEBUG_FULL, "帧诊断: 起点(%.1f,%.1f,%.1f) 帧间位移=%.2f 角度帧间差=%.3f 初速帧间差=%.2f 坦克速度|%.1f|(前向%.1f) 偏移|%.1f|",
+				start[0], start[1], start[2], dStart, dAng, dVel, GetVectorLength(rawVel), vAlong,
+				GetVectorLength(local),
+				(g_iPredPoseSlot[client] > 0) ? "学到的姿势值" : "起手快照");
+
+		g_fPredPrevStart[client][0] = start[0];
+		g_fPredPrevStart[client][1] = start[1];
+		g_fPredPrevStart[client][2] = start[2];
+		g_fPredPrevAng[client][0]	= angles[0];
+		g_fPredPrevAng[client][1]	= angles[1];
+		g_fPredPrevAng[client][2]	= angles[2];
+		g_fPredPrevVel[client]		= GetVectorLength(vel);
+	}
+
+	Pred_DrawPath(client, angles, start, vel);
+}
+
+/* -----------------------------------------------------------
 	其他自定义
 ----------------------------------------------------------- */
 void Reset(int client)
 {
 	IsBhop[client]	= false;
 	IsTrac[client]	= false;
+	IsPred[client]	= false;
 	Dir[client]		= 0;
 	Posture[client] = 0;
 	TracLim[client] = 0;
 	BhopLim[client] = 0;
+	PredLim[client] = 0;
 
 	/* 连跳检测: 新一条命重新开始计数, 按键快照清空 */
 	BhopBtn[client] = 0;
@@ -835,4 +2195,17 @@ void Reset(int client)
 
 	/* 新一条命/新回合不继承跟踪石的连续命中约束 */
 	g_iLastTracTarget[client] = 0;
+
+	/* 新一条命/新回合不继承"手里那颗石头"的记录(实体本身会被引擎清掉) */
+	g_iHeldRock[client]	  = INVALID_ENT_REFERENCE;
+	g_bPredActive[client] = false;
+
+	/* 轨迹预测的临时状态(扔石窗口/平滑/自检/日志节流/实飞记录)一并清掉 */
+	g_fPredUntil[client]	 = 0.0;
+	g_fPredTestUntil[client] = 0.0;
+	g_fPredLogAt[client]	 = 0.0;
+	g_bPredSmoothInit[client] = false;
+	g_bFlyActive[client]	 = false;
+	g_iFlyRock[client]		 = INVALID_ENT_REFERENCE;
+	Pred_ResetCache(client);
 }

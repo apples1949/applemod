@@ -6,7 +6,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION	"1.2.0"
+#define PLUGIN_VERSION	"1.3.0"
 
 ConVar g_hHostName, g_hCfgName;
 char g_sPath[PLATFORM_MAX_PATH], g_sFileLine[PLATFORM_MAX_PATH];
@@ -15,7 +15,7 @@ public Plugin myinfo =
 {
 	name 			= "l4d2_hostname",
 	author 			= "apples1949",
-	description 	= "管理员!host重载服名或设置新服名; 服名后缀跟随当前配置 (applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod)",
+	description 	= "管理员!host重载服名或设置新服名; 服名后缀跟随当前配置 (applemod12v12→多人包抗, applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod)",
 	version 		= PLUGIN_VERSION,
 	url 			= "N/A"
 }
@@ -136,9 +136,10 @@ void ComputeServerName(char[] buffer, int maxlen)
 		strcopy(buffer, maxlen, g_sFileLine);
 }
 
-//配置标识→显示名映射: applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod (大小写不敏感).
-//匹配来源: ①confogl当前配置文件夹名(如 applemod/zonemod/nextmod2v2, 中文配置名被引擎从cfg剥掉时仍可识别)
+//配置标识→显示名映射: applemod12v12→多人包抗, applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod (大小写不敏感).
+//匹配来源: ①confogl当前配置文件夹名(如 applemod/applemod12v12/zonemod/nextmod2v2, 中文配置名被引擎从cfg剥掉时仍可识别)
 //         ②l4d_ready_cfg_name变量值(如 "ZoneMod v2.9.1b" / "2v2 NextMod v1.0.5").
+//映射顺序有讲究: 更具体的关键词(12v12)必须排在它所属的通用词(applemod)之前, 否则永远命中不到.
 void GetDisplayCfgName(char[] sCfgName, int maxlen)
 {
 	char sRaw[PLATFORM_MAX_PATH];
@@ -160,6 +161,12 @@ void GetDisplayCfgName(char[] sCfgName, int maxlen)
 //大小写不敏感关键词映射, 命中返回true并写入显示名.
 bool ApplyCfgNameMapping(const char[] source, char[] buffer, int maxlen)
 {
+	//多人包抗(12v12 多人对抗配置) - 必须排在 applemod 之前: "applemod12v12" 里含 "applemod"
+	if(StrContains(source, "12v12", false) != -1)
+	{
+		strcopy(buffer, maxlen, "多人包抗");
+		return true;
+	}
 	if(StrContains(source, "applemod", false) != -1)
 	{
 		strcopy(buffer, maxlen, "进阶包抗");

@@ -10,12 +10,11 @@
 
 char TAG_WEAPON_NAME[][][] =
 {
-	{"SG552突击步枪"	,"weapon_rifle_sg552"},
-	{"MP5冲锋枪"		,"weapon_smg_mp5"},
-	{"木狙"			,"weapon_hunting_rifle"},
-	{"awp"			,"weapon_sniper_awp"},
-	{"鸟狙"			,"weapon_sniper_scout"},
-	{"可以捡子弹的电锯"				,"weapon_chainsaw"}
+	{"SG552突击步枪",	"weapon_rifle_sg552"},
+	{"木狙",			"weapon_hunting_rifle"},
+	{"awp",				"weapon_sniper_awp"},
+	{"鸟狙",			"weapon_sniper_scout"},
+	{"可以捡子弹的电锯","weapon_chainsaw"}
 };
 
 public Plugin myinfo =

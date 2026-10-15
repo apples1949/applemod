@@ -4,14 +4,18 @@
 	{
 		"applemod"
 		{
-			"name" "Applemod v0.85"
+			"name" "Applemod v0.97"
+		}
+		"applemod12v12"
+		{
+			"name" "Applemod 12v12"
 		}
 	}
 	"ZoneMod Configs"
 	{
 		"zonemodedi"
 		{
-			"name" "ZoneMod 2.9.1b 混野匹配"
+			"name" "ZoneMod 2.9.2 混野匹配"
 		}
 	}
 }

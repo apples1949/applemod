@@ -107,7 +107,10 @@ void DL_OnPluginStart()
 	DL_g_cAllow =		CreateConVar("l4d2_dlock_allow",		"0",	"0=门锁流程禁用, 1=门锁流程启用（准备模式由门锁接管）.", FCVAR_NOTIFY);
 	DL_g_cModes =		CreateConVar("l4d2_dlock_modes",		"",		"在这些游戏模式中启用插件, 用英文逗号分割 (无空格),(无内容=全模式)", FCVAR_NOTIFY);
 	DL_g_cModesOff =	CreateConVar("l4d2_dlock_modes_off",	"",		"在这些游戏模式中禁用插件, 用英文逗号分割 (无空格),(无内容=无)", FCVAR_NOTIFY);
-	DL_g_cModesTog =	CreateConVar("l4d2_dlock_modes_tog",	"0",	"在这些游戏模式中启用插件. 0=全模式, 1=战役, 2=生还者, 4=对抗, 8=清道夫. 多个模式则设置多个模式值的和", FCVAR_NOTIFY);
+	// 注意：这里的位值必须用 Left4DHooks 的 L4D_GetGameModeType() 口径（GAMEMODE_* 枚举）：
+	// 1=战役(coop) 2=对抗(versus) 4=生存(survival) 8=清道夫(scavenge)。
+	// 旧文案曾写成"4=对抗"，那是错的 —— 在对抗服写 4 会命中 4&2==0，门锁流程被静默禁用（本插件曾因此整场不跑）。
+	DL_g_cModesTog =	CreateConVar("l4d2_dlock_modes_tog",	"0",	"在这些游戏模式中启用插件. 0=全模式, 1=战役coop, 2=对抗versus, 4=生存survival, 8=清道夫scavenge (对应 L4D_GetGameModeType() 的 GAMEMODE_* 位值). 多个模式则设置多个模式值的和", FCVAR_NOTIFY);
 	DL_g_cBreakTheDoor =	CreateConVar("l4d2_dlock_weakdoor",		"1",	"如果为1，则安全屋的门开启后将会掉落.", FCVAR_NOTIFY);
 	DL_g_cPrepareTime1r =	CreateConVar("l4d2_dlock_prepare1st",	"7",	"在所有玩家加载完毕后，插件将等待多少秒，然后开始在地图上进行第一轮游戏(适用于对抗类型的模式)", FCVAR_NOTIFY);
 	DL_g_cPrepareTime2r =	CreateConVar("l4d2_dlock_prepare2nd",	"7",	"在所有玩家加载完毕后，插件将等待多少秒，然后开始在地图上进行第二轮游戏(适用于对抗类型的模式)", FCVAR_NOTIFY);

@@ -208,6 +208,17 @@ static void RM_Match_Load()
 		ServerCommand("sm plugins load_unlock");
 		ServerCommand("sm plugins unload_all");
 
+		// 【必须在 exec 大 cfg 之前重建溢出补丁】
+		// unload_all 会把 fixes/command_buffer.smx 一起卸掉 → 它的引擎补丁（patch
+		// CCommandBuffer::InsertCommand）随之失效；紧接着下面 exec 的
+		// generalfixes/confogl_plugins/sharedplugins 等大 cfg 会被一次性灌进引擎命令缓冲，
+		// 触发 "Cbuf_AddText: buffer overflow"，排不进去的命令被【静默丢弃】。
+		// 实测被吞的命令是随机的：轻则 4 个发光插件没加载，重则 confoglcompmod 自身那一行
+		// 被吞 → 框架不重载 → 整条插件链断掉（只剩 24 个 SM 自带插件）。
+		// 所以这里趁缓冲区还空、先把这个小插件装回来，后面的大文件就不会再溢出。
+		// （以前它排在 generalfixes.cfg 第 9 行，等它加载时第一波溢出已经发生，来不及。）
+		ServerCommand("sm plugins load fixes/command_buffer.smx");
+
 		// Loading Plugins.
 		for (int i = 0; i < iNumPieces; i++)
 		{

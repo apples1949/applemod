@@ -404,6 +404,23 @@ public void OnClientDisconnect(int client)
 		delete BotsUpdateTimer;
 		BotsUpdateTimer = CreateTimer(1.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);	// re-update the bots
 	}
+	
+	// 最后一个真人走了 -> 立刻走一遍回收（上面那个 1s 定时器会再兜底一次）
+	if (!IsFakeClient(client) && GetHumanCount() == 0)
+	{
+		CreateTimer(1.5, Timer_RecycleBotsOnEmpty, _, TIMER_FLAG_NO_MAPCHANGE);
+	}
+}
+
+// ------------------------------------------------------------------------
+// 空服回收：真人全走光后延迟一下（等 disconnect 流程收尾）再回收 bot
+// ------------------------------------------------------------------------
+public Action Timer_RecycleBotsOnEmpty(Handle timer)
+{
+	if (GetHumanCount() > 0) return Plugin_Stop;		// 期间又有人进来了，别动
+	SvRecycleSurvivorBots();
+	SvRecycleInfectedBots();
+	return Plugin_Stop;
 }
 
 // ------------------------------------------------------------------------
@@ -429,6 +446,14 @@ public Action Timer_BotsUpdate(Handle hTimer)
 void SpawnCheck()
 {
 	if(RoundStarted != true)  return;      // if during transition, don't do anything
+	
+	// 空服不养 bot：服务器里一个真人都没有时，不补 AI bot，并把已经存在的生还者 bot 回收掉。
+	// 真人一进服（GetHumanCount() > 0）就恢复正常的补位逻辑，所以"进人了才创建 bot"。
+	if (!SvBotsAllowed())
+	{
+		SvRecycleSurvivorBots();
+		return;
+	}
 	
 	int iSurvivor       = GetSurvivorTeam();
 	//int iHumanSurvivor  = InfectedAllowed ? GetTeamPlayers(TEAM_SURVIVOR, false) : GetHumanCount();  // survivors excluding bots but including idles. If coop, counts spectators too (may be idles)
@@ -1194,6 +1219,47 @@ int GetHumanCount()
 }
 
 // ------------------------------------------------------------------------
+// 空服不养 bot：只有真有真人玩家在服务器里时，才允许补 AI bot。
+// 人类玩家加入前的空服状态 -> false（不补 bot，并回收已有 bot）。
+// ------------------------------------------------------------------------
+stock bool SvBotsAllowed()
+{
+	return GetHumanCount() > 0;
+}
+
+// ------------------------------------------------------------------------
+// 回收空服里多余的生还者 bot（只踢 AI bot；有真人空闲接管中/已在踢队列里的跳过）。
+// ------------------------------------------------------------------------
+stock void SvRecycleSurvivorBots()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i)) continue;
+		if (!IsFakeClient(i)) continue;
+		if (GetClientTeam(i) != TEAM_SURVIVOR) continue;
+		if (GetIdlePlayer(i)) continue;              // 有真人 AFK 接管了这个 bot，别踢
+		if (IsClientInKickQueue(i)) continue;
+		if (SurvivorPlaceholder[i]) continue;        // 正在生成中的占位假客户端由它自己的 Timer 收尾
+		KickClient(i, "空服回收 AI bot");
+	}
+}
+
+// ------------------------------------------------------------------------
+// 回收空服里的 AI 特感 bot。
+// ------------------------------------------------------------------------
+stock void SvRecycleInfectedBots()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i)) continue;
+		if (!IsFakeClient(i)) continue;
+		if (GetClientTeam(i) != TEAM_INFECTED) continue;
+		if (IsClientInKickQueue(i)) continue;
+		KickClient(i, "空服回收 AI 特感");
+	}
+}
+
+// ------------------------------------------------------------------------
 // Is the bot valid? (either survivor or infected)
 // ------------------------------------------------------------------------
 bool IsBotValid(int client)
@@ -1509,6 +1575,14 @@ public Action BotInfectedCounter(Handle timer, bool recheck)
 	SubDirector = null;
 
 	if (!RoundStarted || (recheck && !AnySurvivorLeftSafeArea())) return Plugin_Stop;
+	
+	// 空服不养 bot：没有真人时既不排 AI 特感队列，也不补；并把已有的 AI 特感回收掉
+	if (!SvBotsAllowed())
+	{
+		SvRecycleInfectedBots();
+		SubDirector = CreateTimer(5.0, BotInfectedCounter, false);
+		return Plugin_Stop;
+	}
 	
 	if (!MoreSiBotsVersus.BoolValue || GetTeamPlayers(TEAM_INFECTED, false) >= InfectedLimit.IntValue) // if no extra bots wanted
 	{

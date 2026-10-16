@@ -16,9 +16,7 @@ void SetupNatives()
 	CreateNative("IsInReady",				Native_IsInReady);
 	CreateNative("IsReady",					Native_IsReady);
 	CreateNative("ToggleReadyPanel",		Native_ToggleReadyPanel);
-	CreateNative("ReadyUp_ExternalBegin", Native_ExternalBegin);
-	CreateNative("ReadyUp_ExternalLive", Native_ExternalLive);
-	CreateNative("ReadyUp_ExternalCancel", Native_ExternalCancel);
+	// 门锁已并入本插件：不再注册 ReadyUp_External* native，改由内部函数驱动阶段
 }
 
 void SetupForwards()
@@ -37,7 +35,7 @@ void SetupForwards()
 void SetupConVars()
 {
 	// basic
-	l4d_ready_enabled			= CreateConVar("l4d_ready_enabled", "1", "Enable this plugin. (Values: 0 = Disabled, 1 = Manual ready, 2 = Auto start, 3 = Team ready)", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	l4d_ready_enabled			= CreateConVar("l4d_ready_enabled", "1", "Enable this plugin. (Values: 0 = Disabled, 1 = Manual ready, 2 = Auto start, 3 = Team ready, 4 = DoorLock ready)", FCVAR_NOTIFY, true, 0.0, true, 4.0);
 	l4d_ready_cfg_name			= CreateConVar("l4d_ready_cfg_name", "", "Configname to display on the ready-up panel (支持中文)", FCVAR_NOTIFY);
 	l4d_ready_max_players		= CreateConVar("l4d_ready_max_players", "12", "Maximum number of players to show on the ready-up panel.", FCVAR_NOTIFY, true, 0.0, true, MAXPLAYERS+1.0);
 

@@ -7,24 +7,22 @@
 
 #define CVARS_DEBUG				0
 #define CVS_CVAR_MAXLEN			64
-#define CVS_VALUE_MAXLEN			1024
 
 enum struct CVSEntry
 {
 	ConVar CVSE_cvar;
-	char CVSE_oldval[CVS_VALUE_MAXLEN];
-	char CVSE_newval[CVS_VALUE_MAXLEN];
+	char CVSE_oldval[CVS_CVAR_MAXLEN];
+	char CVSE_newval[CVS_CVAR_MAXLEN];
 }
 
 enum struct CVSPending
 {
 	char CVSP_name[CVS_CVAR_MAXLEN];
-	char CVSP_newval[CVS_VALUE_MAXLEN];
+	char CVSP_newval[CVS_CVAR_MAXLEN];
 }
 
 static bool
-	bTrackingStarted = false,
-	bCommitRequested = false;
+	bTrackingStarted = false;
 
 static ArrayList
 	CvarSettingsArray = null,
@@ -55,7 +53,7 @@ void CVS_OnConfigsExecuted()
 {
 	ResolvePendingCvars();
 
-	if (CVS_IsTrackingStarted() && IsPluginEnabled()) {
+	if (bTrackingStarted) {
 		SetEnforcedCvars();
 	}
 }
@@ -63,7 +61,6 @@ void CVS_OnConfigsExecuted()
 static Action CVS_SetCvars_Cmd(int args)
 {
 	if (!IsPluginEnabled()) {
-		LogError("[%s] confogl_setcvars rejected: match mode is not active. Settings were NOT applied; run sm_confoglstatus.", CVS_MODULE_NAME);
 		return Plugin_Handled;
 	}
 
@@ -77,36 +74,10 @@ static Action CVS_SetCvars_Cmd(int args)
 #endif
 
 	ResolvePendingCvars();
-	bCommitRequested = true;
-	if (CvarSettingsArray.Length == 0 && PendingCvarsArray.Length == 0) {
-		// The engine's overflow recovery can deliver this command before the
-		// registrations. Keep the request, but never report an empty commit.
-		LogError("[%s] confogl_setcvars received before any settings. Commit remains pending; late registrations will be applied. Run sm_confoglstatus.", CVS_MODULE_NAME);
-		return Plugin_Handled;
-	}
 	SetEnforcedCvars();
 	bTrackingStarted = true;
-	PrintToServer("[Confogl] CVar settings committed: tracked=%d | pending=%d", CvarSettingsArray.Length, PendingCvarsArray.Length);
-	if (PendingCvarsArray.Length > 0) {
-		LogError("[%s] %d tracked CVar(s) are still missing after commit. Run sm_confoglstatus to see pending names.", CVS_MODULE_NAME, PendingCvarsArray.Length);
-	}
 
 	return Plugin_Handled;
-}
-
-bool CVS_IsTrackingStarted()
-{
-	return bTrackingStarted && (CvarSettingsArray.Length > 0 || PendingCvarsArray.Length > 0);
-}
-
-void CVS_ReplyStatus(int client)
-{
-	ReplyToCommand(client, "[Confogl] tracking=%d | tracked=%d | pending=%d | commit_requested=%d", CVS_IsTrackingStarted(), CvarSettingsArray.Length, PendingCvarsArray.Length, bCommitRequested);
-	CVSPending pendingEntry;
-	for (int i = 0; i < PendingCvarsArray.Length && i < 8; i++) {
-		PendingCvarsArray.GetArray(i, pendingEntry, sizeof(pendingEntry));
-		ReplyToCommand(client, "[Confogl] pending: %s=%s", pendingEntry.CVSP_name, pendingEntry.CVSP_newval);
-	}
 }
 
 static Action CVS_AddCvar_Cmd(int args)
@@ -123,14 +94,9 @@ static Action CVS_AddCvar_Cmd(int args)
 		return Plugin_Handled;
 	}
 
-	char cvar[CVS_CVAR_MAXLEN + 1], newval[CVS_VALUE_MAXLEN + 1];
-	// A full output buffer may mean GetCmdArg truncated the argument. Reject
-	// that boundary instead of registering a shortened CVar name or value.
-	if (GetCmdArg(1, cvar, sizeof(cvar)) >= sizeof(cvar) - 1
-		|| GetCmdArg(2, newval, sizeof(newval)) >= sizeof(newval) - 1) {
-		LogError("[%s] confogl_addcvar argument exceeds the supported name/value buffer", CVS_MODULE_NAME);
-		return Plugin_Handled;
-	}
+	char cvar[CVS_CVAR_MAXLEN], newval[CVS_CVAR_MAXLEN];
+	GetCmdArg(1, cvar, sizeof(cvar));
+	GetCmdArg(2, newval, sizeof(newval));
 
 	AddCvar(cvar, newval);
 
@@ -161,7 +127,7 @@ static Action CVS_CvarSettings_Cmd(int client, int args)
 		return Plugin_Handled;
 	}
 
-	char buffer[CVS_VALUE_MAXLEN], name[CVS_CVAR_MAXLEN];
+	char buffer[CVS_CVAR_MAXLEN], name[CVS_CVAR_MAXLEN];
 	int cvscount = CvarSettingsArray.Length;
 
 	ReplyToCommand(client, "[Confogl] Enforced Server CVars (Total %d)", cvscount);
@@ -207,7 +173,7 @@ static Action CVS_CvarDiff_Cmd(int client, int args)
 		return Plugin_Handled;
 	}
 
-	char buffer[CVS_VALUE_MAXLEN], name[CVS_CVAR_MAXLEN];
+	char buffer[CVS_CVAR_MAXLEN], name[CVS_CVAR_MAXLEN];
 	int cvscount = CvarSettingsArray.Length;
 
 	GetCmdArg(1, buffer, sizeof(buffer));
@@ -245,7 +211,6 @@ static Action CVS_CvarDiff_Cmd(int client, int args)
 static void ClearAllSettings()
 {
 	bTrackingStarted = false;
-	bCommitRequested = false;
 	int iSize = CvarSettingsArray.Length;
 
 	CVSEntry cvsetting;
@@ -282,13 +247,20 @@ static void SetEnforcedCvars()
 
 static void AddCvar(const char[] cvar, const char[] newval)
 {
+	if (bTrackingStarted) {
+		#if CVARS_DEBUG
+			LogMessage("[%s] Attempt to track new cvar %s during a match!", CVS_MODULE_NAME, cvar);
+		#endif
+		return;
+	}
+
 	if (strlen(cvar) >= CVS_CVAR_MAXLEN) {
 		Debug_LogError(CVS_MODULE_NAME, "CVar Specified (%s) is longer than max cvar/value length (%d)", cvar, CVS_CVAR_MAXLEN);
 		return;
 	}
 
-	if (strlen(newval) >= CVS_VALUE_MAXLEN) {
-		Debug_LogError(CVS_MODULE_NAME, "New Value Specified (%s) is longer than max value length (%d)", newval, CVS_VALUE_MAXLEN);
+	if (strlen(newval) >= CVS_CVAR_MAXLEN) {
+		Debug_LogError(CVS_MODULE_NAME, "New Value Specified (%s) is longer than max cvar/value length (%d)", newval, CVS_CVAR_MAXLEN);
 		return;
 	}
 
@@ -325,11 +297,8 @@ static void AddCvar(const char[] cvar, const char[] newval)
 	if (newCvar == null) {
 		// Owning plugin may not be loaded yet; retry from CVS_OnConfigsExecuted.
 		strcopy(pendingEntry.CVSP_name, CVS_CVAR_MAXLEN, cvar);
-		strcopy(pendingEntry.CVSP_newval, CVS_VALUE_MAXLEN, newval);
+		strcopy(pendingEntry.CVSP_newval, CVS_CVAR_MAXLEN, newval);
 		PendingCvarsArray.PushArray(pendingEntry, sizeof(pendingEntry));
-		if (bCommitRequested && IsPluginEnabled()) {
-			bTrackingStarted = true;
-		}
 
 	#if CVARS_DEBUG
 		LogMessage("[%s] Pending late-bind for cvar = %s, newval = %s", CVS_MODULE_NAME, cvar, newval);
@@ -342,13 +311,15 @@ static void AddCvar(const char[] cvar, const char[] newval)
 
 static void PushTrackedCvar(ConVar cvar, const char[] newval)
 {
-	char cvarBuffer[CVS_VALUE_MAXLEN];
-	cvar.GetString(cvarBuffer, CVS_VALUE_MAXLEN);
+	char cvarBuffer[CVS_CVAR_MAXLEN];
+	cvar.GetString(cvarBuffer, CVS_CVAR_MAXLEN);
 
 	CVSEntry newEntry;
 	newEntry.CVSE_cvar = cvar;
-	strcopy(newEntry.CVSE_oldval, CVS_VALUE_MAXLEN, cvarBuffer);
-	strcopy(newEntry.CVSE_newval, CVS_VALUE_MAXLEN, newval);
+	strcopy(newEntry.CVSE_oldval, CVS_CVAR_MAXLEN, cvarBuffer);
+	strcopy(newEntry.CVSE_newval, CVS_CVAR_MAXLEN, newval);
+
+	cvar.AddChangeHook(CVS_ConVarChange);
 
 #if CVARS_DEBUG
 	char cvarName[CVS_CVAR_MAXLEN];
@@ -357,16 +328,6 @@ static void PushTrackedCvar(ConVar cvar, const char[] newval)
 #endif
 
 	CvarSettingsArray.PushArray(newEntry, sizeof(newEntry));
-	// A delayed registration must not be discarded after an early commit.
-	// Apply only this new entry: reapplying every entry would overwrite later
-	// administrator changes. Duplicate registrations still keep the first value.
-	if (bCommitRequested && IsPluginEnabled()) {
-		cvar.SetString(newval);
-		bTrackingStarted = true;
-	}
-	// Attach our reporting hook after the initial write, so replaying hundreds
-	// of delayed registrations does not broadcast hundreds of change notices.
-	cvar.AddChangeHook(CVS_ConVarChange);
 }
 
 static void ResolvePendingCvars()

@@ -38,7 +38,7 @@ public Plugin myinfo =
 	name = "L4D2Lib",
 	author = "Confogl Team",
 	description = "Useful natives and fowards for L4D2 Plugins",
-	version = "3.2.2-applefix",
+	version = "3.2.1",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
@@ -110,13 +110,6 @@ public APLRes AskPluginLoad2(Handle hMyself, bool bLate, char[] sError, int iErr
 }
 
 #if MODULE_MAPINFO
-public void LGO_OnMatchModeLoaded()
-{
-	// Changing the selected config does not add the confogl library again.
-	// Reload and select this map before consumers read its per-map keys.
-	MapInfo_Reload();
-}
-
 public void OnLibraryAdded(const char[] sPluginName)
 {
 	if (strcmp(sPluginName, "confogl", true) == 0) {

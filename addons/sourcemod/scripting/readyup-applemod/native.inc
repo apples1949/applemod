@@ -61,9 +61,11 @@ void ResetExternalReadyState()
 	externalLiveNotified = false;
 }
 
-any Native_ExternalBegin(Handle plugin, int numParams)
+// 以下三个原来是 readyup_external 的 native（供独立门锁插件调用）。
+// 合并成单插件后改为内部函数：门锁模块直接调用，不再对外暴露 native。
+bool RU_ExternalPhaseBegin()
 {
-	if (l4d_ready_enabled == null || l4d_ready_enabled.IntValue != 0 || inReadyUp || externalLiveNotified)
+	if (inReadyUp || externalLiveNotified)
 		return false;
 
 	externalReadyActive = true;
@@ -76,9 +78,9 @@ any Native_ExternalBegin(Handle plugin, int numParams)
 	return true;
 }
 
-any Native_ExternalLive(Handle plugin, int numParams)
+bool RU_ExternalPhaseLive()
 {
-	if (l4d_ready_enabled == null || l4d_ready_enabled.IntValue != 0 || !externalReadyActive || externalLiveNotified)
+	if (!externalReadyActive || externalLiveNotified)
 		return false;
 
 	externalReadyActive = false;
@@ -88,10 +90,10 @@ any Native_ExternalLive(Handle plugin, int numParams)
 	return true;
 }
 
-any Native_ExternalCancel(Handle plugin, int numParams)
+bool RU_ExternalPhaseCancel()
 {
 	externalReadyActive = false;
-	return 0;
+	return true;
 }
 
 any Native_IsReady(Handle plugin, int numParams)

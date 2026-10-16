@@ -13,13 +13,13 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.2.11"
+#define PLUGIN_VERSION "10.3.0"
 
 public Plugin myinfo =
 {
 	name = "L4D2 Ready-Up Applemod",
-	author = "apples1949 (fork of CanadaRox, Target)",
-	description = "New and improved ready-up plugin (中文 fork: 修复团队准备状态显示, 显示玩家时长/Lerp)",
+	author = "apples1949 (fork of CanadaRox, Target; doorlock by Glide Loading, sorallll)",
+	description = "准备模式：ReadyUp 准备阶段 + 门锁/加载等待/倒计时开门（原 readyup-applemod 与 l4d2_doorlock 已合并为本插件，中文硬编码）",
 	version = PLUGIN_VERSION,
 	url = "https://github.com/apples1949"
 };
@@ -40,7 +40,8 @@ enum
 {
 	ReadyMode_PlayerReady = 1,
 	ReadyMode_AutoStart,
-	ReadyMode_TeamReady
+	ReadyMode_TeamReady,
+	ReadyMode_DoorLock		// 4 = 门锁准备模式（合并进来的 doorlock 流程：锁门→等全员加载→倒计时→开门）
 }
 
 enum
@@ -141,6 +142,8 @@ char g_sDisruptReason[disruptType_SIZE][] =
 #include "readyup-applemod/setup.inc"
 #include "readyup-applemod/sound.inc"
 #include "readyup-applemod/util.inc"
+// 原 optional/12v12/l4d2_doorlock.smx：门锁 + 加载等待 + 倒计时开门，已并入本插件
+#include "readyup-applemod/doorlock.inc"
 
 // ========================
 //  Plugin Setup
@@ -167,11 +170,20 @@ public void OnPluginStart()
 	HookEvent("round_end", ExternalRoundEnd_Event, EventHookMode_PostNoCopy);
 	HookEvent("player_team",			PlayerTeam_Event, EventHookMode_Post);
 	HookEvent("gameinstructor_draw",	GameInstructorDraw_Event, EventHookMode_PostNoCopy);
+
+	// 门锁模块（原 l4d2_doorlock.smx）
+	DL_OnPluginStart();
 }
 
 public void OnPluginEnd()
 {
 	InitiateLive(false);
+	DL_OnPluginEnd();
+}
+
+public void OnConfigsExecuted()
+{
+	DL_OnConfigsExecuted();
 }
 
 public void OnAllPluginsLoaded()
@@ -310,6 +322,8 @@ public void OnMapStart()
 	{
 		g_hChangeTeamTimer[client] = null;
 	}
+
+	DL_OnMapStart();
 }
 
 /* This ensures all cvars are reset if the map is changed during ready-up */
@@ -321,6 +335,8 @@ public void OnMapEnd()
 		InitiateAutoStart(false);
 		InitiateLive(false);
 	}
+
+	DL_OnMapEnd();
 }
 
 public void OnClientPutInServer(int client)
@@ -336,6 +352,21 @@ public void OnClientDisconnect(int client)
 	SetPlayerHiddenPanel(client, false);
 	SetPlayerReady(client, false);
 	g_hChangeTeamTimer[client] = null;
+
+	DL_OnClientDisconnect(client);
+}
+
+/* 门锁模块的冻结/倒计时期间保持生还者不动（原来由独立插件自己的 OnPlayerRunCmd 处理） */
+public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
+{
+	DL_OnPlayerRunCmd(client);
+	return Plugin_Continue;
+}
+
+/* 门锁模块需要知道当前游戏模式（原来由独立插件的 L4D_OnGameModeChange 处理） */
+public void L4D_OnGameModeChange(int gamemode)
+{
+	DL_L4D_OnGameModeChange(gamemode);
 }
 
 /* No need to do any other checks since it seems like this is required no matter what since the intros unfreezes players after the animation completes */

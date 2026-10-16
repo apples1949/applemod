@@ -17,8 +17,7 @@ static KeyValues
 	g_hMIData = null;
 
 static bool
-	g_bMapDataAvailable = false,
-	g_bMapRunning = false;
+	g_bMapDataAvailable = false;
 
 static float
 	g_fStartPoint[3] = {0.0, ...},
@@ -58,14 +57,12 @@ void MapInfo_Init()
 
 void MapInfo_OnMapStart_Update()
 {
-	g_bMapRunning = true;
 	MI_KV_UpdateMapInfo();
 }
 
 void MapInfo_OnMapEnd_Update()
 {
-	g_bMapRunning = false;
-	if (g_hMIData != null) KvRewind(g_hMIData);
+	KvRewind(g_hMIData);
 	g_bMapDataAvailable = false;
 
 	for (int i = 0; i <= MAXPLAYERS; i++) {
@@ -82,10 +79,6 @@ void MapInfo_Reload()
 {
 	MI_KV_Close();
 	MI_KV_Load();
-	// A fresh KeyValues handle is at its root, not the current map section.
-	// Library/config changes can happen after OnMapStart has already run.
-	// A loaded map remains valid while an empty server is hibernating.
-	if (g_bMapRunning) MI_KV_UpdateMapInfo();
 }
 
 void MapInfo_PlayerDisconnect_Event(Event hEvent)
@@ -242,15 +235,9 @@ static void MI_KV_Load()
 
 static void MI_KV_UpdateMapInfo()
 {
-	if (g_hMIData == null) {
-		g_bMapDataAvailable = false;
-		return;
-	}
-
 	char sCurMap[128];
 	GetCurrentMap(sCurMap, sizeof(sCurMap));
 
-	KvRewind(g_hMIData);
 	if (KvJumpToKey(g_hMIData, sCurMap)) {
 		KvGetVector(g_hMIData, "start_point", g_fStartPoint);
 		KvGetVector(g_hMIData, "end_point", g_fEndPoint);

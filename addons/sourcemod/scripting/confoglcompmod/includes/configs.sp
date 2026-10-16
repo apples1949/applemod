@@ -33,10 +33,9 @@ void Configs_OnModuleStart()
 
 	char cfgString[PLATFORM_MAX_PATH];
 	hCustomConfig.GetString(cfgString, sizeof(cfgString));
-	if (!SetCustomCfg(cfgString)) {
-		LogError("[%s] Saved mode '%s' is unavailable; clearing stale config state", CONFIGS_MODULE_NAME, cfgString);
-		SetCustomCfg("");
-	}
+	SetCustomCfg(cfgString);
+
+	hCustomConfig.RestoreDefault();
 }
 
 static void InitPaths()
@@ -51,7 +50,6 @@ bool SetCustomCfg(const char[] cfgname)
 {
 	if (!strlen(cfgname)) {
 		customCfgPath[0] = 0;
-		customCfgName[0] = 0;
 		hCustomConfig.RestoreDefault();
 
 		if (IsDebugEnabled()) {
@@ -61,37 +59,28 @@ bool SetCustomCfg(const char[] cfgname)
 		return true;
 	}
 
-	char targetCfgPath[PLATFORM_MAX_PATH];
-	FormatEx(targetCfgPath, sizeof(targetCfgPath), "%s%s%c%s", cfgPath, customCfgDir, DirSeparator, cfgname);
-	if (!DirExists(targetCfgPath)) {
-		Debug_LogError(CONFIGS_MODULE_NAME, "Custom config directory %s does not exist!", targetCfgPath);
+	FormatEx(customCfgPath, sizeof(customCfgPath), "%s%s%c%s", cfgPath, customCfgDir, DirSeparator, cfgname);
+	if (!DirExists(customCfgPath)) {
+		Debug_LogError(CONFIGS_MODULE_NAME, "Custom config directory %s does not exist!", customCfgPath);
+		// Revert customCfgPath
+		customCfgPath[0] = 0;
 		return false;
 	}
 
-	int thislen = strlen(targetCfgPath);
-	if ((thislen + 1) < sizeof(targetCfgPath)) {
-		targetCfgPath[thislen] = DirSeparator;
-		targetCfgPath[(thislen + 1)] = 0;
+	int thislen = strlen(customCfgPath);
+	if ((thislen + 1) < sizeof(customCfgPath)) {
+		customCfgPath[thislen] = DirSeparator;
+		customCfgPath[(thislen + 1)] = 0;
 	} else {
-		Debug_LogError(CONFIGS_MODULE_NAME, "Custom config directory %s path too long!", targetCfgPath);
+		Debug_LogError(CONFIGS_MODULE_NAME, "Custom config directory %s path too long!", customCfgPath);
+		customCfgPath[0] = 0;
 		return false;
 	}
 
-	strcopy(customCfgPath, sizeof(customCfgPath), targetCfgPath);
 	strcopy(customCfgName, sizeof(customCfgName), cfgname);
 	hCustomConfig.SetString(cfgname);
 
 	return true;
-}
-
-bool Configs_CustomCfgExists(const char[] cfgname)
-{
-	if (!strlen(cfgname)) {
-		return false;
-	}
-	char sPath[PLATFORM_MAX_PATH];
-	FormatEx(sPath, sizeof(sPath), "%s%s%c%s", cfgPath, customCfgDir, DirSeparator, cfgname);
-	return strlen(sPath) + 1 < sizeof(sPath) && DirExists(sPath);
 }
 
 void BuildConfigPath(char[] buffer, const int maxlength, const char[] sFileName)
@@ -118,29 +107,10 @@ void BuildConfigPath(char[] buffer, const int maxlength, const char[] sFileName)
 	}
 }
 
-bool Configs_CfgExists(const char[] sFileName)
-{
-	char sFilePath[PLATFORM_MAX_PATH];
-	if (customCfgPath[0]) {
-		FormatEx(sFilePath, sizeof(sFilePath), "%s%s", customCfgPath, sFileName);
-		if (FileExists(sFilePath)) {
-			return true;
-		}
-	}
-	FormatEx(sFilePath, sizeof(sFilePath), "%s%s", cfgPath, sFileName);
-	return strlen(sFileName) > 0 && FileExists(sFilePath);
-}
-
-void Configs_GetConfigName(char[] buffer, int maxlength)
-{
-	strcopy(buffer, maxlength, customCfgName);
-}
-
-bool ExecuteCfg(const char[] sFileName)
+void ExecuteCfg(const char[] sFileName)
 {
 	if (strlen(sFileName) == 0) {
-		LogError("[%s] Cannot execute an empty server config name", CONFIGS_MODULE_NAME);
-		return false;
+		return;
 	}
 
 	char sFilePath[PLATFORM_MAX_PATH];
@@ -155,7 +125,7 @@ bool ExecuteCfg(const char[] sFileName)
 
 			ServerCommand("exec %s%s", customCfgPath[strlen(cfgPath)], sFileName);
 
-			return true;
+			return;
 		} else {
 			if (IsDebugEnabled()) {
 				LogMessage("[%s] Couldn't find custom cfg file %s, trying default", CONFIGS_MODULE_NAME, sFilePath);
@@ -171,12 +141,9 @@ bool ExecuteCfg(const char[] sFileName)
 		}
 
 		ServerCommand("exec %s", sFileName);
-		return true;
 	} else {
 		Debug_LogError(CONFIGS_MODULE_NAME, "Could not execute server config \"%s\", file not found", sFilePath);
-		LogError("[%s] Could not execute config '%s' (mode='%s'): file not found", CONFIGS_MODULE_NAME, sFileName, customCfgName);
 	}
-	return false;
 }
 
 static int _native_BuildConfigPath(Handle plugin, int numParams)
@@ -206,7 +173,9 @@ static int _native_ExecConfigCfg(Handle plugin, int numParams)
 	char[] sFileName = new char[iNewLen];
 	GetNativeString(1, sFileName, iNewLen);
 
-	return ExecuteCfg(sFileName);
+	ExecuteCfg(sFileName);
+
+	return 1;
 }
 
 static int _native_GetConfigName(Handle plugin, int numParams)

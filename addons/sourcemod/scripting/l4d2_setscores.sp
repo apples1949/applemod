@@ -19,12 +19,10 @@
 #include <sourcemod>
 #include <left4dhooks>
 #include <builtinvotes>
-#undef REQUIRE_PLUGIN
-#include <readyup>
 
 #define L4D_TEAM_SPECTATE 1
 
-#define PLUGIN_VERSION "1.5.3"
+#define PLUGIN_VERSION "1.5.2"
 
 public Plugin myinfo =
 {
@@ -45,9 +43,7 @@ Handle
 	
 int 
 	survivorScore, 
-	infectedScore,
-	mapSerial,
-	voteMapSerial;
+	infectedScore;
 	
 bool 
 	inFirstReadyUpOfRound;
@@ -62,8 +58,6 @@ public void OnPluginStart()
 	forceAdminsToVote = CreateConVar("setscore_force_admin_vote", "0", "Whether admin score changes require a vote, 1 vote required, 0 vote not required (default).");
 
 	RegConsoleCmd("sm_setscores", Command_SetScores, "sm_setscores <survivor score> <infected score>");
-	HookEvent("player_left_start_area", Event_LeftStart, EventHookMode_PostNoCopy);
-	HookEvent("round_end", Event_LeftStart, EventHookMode_PostNoCopy);
 }
 
 void CheckGame()
@@ -77,7 +71,7 @@ void CheckGame()
 Action Command_SetScores(int client, int args)
 {
 	//Only allow during the first ready up of the round
-	if (!CanChangeScores()) {
+	if (!inFirstReadyUpOfRound) {
 		ReplyToCommand(client, "Scores can only be changed during readyup before the round starts.");
 		return Plugin_Handled;
 	}
@@ -146,7 +140,6 @@ void StartScoreVote(const int survScore, const int infectScore, const int initia
 		//The best place for this
 		survivorScore = survScore; 
 		infectedScore = infectScore;
-		voteMapSerial = mapSerial;
 		
 		//Create the vote
 		voteHandler = CreateBuiltinVote(VoteActionHandler, BuiltinVoteType_Custom_YesNo, BuiltinVoteAction_Cancel | BuiltinVoteAction_VoteEnd | BuiltinVoteAction_End);
@@ -184,10 +177,7 @@ void SetScores(const int survScore, const int infectScore, const int iAdminIndex
 
 	if (iAdminIndex != -1) { //This works well for an index '0' as well, if the initiator is CONSOLE
 		char client_name[32];
-		if (iAdminIndex == 0)
-			strcopy(client_name, sizeof(client_name), "Console");
-		else
-			GetClientName(iAdminIndex, client_name, sizeof(client_name));
+		GetClientName(iAdminIndex, client_name, sizeof(client_name));
 		PrintToChatAll("\x01Scores set to \x05%d \x01 (\x04Sur\x01) - \x05%d \x01 (\x04Inf\x01) by \x03%s\x01.", survScore, infectScore, client_name);
 	} else {
 		PrintToChatAll("\x01Scores set to \x05%d \x01 (\x04Sur\x01) - \x05%d \x01 (\x04Inf\x01) by vote.", survScore, infectScore);
@@ -210,12 +200,6 @@ void VoteActionHandler(Handle vote, BuiltinVoteAction action, int param1, int pa
 //Handles a score vote's results, if a majority voted for the score change then set the scores
 void ScoreVoteResultHandler(Handle vote, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info)
 {
-	if (voteMapSerial != mapSerial || !CanChangeScores()) {
-		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Generic);
-		PrintToChatAll("Score vote cancelled: the round has already started.");
-		return;
-	}
-
 	for (int i = 0; i < num_items; i++) {
 		if (item_info[i][BUILTINVOTEINFO_ITEM_INDEX] == BUILTINVOTES_VOTE_YES) {
 			if (item_info[i][BUILTINVOTEINFO_ITEM_VOTES] > (num_clients / 2)) {
@@ -234,29 +218,8 @@ public void OnRoundIsLive()
 	inFirstReadyUpOfRound = false;
 }
 
-void Event_LeftStart(Event event, const char[] name, bool dontBroadcast)
-{
-	inFirstReadyUpOfRound = false;
-}
-
-bool CanChangeScores()
-{
-	if (!inFirstReadyUpOfRound || GameRules_GetProp("m_bInSecondHalfOfRound") || L4D_HasAnySurvivorLeftSafeArea())
-		return false;
-
-	// The ReadyUp provider also exposes an external DoorLock preparation phase.
-	// Loading this plugin after go-live must never reopen score editing.
-	return !LibraryExists("readyup") || IsInReady();
-}
-
 // Enables scores changes when map is loaded
 public void OnMapStart()
 {
-	mapSerial++;
 	inFirstReadyUpOfRound = true;
-}
-
-public void OnMapEnd()
-{
-	inFirstReadyUpOfRound = false;
 }

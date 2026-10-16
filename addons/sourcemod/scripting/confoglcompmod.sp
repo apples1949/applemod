@@ -3,7 +3,7 @@
 
 #define DEBUG_ALL				   0
 
-#define PLUGIN_VERSION			   "2.5.3-applefix"
+#define PLUGIN_VERSION			   "2.5.0"
 
 // Using these macros, you can disable unnecessary modules,
 // and they will not be included in the plugin at compile time,
@@ -229,11 +229,6 @@ public void OnPluginStart()
 
 	// Other
 	AddCustomServerTag("confogl");
-
-#if MODULE_REQMATCH
-	// Rebuild a running match only after every module registered its commands/state.
-	RM_OnAllModulesStarted();
-#endif
 }
 
 public void OnPluginEnd()

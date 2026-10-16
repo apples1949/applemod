@@ -65,8 +65,8 @@
 #define CVAR_FLAGS			FCVAR_NOTIFY
 
 
-ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarPillsDecay, g_hCvarZDiff, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarDamage, g_hCvarIncap, g_hCvarScale;
-bool g_bCvarAllow, g_bMapStarted;
+ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarPillsDecay, g_hCvarZDiff, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarDamage, g_hCvarIncap, g_hCvarScale, g_hCvarDirectIncap;
+bool g_bCvarAllow, g_bMapStarted, g_bDirectIncap;
 float g_fCvarDamage, g_fCvarIncapped, g_fCvarPillsDecay;
 
 
@@ -105,6 +105,7 @@ public void OnPluginStart()
 	g_hCvarModes = CreateConVar(	"l4d_witch_damage_modes",			"",						"在这些游戏模式下打开插件，用逗号分隔（没有空格）（空=全部）", CVAR_FLAGS );
 	g_hCvarModesOff = CreateConVar(	"l4d_witch_damage_modes_off",		"",						"在这些游戏模式下关闭插件，用逗号分隔（没有空格）（空=无）", CVAR_FLAGS );
 	g_hCvarModesTog = CreateConVar(	"l4d_witch_damage_modes_tog",		"0",					"在这些游戏模式中打开插件。0=全部，1=战役，2=生还者，4=对抗，8=清道夫。将数字相加", CVAR_FLAGS );
+	g_hCvarDirectIncap = CreateConVar("l4d_witch_damage_direct_incap",	"0",	"1=女巫命中没倒地的生还者时直接倒地（伤害按当前血量+临时血计算，女巫仍是攻击者）；0=只按 l4d_witch_damage_damage 的伤害数值", CVAR_FLAGS );
 	CreateConVar(					"l4d_witch_damage_version",			PLUGIN_VERSION,			"女巫伤害插件版本。", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 	//AutoExecConfig(true,			"l4d_witch_damage");
 
@@ -125,6 +126,7 @@ public void OnPluginStart()
 	g_hCvarDamage.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarIncap.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarScale.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarDirectIncap.AddChangeHook(ConVarChanged_Cvars);
 }
 
 
@@ -163,6 +165,7 @@ void GetCvars()
 	g_fCvarDamage = g_hCvarDamage.FloatValue;
 	g_fCvarIncapped = g_hCvarIncap.FloatValue;
 	g_fCvarPillsDecay = g_hCvarPillsDecay.FloatValue;
+	g_bDirectIncap = g_hCvarDirectIncap.BoolValue;
 
 	// Read scale cvar array
 	char buff[16], buffers[4][4];
@@ -320,11 +323,24 @@ Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, in
 		{
 			// Incapped or normal damage?
 			bool incapped = GetEntProp(victim, Prop_Send, "m_isIncapacitated") != 0;
-			damage = incapped ? g_fCvarIncapped : g_fCvarDamage;
 
-			// Prevent insta kill
-			if( incapped == false )
+			if( incapped )
 			{
+				damage = g_fCvarIncapped;
+			}
+			else if( g_bDirectIncap )
+			{
+				// 直接倒地：伤害取"当前血量 + 临时血 + 1"，走引擎正常倒地流程。
+				// 不写实体血量、不嵌套 TakeDamage，女巫仍是攻击者。
+				float fBuffer = GetTempHealth(victim);
+				damage = float(GetClientHealth(victim)) + fBuffer + 1.0;
+				damagetype = DMG_GENERIC; // 避免 DMG_SLASH 把满血生还者直接击杀
+			}
+			else
+			{
+				damage = g_fCvarDamage;
+
+				// Prevent insta kill
 				int health = GetClientHealth(victim);
 				if( health - damage < 1.0 )
 				{

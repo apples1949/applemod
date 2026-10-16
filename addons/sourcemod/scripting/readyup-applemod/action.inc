@@ -18,6 +18,12 @@ void InitiateReadyUp(bool real = true)
 	{
 		readyUpMode = l4d_ready_enabled.IntValue;
 		if (!readyUpMode) return;
+
+		// 模式 4（ReadyMode_DoorLock）= 门锁准备模式：开局由合并进来的门锁模块负责
+		// （锁安全门 → 等全员加载 → 倒计时 → 开门），阶段通知由门锁直接调用
+		// RU_ExternalPhase* 发布。这里不启动 ReadyUp 自己的准备面板与倒计时。
+		if (readyUpMode == ReadyMode_DoorLock)
+			return;
 		
 		UTIL_WrapperForward(g_hPreInitiateForward);
 		

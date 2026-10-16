@@ -44,19 +44,31 @@ enum voteType
 
 bool	 game_l4d2 = false;
 Handle	 g_hVote = null;
-voteType g_voteType = None;
-char	 g_sVotePassText[128];
-
-int		kickplayer_userid;
-char	kickplayer_name[MAX_NAME_LENGTH];
-char	kickplayer_SteamId[MAX_NAME_LENGTH];
-char	votesmaps[MAX_NAME_LENGTH];
-char	votesmapsname[MAX_NAME_LENGTH];
-int		forcespectateid;
-char	forcespectateplayername[MAX_NAME_LENGTH];
-int		fsgclient;
-static int g_iSpectatePenaltyCounter[MAXPLAYERS + 1];
-static int g_votedelay;
+// One immutable execution context, committed only when a vote is accepted.
+enum struct VoteContext
+{
+    voteType type;
+    int initiatorUserId;
+    int targetUserId;
+    int penaltySeconds;
+    float requiredPercent;
+    char targetName[MAX_NAME_LENGTH];
+    char targetSteamId[32];
+    char mapName[PLATFORM_MAX_PATH];
+    char mapDisplay[MAX_NAME_LENGTH];
+    char passText[128];
+}
+VoteContext g_ActiveVote;
+bool g_bVoteBusy;
+bool g_bMapEnding;
+int g_iVoteGeneration;
+Handle g_hActionTimer;
+Handle g_hMapTimer;
+Handle g_hCooldownTimer;
+Handle g_hPenaltyTimer[MAXPLAYERS + 1];
+bool g_bSpectateAttempted[MAXPLAYERS + 1];
+int g_iSpectatePenaltyCounter[MAXPLAYERS + 1];
+int g_votedelay;
 
 ConVar g_Cvar_Limits;
 ConVar VotensHpED;
@@ -115,7 +127,7 @@ public Plugin myinfo =
 	name		= "Votes AppleMod",
 	author		= "apples1949",
 	description = "Votes Commands (builtinvotes)",
-	version		= "1.0.0",
+	version		= "1.1.0",
 	url			= "https://github.com/apples1949/l4dplugins"
 };
 
@@ -219,7 +231,7 @@ public void event_Round_Start(Event event, const char[] name, bool dontBroadcast
 	// 回合开始后重置强制旁观计时器
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		g_iSpectatePenaltyCounter[i] = iforcespectate_penalty;
+		ClearSpectatePenalty(i);
 	}
 }
 
@@ -280,7 +292,7 @@ bool IsLevelAdvancingToNextMap()
 void ReportMapChangeSkipped()
 {
 	LogMessage("更换地图 %s %s 未执行: 当前地图已过关, 即将切换下一关 (引擎切换状态=%d, 过关事件标记=%d, 对抗=%d, 第二回合=%d)",
-			   votesmaps, votesmapsname,
+			   g_ActiveVote.mapName, g_ActiveVote.mapDisplay,
 			   GameRules_GetProp("m_bIsTransitioningToNextMap"),
 			   isMapTransitioning ? 1 : 0,
 			   L4D_IsVersusMode() ? 1 : 0,
@@ -294,7 +306,7 @@ public void OnClientPutInServer(int client)
 	{
 		CreateTimer(5.0, g_hTimerAnnounce, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 	}
-	g_iSpectatePenaltyCounter[client] = iforcespectate_penalty;
+	ClearSpectatePenalty(client);
 }
 
 public Action g_hTimerAnnounce(Handle timer, any client)
@@ -309,6 +321,8 @@ public Action g_hTimerAnnounce(Handle timer, any client)
 
 public void OnMapStart()
 {
+	g_bMapEnding = false;
+	ClearVoteExecution();
 	isMapRestartPending = false;
 	isMapTransitioning	 = false;
 	g_fRoundStartTime	 = GetGameTime();
@@ -321,14 +335,57 @@ public void OnMapStart()
 
 	ParseCampaigns();
 
-	g_votedelay = 15;
-	CreateTimer(1.0, Timer_VoteDelay, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	BeginVoteCooldown(15);
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		g_iSpectatePenaltyCounter[i] = iforcespectate_penalty;
+		ClearSpectatePenalty(i);
 	}
 	PrecacheSound("buttons/blip1.wav");
+}
+
+public void OnClientDisconnect(int client)
+{
+    ClearSpectatePenalty(client);
+}
+
+public void OnMapEnd()
+{
+    g_bMapEnding = true;
+    if (g_hVote != null && IsBuiltinVoteInProgress()) CancelBuiltinVote();
+    ClearVoteExecution();
+    delete g_hCooldownTimer;
+    delete MapCountdownTimer;
+    for (int i = 1; i <= MaxClients; i++) ClearSpectatePenalty(i);
+}
+
+public void OnPluginEnd()
+{
+    OnMapEnd();
+}
+
+void ClearVoteExecution()
+{
+    delete g_hActionTimer;
+    delete g_hMapTimer;
+    g_bVoteBusy = false;
+    g_ActiveVote.type = None;
+    g_iVoteGeneration++;
+}
+
+void BeginVoteCooldown(int seconds)
+{
+    delete g_hCooldownTimer;
+    g_votedelay = (seconds > 0) ? seconds : 0;
+    if (g_votedelay > 0 && !g_bMapEnding)
+        g_hCooldownTimer = CreateTimer(1.0, Timer_VoteDelay, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+void ClearSpectatePenalty(int client)
+{
+    delete g_hPenaltyTimer[client];
+    g_iSpectatePenaltyCounter[client] = 0;
+    g_bSpectateAttempted[client] = false;
 }
 
 // ====================================================
@@ -526,9 +583,9 @@ void EscapeAndFormat(char[] buffer, int maxlength, const char[] format, const ch
 	Format(buffer, maxlength, format, sEscaped);
 }
 
-bool StartVote(int client, voteType type, const char[] argument, const char[] passText, VoteBroadcast broadcast, BuiltinVoteType builtinType = BuiltinVoteType_Custom_YesNo)
+bool StartVote(int client, voteType type, const char[] argument, const char[] passText, VoteBroadcast broadcast, BuiltinVoteType builtinType = BuiltinVoteType_Custom_YesNo, int targetUserId = 0, const char[] targetName = "", const char[] targetSteamId = "", const char[] mapName = "")
 {
-	if (client <= 0 || !IsClientInGame(client)) return false;
+    if (!TestVoteDelay(client) || !CanStartVotes(client)) return false;
 
 	if (IsBuiltinVoteInProgress())
 	{
@@ -568,8 +625,7 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 		return false;
 	}
 
-	g_voteType = type;
-	strcopy(g_sVotePassText, sizeof(g_sVotePassText), passText);
+
 
 	g_hVote = CreateBuiltinVote(VoteActionHandler, builtinType, BuiltinVoteAction_Cancel | BuiltinVoteAction_End);
 	if (g_hVote == null)
@@ -578,7 +634,19 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 		return false;
 	}
 
-	SetBuiltinVoteArgument(g_hVote, argument);
+    g_ActiveVote.type = type;
+    g_ActiveVote.initiatorUserId = GetClientUserId(client);
+    g_ActiveVote.targetUserId = targetUserId;
+    g_ActiveVote.penaltySeconds = (iforcespectate_penalty > 0) ? iforcespectate_penalty : 0;
+    g_ActiveVote.requiredPercent = g_fLimit;
+    strcopy(g_ActiveVote.targetName, sizeof(g_ActiveVote.targetName), targetName);
+    strcopy(g_ActiveVote.targetSteamId, sizeof(g_ActiveVote.targetSteamId), targetSteamId);
+    strcopy(g_ActiveVote.mapName, sizeof(g_ActiveVote.mapName), mapName);
+    strcopy(g_ActiveVote.mapDisplay, sizeof(g_ActiveVote.mapDisplay), passText);
+    strcopy(g_ActiveVote.passText, sizeof(g_ActiveVote.passText), passText);
+    g_bVoteBusy = true;
+    g_iVoteGeneration++;
+    SetBuiltinVoteArgument(g_hVote, argument);
 	SetBuiltinVoteInitiator(g_hVote, client);
 	if (broadcast == VoteBroadcast_Team)
 	{
@@ -590,6 +658,7 @@ bool StartVote(int client, voteType type, const char[] argument, const char[] pa
 	{
 		delete g_hVote;
 		g_hVote = null;
+		ClearVoteExecution();
 		CPrintToChat(client, "[{olive}VOTE{default}]无法发起投票");
 		return false;
 	}
@@ -606,21 +675,23 @@ public void VoteActionHandler(Handle vote, BuiltinVoteAction action, int param1,
 	{
 		case BuiltinVoteAction_Cancel:
 		{
+			if (vote != g_hVote) return;
 			CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票已取消{default}");
 			DisplayBuiltinVoteFail(vote, view_as<BuiltinVoteFailReason>(param1));
-			g_votedelay = ivotedelay_time;
-			CreateTimer(1.0, Timer_VoteDelay, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+			BeginVoteCooldown(ivotedelay_time);
+			ClearVoteExecution();
 		}
 		case BuiltinVoteAction_End:
 		{
+			if (g_hVote == vote) g_hVote = null;
 			delete vote;
-			g_hVote = null;
 		}
 	}
 }
 
 public void VoteResultHandler(Handle vote, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info)
 {
+	if (vote != g_hVote || !g_bVoteBusy || g_bMapEnding) return;
 	int iYesVotes;
 	for (int i = 0; i < num_items; i++)
 	{
@@ -630,22 +701,22 @@ public void VoteResultHandler(Handle vote, int num_votes, int num_clients, const
 		}
 	}
 
-	g_votedelay = ivotedelay_time;
-	CreateTimer(1.0, Timer_VoteDelay, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	BeginVoteCooldown(ivotedelay_time);
 
 	// 未投票的玩家视作反对, 分母为全部可投票人数(num_clients), 而非实际投票人数(num_votes)
 	float percent = (num_clients > 0) ? (float(iYesVotes) / float(num_clients)) : 0.0;
 
-	if (num_clients > 0 && FloatCompare(percent, g_fLimit) >= 0)
+	if (num_clients > 0 && FloatCompare(percent, g_ActiveVote.requiredPercent) >= 0)
 	{
 		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票通过 {default}(同意：{green}%d%%{default}, 同意票：{green}%i/%i{default})", RoundToNearest(100.0 * percent), iYesVotes, num_clients);
-		DisplayBuiltinVotePass(vote, g_sVotePassText);
-		CreateTimer(3.0, COLD_DOWN, _);
+		DisplayBuiltinVotePass(vote, g_ActiveVote.passText);
+		g_hActionTimer = CreateTimer(3.0, COLD_DOWN, g_iVoteGeneration, TIMER_FLAG_NO_MAPCHANGE);
 	}
 	else
 	{
-		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票未通过 {default}至少需要{green}%d%%{default}的玩家同意。(同意： {green}%d%%{default}, 同意票： {green}%i/%i {default})", RoundToNearest(100.0 * g_fLimit), RoundToNearest(100.0 * percent), iYesVotes, num_clients);
+		CPrintToChatAll("[{olive}VOTE{default}]{lightgreen}投票未通过 {default}至少需要{green}%d%%{default}的玩家同意。(同意： {green}%d%%{default}, 同意票： {green}%i/%i {default})", RoundToNearest(100.0 * g_ActiveVote.requiredPercent), RoundToNearest(100.0 * percent), iYesVotes, num_clients);
 		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Loses);
+		ClearVoteExecution();
 	}
 }
 
@@ -685,7 +756,6 @@ public Action Command_Votesforcestartgame(int client, int args)
 		if (!TestVoteDelay(client)) return Plugin_Handled;
 		if (!CanStartVotes(client)) return Plugin_Handled;
 
-		fsgclient = client;
 
 		char SteamId[35];
 		GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
@@ -812,7 +882,7 @@ public Action Command_VotesKick(int client, int args)
 	if (client == 0) return Plugin_Handled;
 	if (g_bEnable && g_bVotensKickED)
 	{
-		CreateVoteKickMenu(client);
+		if (TestVoteDelay(client) && CanStartVotes(client)) CreateVoteKickMenu(client);
 	}
 	else if (!g_bEnable || !g_bVotensKickED)
 	{
@@ -848,6 +918,7 @@ public int Menu_VotesKick(Menu menu, MenuAction action, int param1, int param2)
 {
 	if (action == MenuAction_Select)
 	{
+		if (!TestVoteDelay(param1) || !CanStartVotes(param1)) return 0;
 		char info[32], name[32];
 		menu.GetItem(param2, info, sizeof(info), _, name, sizeof(name));
 		int player = StringToInt(info);
@@ -869,10 +940,7 @@ public int Menu_VotesKick(Menu menu, MenuAction action, int param1, int param2)
 			}
 			else
 			{
-				kickplayer_userid = GetClientUserId(player);
-				kickplayer_name	  = name;
-				GetClientAuthId(player, AuthId_Steam2, kickplayer_SteamId, sizeof(kickplayer_SteamId));
-				DisplayVoteKickMenu(param1);
+				DisplayVoteKickMenu(param1, player);
 			}
 		}
 		else
@@ -896,20 +964,24 @@ public int Menu_VotesKick(Menu menu, MenuAction action, int param1, int param2)
 	return 0;
 }
 
-void DisplayVoteKickMenu(int client)
+void DisplayVoteKickMenu(int client, int player)
 {
 	if (!TestVoteDelay(client)) return;
 	if (!CanStartVotes(client)) return;
 
 	char SteamId[35];
 	GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-	LogMessage("%N(%s) 发起投票: 踢出 %s(%s)", client, SteamId, kickplayer_name, kickplayer_SteamId);	 //紀錄在log文件
+    if (!IsClientInGame(player) || (GetClientTeam(player) != GetClientTeam(client) && GetClientTeam(player) != L4D_TEAM_SPECTATE)) return;
+    char kickplayer_name[MAX_NAME_LENGTH], kickplayer_SteamId[32];
+    GetClientName(player, kickplayer_name, sizeof(kickplayer_name));
+    GetClientAuthId(player, AuthId_Steam2, kickplayer_SteamId, sizeof(kickplayer_SteamId));
+    LogMessage("%N(%s) 发起投票: 踢出 %s(%s)", client, SteamId, kickplayer_name, kickplayer_SteamId);	 //紀錄在log文件
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}踢出 %s {default}, 只有投票发起者的阵营才能参与投票", client, kickplayer_name);
 	char sArgument[128], sPassText[MAX_NAME_LENGTH];
 	EscapeAndFormat(sArgument, sizeof(sArgument), "是否踢出 %s ?", kickplayer_name);
 	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", kickplayer_name);
-	StartVote(client, kick, sArgument, sPassText, VoteBroadcast_Team);
+	StartVote(client, kick, sArgument, sPassText, VoteBroadcast_Team, BuiltinVoteType_Custom_YesNo, GetClientUserId(player), kickplayer_name, kickplayer_SteamId);
 }
 
 // 更换地图
@@ -990,11 +1062,10 @@ public int MapMenuHandler(Menu menu, MenuAction action, int client, int itemNum)
 {
 	if (action == MenuAction_Select)
 	{
-		char info[32], name[64];
+		if (!TestVoteDelay(client) || !CanStartVotes(client)) return 0;
+		char info[PLATFORM_MAX_PATH], name[MAX_NAME_LENGTH];
 		menu.GetItem(itemNum, info, sizeof(info), _, name, sizeof(name));
-		votesmaps	  = info;
-		votesmapsname = name;
-		DisplayVoteMapsMenu(client);
+		DisplayVoteMapsMenu(client, info, name);
 	}
 	else if (action == MenuAction_Cancel)
 	{
@@ -1011,7 +1082,7 @@ public int MapMenuHandler(Menu menu, MenuAction action, int client, int itemNum)
 	return 0;
 }
 
-void DisplayVoteMapsMenu(int client)
+void DisplayVoteMapsMenu(int client, const char[] votesmaps, const char[] votesmapsname)
 {
 	if (!TestVoteDelay(client)) return;
 	if (!CanStartVotes(client)) return;
@@ -1025,7 +1096,8 @@ void DisplayVoteMapsMenu(int client)
 	// 使用游戏原生 ChgCampaign 投票类型: 官方投票文案会自行拼出"更换战役", argument 传战役/地图显示名
 	EscapeAndFormat(sArgument, sizeof(sArgument), "%s", votesmapsname);
 	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", votesmapsname);
-	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec, BuiltinVoteType_ChgCampaign);
+	if (!IsMapValid(votesmaps)) return;
+	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec, BuiltinVoteType_ChgCampaign, 0, "", "", votesmaps);
 }
 
 // 强制玩家旁观
@@ -1034,7 +1106,7 @@ public Action Command_Votesforcespectate(int client, int args)
 	if (client == 0) return Plugin_Handled;
 	if (g_bEnable && g_bVotensForceSpectateED)
 	{
-		CreateVoteforcespectateMenu(client);
+		if (TestVoteDelay(client) && CanStartVotes(client)) CreateVoteforcespectateMenu(client);
 	}
 	else if (!g_bEnable || !g_bVotensForceSpectateED)
 	{
@@ -1072,10 +1144,9 @@ public int Menu_Votesforcespectate(Menu menu, MenuAction action, int param1, int
 	{
 		char info[32], name[32];
 		menu.GetItem(param2, info, sizeof(info), _, name, sizeof(name));
-		forcespectateid			= StringToInt(info);
-		forcespectateplayername = name;
-
-		DisplayVoteforcespectateMenu(param1);
+		if (!TestVoteDelay(param1) || !CanStartVotes(param1)) return 0;
+		int player = GetClientOfUserId(StringToInt(info));
+		if (player > 0 && IsClientInGame(player)) DisplayVoteforcespectateMenu(param1, player);
 	}
 	else if (action == MenuAction_Cancel)
 	{
@@ -1092,20 +1163,23 @@ public int Menu_Votesforcespectate(Menu menu, MenuAction action, int param1, int
 	return 0;
 }
 
-void DisplayVoteforcespectateMenu(int client)
+void DisplayVoteforcespectateMenu(int client, int player)
 {
 	if (!TestVoteDelay(client)) return;
 	if (!CanStartVotes(client)) return;
 
 	char SteamId[35];
 	GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-	LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观", client, SteamId, forcespectateplayername);	  //紀錄在log文件
+    if (!IsClientInGame(player) || GetClientTeam(player) != GetClientTeam(client) || HasAccess(player, g_sKickImmueAccesslvl)) return;
+    char forcespectateplayername[MAX_NAME_LENGTH];
+    GetClientName(player, forcespectateplayername, sizeof(forcespectateplayername));
+    LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观", client, SteamId, forcespectateplayername);	  //紀錄在log文件
 
 	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}强制玩家%s旁观{default}, 只有投票发起者的阵营才能参与投票", client, forcespectateplayername);
 	char sArgument[128], sPassText[MAX_NAME_LENGTH];
 	EscapeAndFormat(sArgument, sizeof(sArgument), "是否强制%s旁观?", forcespectateplayername);
 	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", forcespectateplayername);
-	StartVote(client, forcespectate, sArgument, sPassText, VoteBroadcast_Team);
+	StartVote(client, forcespectate, sArgument, sPassText, VoteBroadcast_Team, BuiltinVoteType_Custom_YesNo, GetClientUserId(player), forcespectateplayername);
 }
 
 // ====================================================
@@ -1160,9 +1234,11 @@ void RestartMapNow()
 // ====================================================
 // 投票通过后执行
 // ====================================================
-public Action COLD_DOWN(Handle timer, any client)
+public Action COLD_DOWN(Handle timer, int generation)
 {
-	switch (g_voteType)
+	g_hActionTimer = null;
+	if (!g_bVoteBusy || g_bMapEnding || generation != g_iVoteGeneration) return Plugin_Stop;
+	switch (g_ActiveVote.type)
 	{
 		case hp:
 		{
@@ -1181,7 +1257,7 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 		case restartmap:
 		{
-			ServerCommand("sm_restartmap");
+			RestartMapDelayed();
 			LogMessage("重置地图通过");
 		}
 		case map:
@@ -1191,42 +1267,41 @@ public Action COLD_DOWN(Handle timer, any client)
 			{
 				CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
 				ReportMapChangeSkipped();
-				return Plugin_Continue;
+				ClearVoteExecution();
+				return Plugin_Stop;
 			}
-			CreateTimer(5.0, Changelevel_Map);
-			CPrintToChatAll("[{olive}VOTE{default}]{green}5{default}秒后将切换地图为{blue}%s", votesmapsname);
-			LogMessage("更换地图 %s %s 通过", votesmaps, votesmapsname);
+			g_hMapTimer = CreateTimer(5.0, Changelevel_Map, generation, TIMER_FLAG_NO_MAPCHANGE);
+			CPrintToChatAll("[{olive}VOTE{default}]{green}5{default}秒后将切换地图为{blue}%s", g_ActiveVote.mapDisplay);
+			LogMessage("更换地图 %s %s 通过", g_ActiveVote.mapName, g_ActiveVote.mapDisplay);
+			return Plugin_Stop;
 		}
-		case kick:
-		{
-			CPrintToChatAll("[{olive}VOTE{default}]%s 已被投票踢出!", kickplayer_name);
-			LogMessage("投票踢出玩家%s通过", kickplayer_name);
+        case kick:
+        {
+            int player = GetClientOfUserId(g_ActiveVote.targetUserId);
+            if (player > 0 && IsClientInGame(player) && HasAccess(player, g_sKickImmueAccesslvl))
+                CPrintToChatAll("[{olive}VOTE{default}]该玩家目前拥有免踢权限，已取消处罚");
+            else
+            {
+                CPrintToChatAll("[{olive}VOTE{default}]%s 已被投票踢出!", g_ActiveVote.targetName);
+                if (player > 0 && IsClientInGame(player)) KickClient(player, "你已被投票踢出");
+                if (g_ActiveVote.targetSteamId[0] != '\0')
+                    ServerCommand("sm_addban 5 \"%s\" \"你已被投票踢出\"", g_ActiveVote.targetSteamId);
+            }
+        }
+        case forcespectate:
+        {
+            int player = GetClientOfUserId(g_ActiveVote.targetUserId);
+            if (player > 0 && IsClientInGame(player) && !HasAccess(player, g_sKickImmueAccesslvl))
+            {
+                ClearSpectatePenalty(player);
+                ChangeClientTeam(player, L4D_TEAM_SPECTATE);
+                g_iSpectatePenaltyCounter[player] = g_ActiveVote.penaltySeconds;
+                if (g_iSpectatePenaltyCounter[player] > 0)
+                    g_hPenaltyTimer[player] = CreateTimer(1.0, Timer_forcespectate, g_ActiveVote.targetUserId, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+                CPrintToChatAll("[{olive}VOTE{default}]玩家%s已被强制旁观!", g_ActiveVote.targetName);
+            }
+        }
 
-			int player = GetClientOfUserId(kickplayer_userid);
-			if (player && IsClientInGame(player)) KickClient(player, "你已被投票踢出");
-			ServerCommand("sm_addban 5 \"%s\" \"你已被投票踢出\" ", kickplayer_SteamId);
-		}
-		case forcespectate:
-		{
-			forcespectateid = GetClientOfUserId(forcespectateid);
-			if (HasAccess(forcespectateid, g_sKickImmueAccesslvl))
-			{
-				CPrintToChatAll("[{olive}VOTE{default}]玩家%s因拥有权限而无法强制旁观!", forcespectateplayername);
-				LogMessage("玩家%s因拥有权限而无法强制旁观", forcespectateplayername);
-				return Plugin_Handled;
-			}
-			if (forcespectateid && IsClientInGame(forcespectateid))
-			{
-				CPrintToChatAll("[{olive}VOTE{default}]玩家{blue}%s{default}已被强制旁观!", forcespectateplayername);
-				ChangeClientTeam(forcespectateid, 1);
-				LogMessage("玩家%s已经被强制旁观", forcespectateplayername);
-				CreateTimer(1.0, Timer_forcespectate, forcespectateid, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);	   // Start unpause countdown
-			}
-			else
-			{
-				CPrintToChatAll("[{olive}VOTE{default}]无法找到玩家%s", forcespectateplayername);
-			}
-		}
 		case forcedellobby:
 		{
 			L4D_LobbyUnreserve();
@@ -1241,6 +1316,7 @@ public Action COLD_DOWN(Handle timer, any client)
 		{
 			if (!IsGameLive())
 			{
+				int fsgclient = GetClientOfUserId(g_ActiveVote.initiatorUserId);
 				if (fsgclient <= 0 || !IsClientInGame(fsgclient))
 				{
 					CPrintToChatAll("[{olive}VOTE{default}]发起投票的玩家已断开连接，无法强制开始游戏!");
@@ -1260,63 +1336,56 @@ public Action COLD_DOWN(Handle timer, any client)
 		}
 	}
 
-	return Plugin_Continue;
+	ClearVoteExecution();
+	return Plugin_Stop;
 }
 
-public Action Changelevel_Map(Handle timer)
+public Action Changelevel_Map(Handle timer, int generation)
 {
+	g_hMapTimer = null;
+	if (!g_bVoteBusy || g_bMapEnding || generation != g_iVoteGeneration) return Plugin_Stop;
 	// 5秒等待期间地图过关(例如幸存者刚关上终点安全室的门) -> 放弃换图, 让服务器正常进入下一关
 	if (IsLevelAdvancingToNextMap())
 	{
 		CPrintToChatAll("[{olive}VOTE{default}]{green}当前地图已过关, 即将切换下一关{default}, 已取消更换地图");
 		ReportMapChangeSkipped();
-		return Plugin_Continue;
-	}
-
-	ServerCommand("changelevel %s", votesmaps);
-	return Plugin_Continue;
-}
-
-public Action Timer_forcespectate(Handle timer, any client)
-{
-	static bool bClientJoinedTeam = false;	  // did the client try to join the infected?
-
-	if (!IsClientInGame(client) || IsFakeClient(client)) return Plugin_Stop;	// if client disconnected or is fake client
-
-	if (g_iSpectatePenaltyCounter[client] != 0)
-	{
-		if ((GetClientTeam(client) == 3 || GetClientTeam(client) == 2))
-		{
-			ChangeClientTeam(client, 1);
-			CPrintToChat(client, "[{olive}VOTE{default}] 你已被投票强制旁观! 等待 {green}%d {default}秒后重新回到游戏.", g_iSpectatePenaltyCounter[client]);
-			bClientJoinedTeam = true;	 // client tried to join the infected again when not allowed
-		}
-		else if (GetClientTeam(client) == 1 && IsClientIdle(client))
-		{
-			L4D_TakeOverBot(client);
-			ChangeClientTeam(client, 1);
-			CPrintToChat(client, "[{olive}VOTE{default}] 你已被投票强制旁观! 等待 {green}%d {default}秒后重新回到游戏.", g_iSpectatePenaltyCounter[client]);
-			bClientJoinedTeam = true;	 // client tried to join the infected again when not allowed
-		}
-		g_iSpectatePenaltyCounter[client]--;
-		return Plugin_Continue;
-	}
-	else if (g_iSpectatePenaltyCounter[client] == 0)
-	{
-		if (GetClientTeam(client) == 3 || GetClientTeam(client) == 2)
-		{
-			ChangeClientTeam(client, 1);
-			bClientJoinedTeam = true;
-		}
-		if (GetClientTeam(client) == 1 && bClientJoinedTeam)
-		{
-			CPrintToChat(client, "[{olive}VOTE{default}]你现在可以按M回到队伍了");	  // only print this hint text to the spectator if he tried to join the infected team, and got swapped before
-		}
-		bClientJoinedTeam				  = false;
-		g_iSpectatePenaltyCounter[client] = iforcespectate_penalty;
+		ClearVoteExecution();
 		return Plugin_Stop;
 	}
-	return Plugin_Continue;
+
+	if (IsMapValid(g_ActiveVote.mapName)) ServerCommand("changelevel %s", g_ActiveVote.mapName);
+	ClearVoteExecution();
+	return Plugin_Stop;
+}
+
+public Action Timer_forcespectate(Handle timer, int userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client <= 0) return Plugin_Stop;
+    if (g_hPenaltyTimer[client] != timer) return Plugin_Stop;
+    if (!IsClientInGame(client) || IsFakeClient(client))
+    {
+        g_hPenaltyTimer[client] = null;
+        g_iSpectatePenaltyCounter[client] = 0;
+        g_bSpectateAttempted[client] = false;
+        return Plugin_Stop;
+    }
+    if (g_iSpectatePenaltyCounter[client] <= 0)
+    {
+        g_hPenaltyTimer[client] = null;
+        if (g_bSpectateAttempted[client]) CPrintToChat(client, "[{olive}VOTE{default}]你现在可以按M回到队伍了");
+        g_bSpectateAttempted[client] = false;
+        return Plugin_Stop;
+    }
+    if (GetClientTeam(client) > L4D_TEAM_SPECTATE || IsClientIdle(client))
+    {
+        if (IsClientIdle(client)) L4D_TakeOverBot(client);
+        ChangeClientTeam(client, L4D_TEAM_SPECTATE);
+        g_bSpectateAttempted[client] = true;
+        CPrintToChat(client, "[{olive}VOTE{default}]你已被投票强制旁观! 等待 %d 秒后重新回到游戏.", g_iSpectatePenaltyCounter[client]);
+    }
+    g_iSpectatePenaltyCounter[client]--;
+    return Plugin_Continue;
 }
 
 // 全体回血
@@ -1332,7 +1401,7 @@ void AnyHp()
 			SetEntityHealth(i, MaxHealth);
 		}
 	}
-	SetCommandFlags("give", flags | FCVAR_CHEAT);
+	SetCommandFlags("give", flags);
 }
 
 // 临时提升权限执行 sm_fs (强制开始游戏, 由服务器上其他插件提供该命令)
@@ -1349,6 +1418,8 @@ void CheatCommandEx(int client)
 // ====================================================
 bool TestVoteDelay(int client)
 {
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client)) return false;
+	if (GetClientTeam(client) < 2) { CPrintToChat(client, "[{olive}VOTE{default}]旁观无法发起投票"); return false; }
 	int delay = CheckVoteDelay();
 	if (delay > 0)
 	{
@@ -1374,6 +1445,8 @@ bool TestVoteDelay(int client)
 
 bool CanStartVotes(int client)
 {
+	if (!g_bEnable) return false;
+	if (g_bMapEnding || g_bVoteBusy || isMapRestartPending) { CPrintToChat(client, "[{olive}VOTE{default}]已有投票或通过后的操作正在进行中"); return false; }
 	if (IsBuiltinVoteInProgress())
 	{
 		CPrintToChat(client, "[{olive}VOTE{default}]已经有了一个投票正在进行中");
@@ -1396,9 +1469,11 @@ bool CanStartVotes(int client)
 
 public Action Timer_VoteDelay(Handle timer, any client)
 {
+	if (timer != g_hCooldownTimer) return Plugin_Stop;
 	g_votedelay--;
 	if (g_votedelay <= 0)
 	{
+		g_hCooldownTimer = null;
 		return Plugin_Stop;
 	}
 	return Plugin_Continue;
@@ -1409,6 +1484,7 @@ public Action Timer_VoteDelay(Handle timer, any client)
 // ====================================================
 void ParseCampaigns()
 {
+	g_iCount = 0;
 	Handle g_kvCampaigns = CreateKeyValues("VoteCustomCampaigns");
 
 	char sPath[PLATFORM_MAX_PATH];
@@ -1430,15 +1506,17 @@ void ParseCampaigns()
 
 	for (int i = 0; i < MAX_CAMPAIGN_LIMIT; i++)
 	{
-		KvGetString(g_kvCampaigns, "mapinfo", g_sMapinfo[i], sizeof(g_sMapinfo));
-		KvGetString(g_kvCampaigns, "mapname", g_sMapname[i], sizeof(g_sMapname));
+		KvGetString(g_kvCampaigns, "mapinfo", g_sMapinfo[i], sizeof(g_sMapinfo[]));
+		KvGetString(g_kvCampaigns, "mapname", g_sMapname[i], sizeof(g_sMapname[]));
 
+		g_iCount = i + 1;
 		if (!KvGotoNextKey(g_kvCampaigns))
 		{
 			g_iCount = ++i;
 			break;
 		}
 	}
+	CloseHandle(g_kvCampaigns);
 }
 
 // ====================================================

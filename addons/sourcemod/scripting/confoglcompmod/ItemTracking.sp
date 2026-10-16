@@ -314,10 +314,12 @@ static void KillRegisteredItems()
 {
     int itemindex = 0, psychonic = GetEntityCount();
     int iSurvivorLimit = g_hSurvivorLimit.IntValue;
-    bool bKeepPlayerItems = g_hCvarIgnorePlayerItems.BoolValue;
 
     for (int i = (MaxClients + 1); i <= psychonic; i++) {
         if (!IsValidEdict(i)) {
+            continue;
+        }
+        if (IT_IsPlayerItem(i)) {
             continue;
         }
 
@@ -328,11 +330,7 @@ static void KillRegisteredItems()
             } else if (IsEntityInSaferoom(i, END_SAFEROOM) && g_iSaferoomCount[END_SAFEROOM - 1] < iSurvivorLimit) {
                 g_iSaferoomCount[END_SAFEROOM - 1]++;
             } else {
-                // Kill items we're tracking;
-                // Exception for if the item is in a player's inventory.
-                if (bKeepPlayerItems && HasEntProp(i, Prop_Send, "m_hOwner") && GetEntPropEnt(i, Prop_Send, "m_hOwner") > 0)
-                  continue;
-                
+                // Carried items were excluded before saferoom counts and tracking.
                 KillEntity(i);
                 /*if (!AcceptEntityInput(i, "kill")) {
                     Debug_LogError(IT_MODULE_NAME, "Error killing instance of item %s", g_sItemNames[itemindex][IN_longname]);
@@ -340,6 +338,23 @@ static void KillRegisteredItems()
             }
         }
     }
+}
+
+// Both enumeration (round 1) and saved-spawn cleanup (round 2) must use
+// the same ownership rule. Carried pills must never enter the world flow filter.
+static bool IT_IsPlayerItem(int entity)
+{
+    if (!g_hCvarIgnorePlayerItems.BoolValue) {
+        return false;
+    }
+    int owner = -1;
+    if (HasEntProp(entity, Prop_Send, "m_hOwnerEntity")) {
+        owner = GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity");
+    }
+    if ((owner < 1 || owner > MaxClients) && HasEntProp(entity, Prop_Send, "m_hOwner")) {
+        owner = GetEntPropEnt(entity, Prop_Send, "m_hOwner");
+    }
+    return owner > 0 && owner <= MaxClients;
 }
 
 static void SpawnItems()
@@ -409,6 +424,9 @@ static void EnumerateSpawns()
 
     for (int i = (MaxClients + 1); i <= psychonic; i++) {
         if (!IsValidEdict(i)) {
+            continue;
+        }
+        if (IT_IsPlayerItem(i)) {
             continue;
         }
 

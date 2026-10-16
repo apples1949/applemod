@@ -16,6 +16,9 @@ void SetupNatives()
 	CreateNative("IsInReady",				Native_IsInReady);
 	CreateNative("IsReady",					Native_IsReady);
 	CreateNative("ToggleReadyPanel",		Native_ToggleReadyPanel);
+	CreateNative("ReadyUp_ExternalBegin", Native_ExternalBegin);
+	CreateNative("ReadyUp_ExternalLive", Native_ExternalLive);
+	CreateNative("ReadyUp_ExternalCancel", Native_ExternalCancel);
 }
 
 void SetupForwards()

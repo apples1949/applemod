@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.2.10"
+#define PLUGIN_VERSION "10.2.11"
 
 public Plugin myinfo =
 {
@@ -65,6 +65,8 @@ GlobalForward
 	g_hCountdownCancelledForward,
 	g_hPlayerReadyForward,
 	g_hPlayerUnreadyForward;
+
+bool externalReadyNotified, externalReadyActive, externalLiveNotified;
 
 // Game Cvars
 ConVar
@@ -162,6 +164,7 @@ public void OnPluginStart()
 	l4d_ready_survivor_freeze.AddChangeHook(CvarChg_SurvFreeze);
 
 	HookEvent("round_start",			RoundStart_Event, EventHookMode_Pre);
+	HookEvent("round_end", ExternalRoundEnd_Event, EventHookMode_PostNoCopy);
 	HookEvent("player_team",			PlayerTeam_Event, EventHookMode_Post);
 	HookEvent("gameinstructor_draw",	GameInstructorDraw_Event, EventHookMode_PostNoCopy);
 }
@@ -207,7 +210,13 @@ void CvarChg_SurvFreeze(ConVar convar, const char[] oldValue, const char[] newVa
 
 void RoundStart_Event(Event event, const char[] name, bool dontBroadcast)
 {
+	ResetExternalReadyState();
 	InitiateReadyUp();
+}
+
+void ExternalRoundEnd_Event(Event event, const char[] name, bool dontBroadcast)
+{
+	ResetExternalReadyState();
 }
 
 void GameInstructorDraw_Event(Event event, const char[] name, bool dontBroadcast)
@@ -306,6 +315,7 @@ public void OnMapStart()
 /* This ensures all cvars are reset if the map is changed during ready-up */
 public void OnMapEnd()
 {
+	ResetExternalReadyState();
 	if (inReadyUp)
 	{
 		InitiateAutoStart(false);

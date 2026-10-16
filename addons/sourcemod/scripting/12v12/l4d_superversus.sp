@@ -1,19 +1,18 @@
 #include <sourcemod>
 #include <sdktools>
+#include <left4dhooks>
+
+#undef REQUIRE_PLUGIN
+#include <l4d2_fix_team_shuffle_edi>
+#define REQUIRE_PLUGIN
 
 #pragma semicolon 1; // Force strict semicolon mode.
 #pragma newdecls required; 
 
-// l4dt native (for lobby unreserve)
-native bool L4D_LobbyUnreserve();
-
-// l4dt forward (to add more SI bots)
-forward Action L4D_OnGetScriptValueInt(const char[] key, int &retVal);
-
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION		       "2.5"
+#define PLUGIN_VERSION "2.5.5-core"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -30,45 +29,6 @@ forward Action L4D_OnGetScriptValueInt(const char[] key, int &retVal);
 #define ZC_WITCH                       7
 #define ZC_TANK                        8
 
-ConVar TankVersusHealth;
-ConVar TankExpertHealth;
-ConVar TankAdvancedHealth;
-ConVar TankNormalHealth;
-ConVar TankEasyHealth;
-
-ConVar CIMobSpawnFinaleSize;
-ConVar CIMobSpawnMaxSize;
-ConVar CIMobSpawnMinSize;
-ConVar CIMegaMobSize;
-ConVar CICommonMobLimit;
-ConVar CIBackgroundMobSize;
-
-ConVar ITMobSpawnMaxIntervalEasy;
-ConVar ITMobSpawnMaxIntervalNormal;
-ConVar ITMobSpawnMaxIntervalHard;
-ConVar ITMobSpawnMaxIntervalExpert;
-ConVar ITMobSpawnMinIntervalEasy;
-ConVar ITMobSpawnMinIntervalNormal;
-ConVar ITMobSpawnMinIntervalHard;
-ConVar ITMobSpawnMinIntervalExpert;
-
-ConVar ITMegaMobSpawnMaxInterval;
-ConVar ITMegaMobSpawnMinInterval;
-ConVar ITDirectorSpecialRespawnInterval;
-ConVar ITDirectorSpecialBattlefieldRespawnInterval;
-ConVar ITDirectorSpecialFinaleOfferLength;
-ConVar ITDirectorSpecialInitialSpawnDelayMax;
-ConVar ITDirectorSpecialInitialSpawnDelayMaxExtra;
-ConVar ITDirectorSpecialInitialSpawnDelayMin;
-ConVar ITDirectorSpecialOriginalOfferLength;
-
-ConVar SISmokerHealth;
-ConVar SIHunterHealth;
-ConVar SIBoomerHealth;
-ConVar SISpitterHealth;
-ConVar SIChargerHealth;
-ConVar SIJockeyHealth;
-
 char gameMode[16];
 char gameName[16];
 bool L4D1;
@@ -79,89 +39,56 @@ ConVar InfectedLimit;
 
 ConVar L4DInfectedLimit;
 ConVar L4DSurvivorLimit;
-ConVar AfkTimeout;
 ConVar GhostDelayMax;
 ConVar L4DHooks;
 ConVar L4DTown;
 ConVar GameType;
-ConVar Difficulty;
-ConVar SmokerHealth;
-ConVar BoomerHealth;
-ConVar HunterHealth;
-ConVar SpitterHealth;
-ConVar JockeyHealth;
-ConVar ChargerHealth;
-ConVar TankHealth;
 ConVar SurvMaxIncap;
 ConVar PainPillsDR;
 ConVar MinionLimit;
-ConVar szMobSpawnFinale;
-ConVar szMobSpawnMax;
-ConVar szMobSpawnMin;
-ConVar szMobMega; 
-ConVar szMobLimit;
-ConVar szBGLimit;
-ConVar intvlMobSpawnMaxEasy;
-ConVar intvlMobSpawnMaxNormal;
-ConVar intvlMobSpawnMaxHard;
-ConVar intvlMobSpawnMaxExpert;
-ConVar intvlMobSpawnMinEasy;
-ConVar intvlMobSpawnMinNormal;
-ConVar intvlMobSpawnMinHard;
-ConVar intvlMobSpawnMinExpert;
-ConVar intvlMobMegaSpawnMax;
-ConVar intvlMobMegaSpawnMin;
-ConVar directSpecialRespawn;
-ConVar directSpecialFinalRespawn;
-ConVar directSpecialFinalOffer;
-ConVar directSpecialSpawnDelayMax;
-ConVar directSpecialSpawnDelayMaxExtra;
-ConVar directSpecialSpawnDelayMin;
-ConVar directSpecialOriginalOffer;
 
-ConVar ExtraFirstAid;
-ConVar FinaleExtraFirstAid;
 ConVar KillRes;
 ConVar RespawnJoin;
 ConVar MoreSiBotsVersus;
-ConVar AfkMode;
 ConVar AutoJoin;
 ConVar Management;
 
-ConVar AutoDifficulty;
-ConVar TankHpMulti;
-ConVar SiHpMulti;
-ConVar CiSpMulti;
-ConVar SiSpMore;
 ConVar SiSpMoreDelay;
-ConVar ITHordeTimers;
 ConVar cvar_minsurvivor;
 
-Handle MedkitTimer					= null;
 Handle SubDirector					= null;
 Handle BotsUpdateTimer				= null;
-Handle DifficultyTimer				= null;
 Handle TeamPanelTimer[MAXPLAYERS+1];
-Handle AfkTimer[MAXPLAYERS+1];
+Handle JoinTimer[MAXPLAYERS+1];
+bool JoinPending[MAXPLAYERS+1];
+bool JoinAutomatic[MAXPLAYERS+1];
+bool NewConnection[MAXPLAYERS+1];
+int JoinTarget[MAXPLAYERS+1];
+int JoinAttempts[MAXPLAYERS+1];
+bool SurvivorPlaceholder[MAXPLAYERS+1];
 
-bool MedkitsGiven = false;
+enum JoinResult
+{
+	Join_Success,
+	Join_Wait,
+	Join_Failed
+};
+
 bool RoundStarted = false;
 
 bool  CheckIdle[MAXPLAYERS+1];
-int   iButtons[MAXPLAYERS+1];
-float fEyeAngles[MAXPLAYERS+1][3];
 
-float SiTimes[MAXPLAYERS+1] = 0.0;
+float SiTimes[MAXPLAYERS+1] = {0.0, ...};
 
-int MaxSpecials = 2;
 
 StringMap SteamIDs;
+StringMap TransitionPlayers;
 
 public Plugin myinfo =
 {
 	name        = "Super Versus Reloaded",
 	author      = "DDRKhat, Marcus101RR, Merudo, Foxhound27, Senip, RainyDagger, Shao",
-	description = "Allows up to 32 players on Left 4 Dead.",
+	description = "Multiplayer capacity, team joining and AI filling; no automatic AFK, item grants or difficulty scaling.",
 	version     = PLUGIN_VERSION,
 	url         = "https://forums.alliedmods.net/showthread.php?p=2704058#post2704058"
 }
@@ -178,114 +105,37 @@ public void OnPluginStart()
 	
 	L4DSurvivorLimit = FindConVar("survivor_limit");
 	L4DInfectedLimit = FindConVar("z_max_player_zombies");
-	SurvivorLimit = CreateConVar("l4d_survivor_limit", "4", "生还者最大人数", CVAR_FLAGS,true, 1.00, true, 24.00);
-	InfectedLimit = CreateConVar("l4d_infected_limit", "4", "特感最大人数（不影响 AI 特感）", CVAR_FLAGS, true, 4.00, true, 24.00);
-	cvar_minsurvivor = CreateConVar("l4d_static_minimum_survivor", "4", "生还者队最低人数（不足时自动补 AI bot）", CVAR_FLAGS, true, 4.00, true, 24.00);
+	SurvivorLimit = CreateConVar("l4d_survivor_limit", "12", "生还者最大人数", CVAR_FLAGS,true, 1.00, true, 24.00);
+	InfectedLimit = CreateConVar("l4d_infected_limit", "12", "特感最大人数（不影响 AI 特感）", CVAR_FLAGS, true, 4.00, true, 24.00);
+	cvar_minsurvivor = CreateConVar("l4d_static_minimum_survivor", "12", "生还者队最低人数（不足时自动补 AI bot）", CVAR_FLAGS, true, 4.00, true, 24.00);
 
 	// Remove limits for survivor/infected
 	SetConVarBounds(L4DSurvivorLimit, ConVarBound_Upper, true, 24.0);
 	SetConVarBounds(L4DInfectedLimit, ConVarBound_Upper, true, 24.0);
 	HookConVarChange(InfectedLimit, OnInfectedChanged);	HookConVarChange(L4DInfectedLimit, OnInfectedChanged);
 	HookConVarChange(SurvivorLimit, OnSurvivorChanged);	HookConVarChange(L4DSurvivorLimit, OnSurvivorChanged);
-
-	TankVersusHealth = CreateConVar("tank_health_versus", "6000.0", "对抗模式的坦克血量", CVAR_FLAGS);
-	TankExpertHealth = CreateConVar("tank_health_expert", "8000.0", "专家难度的坦克血量", CVAR_FLAGS);
-	TankAdvancedHealth = CreateConVar("tank_health_advanced", "8000.0", "困难难度的坦克血量", CVAR_FLAGS);
-	TankNormalHealth = CreateConVar("tank_health_normal", "4000.0", "普通难度的坦克血量", CVAR_FLAGS);
-	TankEasyHealth = CreateConVar("tank_health_easy", "3000.0", "简单难度的坦克血量", CVAR_FLAGS);
-
-	CIMobSpawnFinaleSize = CreateConVar("ci_mob_spawn_finale_size", "20.0", "终局尸潮(mob)数量", CVAR_FLAGS);
-	CIMobSpawnMaxSize = CreateConVar("ci_mob_spawn_max_size", "30.0", "尸潮(mob)最大数量", CVAR_FLAGS);
-	CIMobSpawnMinSize = CreateConVar("ci_mob_spawn_min_size", "10.0", "尸潮(mob)最小数量", CVAR_FLAGS);
-	CIMegaMobSize = CreateConVar("ci_mega_mob_size", "50.0", "大尸潮(mega mob)数量", CVAR_FLAGS);
-	CICommonMobLimit = CreateConVar("ci_common_mob_limit_size", "30.0", "场上小僵尸上限", CVAR_FLAGS);
-	CIBackgroundMobSize = CreateConVar("ci_background_mob_size", "20.0", "区域背景小僵尸数量", CVAR_FLAGS);
-	
-	ITMobSpawnMaxIntervalEasy = CreateConVar("it_mob_spawn_max_interval_easy", "240.0", "尸潮间隔上限(简单)", CVAR_FLAGS);
-	ITMobSpawnMaxIntervalNormal = CreateConVar("it_mob_spawn_max_interval_normal", "180.0", "尸潮间隔上限(普通)", CVAR_FLAGS);
-	ITMobSpawnMaxIntervalHard = CreateConVar("it_mob_spawn_max_interval_hard", "180.0", "尸潮间隔上限(困难)", CVAR_FLAGS);
-	ITMobSpawnMaxIntervalExpert = CreateConVar("it_mob_spawn_max_interval_expert", "180.0", "尸潮间隔上限(专家)", CVAR_FLAGS);
-	ITMobSpawnMinIntervalEasy = CreateConVar("it_mob_spawn_min_interval_easy", "120.0", "尸潮间隔下限(简单)", CVAR_FLAGS);
-	ITMobSpawnMinIntervalNormal = CreateConVar("it_mob_spawn_min_interval_normal", "90.0", "尸潮间隔下限(普通)", CVAR_FLAGS);
-	ITMobSpawnMinIntervalHard = CreateConVar("it_mob_spawn_min_interval_hard", "90.0", "尸潮间隔下限(困难)", CVAR_FLAGS);
-	ITMobSpawnMinIntervalExpert = CreateConVar("it_mob_spawn_min_interval_expert", "90.0", "尸潮间隔下限(专家)", CVAR_FLAGS);
-	ITMegaMobSpawnMaxInterval = CreateConVar("it_mega_mob_spawn_max_interval", "900.0", "大尸潮间隔上限", CVAR_FLAGS);
-	ITMegaMobSpawnMinInterval = CreateConVar("it_mega_mob_spawn_min_interval", "420.0", "大尸潮间隔下限", CVAR_FLAGS);
-	ITDirectorSpecialRespawnInterval = CreateConVar("it_director_special_respawn_interval", "45.0", "特感重生间隔", CVAR_FLAGS);
-	ITDirectorSpecialBattlefieldRespawnInterval = CreateConVar("it_director_special_battlefield_respawn_interval", "10.0", "战场特感重生间隔", CVAR_FLAGS);
-	ITDirectorSpecialFinaleOfferLength = CreateConVar("it_director_special_finale_offer_length", "10.0", "终局特感投放时长", CVAR_FLAGS);
-	ITDirectorSpecialInitialSpawnDelayMax = CreateConVar("it_director_special_initial_spawn_delay_max", "60.0", "特感初始出生延迟上限", CVAR_FLAGS);
-	ITDirectorSpecialInitialSpawnDelayMaxExtra = CreateConVar("it_director_special_initial_spawn_delay_max_extra", "180.0", "特感初始出生延迟上限(额外)", CVAR_FLAGS);
-	ITDirectorSpecialInitialSpawnDelayMin = CreateConVar("it_director_special_initial_spawn_delay_min", "30.0", "特感初始出生延迟下限", CVAR_FLAGS);
-	ITDirectorSpecialOriginalOfferLength = CreateConVar("it_director_special_original_offer_length", "30.0", "特感原始投放时长", CVAR_FLAGS);
-
-	SISmokerHealth = CreateConVar("si_smoker_health", "250.0", "Smoker 血量", CVAR_FLAGS);
-	SIHunterHealth = CreateConVar("si_hunter_health", "250.0", "Hunter 血量", CVAR_FLAGS);
-	SIBoomerHealth = CreateConVar("si_boomer_health", "50.0", "Boomer 血量", CVAR_FLAGS);
-	SISpitterHealth = CreateConVar("si_spitter_health", "100.0", "Spitter(口水) 血量", CVAR_FLAGS);
-	SIChargerHealth = CreateConVar("si_charger_health", "600.0", "Charger 血量", CVAR_FLAGS);
-	SIJockeyHealth = CreateConVar("si_jockey_health", "325.0", "Jockey 血量", CVAR_FLAGS);
+	Initialize12v12Capacity();
 
 	KillRes = CreateConVar("l4d_killreservation","0","是否清除大厅预留（需要 Left4Downtown / Left4DHooks）", CVAR_FLAGS,true,0.0,true,1.0);
-	ExtraFirstAid = CreateConVar("l4d_extra_first_aid", "1" , "是否给多出来的生还者补医疗包。0=不补；1=每超过 4 人补 1 个", CVAR_FLAGS, true, 0.0, true, 1.0);
-	FinaleExtraFirstAid = CreateConVar("l4d_finale_extra_first_aid", "1" , "终局开始时是否给多出来的生还者补医疗包。0=不补；1=每超过 4 人补 1 个", CVAR_FLAGS, true, 0.0, true, 1.0);
 	
 	RespawnJoin = CreateConVar("l4d_respawn_on_join", "1" , "额外生还者加入时是否直接复活。0=否；1=是（仅首次）", CVAR_FLAGS, true, 0.0, true, 1.0);
 	MoreSiBotsVersus =  CreateConVar("l4d_versus_si_more", "1" , "对抗/清道夫里真人特感不足 l4d_infected_limit 时，是否用 AI 特感补位", CVAR_FLAGS, true, 0.0, true, 1.0);
-	AfkMode =  CreateConVar("l4d_versus_afk", "1" , "对抗中玩家挂机的处理。0=不处理；1=变闲置；2=移入旁观；3=踢出", CVAR_FLAGS, true, 0.0, true, 3.0);
-	AutoJoin = CreateConVar("l4d_autojoin", "2" , "玩家连接后的入队方式。3=旁观；2=战役进生还者/对抗随机分队；1=弹出队伍菜单；0=不处理", CVAR_FLAGS, true, 0.0, true, 3.0);
+	AutoJoin = CreateConVar("l4d_autojoin", "2" , "新连接入队。3=旁观；2=战役进生还者/对抗补真人较少一方，同数随机；1=弹出队伍菜单；0=不处理", CVAR_FLAGS, true, 0.0, true, 3.0);
 	Management = CreateConVar("l4d_management", "3", "队伍管理权限。3=队伍菜单+命令；2=仅命令；1=仅 !infected/!survivor/!join；0=无", CVAR_FLAGS, true, 0.0, true, 4.0);
-	
-	AutoDifficulty = CreateConVar("director_auto_difficulty", "1", "是否按人数自动调整难度（坦克血量/特感血量/小僵尸刷新）", CVAR_FLAGS, true, 0.0, true, 1.0);
-	TankHpMulti    = CreateConVar("director_tank_hpmulti","0.25","坦克血量倍率 = 倍率*(生还者-4)，需要 director_auto_difficulty 1", CVAR_FLAGS,true,0.00,true,1.00);
-	SiHpMulti      = CreateConVar("director_si_hpmulti","0.00","特感血量倍率 = 倍率*(生还者-4)，需要 director_auto_difficulty 1", CVAR_FLAGS,true,0.00,true,1.00);
-	CiSpMulti      = CreateConVar("director_ci_multi","0.25","小僵尸刷新速率倍率 = 倍率*(生还者-4)，需要 director_auto_difficulty 1", CVAR_FLAGS,true,0.00,true,1.00);
-	SiSpMore       = CreateConVar("director_si_more","1","战役中每多 1 名玩家是否多刷 1 个特感？（需要 director_auto_difficulty 1 + Left4Downtown/Left4DHooks）", CVAR_FLAGS,true,0.0,true,1.0);
 	SiSpMoreDelay  = CreateConVar("director_si_more_delay","5","对抗中 AI 特感出生时，额外加到 z_ghost_delay_max 上的延迟（秒）", CVAR_FLAGS);
-	ITHordeTimers  = CreateConVar("director_horde_timers","1","director_ci_multi 的尸潮倍率是否同时影响尸潮间隔计时", CVAR_FLAGS, true, 0.0, true, 1.0);
 	
 	//Cache CVArs
-	AfkTimeout = FindConVar("director_afk_timeout");
 	GhostDelayMax = FindConVar("z_ghost_delay_max");
 	L4DHooks = FindConVar("left4dhooks_version");
 	L4DTown = FindConVar("left4downtown_version");
 	GameType = FindConVar("mp_gamemode");
-	Difficulty = FindConVar("z_difficulty");
-	SmokerHealth = FindConVar("z_gas_health");
-	BoomerHealth = FindConVar("z_exploding_health");
-	HunterHealth = FindConVar("z_hunter_health");
-	SpitterHealth = FindConVar("z_spitter_health");
-	JockeyHealth = FindConVar("z_jockey_health");
-	ChargerHealth = FindConVar("z_charger_health");
-	TankHealth = FindConVar("z_tank_health");
 	SurvMaxIncap = FindConVar("survivor_max_incapacitated_count");
 	PainPillsDR = FindConVar("pain_pills_decay_rate");
 	MinionLimit = FindConVar("z_minion_limit");
-	szMobSpawnFinale = FindConVar("z_mob_spawn_finale_size");
-	szMobSpawnMax = FindConVar("z_mob_spawn_max_size");
-	szMobSpawnMin = FindConVar("z_mob_spawn_min_size");
-	szMobMega = FindConVar("z_mega_mob_size"); 
-	szMobLimit = FindConVar("z_common_limit");
-	szBGLimit = FindConVar("z_background_limit");
-	intvlMobSpawnMaxEasy = FindConVar("z_mob_spawn_max_interval_easy");
-	intvlMobSpawnMaxNormal = FindConVar("z_mob_spawn_max_interval_normal");
-	intvlMobSpawnMaxHard = FindConVar("z_mob_spawn_max_interval_hard");
-	intvlMobSpawnMaxExpert = FindConVar("z_mob_spawn_max_interval_expert");
-	intvlMobSpawnMinEasy = FindConVar("z_mob_spawn_min_interval_easy");
-	intvlMobSpawnMinNormal = FindConVar("z_mob_spawn_min_interval_normal");
-	intvlMobSpawnMinHard = FindConVar("z_mob_spawn_min_interval_hard");
-	intvlMobSpawnMinExpert = FindConVar("z_mob_spawn_min_interval_expert");
-	intvlMobMegaSpawnMax = FindConVar("z_mega_mob_spawn_max_interval");
-	intvlMobMegaSpawnMin = FindConVar("z_mega_mob_spawn_min_interval");
-	directSpecialRespawn = FindConVar("director_special_respawn_interval");
-	directSpecialFinalRespawn = FindConVar("director_special_battlefield_respawn_interval");
-	directSpecialFinalOffer = FindConVar("director_special_finale_offer_length");
-	directSpecialSpawnDelayMax = FindConVar("director_special_initial_spawn_delay_max");
-	directSpecialSpawnDelayMaxExtra = FindConVar("director_special_initial_spawn_delay_max_extra");
-	directSpecialSpawnDelayMin = FindConVar("director_special_initial_spawn_delay_min");
-	directSpecialOriginalOffer = FindConVar("director_special_original_offer_length");
 	
 	RegConsoleCmd("sm_join", Join_Game, "Join Survivor or Infected team");
+	RegConsoleCmd("sm_jg", Join_Game, "Join Survivor or Infected team");
+	RegConsoleCmd("sm_multistatus", MultiStatus, "Show actual multiplayer limits and pending joins");
 	RegConsoleCmd("sm_survivor", Join_Survivor, "Join Survivor Team");
 	RegConsoleCmd("sm_infected", Join_Infected, "Join Infected Team");
 	RegConsoleCmd("sm_spectate", Join_Spectator, "Join Spectator Team");
@@ -300,31 +150,70 @@ public void OnPluginStart()
 	HookEvent("player_left_start_area", Event_PlayerLeftStartArea, EventHookMode_Post);
 	HookEvent("player_left_checkpoint", Event_PlayerLeftStartArea, EventHookMode_Post);
 	HookEvent("player_afk", Event_PlayerWentAFK, EventHookMode_Pre);
-	HookEvent("tank_spawn", Event_TankSpawn, EventHookMode_Post);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_Post);
 	HookEvent("round_end", Event_RoundEnd, EventHookMode_Pre);
 	HookEvent("finale_vehicle_leaving", Event_FinaleVehicleLeaving);
-	HookEvent("difficulty_changed", Event_Difficulty, EventHookMode_Post);
-	HookEvent("finale_start", Event_FinaleStart, EventHookMode_Post);
 
 	AddCommandListener(Cmd_spec_next, "spec_next");
+	AddCommandListener(Cmd_JoinTeam, "jointeam");
+	AddCommandListener(Cmd_StaySpectator, "sm_spec");
+	AddCommandListener(Cmd_StaySpectator, "sm_s");
+	AddCommandListener(Cmd_StaySpectator, "sm_spectate");
+	AddCommandListener(Cmd_StaySpectator, "sm_afk");
+	AddCommandListener(Cmd_StaySpectator, "go_away_from_keyboard");
 	
 	SteamIDs = new StringMap();
+	TransitionPlayers = new StringMap();
 
-	// 不生成 cfg/sourcemod/l4d_superversus.cfg：本插件的 cvar 全部由 confogl 的比赛配置
-	// 用 confogl_addcvar 下发（cfg/cfgogl/applemod12v12/applemod12v12.cfg）。
-	// 自动生成的 cfg 会在**所有模式**（含 4v4）换图时被执行，会把 12v12 的值带进 4v4。
-	AutoExecConfig(false, "l4d_superversus");
+	// Core settings are owned by the mode CFG. Do not execute a legacy
+	// l4d_superversus.cfg containing removed features or stale team limits.
 }
 
 public void OnInfectedChanged (Handle c, const char[] o, const char[] n)  {L4DInfectedLimit.IntValue = InfectedLimit.IntValue;}
 public void OnSurvivorChanged (Handle c, const char[] o, const char[] n)  {L4DSurvivorLimit.IntValue = SurvivorLimit.IntValue;}
 
+// This binary belongs exclusively to optional/12v12. Existing ConVars survive
+// plugin reloads, so defaults alone cannot replace an old 4/4 setting.
+void Initialize12v12Capacity()
+{
+	SurvivorLimit.IntValue = 12;
+	InfectedLimit.IntValue = 12;
+	cvar_minsurvivor.IntValue = 12;
+	SyncTeamLimits();
+}
+
+void SyncTeamLimits()
+{
+	L4DSurvivorLimit.IntValue = SurvivorLimit.IntValue;
+	L4DInfectedLimit.IntValue = InfectedLimit.IntValue;
+}
+
+public void OnConfigsExecuted()
+{
+	GameType.GetString(gameMode, sizeof(gameMode));
+	InfectedAllowed = AreInfectedAllowed();
+	SyncTeamLimits();
+}
+
+public void OnClientPutInServer(int client)
+{
+	CancelJoin(client);
+	SurvivorPlaceholder[client] = false;
+}
+
+public void OnClientConnected(int client)
+{
+	// PutInServer/PostAdminCheck run again on maps and late plugin loads. Only a
+	// connection observed here may override the engine's initial team assignment.
+	CancelJoin(client);
+	NewConnection[client] = !IsFakeClient(client);
+}
+
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max){MarkNativeAsOptional("L4D_LobbyUnreserve"); return APLRes_Success;}
 
 // ------------------------------------------------------------------------
-// Return true if lobby unreserve and SiSpMore is supported
+// Return true if the lobby-unreserve provider is available
 // ------------------------------------------------------------------------
 bool l4dt()
 {
@@ -346,6 +235,17 @@ public void OnMapStart()
 // ------------------------------------------------------------------------
 public void OnMapEnd()
 {
+	// Some game transitions reconnect players. Preserve those players' teams even
+	// when the engine produces another Connected/PostAdminCheck callback pair.
+	TransitionPlayers.Clear();
+	char auth[MAX_AUTHID_LENGTH];
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (IsClientConnected(client) && !IsFakeClient(client)
+			&& GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+			TransitionPlayers.SetValue(auth, true);
+		NewConnection[client] = false;
+	}
 	GameEnd();
 }
 
@@ -360,14 +260,12 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 void GameEnd()
 {
 	delete SubDirector;
-	delete MedkitTimer;
 	delete BotsUpdateTimer;
-	delete DifficultyTimer;
 	
 	for(int i = 1; i <= MaxClients; i++)
 	{
+		delete JoinTimer[i];
 		delete TeamPanelTimer[i];
-		delete AfkTimer[i];
 		TakeOver(i);
 	}
 
@@ -375,6 +273,7 @@ void GameEnd()
 	SteamIDs.Clear();
 	
 	RoundStarted = false;
+	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
 }
 
 // ------------------------------------------------------------------------
@@ -382,47 +281,23 @@ void GameEnd()
 // ------------------------------------------------------------------------
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	MedkitsGiven = false;
 	RoundStarted = true;
-}
-
-// ------------------------------------------------------------------------
-//  MedKit timer. Used to spawn extra medkits in safehouse
-// ------------------------------------------------------------------------
-public Action Timer_SpawnExtraMedKit(Handle hTimer)
-{
-	MedkitTimer = null;
-
-	int client = GetAnyAliveSurvivor();
-	int amount = GetSurvivorTeam() - 4;
-	
-	if(amount > 0 && client > 0)
+	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		for(int i = 1; i <= amount; i++)
+		delete JoinTimer[client];
+		if (JoinPending[client] && IsClientInGame(client) && !IsFakeClient(client))
 		{
-			CheatCommand(client, "give", "first_aid_kit", "");
+			JoinAttempts[client] = 0;
+			JoinTimer[client] = CreateTimer(0.5, Timer_AutoJoinTeam, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 		}
 	}
+	delete BotsUpdateTimer;
+	BotsUpdateTimer = CreateTimer(0.2, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
 }
-// ------------------------------------------------------------------------
-//  Spawn extra medkits at the finale based on survivors on the team after the finale starts.
-// ------------------------------------------------------------------------
-public void Event_FinaleStart(Event event, const char[] name, bool dontBroadcast)
-{
-	if(FinaleExtraFirstAid.BoolValue)
-	{
-		int client = GetAnyAliveSurvivor();
-		int amount = GetSurvivorTeam() - 4;
 
-		if(amount > 0 && client > 0)
-		{
-			for(int i = 1; i <= amount; i++)
-			{
-			CheatCommand(client, "give", "first_aid_kit", "");
-			}
-		}
-	}
-}
+
+
 // ------------------------------------------------------------------------
 // FinaleEnd() Thanks to Damizean for smarter method of detecting safe survivors.
 // ------------------------------------------------------------------------
@@ -454,18 +329,17 @@ public void Event_FinaleVehicleLeaving(Event event, const char[] name, bool dont
 // ------------------------------------------------------------------------
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
-	ADPlayerSpawn(event);
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	
 	// Adds very brief invulnerability to spawned SI infected bots in versus/scavenge. Otherwise they keep respawning dead
 	if (GetClientTeam(client) == TEAM_INFECTED && InfectedAllowed && MoreSiBotsVersus.BoolValue && IsFakeClient(client)) SetGodMode(client, 0.1);
 	
-	// Each time a new survivor spawns, check difficulty & record steam id (to prevent free respawning)
+	// Each survivor spawn updates bot capacity and records respawn eligibility.
 	if (GetClientTeam(client) == TEAM_SURVIVOR)
 	{
 		// Reset the bot check timer, if one exists	
 		delete BotsUpdateTimer;
-		BotsUpdateTimer = CreateTimer(2.0, Timer_BotsUpdate);
+		BotsUpdateTimer = CreateTimer(2.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
 		
 		if (!IsFakeClient(client) && !InfectedAllowed && IsFirstTime(client))
 			RecordSteamID(client); // Record SteamID of player.
@@ -474,10 +348,11 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	}
 	
 	//  If Si bot spawns, remove oldest Si in queue
-	if (IsFakeClient(client) && GetClientTeam(client) == TEAM_INFECTED)
+	if (IsFakeClient(client) && GetClientTeam(client) == TEAM_INFECTED
+		&& GetSiType(client) >= ZC_SMOKER && GetSiType(client) <= ZC_CHARGER)
 	{
 		int OldestSi = GetOldestSi();
-		if (OldestSi != -1) SiTimes[OldestSi] == 0.0;
+		if (OldestSi != -1) SiTimes[OldestSi] = 0.0;
 	}
 }
 
@@ -494,45 +369,10 @@ public int GetClientZC(int client)
 
 ////////////////////////////////////////////////////////////////////
 
-// ------------------------------------------------------------------------
-//  When a tank spawns, Its health is factored by difficultyHP times ExtraPlayers times the Given percent in the CFG.
-// ------------------------------------------------------------------------
-
-public Action Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
-{
-	if(AutoDifficulty.BoolValue) CreateTimer(1.0, SetTankHp, GetClientOfUserId(event.GetInt("userid")), TIMER_FLAG_NO_MAPCHANGE );
-}
 
 ////////////////////////////////////////////////////////////////////
 
-int ADPlayerSpawn(Event event)
-{
-	if(!AutoDifficulty.BoolValue) return;
-	int client = GetClientOfUserId(event.GetInt("userid"));
-	
-	if (IsValidClient(client) && GetClientTeam(client) == TEAM_INFECTED) switch(GetClientZC(client))
-	{
-		case ZC_SMOKER: SetEntityHealth(client, SmokerHealth.IntValue);
-		case ZC_BOOMER: SetEntityHealth(client, BoomerHealth.IntValue);
-		case ZC_HUNTER: SetEntityHealth(client, HunterHealth.IntValue);
-		case ZC_SPITTER: SetEntityHealth(client, SpitterHealth.IntValue);
-		case ZC_JOCKEY: SetEntityHealth(client, JockeyHealth.IntValue);
-		case ZC_CHARGER: SetEntityHealth(client, ChargerHealth.IntValue);
-	}
-}
-
 ////////////////////////////////////////////////////////////////////
-
-
-public Action SetTankHp(Handle hTimer, int client)
-{
-
-SetEntProp(client,Prop_Send,"m_iHealth", TankHealth.IntValue);
-SetEntProp(client,Prop_Send,"m_iMaxHealth", TankHealth.IntValue);
-SetEntityHealth(client, TankHealth.IntValue);
- 
-}
-
 
 ////////////////////////////////////////////////////////////////////
 
@@ -546,15 +386,15 @@ bool IsValidClient(int client)
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
 
-
 // ------------------------------------------------------------------------
-// If player disconnect, set timer to spawn/kick bots as needed. Manages difficulty on survivor bot disconnect.
+// If a player disconnects, update survivor bot capacity.
 // ------------------------------------------------------------------------
 public void OnClientDisconnect(int client)
 {
-	if(AutoDifficulty.BoolValue && IsFakeClient(client) && GetClientTeam(client) == TEAM_SURVIVOR) DifficultyTimer = CreateTimer(5.0, Timer_Difficulty);
+	CancelJoin(client);
+	NewConnection[client] = false;
+	SurvivorPlaceholder[client] = false;
 
-	delete AfkTimer[client];				//	Clean up Afk timer
 	delete TeamPanelTimer[client];			//	Clean up Panel timer
 	CheckIdle[client] = false;				//  Turn off idle check
 
@@ -562,7 +402,7 @@ public void OnClientDisconnect(int client)
 	{
 		// Reset the timer, if one exists
 		delete BotsUpdateTimer;
-		BotsUpdateTimer = CreateTimer(1.0, Timer_BotsUpdate);	// re-update the bots
+		BotsUpdateTimer = CreateTimer(1.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);	// re-update the bots
 	}
 }
 
@@ -573,34 +413,15 @@ public Action Timer_BotsUpdate(Handle hTimer)
 {
 	BotsUpdateTimer = null;
 
-	if (AreAllInGame() == true)
+	if (RoundStarted)
 	{
 
 		SpawnCheck();
 
-		// Give medkit (start of round)
-		if (MedkitTimer == null && !MedkitsGiven && ExtraFirstAid.BoolValue)
-		{
-			MedkitsGiven = true;
-			MedkitTimer = CreateTimer(2.0, Timer_SpawnExtraMedKit);
-		}
-		// Update the difficulty
-		delete DifficultyTimer;
-		if (AutoDifficulty.BoolValue) DifficultyTimer = CreateTimer(5.0, Timer_Difficulty);
 	}
-	else
-	{
-		BotsUpdateTimer = CreateTimer(1.0, Timer_BotsUpdate); // if not everyone joined, delay update
-	}
+	return Plugin_Stop;
 }
 
-// ------------------------------------------------------------------------
-// Update the difficulty on difficulty change
-// ------------------------------------------------------------------------
-public void Event_Difficulty(Event event, const char[] name, bool dontBroadcast)
-{
-	if (AutoDifficulty.BoolValue) DifficultyTimer = CreateTimer(5.0, Timer_Difficulty);
-}
 
 // ------------------------------------------------------------------------
 // Check the # of survivors, and kick/spawn bots as needed
@@ -653,6 +474,7 @@ bool SpawnFakeSurvivorClient()
 	// if entity is valid
 	if (fakeclient != 0)
 	{
+		SurvivorPlaceholder[fakeclient] = true;
 		// move into survivor team
 		ChangeClientTeam(fakeclient, TEAM_SURVIVOR);
 		
@@ -663,7 +485,7 @@ bool SpawnFakeSurvivorClient()
 			if (DispatchSpawn(fakeclient) == true)
 			{	
 				// kick the fake client to make the bot take over
-				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, fakeclient, TIMER_REPEAT);
+				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, GetClientUserId(fakeclient), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 				fakeclientKicked = true;
 			}
 		}			
@@ -672,7 +494,6 @@ bool SpawnFakeSurvivorClient()
 	}
 	return fakeclientKicked;
 }
-
 
 // ------------------------------------------------------------------------
 // If lobby full, unreserve it. Autojoin survivors if coop & spectator
@@ -687,15 +508,26 @@ public void OnClientPostAdminCheck(int client)
 	
 	if (IsFakeClient(client)) return;
 	
-	if (GetClientTeam(client) <= TEAM_SPECTATOR) // Sets on a random team in versus if lobby is 8+ player. l4d_autojoin 2 required.
+	char auth[MAX_AUTHID_LENGTH];
+	int returningPlayer;
+	if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
 	{
-		CreateTimer(5.0, Timer_AutoJoinTeam, GetClientUserId(client));
+		// Without a stable identity, preserve an existing team rather than risk
+		// treating a returning map connection as a new player.
+		NewConnection[client] = false;
+		return;
 	}
-	if (GetClientTeam(client) == TEAM_SURVIVOR && !InfectedAllowed) // Sets on survivor team in coop regardless of the character without creating an extra survivor that could be dead on connection. l4d_autojoin 2 required.
+	if (TransitionPlayers.GetValue(auth, returningPlayer))
 	{
-		CreateTimer(0.5, Timer_AutoJoinTeam, GetClientUserId(client));
+		TransitionPlayers.Remove(auth);
+		NewConnection[client] = false;
 	}
-	delete AfkTimer[client];
+	if (!NewConnection[client]) return;
+	// Initial engine autoassignment can already put a new player on infected.
+	// It is not a manual choice and must still pass the human-count balancer.
+	if (AutoJoin.IntValue > 0 && AutoJoin.IntValue < 3 && GetBotOfIdle(client) == 0)
+		QueueJoin(client, AutoJoin.IntValue == 1 ? 4 : 0, true, 1.0);
+	else NewConnection[client] = false;
 }
 
 // ------------------------------------------------------------------------
@@ -704,24 +536,102 @@ public void OnClientPostAdminCheck(int client)
 public Action Timer_AutoJoinTeam(Handle timer, int userid)
 {
 	int client = GetClientOfUserId(userid);
-
-	// If joined the game already or not valid, don't do anything
-	if (!client || !IsClientInGame(client) || IsFakeClient(client) || GetBotOfIdle(client)) return;
-	
-	if (BotsUpdateTimer != null || !RoundStarted || !AreAllInGame() || GetClientTeam(client) == 0)
+	if (client <= 0 || JoinTimer[client] != timer) return Plugin_Stop;
+	JoinTimer[client] = null;
+	if (!JoinPending[client] || IsFakeClient(client)) return Plugin_Stop;
+	if (!IsClientInGame(client))
 	{
-		CreateTimer(1.0, Timer_AutoJoinTeam, GetClientUserId(client)); // if during transition, delay autojoin
-	}
-	else
-	{
-		if(AutoJoin.IntValue > 0)
+		if (++JoinAttempts[client] < 120)
+			JoinTimer[client] = CreateTimer(1.0, Timer_AutoJoinTeam, userid, TIMER_FLAG_NO_MAPCHANGE);
+		else
 		{
-			if(AutoJoin.IntValue == 3) FakeClientCommand(client, "sm_spectate");  // Autojoin Spectate
-			else if(!InfectedAllowed && AutoJoin.IntValue == 2) FakeClientCommand(client, "sm_survivor"); // Autojoin Survivor
-			else if(AutoJoin.IntValue == 2) FakeClientCommand(client, "sm_join"); // Autojoin random team
-			else if(AutoJoin.IntValue == 1) FakeClientCommand(client, "sm_teams"); // Show team selection menu
+			NewConnection[client] = false;
+			CancelJoin(client);
+		}
+		return Plugin_Stop;
+	}
+	if (JoinAutomatic[client] && (!NewConnection[client]
+		|| (JoinTarget[client] == 0 && GetBotOfIdle(client) > 0)
+		|| AutoJoin.IntValue == 0 || AutoJoin.IntValue == 3))
+	{
+		NewConnection[client] = false;
+		CancelJoin(client);
+		return Plugin_Stop;
+	}
+
+	JoinAttempts[client]++;
+	JoinResult result = Join_Wait;
+	if (RoundStarted)
+	{
+		if (JoinTarget[client] == 4)
+		{
+			if (!TeamChangesLocked()) DisplayTeamMenu(client);
+			result = TeamChangesLocked() ? Join_Wait : Join_Success;
+		}
+		else
+		{
+			if (JoinAutomatic[client] && JoinTarget[client] == 0 && !TeamChangesLocked())
+			{
+				// Decide once for this request; a delayed bot takeover must not make
+				// the same player oscillate between teams on successive retries.
+				int team = SelectBalancedTeam(client);
+				if (team > 0) JoinTarget[client] = team;
+				else
+				{
+					// An engine/third-party initial assignment must not create a
+					// thirteenth human seat after both configured teams are full.
+					if (GetClientTeam(client) > TEAM_SPECTATOR) TryJoinTeam(client, TEAM_SPECTATOR, false);
+					result = Join_Failed;
+				}
+			}
+			if (result != Join_Failed) result = TryJoinTeam(client, JoinTarget[client], false);
 		}
 	}
+	if (result == Join_Wait && JoinAttempts[client] < 120)
+		JoinTimer[client] = CreateTimer(1.0, Timer_AutoJoinTeam, userid, TIMER_FLAG_NO_MAPCHANGE);
+	else
+	{
+		if (JoinAutomatic[client]) NewConnection[client] = false;
+		if (result != Join_Success)
+			PrintToChat(client, "\x03[SV] \x01当前没有可加入的队伍位置，可按 M 或输入 !join 重试。");
+		CancelJoin(client);
+	}
+	return Plugin_Stop;
+}
+
+int SelectBalancedTeam(int client)
+{
+	if (!InfectedAllowed) return TEAM_SURVIVOR;
+	int survivors = GetTeamPlayers(TEAM_SURVIVOR, false);
+	int infected = GetTeamPlayers(TEAM_INFECTED, false);
+	// Compare everyone already admitted, excluding this new connection's default
+	// engine seat. GetTeamPlayers(false) excludes AI but includes idle humans.
+	int current = GetClientTeam(client);
+	if (current == TEAM_SURVIVOR) survivors--;
+	else if (current == TEAM_INFECTED) infected--;
+	if (survivors >= SurvivorLimit.IntValue && infected >= InfectedLimit.IntValue) return 0;
+	if (survivors >= SurvivorLimit.IntValue) return TEAM_INFECTED;
+	if (infected >= InfectedLimit.IntValue) return TEAM_SURVIVOR;
+	if (survivors < infected) return TEAM_SURVIVOR;
+	if (infected < survivors) return TEAM_INFECTED;
+	return GetRandomInt(TEAM_SURVIVOR, TEAM_INFECTED);
+}
+
+void CancelJoin(int client)
+{
+	delete JoinTimer[client];
+	JoinPending[client] = false;
+	JoinAutomatic[client] = false;
+	JoinAttempts[client] = 0;
+}
+
+void QueueJoin(int client, int team, bool automatic, float delay)
+{
+	CancelJoin(client);
+	JoinPending[client] = true;
+	JoinAutomatic[client] = automatic;
+	JoinTarget[client] = team;
+	JoinTimer[client] = CreateTimer(delay, Timer_AutoJoinTeam, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
 // *********************************************************************************
@@ -735,7 +645,11 @@ public Action Event_PlayerWentAFK(Event event, const char[] name, bool dontBroad
 {
 	// Event is triggered when a player goes AFK
 	int client = GetClientOfUserId(event.GetInt("player"));
+	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Continue;
+	NewConnection[client] = false;
+	CancelJoin(client);
 	CheckIdle[client] = true;
+	return Plugin_Continue;
 }
 
 // ------------------------------------------------------------------------
@@ -747,18 +661,20 @@ public Action Event_BotReplacedPlayer(Event event, const char[] name, bool dontB
 	int player	= GetClientOfUserId(event.GetInt("player"));
 	int bot		= GetClientOfUserId(event.GetInt("bot"));
 
-	if (GetClientTeam(bot) == TEAM_SURVIVOR) CreateTimer(DELAY_KICK_NONEEDBOT, Timer_KickNoNeededBot, bot);
+	if (!IsValidClient(bot)) return Plugin_Continue;
+	if (GetClientTeam(bot) == TEAM_SURVIVOR) CreateTimer(DELAY_KICK_NONEEDBOT, Timer_KickNoNeededBot, GetClientUserId(bot), TIMER_FLAG_NO_MAPCHANGE);
 	
-	if (IsFakeClient(player)) return; 		// if "player" is a bot, don't do anything (side effect of creating new bots)
+	if (!IsValidClient(player) || IsFakeClient(player)) return Plugin_Continue;
 
 	// Create a datapack as we are moving 2+ pieces of data through a timer
 	if(player > 0 && IsClientInGame(player) && GetClientTeam(bot)==TEAM_SURVIVOR) 
 	{
 		Handle datapack = CreateDataPack();
-		WritePackCell(datapack, player);
-		WritePackCell(datapack, bot);
-		CreateTimer(0.2, Timer_ActivateFix, datapack, TIMER_FLAG_NO_MAPCHANGE);
+		WritePackCell(datapack, GetClientUserId(player));
+		WritePackCell(datapack, GetClientUserId(bot));
+		CreateTimer(0.2, Timer_ActivateFix, datapack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
 	}
+	return Plugin_Continue;
 }
 
 // ------------------------------------------------------------------------
@@ -770,8 +686,9 @@ public Action Timer_ActivateFix(Handle Timer, any datapack)
 	ResetPack(datapack);
 
 	// Retrieve values from datapack
-	int player = ReadPackCell(datapack);
-	int bot = ReadPackCell(datapack);
+	int player = GetClientOfUserId(ReadPackCell(datapack));
+	int bot = GetClientOfUserId(ReadPackCell(datapack));
+	if (!IsValidClient(player) || IsFakeClient(player)) return Plugin_Stop;
 
 	// If  player left game, is not spectator, or is correctly idle, skip the fix
 	// If  bot is occupied (should not happen unless something happened in .2 sec) , try to get another
@@ -785,6 +702,7 @@ public Action Timer_ActivateFix(Handle Timer, any datapack)
 		CheckIdle[player] = false;
 		SetHumanIdle(bot, player);
 	}
+	return Plugin_Stop;
 }
 
 // ------------------------------------------------------------------------
@@ -795,6 +713,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 	// Event is triggered when a player dies
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	TakeOver(client);
+	return Plugin_Continue;
 }
 
 void TakeOver(int bot)
@@ -807,58 +726,8 @@ void TakeOver(int bot)
 	}
 }
 
-// ------------------------------------------------------------------------
-// Store vision angle & button, if changed reset afk timer
-// ------------------------------------------------------------------------
-public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
-{
-	if (IsFakeClient(client)) return;
 
-	if (InfectedAllowed && AfkMode.BoolValue && GetClientTeam(client) > TEAM_SPECTATOR && IsPlayerAlive(client) && RoundStarted)
-	{	
-		if ( (iButtons[client] != buttons) ||  (FloatAbs(angles[0] - fEyeAngles[client][0]) > 2.0) || (FloatAbs(angles[1] - fEyeAngles[client][1]) > 2.0) || (FloatAbs(angles[2] - fEyeAngles[client][2]) > 2.0) ) 
-		{
-			delete AfkTimer[client];  // Reset timer
-		}
-		if (AfkTimer[client] == null) AfkTimer[client] = CreateTimer(AfkTimeout.FloatValue, Timer_AFK, client); 
-		
-		iButtons[client]   = buttons;
-		fEyeAngles[client] = angles; 
-	} else delete AfkTimer[client];
-}
 
-// ------------------------------------------------------------------------
-// Reset timer if client say something in chat
-// ------------------------------------------------------------------------
-public Action OnClientSayCommand(int client, const char[] command, const char[] sArgs) // Player Chat
-{
-	if (!client || IsFakeClient(client)) return;
-	
-	delete AfkTimer[client];	
-	
-	if (InfectedAllowed && AfkMode.BoolValue && GetClientTeam(client) > TEAM_SPECTATOR && IsPlayerAlive(client) && RoundStarted)
-	{
-		AfkTimer[client] = CreateTimer(AfkTimeout.FloatValue, Timer_AFK, client);
-	}
-}
-
-// ------------------------------------------------------------------------
-// If afk timer ran out, deal with afk client
-// ------------------------------------------------------------------------
-public Action Timer_AFK(Handle Timer, int client)
-{
-	AfkTimer[client] = null;
-
-	if (IsClientInGame(client) && InfectedAllowed && AfkMode.BoolValue && GetClientTeam(client) > TEAM_SPECTATOR && IsPlayerAlive(client) && RoundStarted)
-	{
-		if ( GetTeamPlayers(GetClientTeam(client), false) > 0) // if more than 1 human player on the team
-		{
-			if (AfkMode.IntValue == 1) FakeClientCommand(client, "sm_afk");
-			if (AfkMode.IntValue == 2) FakeClientCommand(client, "sm_spectate");
-			if (AfkMode.IntValue == 3) KickClient(client, "Afk");
-		}
-	}
-}
 
 // *********************************************************************************
 // COMMANDS FOR JOINING TEAMS
@@ -881,121 +750,221 @@ public Action Cmd_spec_next(int client, char[] command, int argc)
 // ------------------------------------------------------------------------
 public Action Join_Game(int client, int args)
 {
-	if (!Management.BoolValue) return Plugin_Continue;
-
-	if (!InfectedAllowed || GetBotOfIdle(client) || GetClientTeam(client) == TEAM_SURVIVOR) FakeClientCommand(client,"sm_survivor"); 
-	else if (GetClientTeam(client) == TEAM_INFECTED) FakeClientCommand(client,"sm_infected");
-	else if (InfectedLimit.IntValue <= GetTeamPlayers(TEAM_INFECTED, false) && SurvivorLimit.IntValue <= GetTeamPlayers(TEAM_SURVIVOR, false))
-	{
-		PrintToChat(client, "Both teams are full.");
-	}
-	else if (InfectedLimit.IntValue <= GetTeamPlayers(TEAM_INFECTED, false)) FakeClientCommand(client,"sm_survivor");
-	else if (SurvivorLimit.IntValue <= GetTeamPlayers(TEAM_SURVIVOR, false)) FakeClientCommand(client,"sm_infected");
-	else if (GetTeamPlayers(TEAM_INFECTED, false) > GetTeamPlayers(TEAM_SURVIVOR, false) ) FakeClientCommand(client,"sm_survivor");
-	else if (GetTeamPlayers(TEAM_INFECTED, false) < GetTeamPlayers(TEAM_SURVIVOR, false) ) FakeClientCommand(client,"sm_infected");
-	else if (GetRandomInt(0, 1)) FakeClientCommand(client,"sm_survivor");
-	else FakeClientCommand(client,"sm_infected");
-	return Plugin_Handled;
+	return RequestJoin(client, 0);
 }
 
 public Action Join_Spectator(int client, int args)
 {
-	if (Management.IntValue < 2) return Plugin_Continue;
+	return RequestJoin(client, TEAM_SPECTATOR);
+}
 
-	ChangeClientTeam(client,TEAM_SPECTATOR);
+public Action Join_Survivor(int client, int args)
+{
+	return RequestJoin(client, TEAM_SURVIVOR);
+}
+
+public Action Join_Infected(int client, int args)
+{
+	return RequestJoin(client, TEAM_INFECTED);
+}
+
+public Action Cmd_JoinTeam(int client, const char[] command, int argc)
+{
+	if (!IsValidClient(client) || IsFakeClient(client) || argc < 1 || !Management.BoolValue)
+		return Plugin_Continue;
+	char choice[32];
+	GetCmdArg(1, choice, sizeof(choice));
+	int team = ParseJoinTeam(choice);
+	if (team < 0) return Plugin_Continue;
+	return RequestJoin(client, team);
+}
+
+public Action Cmd_StaySpectator(int client, const char[] command, int argc)
+{
+	if (client > 0 && client <= MaxClients)
+	{
+		NewConnection[client] = false;
+		CancelJoin(client);
+	}
+	return Plugin_Continue;
+}
+
+int ParseJoinTeam(const char[] choice)
+{
+	if (StrEqual(choice, "0") || StrEqual(choice, "auto", false) || StrEqual(choice, "autoassign", false)) return 0;
+	if (StrEqual(choice, "1") || StrEqual(choice, "spectator", false) || StrEqual(choice, "spectators", false) || StrEqual(choice, "spectate", false)) return TEAM_SPECTATOR;
+	if (StrEqual(choice, "2") || StrEqual(choice, "survivor", false) || StrEqual(choice, "survivors", false)) return TEAM_SURVIVOR;
+	if (StrEqual(choice, "3") || StrEqual(choice, "infected", false)) return TEAM_INFECTED;
+	return -1;
+}
+
+bool TeamChangesLocked()
+{
+	return GetFeatureStatus(FeatureType_Native, "L4D2_FixTeamShuffle_IsFixComplete") == FeatureStatus_Available
+		&& !L4D2_FixTeamShuffle_IsFixComplete();
+}
+
+Action RequestJoin(int client, int team)
+{
+	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Handled;
+	// Explicit choices cancel an outstanding automatic join, including choosing spectator.
+	NewConnection[client] = false;
+	CancelJoin(client);
+	if (!Management.BoolValue) return Plugin_Continue;
+	JoinResult result = TryJoinTeam(client, team, true);
+	if (result == Join_Wait && team != TEAM_SPECTATOR)
+		QueueJoin(client, team, false, 0.3);
 	return Plugin_Handled;
 }
 
-public Action Join_Survivor(int client, int args) {
-
-	if (CountAvailableBots(TEAM_SURVIVOR) == 0) {
-		Create_Player(client, 0);
-		Join_Survivor2(client, 0);
-	} else if (CountAvailableBots(TEAM_SURVIVOR) > 0) {
-
-		Join_Survivor2(client, 0);
-
-	}
-
-}
-
-public Action Join_Survivor2(int client, int args)
+JoinResult TryJoinTeam(int client, int team, bool announce)
 {
-	if (!Management.BoolValue) return Plugin_Continue;
-
-	if(!IsClientInGame(client)) return Plugin_Handled;
-	
-	if(GetClientTeam(client) != TEAM_SURVIVOR && !GetBotOfIdle(client))
+	if (!IsValidClient(client) || IsFakeClient(client) || !Management.BoolValue) return Join_Failed;
+	if (TeamChangesLocked())
 	{
-		if(CountAvailableBots(TEAM_SURVIVOR) == 0 && !InfectedAllowed)
-		{
-			bool canRespawn = (RespawnJoin.BoolValue && IsFirstTime(client)) ;
-			
-			ChangeClientTeam(client, TEAM_SURVIVOR);  // Add extra survivor. Triggers player_spawn, which makes IsFirstTime false
-			
-			if (!IsPlayerAlive(client) && !GetBotOfIdle(client) && canRespawn)
-			{
-				Respawn(client);
-				TeleportToSurvivor(client);
-				SetGodMode(client, 1.0); // 1 sec of god mode after spawning
-				
-				GiveAverageWeapon(client);				
-				if(ExtraFirstAid.BoolValue && MedkitsGiven && MedkitTimer == null) // if medkits already given				
-					CheatCommand(client, "give", "first_aid_kit", "");
-			} else if (!IsPlayerAlive(client) && !GetBotOfIdle(client) && RespawnJoin.BoolValue)
-			{
-				PrintToChat(client, "\x03[SV] \x01You already played on the \x04Survivor Team\x01 this round. You will spawn dead.");
-			}
-		}
+		if (announce) PrintToChat(client, "\x03[SV] \x01正在还原换图队伍，完成后将处理你的入队请求。");
+		return Join_Wait;
+	}
+	int current = GetClientTeam(client);
+	if (current == TEAM_INFECTED && GetClientZC(client) == ZC_JOCKEY
+		&& GetEntProp(client, Prop_Send, "m_jockeyVictim") > 0)
+		return Join_Failed;
+	if (team == 0)
+	{
+		if (GetBotOfIdle(client) || current == TEAM_SURVIVOR || !InfectedAllowed) team = TEAM_SURVIVOR;
+		else if (current == TEAM_INFECTED) team = TEAM_INFECTED;
 		else
 		{
-			FakeClientCommand(client,"jointeam 2");
+			int survivors = GetTeamPlayers(TEAM_SURVIVOR, false);
+			int infected = GetTeamPlayers(TEAM_INFECTED, false);
+			if (survivors >= SurvivorLimit.IntValue && infected >= InfectedLimit.IntValue)
+			{
+				if (announce) PrintToChat(client, "\x03[SV] \x01两支队伍的真人位置都已满。");
+				return Join_Failed;
+			}
+			team = infected >= InfectedLimit.IntValue ? TEAM_SURVIVOR
+				: (survivors >= SurvivorLimit.IntValue ? TEAM_INFECTED
+				: (infected < survivors ? TEAM_INFECTED : TEAM_SURVIVOR));
 		}
 	}
-	
-	if(GetBotOfIdle(client))  TakeOver(GetBotOfIdle(client));
-	
-	if(GetClientTeam(client) == TEAM_SURVIVOR)
-	{		
-		if(IsPlayerAlive(client) == true && InfectedAllowed)
+	if (current == team && (team != TEAM_SURVIVOR || IsPlayerAlive(client))) return Join_Success;
+	if (team == TEAM_SPECTATOR)
+	{
+		int ownedBot = GetBotOfIdle(client);
+		if (ownedBot > 0) L4D_TakeOverBot(client);
+		ChangeClientTeam(client, TEAM_SPECTATOR);
+		return Join_Success;
+	}
+	if (team == TEAM_INFECTED)
+	{
+		if (!InfectedAllowed || GetTeamPlayers(TEAM_INFECTED, false) >= InfectedLimit.IntValue)
 		{
-			PrintToChat(client, "\x03[SV] \x01You are on the \x04Survivor Team\x01.");
+			if (announce) PrintToChat(client, "\x03[SV] \x01特感队伍的真人位置已满或本模式不允许加入。");
+			return Join_Failed;
 		}
-		else if(IsPlayerAlive(client) == false && CountAvailableBots(TEAM_SURVIVOR) != 0)  // Takeover a bot
-		{
-			ChangeClientTeam(client, TEAM_SPECTATOR);
-			FakeClientCommand(client,"jointeam 2");
-		}
-		else if(IsPlayerAlive(client) == false && CountAvailableBots(TEAM_SURVIVOR) == 0)
-		{
-			PrintToChat(client, "\x03[SV] \x01You are \x04Dead\x01. No \x05Bot(s) \x01Available.");
-		}
-	}
-	return Plugin_Handled;
-}
-
-public Action Join_Infected(int client, int args) {
-	if (!Management.BoolValue) return Plugin_Continue;
-
-	if (GetClientTeam(client) == TEAM_INFECTED) {
-		PrintToChat(client, "\x03[SV] \x01You are on the \x05Infected Team\x01.");
-	}
-	else if (!InfectedAllowed) {
-		PrintToChat(client, "\x03[SV] \x01[\x04ERROR\x01] The \x05Infected Team\x01 is not available in %s.", gameMode);
-	}
-	else if (InfectedLimit.IntValue <= GetTeamPlayers(TEAM_INFECTED, false)) {
-		PrintToChat(client, "\x03[SV] \x01[\x04ERROR\x01] The \x05Infected Team\x01 is Full.");
-	}
-	else {
+		if (!MakeInfectedRoom()) return Join_Wait;
+		int ownedBot = GetBotOfIdle(client);
+		if (ownedBot > 0) L4D_TakeOverBot(client);
 		ChangeClientTeam(client, TEAM_INFECTED);
+		return GetClientTeam(client) == TEAM_INFECTED ? Join_Success : Join_Wait;
 	}
-	return Plugin_Handled;
+	if (team != TEAM_SURVIVOR) return Join_Failed;
+	int bot = GetBotOfIdle(client);
+	if (bot <= 0 && current != TEAM_SURVIVOR && GetTeamPlayers(TEAM_SURVIVOR, false) >= SurvivorLimit.IntValue)
+	{
+		if (announce) PrintToChat(client, "\x03[SV] \x01生还者队伍的真人位置已满。");
+		return Join_Failed;
+	}
+	if (bot <= 0) bot = FindJoinSurvivorBot();
+	if (bot <= 0)
+	{
+		if (GetSurvivorTeam() < SurvivorLimit.IntValue) SpawnFakeSurvivorClient();
+		return Join_Wait;
+	}
+	// The original jointeam command has its own four-player checks. Bypass only that
+	// route after checking our human limit, and reserve exactly this available bot.
+	bool canRespawn = !InfectedAllowed && RespawnJoin.BoolValue && IsFirstTime(client);
+	if (current != TEAM_SPECTATOR) ChangeClientTeam(client, TEAM_SPECTATOR);
+	ChangeClientTeam(client, 0);
+	bool reserved = L4D_SetHumanSpec(bot, client);
+	bool taken = reserved && L4D_TakeOverBot(client);
+	if (!taken || GetClientTeam(client) != TEAM_SURVIVOR)
+	{
+		ChangeClientTeam(client, TEAM_SPECTATOR);
+		return Join_Wait;
+	}
+	if (!IsPlayerAlive(client) && canRespawn)
+	{
+		Respawn(client);
+		TeleportToSurvivor(client);
+		SetGodMode(client, 1.0);
+	}
+	return Join_Success;
 }
 
+int FindJoinSurvivorBot()
+{
+	int deadBot = -1;
+	for (int bot = 1; bot <= MaxClients; bot++)
+	{
+		if (!IsBotValid(bot) || GetClientTeam(bot) != TEAM_SURVIVOR || SurvivorPlaceholder[bot]) continue;
+		if (IsPlayerAlive(bot)) return bot;
+		deadBot = bot;
+	}
+	return deadBot;
+}
+
+bool MakeInfectedRoom()
+{
+	while (GetTeamPlayers(TEAM_INFECTED, true) >= InfectedLimit.IntValue)
+	{
+		int candidate = -1;
+		for (int bot = MaxClients; bot >= 1; bot--)
+		{
+			if (IsClientInGame(bot) && IsFakeClient(bot) && !IsClientInKickQueue(bot)
+				&& GetClientTeam(bot) == TEAM_INFECTED && GetClientZC(bot) >= ZC_SMOKER
+				&& GetClientZC(bot) <= ZC_CHARGER)
+			{
+				candidate = bot;
+				break;
+			}
+		}
+		if (candidate < 1) return false;
+		ChangeClientTeam(candidate, TEAM_SPECTATOR);
+		KickClient(candidate, "Making room for a human infected player");
+	}
+	return true;
+}
+
+public Action MultiStatus(int client, int args)
+{
+	char filename[PLATFORM_MAX_PATH];
+	GetPluginFilename(null, filename, sizeof(filename));
+	ConVar maxPlayers = FindConVar("sv_maxplayers");
+	ConVar multiPlayers = FindConVar("mv_maxplayers");
+	int waiting, automatic;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (JoinPending[i]) waiting++;
+		if (JoinPending[i] && JoinAutomatic[i]) automatic++;
+	}
+	ReplyToCommand(client, "[Multi] v%s | file=%s | engine=%d/%d | plugin=%d/%d | minsurvivor=%d",
+		PLUGIN_VERSION, filename, L4DSurvivorLimit.IntValue, L4DInfectedLimit.IntValue,
+		SurvivorLimit.IntValue, InfectedLimit.IntValue, cvar_minsurvivor.IntValue);
+	ReplyToCommand(client, "[Multi] MaxClients=%d | sv_maxplayers=%d | mv_maxplayers=%d | mode=%s",
+		MaxClients, maxPlayers == null ? -1 : maxPlayers.IntValue, multiPlayers == null ? -1 : multiPlayers.IntValue, gameMode);
+	ReplyToCommand(client, "[Multi] survivor humans=%d AI=%d | infected humans=%d AI=%d | auto=%d management=%d | round=%d restorelock=%d | waiting=%d auto_waiting=%d",
+		GetTeamPlayers(TEAM_SURVIVOR, false), CountBots(TEAM_SURVIVOR), GetTeamPlayers(TEAM_INFECTED, false),
+		CountBots(TEAM_INFECTED), AutoJoin.IntValue, Management.IntValue, RoundStarted, TeamChangesLocked(), waiting, automatic);
+	return Plugin_Handled;
+}
 
 
 public Action GO_AFK(int client, int args) {
 	if (Management.IntValue < 2) return Plugin_Continue;
+	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Handled;
+	NewConnection[client] = false;
+	CancelJoin(client);
 
 	if (GetClientTeam(client) == TEAM_SURVIVOR) // Infected can't go idle, they spectate instead
 	{
@@ -1034,6 +1003,7 @@ public Action Create_Player(int client, int args) {
 		if (Bot == 0) return Plugin_Handled;
 
 		ChangeClientTeam(Bot, TEAM_SURVIVOR);
+		SurvivorPlaceholder[Bot] = true;
 		if (!DispatchKeyValue(Bot, "classname", "survivorbot")) return Plugin_Handled;
 
 		if (!DispatchSpawn(Bot)) return Plugin_Handled; // if dispatch failed		
@@ -1047,10 +1017,8 @@ public Action Create_Player(int client, int args) {
 
 				// teleport client to the position of any active alive player
 				TeleportToSurvivor(Bot);
-				GiveAverageWeapon(Bot);
-				if (ExtraFirstAid.BoolValue) CheatCommand(Bot, "give", "first_aid_kit", "");
 				// kick the fake client to make the bot take over
-				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, Bot, TIMER_REPEAT);
+				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, GetClientUserId(Bot), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 				fakeclientKicked = true;
 			}
 		}
@@ -1061,8 +1029,10 @@ public Action Create_Player(int client, int args) {
 	return Plugin_Handled;
 }
 
-public Action Timer_KickFakeBot(Handle timer, any Bot)
+public Action Timer_KickFakeBot(Handle timer, any userid)
 {
+	int Bot = GetClientOfUserId(userid);
+	if (!Bot || !IsFakeClient(Bot)) return Plugin_Stop;
 	if (IsClientConnected(Bot))
 	{
 		KickClient(Bot, "Kicking FakeClient");		
@@ -1074,6 +1044,9 @@ public Action Timer_KickFakeBot(Handle timer, any Bot)
 public Action TeamMenu(int client, int args)
 {
 	if (Management.IntValue < 3) return Plugin_Continue;
+	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Handled;
+	NewConnection[client] = false;
+	CancelJoin(client);
 
 	if(TeamPanelTimer[client] == null)
 	{
@@ -1109,21 +1082,6 @@ bool AreInfectedAllowed()
 		}
 	}
 	return true;   // includes versus, realism versus, scavenge, & some mutations
-}
-
-// ------------------------------------------------------------------------
-// Returns true if all connected players are in the game
-// ------------------------------------------------------------------------
-bool AreAllInGame()
-{
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsClientConnected(i) && !IsFakeClient(i))
-		{
-			if (!IsClientInGame(i)) return false;
-		}
-	}
-	return true;
 }
 
 // ------------------------------------------------------------------------
@@ -1175,19 +1133,12 @@ void RecordSteamID(int client)
 // ------------------------------------------------------------------------
 int GetIdlePlayer(int bot)
 {
-	if(IsClientInGame(bot) && GetClientTeam(bot) == TEAM_SURVIVOR && IsPlayerAlive(bot) && IsFakeClient(bot))
+	if (bot > 0 && IsClientInGame(bot) && GetClientTeam(bot) == TEAM_SURVIVOR && IsFakeClient(bot)
+		&& HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
 	{
-		char sNetClass[12];
-		GetEntityNetClass(bot, sNetClass, sizeof(sNetClass));
-
-		if(strcmp(sNetClass, "SurvivorBot") == 0)
-		{
-			int client = GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID"));			
-			if(client > 0 && IsClientInGame(client) && GetClientTeam(client) == TEAM_SPECTATOR)
-			{
-				return client;
-			}
-		}
+		int client = GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID"));
+		if (client > 0 && IsClientInGame(client) && !IsFakeClient(client) && GetClientTeam(client) == TEAM_SPECTATOR)
+			return client;
 	}
 	return 0;
 }
@@ -1303,18 +1254,6 @@ int GetAnyValidClient()
 	return -1;
 }
 
-int GetAnyAliveSurvivor()
-{
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsClientInGame(i) && !IsClientInKickQueue(i) && GetClientTeam(i) == TEAM_SURVIVOR && IsPlayerAlive(i))
-		{
-			return i;
-		}
-	}
-	return -1;
-}
-
 bool AnySurvivorLeftSafeArea()
 {
 	int ent = -1, maxents = GetMaxEntities();
@@ -1423,9 +1362,7 @@ void DisplayTeamMenu(int client)
 	}
 	else if (!InfectedAllowed)
 	{
-		if (SiSpMore.BoolValue && AutoDifficulty.BoolValue && l4dt())
-			Format(title_infected, sizeof(title_infected), "Infected - Max %d Bot(s)", MaxSpecials);  // doesn't show how many bots are alive, but show max bots
-		else Format(title_infected, sizeof(title_infected), "Infected");  // don't show max bots if not known
+		Format(title_infected, sizeof(title_infected), "Infected");
 	}
 	else if ( InfectedAllowed)
 	{
@@ -1481,7 +1418,7 @@ void DisplayTeamMenu(int client)
 		
 	SendPanelToClient(TeamPanel, client, TeamMenuHandler, 30);
 	CloseHandle(TeamPanel);
-	TeamPanelTimer[client] = CreateTimer(1.0, Timer_TeamMenuHandler, client);
+	TeamPanelTimer[client] = CreateTimer(1.0, Timer_TeamMenuHandler, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public int TeamMenuHandler(Handle UpgradePanel, MenuAction action, int client, int param2) {
@@ -1505,11 +1442,16 @@ public int TeamMenuHandler(Handle UpgradePanel, MenuAction action, int client, i
 	else if (action == MenuAction_Cancel) {
 		// Nothing
 	}
+	return 0;
 }
 
-public Action Timer_TeamMenuHandler(Handle hTimer, int client)
+public Action Timer_TeamMenuHandler(Handle hTimer, int userid)
 {
+	int client = GetClientOfUserId(userid);
+	if (!IsValidClient(client) || TeamPanelTimer[client] != hTimer) return Plugin_Stop;
+	TeamPanelTimer[client] = null;
 	DisplayTeamMenu(client);
+	return Plugin_Stop;
 }
 
 int GetClientRealHealth(int client)
@@ -1545,116 +1487,6 @@ int GetClientRealHealth(int client)
 }
 
 // *********************************************************************************
-// DIRECTOR DIFFICULTY METHODS
-// *********************************************************************************
-
-// ------------------------------------------------------------------------
-//  Change the director variable MaxSpecials. Won't do anything unless l4dt present
-// ------------------------------------------------------------------------
-public Action L4D_OnGetScriptValueInt(const char[] key, int &retVal)
-{
-	if (!InfectedAllowed && StrEqual(key, "MaxSpecials") && SiSpMore.BoolValue && AutoDifficulty.BoolValue)
-	{
-		retVal = MaxSpecials;
-		return Plugin_Handled;
-	}
-	return Plugin_Continue;
-}
-
-// ------------------------------------------------------------------------
-//  Difficulty timer. Triggered by Timer_BotsUpdate
-// ------------------------------------------------------------------------
-public Action Timer_Difficulty(Handle hTimer)
-{
-	DifficultyTimer = null;
-	AutoDifficultyCheck();
-}
-
-void AutoDifficultyCheck()
-{
-	int extrasurvivors = GetSurvivorTeam() - 4;
-	extrasurvivors = (extrasurvivors > 0) ? extrasurvivors : 0;// Don't make game easier if less than 4 survivors 
-	
-	float TankHp_Multi = 1 + TankHpMulti.FloatValue * extrasurvivors;// More Survivors = More Tank Health
-	float setHP;
-	char z_difficulty[16];
-	GetConVarString(Difficulty, z_difficulty, sizeof(z_difficulty));
-	if (AreInfectedAllowed())
-		setHP = TankVersusHealth.FloatValue;
-	else if (StrEqual(z_difficulty, "Impossible", false))
-		setHP = TankExpertHealth.FloatValue;
-	else if (StrEqual(z_difficulty, "Hard", false))
-		setHP = TankAdvancedHealth.FloatValue;
-	else if (StrEqual(z_difficulty, "Normal", false))
-		setHP = TankNormalHealth.FloatValue;
-	else if (StrEqual(z_difficulty, "Easy", false))
-		setHP = TankEasyHealth.FloatValue;
-	TankHealth.IntValue = RoundToNearest(setHP * TankHp_Multi);
-
-	float spawn_multi = 1 + CiSpMulti.FloatValue * extrasurvivors ;// More Survivors = More Commons
-	szMobSpawnFinale.IntValue	= RoundFloat(CIMobSpawnFinaleSize.FloatValue*spawn_multi);
-	szMobSpawnMax.IntValue		= RoundFloat(CIMobSpawnMaxSize.FloatValue*spawn_multi);
-	szMobSpawnMin.IntValue		= RoundFloat(CIMobSpawnMinSize.FloatValue*spawn_multi);
-	szMobMega.IntValue			= RoundFloat(CIMegaMobSize.FloatValue*spawn_multi);
-	szMobLimit.IntValue			= RoundFloat(CICommonMobLimit.FloatValue*spawn_multi);
-	szBGLimit.IntValue			= RoundFloat(CIBackgroundMobSize.FloatValue*spawn_multi);
-
-	if(ITHordeTimers.BoolValue)// Should timers be affected too?
-	{
-		intvlMobSpawnMaxEasy.IntValue				= RoundToFloor(ITMobSpawnMaxIntervalEasy.FloatValue / spawn_multi);
-		intvlMobSpawnMaxNormal.IntValue				= RoundToFloor(ITMobSpawnMaxIntervalNormal.FloatValue / spawn_multi);
-		intvlMobSpawnMaxHard.IntValue				= RoundToFloor(ITMobSpawnMaxIntervalHard.FloatValue / spawn_multi);
-		intvlMobSpawnMaxExpert.IntValue				= RoundToFloor(ITMobSpawnMaxIntervalExpert.FloatValue / spawn_multi);
-		intvlMobSpawnMinEasy.IntValue				= RoundToFloor(ITMobSpawnMinIntervalEasy.FloatValue / spawn_multi);
-		intvlMobSpawnMinNormal.IntValue				= RoundToFloor(ITMobSpawnMinIntervalNormal.FloatValue / spawn_multi);
-		intvlMobSpawnMinHard.IntValue				= RoundToFloor(ITMobSpawnMinIntervalHard.FloatValue / spawn_multi);
-		intvlMobSpawnMinExpert.IntValue				= RoundToFloor(ITMobSpawnMinIntervalExpert.FloatValue / spawn_multi);
-		intvlMobMegaSpawnMax.IntValue				= RoundToFloor(ITMegaMobSpawnMaxInterval.FloatValue / spawn_multi);
-		intvlMobMegaSpawnMin.IntValue				= RoundToFloor(ITMegaMobSpawnMinInterval.FloatValue / spawn_multi);
-		directSpecialRespawn.IntValue				= RoundToFloor(ITDirectorSpecialRespawnInterval.FloatValue / spawn_multi);
-		directSpecialFinalRespawn.IntValue			= RoundToFloor(ITDirectorSpecialBattlefieldRespawnInterval.FloatValue / spawn_multi);
-		directSpecialFinalOffer.IntValue			= RoundToFloor(ITDirectorSpecialFinaleOfferLength.FloatValue / spawn_multi);
-		directSpecialSpawnDelayMax.IntValue			= RoundToFloor(ITDirectorSpecialInitialSpawnDelayMax.FloatValue / spawn_multi);
-		directSpecialSpawnDelayMaxExtra.IntValue	= RoundToFloor(ITDirectorSpecialInitialSpawnDelayMaxExtra.FloatValue / spawn_multi);
-		directSpecialSpawnDelayMin.IntValue			= RoundToFloor(ITDirectorSpecialInitialSpawnDelayMin.FloatValue / spawn_multi);
-		directSpecialOriginalOffer.IntValue			= RoundToFloor(ITDirectorSpecialOriginalOfferLength.FloatValue / spawn_multi);
-	}
-
-	float sihp_Multi = 1 + SiHpMulti.FloatValue * extrasurvivors;// More Survivors = More SI Health
-	SmokerHealth.IntValue		= RoundToCeil	(SISmokerHealth.FloatValue * sihp_Multi);
-	HunterHealth.IntValue		= RoundToCeil	(SIHunterHealth.FloatValue * sihp_Multi);
-	BoomerHealth.IntValue		= RoundToCeil	(SIBoomerHealth.FloatValue * sihp_Multi);
-	SpitterHealth.IntValue		= RoundToCeil	(SISpitterHealth.FloatValue * sihp_Multi);
-	ChargerHealth.IntValue		= RoundToCeil	(SIChargerHealth.FloatValue * sihp_Multi);
-	JockeyHealth.IntValue		= RoundToCeil	(SIJockeyHealth.FloatValue * sihp_Multi);
-
-	// Increase limit of special infected as bots. 
-	if(!InfectedAllowed && SiSpMore.BoolValue && l4dt() && !StrEqual(gameMode, "survival")) // Not in survival, versus, scavenge or realism versus, l4dt required
-	{
-		// Increase overall infected limit
-		MaxSpecials = 2 + RoundToNearest(extrasurvivors * SiSpMore.FloatValue);
-		MinionLimit.IntValue = MaxSpecials; 	// For L4D1?
-		
-		// Increase limits of infected classes
-		char iType[6][24] = {"z_smoker_limit", "z_boomer_limit", "z_hunter_limit", "z_spitter_limit", "z_charger_limit", "z_jockey_limit"};
-		int maxTypes = L4D1 ? 3 : 6;
-		if(L4D1)
-		{
-			ReplaceString(iType[0], sizeof(iType[]), "smoker", "gas", false);
-			ReplaceString(iType[1], sizeof(iType[]), "boomer", "exploding", false);		
-		}
-
-		int SIperclass = RoundToCeil(MaxSpecials/3.0);  // 0 to 3 SI: 1 per class, 4 to 6 SI: 2 per class, 7 to 9 SI: 3 per class, etc
-
-		for(int i = 0; i < maxTypes; i++)
-		{
-			FindConVar(iType[i]).IntValue = SIperclass;  // Increase each SI class limit
-		}
-	}
-	PrintToConsoleAll("[SV] - Tank HP: %.0f%%\tSI HP: %.0f%%\tCI spawn rate: %.0f%%\tMaxSpecials: %d", 100.0*TankHp_Multi, 100.0*sihp_Multi, 100.0*spawn_multi, MaxSpecials);
-}
-
-// *********************************************************************************
 // INFECTED COUNTER, for Versus / Scavenge
 // *********************************************************************************
 
@@ -1676,17 +1508,18 @@ public Action BotInfectedCounter(Handle timer, bool recheck)
 {
 	SubDirector = null;
 
-	if (recheck && !AnySurvivorLeftSafeArea()) return;  // Disable counter if false start due to round restart
+	if (!RoundStarted || (recheck && !AnySurvivorLeftSafeArea())) return Plugin_Stop;
 	
 	if (!MoreSiBotsVersus.BoolValue || GetTeamPlayers(TEAM_INFECTED, false) >= InfectedLimit.IntValue) // if no extra bots wanted
 	{
 		SubDirector = CreateTimer(10.0, BotInfectedCounter, false); // check back in 10 secs to see if setting changed
-		return ;
+		return Plugin_Stop;
 	}
 	
 	SiSpawnCheck();
 	
 	SubDirector = CreateTimer(2.0, BotInfectedCounter, false);
+	return Plugin_Stop;
 }
 
 // ------------------------------------------------------------------------
@@ -1792,13 +1625,8 @@ char SiNames[9][] = {"none", "smoker", "boomer", "hunter", "spitter", "jockey", 
 
 int GetSiType(int client)
 {
-	char modelName[32];
-	GetClientModel(client, modelName, sizeof(modelName));
-	for (int type = 1; type <= 8; type++)
-	{
-		if (StrEqual(modelName, SiNames[type])) return type;
-	}
-	return 0;
+	if (!IsValidClient(client) || GetClientTeam(client) != TEAM_INFECTED) return 0;
+	return GetEntProp(client, Prop_Send, "m_zombieClass");
 }
 
 void SiSpawn(int type = -1)
@@ -1855,7 +1683,7 @@ void SiSpawn(int type = -1)
 }
 
 char L4D1_limits[4][] = {"none", "z_gas_limit",			  "z_exploding_limit",	   "z_hunter_limit"};
-char L4D2_limits[7][] = {"none", "z_versus_smoker_limit", "z_versus_boomer_limit", "z_versus_hunter_limit", "z_versus_spitter_limit", "z_versus_charger_limit", "z_versus_jockey_limit"};
+char L4D2_limits[7][] = {"none", "z_versus_smoker_limit", "z_versus_boomer_limit", "z_versus_hunter_limit", "z_versus_spitter_limit", "z_versus_jockey_limit", "z_versus_charger_limit"};
 
 // ------------------------------------------------------------------------
 //  Find which SI should be spawned
@@ -1897,9 +1725,10 @@ int PickSiType()
 	//////////////////////////////////////////			
 	for(int i = 1; i <= MaxClients; i++)
 	{
-		if(IsClientInGame(i) && GetClientTeam(i) == TEAM_INFECTED)
+		if(IsClientInGame(i) && GetClientTeam(i) == TEAM_INFECTED && IsPlayerAlive(i))
 		{			
-			SIleft[GetSiType(i)]--;
+			int type = GetSiType(i);
+			if (type >= 1 && type <= maxTypes) SIleft[type]--;
 		}
 	}
 	
@@ -1940,35 +1769,13 @@ void Respawn(int client)
 
 void SetHumanIdle(int bot, int client)
 {
-	static Handle hSpec;
-	if (hSpec == null)
-	{
-		Handle hGameConf = LoadGameConfigFile("l4d_superversus");
-		StartPrepSDKCall(SDKCall_Player);
-		PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, "SetHumanSpec");
-		PrepSDKCall_AddParameter(SDKType_CBasePlayer, SDKPass_Pointer);
-		hSpec = EndPrepSDKCall();
-
-
-	}
-
-	SDKCall(hSpec, bot, client);
+	L4D_SetHumanSpec(bot, client);
 	SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
 }
 
 void TakeOverBot(int client)
 {
-	static Handle hSwitch;
-	if (hSwitch == null)
-	{
-		Handle hGameConf = LoadGameConfigFile("l4d_superversus");
-		StartPrepSDKCall(SDKCall_Player);
-		PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, "TakeOverBot");
-		PrepSDKCall_AddParameter(SDKType_Bool, SDKPass_Plain);
-		hSwitch = EndPrepSDKCall();
-
-	}
-	SDKCall(hSwitch, client, true);
+	L4D_TakeOverBot(client);
 }
 
 // *********************************************************************************
@@ -2019,53 +1826,6 @@ void TeleportToSurvivor(int Bot)
 				}
 }
 
-// ------------------------------------------------------------------------
-// Get the average weapon tier of survivors, and give a weapon of that tier to client
-// ------------------------------------------------------------------------
-char tier1_weapons[5][] =
-{
-	"weapon_smg",
-	"weapon_pumpshotgun",
-	"weapon_smg_silenced",		// L4D2 only
-	"weapon_shotgun_chrome",	// L4D2 only
-	"weapon_smg_mp5"			// International only
-};
-bool IsWeaponTier1(int iWeapon)
-{
-	char sWeapon[128];
-	GetEdictClassname(iWeapon, sWeapon, sizeof(sWeapon));
-	for (int i = 0; i < sizeof(tier1_weapons); i++)
-	{
-		if (StrEqual(sWeapon, tier1_weapons[i], false)) return true;
-	}
-	return false;
-}
-void GiveAverageWeapon(int client)
-{
-	if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SURVIVOR || !IsPlayerAlive(client)) return;
-
-	int iWeapon;
-	int wtotal=0; int total=0;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && GetClientTeam(i) == TEAM_SURVIVOR && IsPlayerAlive(i) && client != i)
-		{
-			total = total+1;	
-			iWeapon = GetPlayerWeaponSlot(i, 0);
-			if (iWeapon < 0 || !IsValidEntity(iWeapon) || !IsValidEdict(iWeapon)) continue; // no primary weapon
-
-			if (IsWeaponTier1(iWeapon)) wtotal = wtotal + 1;  // tier 1
-			else wtotal = wtotal + 2; // tier 2 or more
-		}
-	}
-	int average = total > 0 ? RoundToNearest(1.0 * wtotal/total) : 0;
-	switch(average)
-	{
-		case 0: CheatCommand(client, "give", "pistol", "");	
-		case 1: CheatCommand(client, "give", "smg", "");
-		case 2: CheatCommand(client, "give", "weapon_rifle", "");
-	}
-}
 
 void SetGodMode(int client, float duration)
 {
@@ -2079,11 +1839,10 @@ void SetGodMode(int client, float duration)
 public Action Timer_mortal(Handle hTimer, int userid)
 {
 	int client = GetClientOfUserId(userid);
-	if (!client || !IsClientInGame(client)) return;
+	if (!client || !IsClientInGame(client)) return Plugin_Stop;
 	SetEntProp(client, Prop_Data, "m_takedamage", 2, 1); // mortal
+	return Plugin_Stop;
 }
-
-
 
 stock int TotalSurvivors() // total bots, including players
 {
@@ -2098,10 +1857,11 @@ stock int TotalSurvivors() // total bots, including players
 	return l;
 }
 
-
-
-public Action Timer_KickNoNeededBot(Handle timer, any bot)
+public Action Timer_KickNoNeededBot(Handle timer, any userid)
 {
+	int bot = GetClientOfUserId(userid);
+	if (!bot || !IsFakeClient(bot) || !IsClientInGame(bot) || GetClientTeam(bot) != TEAM_SURVIVOR)
+		return Plugin_Stop;
 	if ((TotalSurvivors() <= cvar_minsurvivor.IntValue)) return Plugin_Handled;
 	if (IsClientConnected(bot) && IsClientInGame(bot))
 	{
@@ -2121,7 +1881,7 @@ public Action Timer_KickNoNeededBot(Handle timer, any bot)
 }
 
 
-stock int StripWeapons(int client) // strip all items from client
+stock void StripWeapons(int client) // strip all items from client
 {
 	int itemIdx;
 	for (int x = 0; x <= 3; x++)

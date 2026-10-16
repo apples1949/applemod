@@ -10,7 +10,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   ""
+#define PLG_VERS		   "1.1.0-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -22,6 +22,8 @@
 #define R				   1  /* 右向 */
 
 #define TAG				   "{olive}[{lightred}!{olive}]{orange}"
+
+native int TankAttackControl_GetThrowSequence(int client);
 
 #define TRAC_ROCK_MAX	   2048 /* 跟踪石相关数组上限(tank_rock 实体索引) */
 #define ROCK_FLY_SOUND	   "HulkZombie.Throw.FlyLoop" /* 坦克石头飞行动画循环音效(server.dll 里引擎按这个名字播放) */
@@ -194,6 +196,7 @@ public Plugin myinfo =
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+	MarkNativeAsOptional("TankAttackControl_GetThrowSequence");
 	RegPluginLibrary("Apex");
 	CreateNative("Apex_IsBhopEnabled", Native_IsBhopEnabled);
 	CreateNative("Apex_IsTracEnabled", Native_IsTracEnabled);
@@ -668,17 +671,22 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 	/* 连跳检测用客户端原始按键, 必须放在下面按键改写(清 IN_JUMP)之前 */
 	BhopDetect_Check(client, buttons);
 
-	if (buttons & IN_RELOAD)
+	// Tank Attack Control owns R/E and the !underhand/!overhand commands.
+	// Keep the original Apex bindings when it is used on its own.
+	if (!HasTankAttackControl())
 	{
-		Posture[client] = 3;
-		buttons |= IN_ATTACK2;
+		if (buttons & IN_RELOAD)
+		{
+			Posture[client] = 3;
+			buttons |= IN_ATTACK2;
+		}
+		else if (buttons & IN_USE)
+		{
+			Posture[client] = 2;
+			buttons |= IN_ATTACK2;
+		}
+		else Posture[client] = 1;
 	}
-	else if (buttons & IN_USE)
-	{
-		Posture[client] = 2;	// underhand
-		buttons |= IN_ATTACK2;
-	}
-	else Posture[client] = 1;	 // one hand overhand
 
 	if (buttons & IN_JUMP)
 	{
@@ -827,8 +835,29 @@ public Action L4D_OnCThrowActivate(int ability)
 	return Plugin_Continue;
 }
 
+bool HasTankAttackControl()
+{
+	return GetFeatureStatus(FeatureType_Native, "TankAttackControl_GetThrowSequence") == FeatureStatus_Available;
+}
+
 public Action L4D2_OnSelectTankAttack(int client, int &sequence)
 {
+	bool changed = false;
+	int selectedSequence = sequence;
+	if (sequence > 48 && IsTank(client))
+	{
+		if (HasTankAttackControl())
+		{
+			int delegated = TankAttackControl_GetThrowSequence(client);
+			if (delegated > 48) selectedSequence = delegated;
+		}
+		else if (Posture[client])
+		{
+			sequence = Posture[client] + 48;
+			selectedSequence = sequence;
+			changed = true;
+		}
+	}
 	/* 坦克起手"扔石头"(投掷动作 49/50/51)的一瞬间就开预测窗口, 让线在整个蓄力瞄准期间都在。
 	   这里不依赖 tank_rock 实体: 实测它可能创建与掷出几乎同帧(甚至只有一帧),
 	   靠"石头还在手上"来判断会完全抓不到蓄力阶段。 */
@@ -840,7 +869,7 @@ public Action L4D2_OnSelectTankAttack(int client, int &sequence)
 		bool fresh = (GetGameTime() > g_fPredUntil[client]);
 
 		g_fPredUntil[client] = GetGameTime() + PRED_WINDOW;
-		g_iPredSeq[client]	 = sequence; /* 每次重选都记: 保证掷出时学到的是这一发的姿势 */
+		g_iPredSeq[client]	 = selectedSequence; // Querying the owner also supports reversed plugin load order.
 
 		if (fresh)
 		{
@@ -870,13 +899,7 @@ public Action L4D2_OnSelectTankAttack(int client, int &sequence)
 		}
 	}
 
-	if (sequence > 48 && Posture[client])
-	{
-		sequence = Posture[client] + 48;
-		return Plugin_Handled;
-	}
-
-	return Plugin_Continue;
+	return changed ? Plugin_Handled : Plugin_Continue;
 }
 
 public void L4D_OnTraceRockCreated(int client, int &trace)
@@ -1023,7 +1046,7 @@ void RefundTracThrow(int tank, int rock)
 	{
 		SetEntProp(tank, Prop_Data, "m_iHealth", newhp);
 		/* 通报退还(负数): 命中则不扣血, 伤害统计侧据此把预扣的血扣回去 */
-		FireSkillCost(tank, ApexSkillCost_TracThrow, newhp - hp);
+		FireSkillCost(tank, ApexSkillCost_TracThrow, hp - newhp);
 	}
 }
 /* -----------------------------------------------------------

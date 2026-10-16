@@ -14,11 +14,11 @@
 #endif
 
 #tryinclude <confogl>
-#if !defined _confogl_Included
- native int LGO_BuildConfigPath(char[] buffer, int maxlength, const char[] sFileName);
+#if !defined _confogl_included
+ native void LGO_BuildConfigPath(char[] buffer, int maxlength, const char[] sFileName);
 #endif
 
-#define PLUGIN_VERSION "1.5.1"
+#define PLUGIN_VERSION "1.5.2"
 
 public Plugin myinfo = 
 {
@@ -50,6 +50,9 @@ void LoadPluginTranslations()
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+	MarkNativeAsOptional("InfoEditor_GetString");
+	MarkNativeAsOptional("LGO_BuildConfigPath");
+
 	switch (GetEngineVersion())
 	{
 		case Engine_Left4Dead: g_bLeft4Dead2 = false;

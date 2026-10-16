@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.6"
+#define PLUGIN_VERSION 		"1.6.1"
 
 /*======================================================================================
 	Plugin Info:
@@ -331,11 +331,10 @@ Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, in
 					float fHealth = GetTempHealth(victim);
 					if( fHealth - (damage - health) < 1.0 )
 					{
-						// Incap them instead.
-						SetTempHealth(victim, 0.0);
-						SetEntityHealth(victim, 1);
-						HurtEntity(victim);
-						damage = 0.0;
+						// Use the normal damage/incap path for this original hit.
+						// Keeping the Witch as attacker preserves attackerentid for
+						// witch_target_override. No nested TakeDamage or HP rewrite.
+						damagetype = DMG_GENERIC;
 					}
 				}
 			}
@@ -347,11 +346,6 @@ Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, in
 	return Plugin_Continue;
 }
 
-void HurtEntity(int target)
-{
-	SDKHooks_TakeDamage(target, 0, 0, 100.0, DMG_GENERIC);
-}
-
 float GetTempHealth(int client)
 {
 	float fGameTime = GetGameTime();
@@ -361,8 +355,3 @@ float GetTempHealth(int client)
 	return fHealth < 0.0 ? 0.0 : fHealth;
 }
 
-void SetTempHealth(int client, float fHealth)
-{
-	SetEntPropFloat(client, Prop_Send, "m_healthBuffer", fHealth < 0.0 ? 0.0 : fHealth);
-	SetEntPropFloat(client, Prop_Send, "m_healthBufferTime", GetGameTime());
-}

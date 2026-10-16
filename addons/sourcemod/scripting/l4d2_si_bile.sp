@@ -5,7 +5,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION "1.2.0"
+#define PLUGIN_VERSION "1.2.1"
 
 #define TEAM_SURVIVOR 2
 #define TEAM_INFECTED 3
@@ -51,8 +51,6 @@ float g_fSIBileHeal[MAXPLAYERS + 1];
 
 bool  g_bSurvivorBiled[MAXPLAYERS + 1];
 
-float g_fSIBileMobBlockUntil;
-
 float g_fSIGlowEnd[MAXPLAYERS + 1];
 bool  g_bSIGlowApplied[MAXPLAYERS + 1];
 int   g_iSIGlowPrevType[MAXPLAYERS + 1];
@@ -64,7 +62,7 @@ bool  g_bBoomerDeathValid;
 
 float g_fZonePos[MAX_ZONES][3];
 float g_fZoneEnd[MAX_ZONES];
-int   g_iZoneAttacker[MAX_ZONES];
+int   g_iZoneAttacker[MAX_ZONES]; // User IDs; a disconnected thrower must not become a new slot occupant.
 
 public Plugin myinfo =
 {
@@ -78,6 +76,7 @@ public Plugin myinfo =
 public void OnPluginStart()
 {
 	g_cvEnable = CreateConVar("l4d2_si_bile_enable", "1", "总开关", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvEnable.AddChangeHook(OnEnableChanged);
 	g_cvJarZoneRadius = CreateConVar("l4d2_si_bile_jar_zone_radius", "150.0", "投掷物胆汁罐爆炸后区域半径", FCVAR_NOTIFY, true, 0.0);
 	g_cvHealPerSecond = CreateConVar("l4d2_si_bile_heal_per_second", "60.0", "特感胆汁基础每秒回复量：坦克满额，非坦克减半，第 2 次胆汁再减半 (0=关)", FCVAR_NOTIFY, true, 0.0);
 	g_cvBlockHorde = CreateConVar("l4d2_si_bile_block_horde", "1", "特感被附着胆汁时是否阻止游戏刷新尸潮 (0=允许刷新, 1=阻止刷新)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -121,6 +120,7 @@ public void OnPluginStart()
 	HookEvent("player_now_it", Event_PlayerNowIt, EventHookMode_Pre);
 	HookEvent("player_no_longer_it", Event_PlayerNoLongerIt);
 	HookEvent("player_team", Event_PlayerTeam);
+	HookEvent("round_start", Event_ResetBile, EventHookMode_PostNoCopy);
 
 	g_hHealTimer = CreateTimer(HEAL_TICK_INTERVAL, Timer_HealBiled, INVALID_HANDLE, TIMER_REPEAT);
 	g_hZoneTimer = CreateTimer(ZONE_TICK_INTERVAL, Timer_ZoneTick, INVALID_HANDLE, TIMER_REPEAT);
@@ -137,13 +137,37 @@ public void OnPluginEnd()
 
 public void OnMapEnd()
 {
-	g_fSIBileMobBlockUntil = 0.0;
-
 	for (int i = 1; i <= MaxClients; i++)
 	{
+		ClearSIBileState(i);
+		g_iSIBileCount[i] = 0;
+		g_bSurvivorBiled[i] = false;
 		g_bSIGlowApplied[i] = false;
 		g_fSIGlowEnd[i] = 0.0;
 	}
+	for (int i = 0; i < MAX_ZONES; i++) g_fZoneEnd[i] = 0.0;
+	g_bBoomerDeathValid = false;
+}
+
+public void Event_ResetBile(Event event, const char[] name, bool dontBroadcast)
+{
+	ResetBileState();
+}
+
+public void OnEnableChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (!convar.BoolValue) ResetBileState();
+}
+
+void ResetBileState()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		ClearSIBileLife(i);
+		g_bSurvivorBiled[i] = false;
+	}
+	for (int i = 0; i < MAX_ZONES; i++) g_fZoneEnd[i] = 0.0;
+	g_bBoomerDeathValid = false;
 }
 
 public void OnGlowChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -263,10 +287,8 @@ void BileSpecialInfected(int victim, int attacker)
 		return;
 	}
 
-	// 阻止本次胆汁紧随而来的 IT 尸潮（须在施加胆汁前设窗，覆盖同步触发的 SpawnITMob）
-	if (g_cvBlockHorde.BoolValue)
-		g_fSIBileMobBlockUntil = GetGameTime() + 0.2;
-
+	// The pre-forward blocks engine IT at its SI source when block_horde=1.
+	// Our healing/glow state below is independent of the engine IT effect.
 	L4D2_CTerrorPlayer_OnHitByVomitJar(victim, attacker);
 
 	// 特感不保留胆汁负面效果：立即移除屏幕模糊并结束 IT 状态（小僵尸不再被吸引围攻）
@@ -328,12 +350,14 @@ void ClearSIBileGlow(int client)
 
 public Action L4D2_OnHitByVomitJar(int victim, int &attacker)
 {
-	// 特感被胆汁罐命中时记录窗口，随后由 L4D_OnSpawnITMob 按 cvar 决定是否阻止 IT 尸潮
+	// Stop only SI jar hits before the engine can call SpawnITMob. Returning
+	// Handled from SpawnITMob itself is too late for equalizers that add their
+	// own pending mobs; a time window also incorrectly swallows survivor hits.
 	if (g_cvEnable.BoolValue && g_cvBlockHorde.BoolValue
 		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
 		&& GetClientTeam(victim) == TEAM_INFECTED)
 	{
-		g_fSIBileMobBlockUntil = GetGameTime() + 0.2;
+		return Plugin_Handled;
 	}
 
 	return Plugin_Continue;
@@ -350,6 +374,14 @@ public void L4D2_OnHitByVomitJar_Post(int victim, int attacker)
 	}
 }
 
+public void L4D2_OnHitByVomitJar_PostHandled(int victim, int attacker)
+{
+	// Retain our immediate visual effect even when the engine IT call was blocked.
+	if (g_cvEnable.BoolValue && g_cvBlockHorde.BoolValue && victim > 0 && victim <= MaxClients
+		&& IsClientInGame(victim) && GetClientTeam(victim) == TEAM_INFECTED)
+		ClearSIBileEffect(victim);
+}
+
 public Action L4D_OnVomitedUpon(int victim, int &attacker, bool &boomerExplosion)
 {
 	// Boomer 喷吐/爆炸让特感"成为 it"时直接阻止：不给屏幕模糊、不触发 IT 尸潮、不吸引小僵尸
@@ -357,18 +389,6 @@ public Action L4D_OnVomitedUpon(int victim, int &attacker, bool &boomerExplosion
 		&& victim > 0 && victim <= MaxClients && IsClientInGame(victim)
 		&& GetClientTeam(victim) == TEAM_INFECTED)
 	{
-		return Plugin_Handled;
-	}
-
-	return Plugin_Continue;
-}
-
-public Action L4D_OnSpawnITMob(int &amount)
-{
-	// 只拦截特感胆汁紧随而来的 IT 尸潮，不影响生还者胆汁等正常尸潮
-	if (g_cvEnable.BoolValue && g_cvBlockHorde.BoolValue && g_fSIBileMobBlockUntil > GetGameTime())
-	{
-		g_fSIBileMobBlockUntil = 0.0;
 		return Plugin_Handled;
 	}
 
@@ -390,25 +410,23 @@ public void Event_AbilityUse(Event event, const char[] name, bool dontBroadcast)
 		return;
 
 	DataPack pack = new DataPack();
-	pack.WriteCell(boomer);
+	pack.WriteCell(GetClientUserId(boomer));
 	pack.WriteFloat(GetGameTime() + g_fVomitDuration);
-	CreateTimer(SPIT_SCAN_INTERVAL, Timer_SpitScan, pack, TIMER_REPEAT);
+	CreateTimer(SPIT_SCAN_INTERVAL, Timer_SpitScan, pack, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
 }
 
 public Action Timer_SpitScan(Handle timer, DataPack pack)
 {
 	pack.Reset();
-	int boomer = pack.ReadCell();
+	int boomer = GetClientOfUserId(pack.ReadCell());
 	float endTime = pack.ReadFloat();
 
-	if (GetGameTime() >= endTime)
+	if (!g_cvEnable.BoolValue || GetGameTime() >= endTime)
 	{
-		delete pack;
 		return Plugin_Stop;
 	}
 	if (boomer <= 0 || !IsClientInGame(boomer) || !IsPlayerAlive(boomer) || GetClientTeam(boomer) != TEAM_INFECTED)
 	{
-		delete pack;
 		return Plugin_Stop;
 	}
 
@@ -569,6 +587,9 @@ public Action Timer_HealBiled(Handle timer)
 
 public void OnClientDisconnect(int client)
 {
+	ClearSIBileState(client);
+	g_iSIBileCount[client] = 0;
+	g_bSurvivorBiled[client] = false;
 	g_bSIGlowApplied[client] = false;
 	g_fSIGlowEnd[client] = 0.0;
 }
@@ -597,8 +618,8 @@ void AddBileZone(const float pos[3], int attacker)
 	float now = GetGameTime();
 	float expire = now + g_fBileDuration;
 
-	int slot = -1;
-	float oldest = expire;
+	int slot = 0;
+	float oldest = g_fZoneEnd[0];
 	for (int i = 0; i < MAX_ZONES; i++)
 	{
 		if (g_fZoneEnd[i] <= now)
@@ -615,11 +636,12 @@ void AddBileZone(const float pos[3], int attacker)
 
 	g_fZonePos[slot] = pos;
 	g_fZoneEnd[slot] = expire;
-	g_iZoneAttacker[slot] = attacker;
+	g_iZoneAttacker[slot] = attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) ? GetClientUserId(attacker) : 0;
 }
 
 public Action Timer_ZoneTick(Handle timer)
 {
+	if (!g_cvEnable.BoolValue) return Plugin_Continue;
 	float now = GetGameTime();
 	float radius = g_cvJarZoneRadius.FloatValue;
 
@@ -644,16 +666,16 @@ public Action Timer_ZoneTick(Handle timer)
 				if (g_bSurvivorBiled[i])
 					continue;
 
-				int attacker = (g_iZoneAttacker[z] > 0 && g_iZoneAttacker[z] <= MaxClients && IsClientInGame(g_iZoneAttacker[z]))
-					? g_iZoneAttacker[z] : i;
+				int attacker = GetClientOfUserId(g_iZoneAttacker[z]);
+				if (!attacker || !IsClientInGame(attacker)) attacker = i;
 
 				L4D_CTerrorPlayer_OnVomitedUpon(i, attacker);
 				g_bSurvivorBiled[i] = true;
 			}
 			else if (team == TEAM_INFECTED)
 			{
-				int attacker = (g_iZoneAttacker[z] > 0 && g_iZoneAttacker[z] <= MaxClients && IsClientInGame(g_iZoneAttacker[z]))
-					? g_iZoneAttacker[z] : i;
+				int attacker = GetClientOfUserId(g_iZoneAttacker[z]);
+				if (!attacker || !IsClientInGame(attacker)) attacker = i;
 
 				BileSpecialInfected(i, attacker);
 			}

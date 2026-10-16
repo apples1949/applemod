@@ -4,6 +4,7 @@
 #include <sourcemod>
 #include <colors>
 
+#define PLUGIN_VERSION "2.3.2"
 #define STEAMID_SIZE 32
 
 #define L4D_TEAM_SPECTATE 1
@@ -14,6 +15,7 @@ StringMap
 	ArrLerpsCountChanges = null;
 	
 ConVar 
+	cVarEnforceLerp = null,
 	cVarReadyUpLerpChanges = null,
 	cVarAllowedLerpChanges = null,
 	cVarLerpChangeSpec = null,
@@ -36,7 +38,7 @@ public Plugin myinfo =
 	name = "LerpMonitor++",
 	author = "ProdigySim, Die Teetasse, vintik, A1m`",
 	description = "Keep track of players' lerp settings",
-	version = "2.3",
+	version = PLUGIN_VERSION,
 	url = "https://github.com/A1mDev/L4D2-Competitive-Plugins"
 };
 
@@ -85,6 +87,9 @@ public int LM_GetCurrentLerpTime(Handle plugin, int numParams)
 
 public void OnPluginStart()
 {
+	cVarEnforceLerp = CreateConVar("sm_lerp_enforce", "0", "Enforce lerp range and change limits? 0 = monitor only, 1 = enforce", _, true, 0.0, true, 1.0);
+	// ConVars can survive a reload. Start in monitor-only mode until a config opts in.
+	cVarEnforceLerp.BoolValue = false;
 	cVarAllowedLerpChanges = CreateConVar("sm_allowed_lerp_changes", "4", "Allowed number of lerp changes for a half", _, true, 0.0, true, 20.0);
 	cVarLerpChangeSpec = CreateConVar("sm_lerp_change_spec", "1", "Move to spectators on exceeding lerp changes count?", _, true, 0.0, true, 1.0);
 	cVarReadyUpLerpChanges = CreateConVar("sm_readyup_lerp_changes", "1", "Allow lerp changes during ready-up", _, true, 0.0, true, 1.0);
@@ -93,6 +98,7 @@ public void OnPluginStart()
 	cVarMaxLerp = CreateConVar("sm_max_lerp", "0.067", "Maximum allowed lerp value", _, true, 0.000, true, 0.500);
 	
 	RegConsoleCmd("sm_lerps", Lerps_Cmd, "List the Lerps of all players in game");
+	RegConsoleCmd("sm_lerpstatus", LerpStatus_Cmd, "Show the loaded lerp monitor version, file and enforcement settings");
 	
 	cVarMinUpdateRate = FindConVar("sv_minupdaterate");
 	cVarMaxUpdateRate = FindConVar("sv_maxupdaterate");
@@ -288,6 +294,14 @@ public void Event_RoundStart(Event hEvent, const char[] name, bool dontBroadcast
 	CreateTimer(0.5, OnTransfer, _, TIMER_FLAG_NO_MAPCHANGE);
 }
 
+public Action LerpStatus_Cmd(int client, int args)
+{
+	char pluginFile[PLATFORM_MAX_PATH];
+	GetPluginFilename(GetMyHandle(), pluginFile, sizeof(pluginFile));
+	ReplyToCommand(client, "[Lerp] v%s | file=%s | sm_lerp_enforce=%d | min=%.1f ms | max=%.1f ms", PLUGIN_VERSION, pluginFile, cVarEnforceLerp.BoolValue, cVarMinLerp.FloatValue * 1000.0, cVarMaxLerp.FloatValue * 1000.0);
+	return Plugin_Handled;
+}
+
 public Action OnTransfer(Handle hTimer)
 {
 	isTransfer = false;
@@ -310,7 +324,7 @@ void ProcessPlayerLerp(int client, bool load = false, bool team = false)
 	char steamID[STEAMID_SIZE];
 	GetClientAuthId(client, AuthId_Steam2, steamID, sizeof(steamID));
 
-	if ((FloatCompare(newLerpTime, cVarMinLerp.FloatValue) == -1)  || (FloatCompare(newLerpTime, cVarMaxLerp.FloatValue) == 1)) {
+	if (cVarEnforceLerp.BoolValue && ((FloatCompare(newLerpTime, cVarMinLerp.FloatValue) == -1) || (FloatCompare(newLerpTime, cVarMaxLerp.FloatValue) == 1))) {
 		//PrintToChatAll("%N's lerp changed to %.01f", client, newLerpTime * 1000);
 		if (!load) {
 			float currentLerpTime = 0.0;
@@ -349,7 +363,7 @@ void ProcessPlayerLerp(int client, bool load = false, bool team = false)
 		return;
 	}
 
-	if (isMatchLife || !cVarReadyUpLerpChanges.BoolValue) { // Midgame?
+	if (cVarEnforceLerp.BoolValue && (isMatchLife || !cVarReadyUpLerpChanges.BoolValue)) { // Midgame enforcement?
 		int count = 0;
 		ArrLerpsCountChanges.GetValue(steamID, count);
 		count++;

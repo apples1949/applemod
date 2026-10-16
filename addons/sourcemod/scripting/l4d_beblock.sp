@@ -39,10 +39,11 @@
 #pragma newdecls required
 
 #include <sourcemod>
+#include <beblock_voice>
 #include <sdktools>
 #include <colors>
 
-#define PLUGIN_VERSION "1.2.1"
+#define PLUGIN_VERSION "1.3.0"
 #define CVAR_FLAGS     FCVAR_NOTIFY
 
 /* 屏蔽状态位 */
@@ -82,6 +83,7 @@ float  g_fSpokenTime[MAXPLAYERS+1];
 float  g_fSilenceAt[MAXPLAYERS+1];     /**< 最近的停止说话时刻，-1 = 未知 */
 bool   g_bAutoDone[MAXPLAYERS+1];      /**< 本局已自动屏蔽过，不重复触发 */
 Handle g_hAutoTimer;
+GlobalForward g_hVoiceChanged;
 float  g_fTimerLast;                   /**< 上一次自动屏蔽检测的时刻，用于按真实时间累计 */
 
 /* 外部插件状态 */
@@ -108,6 +110,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	/* native 先创建，再注册库名，避免别的插件拿到库名后调用到未绑定的 native */
 	CreateNative("BeBlock_CanSeeChat", Native_CanSeeChat);
 	CreateNative("BeBlock_HasChatBlocker", Native_HasChatBlocker);
+    CreateNative("BeBlock_IsVoiceBlocked", Native_IsVoiceBlocked);
+    CreateNative("BeBlock_SetVoiceBlocked", Native_SetVoiceBlocked);
+    g_hVoiceChanged = new GlobalForward("BeBlock_OnVoiceChanged", ET_Ignore, Param_Cell, Param_Cell, Param_Cell);
 	RegPluginLibrary("beblock");
 	return APLRes_Success;
 }
@@ -242,6 +247,8 @@ void ResetClientState(int client)
 	{
 		g_iBlockFlags[client][i] = 0;
 		g_iBlockFlags[i][client] = 0;
+		NotifyVoiceState(client, i, false);
+		if (i != client) NotifyVoiceState(i, client, false);
 		/* 引擎在本玩家断线时已自动清掉与他相关的 ListenOverride，这里同步清掉记录 */
 		g_iVoiceOwn[client][i] = 0;
 		g_iVoiceOwn[i][client] = 0;
@@ -365,6 +372,43 @@ void UnblockAll(int client)
 	CPrintToChat(client, "%t", "Msg_Unblock_All");
 }
 
+// Both !bz and SpecLister use these flags; only this plugin writes their shared override.
+public int Native_IsVoiceBlocked(Handle plugin, int numParams)
+{
+    int listener = GetNativeCell(1), speaker = GetNativeCell(2);
+    if (!ValidVoicePair(listener, speaker)) return false;
+    return g_bEnable && IsBlocked(listener, speaker, BLOCK_VOICE);
+}
+
+public int Native_SetVoiceBlocked(Handle plugin, int numParams)
+{
+    int listener = GetNativeCell(1), speaker = GetNativeCell(2);
+    if (!g_bEnable || !ValidVoicePair(listener, speaker)) return false;
+    if (GetNativeCell(3)) g_iBlockFlags[listener][speaker] |= BLOCK_VOICE;
+    else g_iBlockFlags[listener][speaker] &= ~BLOCK_VOICE;
+    g_iBlockFlags[listener][speaker] &= ~BLOCK_AUTO;
+    ApplyVoiceOverride(listener, speaker);
+    // Also notify when the requested state was already clear.
+    NotifyVoiceState(listener, speaker, IsBlocked(listener, speaker, BLOCK_VOICE));
+    return true;
+}
+
+bool ValidVoicePair(int listener, int speaker)
+{
+    return listener > 0 && listener <= MaxClients && speaker > 0 && speaker <= MaxClients
+        && listener != speaker && IsClientConnected(listener) && IsClientConnected(speaker);
+}
+
+void NotifyVoiceState(int listener, int speaker, bool blocked)
+{
+    if (g_hVoiceChanged == null) return;
+    Call_StartForward(g_hVoiceChanged);
+    Call_PushCell(listener);
+    Call_PushCell(speaker);
+    Call_PushCell(blocked);
+    Call_Finish();
+}
+
 /** 下发 / 撤销 (listener 听 speaker) 的语音屏蔽 */
 void ApplyVoiceOverride(int listener, int speaker)
 {
@@ -385,11 +429,13 @@ void ApplyVoiceOverride(int listener, int speaker)
 			g_iVoiceOwn[listener][speaker] = view_as<int>(GetListenOverride(listener, speaker)) + 1;
 
 		SetListenOverride(listener, speaker, Listen_No);
+		NotifyVoiceState(listener, speaker, true);
 	}
 	else if (g_iVoiceOwn[listener][speaker] != 0)
 	{
 		SetListenOverride(listener, speaker, view_as<ListenOverride>(g_iVoiceOwn[listener][speaker] - 1));
 		g_iVoiceOwn[listener][speaker] = 0;
+		NotifyVoiceState(listener, speaker, false);
 	}
 }
 

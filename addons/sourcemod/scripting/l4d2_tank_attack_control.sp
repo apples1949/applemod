@@ -23,12 +23,21 @@ ConVar hOverhandOnly;
 bool g_bBlockJumpRock;
 bool g_bOverhandOnly;
 
+// Apex queries the selection, but this plugin remains its only owner.
+public int Native_GetThrowSequence(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients || !IsClientInGame(client)
+		|| IsFakeClient(client) || !IsTank(client)) return 0;
+	return g_iQueuedThrow[client] >= 1 && g_iQueuedThrow[client] <= 3 ? g_iQueuedThrow[client] + 48 : 0;
+}
+
 public Plugin myinfo = 
 {
 	name = "Tank Attack Control", 
 	author = "vintik, CanadaRox, Jacob, Visor, Forgetest",
 	description = "",
-	version = "0.8",
+	version = "0.9.0",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 }
 
@@ -39,6 +48,8 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		strcopy(error, err_max, "Plugin supports Left 4 dead 2 only!");
 		return APLRes_SilentFailure;
 	}
+	RegPluginLibrary("l4d2_tank_attack_control");
+	CreateNative("TankAttackControl_GetThrowSequence", Native_GetThrowSequence);
 	return APLRes_Success;
 }
 
@@ -76,6 +87,7 @@ void GetCvars()
 public void OnClientConnected(int client)
 {
 	g_bQueuedCommandThrow[client] = false;
+	g_iQueuedThrow[client] = 0;
 }
 
 Action Cmd_sm_underhand(int client, int args)
@@ -188,6 +200,7 @@ public Action L4D_OnCThrowActivate(int ability)
 
 public Action L4D2_OnSelectTankAttack(int client, int &sequence)
 {
+	if (!IsClientInGame(client) || IsFakeClient(client) || !IsTank(client)) return Plugin_Continue;
 	if (sequence > 48 && g_iQueuedThrow[client])
 	{
 		//rock throw

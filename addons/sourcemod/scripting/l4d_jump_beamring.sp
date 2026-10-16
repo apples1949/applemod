@@ -20,7 +20,7 @@ Change Log:
 #define PLUGIN_NAME                   "[L4D1 & L4D2] Jump Beam Ring"
 #define PLUGIN_AUTHOR                 "Mart"
 #define PLUGIN_DESCRIPTION            "Creates a colored beam ring on player jump"
-#define PLUGIN_VERSION                "1.0.2"
+#define PLUGIN_VERSION                "1.0.3"
 #define PLUGIN_URL                    "https://forums.alliedmods.net/showthread.php?t=341804"
 
 // ====================================================================================================
@@ -217,7 +217,7 @@ enum struct PluginData
         this.cvars.l4d_jump_beamring_color.GetString(this.sColor, sizeof(this.sColor));
         TrimString(this.sColor);
         this.randomColor = StrEqual(this.sColor, "random", false);
-        this.color = ConvertRGBToIntArray(this.sColor);
+        ConvertRGBToIntArray(this.sColor, this.color);
         this.alpha = this.cvars.l4d_jump_beamring_alpha.IntValue;
         this.duration = this.cvars.l4d_jump_beamring_duration.FloatValue;
         this.startRadius = this.cvars.l4d_jump_beamring_start_radius.FloatValue;
@@ -453,7 +453,9 @@ public void Event_PlayerJump(Handle event, char[] error, bool dontBroadcast)
         }
         else
         {
-            color = plugin.color;
+            color[0] = plugin.color[0];
+            color[1] = plugin.color[1];
+            color[2] = plugin.color[2];
         }
     }
     color[3] = plugin.alpha;
@@ -674,14 +676,16 @@ int GetTeamFlag(int team)
  * Example: "255 255 255"
  *
  * @param sColor        RGB color string.
- * @return              Integer array (int[3]) value of the RGB string or {0,0,0} if not in specified format.
+ * @param color         Output RGB values; missing components are set to zero.
  */
-int[] ConvertRGBToIntArray(char[] sColor)
+void ConvertRGBToIntArray(const char[] sColor, int color[3])
 {
-    int color[3];
+    color[0] = 0;
+    color[1] = 0;
+    color[2] = 0;
 
     if (sColor[0] == 0)
-        return color;
+        return;
 
     char sColors[3][4];
     int count = ExplodeString(sColor, " ", sColors, sizeof(sColors), sizeof(sColors[]));
@@ -704,6 +708,4 @@ int[] ConvertRGBToIntArray(char[] sColor)
             color[2] = StringToInt(sColors[2]);
         }
     }
-
-    return color;
 }

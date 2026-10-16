@@ -2,11 +2,12 @@
 #pragma newdecls required
 #include <sourcemod>
 #include <left4dhooks>
+#include <readyup_external>
 
 #define PLUGIN_NAME				"L4D2 Door Lock"
 #define PLUGIN_AUTHOR			"Glide Loading, sorallll"
 #define PLUGIN_DESCRIPTION		"Saferoom Door locked until all players loaded and infected are ready to spawn"
-#define PLUGIN_VERSION			"2.7.2"
+#define PLUGIN_VERSION			"2.7.3"
 #define PLUGIN_URL				"http://forums.alliedmods.net/showpost.php?p=1373587&postcount=136"
 
 #define CVAR_FLAGS				FCVAR_NOTIFY
@@ -41,6 +42,7 @@ bool
 	g_bBreakTheDoor,
 	g_bFreezeNodoor,
 	g_bFreezeAllowed,
+	g_bLifecycleStarted,
 	g_bIsLoading[MAXPLAYERS + 1];
 
 int
@@ -62,6 +64,42 @@ public Plugin myinfo = {
 	version = PLUGIN_VERSION,
 	url = PLUGIN_URL
 };
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
+	MarkNativeAsOptional("ReadyUp_ExternalBegin");
+	MarkNativeAsOptional("ReadyUp_ExternalLive");
+	MarkNativeAsOptional("ReadyUp_ExternalCancel");
+	return APLRes_Success;
+}
+
+void BeginRoundLifecycle() {
+	if (GetFeatureStatus(FeatureType_Native, "ReadyUp_ExternalBegin") == FeatureStatus_Available)
+		g_bLifecycleStarted = ReadyUp_ExternalBegin();
+}
+
+void CompleteRoundLifecycle() {
+	if (g_bLifecycleStarted && GetFeatureStatus(FeatureType_Native, "ReadyUp_ExternalLive") == FeatureStatus_Available)
+		ReadyUp_ExternalLive();
+	g_bLifecycleStarted = false;
+}
+
+void CancelRoundLifecycle() {
+	if (g_bLifecycleStarted && GetFeatureStatus(FeatureType_Native, "ReadyUp_ExternalCancel") == FeatureStatus_Available)
+		ReadyUp_ExternalCancel();
+	g_bLifecycleStarted = false;
+}
+
+public void OnLibraryAdded(const char[] name) {
+	if (StrEqual(name, "readyup") && g_hTimer != null)
+		BeginRoundLifecycle();
+}
+
+public void OnPluginEnd() {
+	UnLockDoor();
+	if (g_iStartDoor && EntRefToEntIndex(g_iStartDoor) != -1)
+		UnhookSingleEntityOutput(g_iStartDoor, "OnOpen", OnOpen);
+	DeleteTimer();
+}
 
 public void OnPluginStart() {
 	LoadTranslations("doorlock.phrases");
@@ -142,11 +180,10 @@ void IsAllowed() {
 	else if (g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false)) {
 		g_bCvarAllow = false;
 		HookEvents(false);
-		ResetPlugin();
-		DeleteTimer();
-
+		UnLockDoor();
 		if (g_iStartDoor && EntRefToEntIndex(g_iStartDoor) != -1)
 			UnhookSingleEntityOutput(g_iStartDoor, "OnOpen", OnOpen);
+		ResetPlugin();
 	}
 }
 
@@ -263,6 +300,7 @@ void ResetPlugin() {
 }
 
 void DeleteTimer() {
+	CancelRoundLifecycle();
 	if (g_hTimer) {
 		UnFreezeSurBots();
 		UnFreezePlayers();
@@ -295,13 +333,27 @@ void StartSequence() {
 		LockDoor();
 		FreezeSurBots();
 		g_hTimer = CreateTimer(1.0, tmrLoading, _, TIMER_REPEAT);
+		BeginRoundLifecycle();
 	}
 	else if (g_bFreezeNodoor) {
 		g_iCountDown = -1;
 		g_bFreezeAllowed = true;
 		g_cNbStop.SetInt(1); // 没有安全门则连同僵尸特感一起定住
 		g_hTimer = CreateTimer(1.0, tmrLoading, _, TIMER_REPEAT);
+		BeginRoundLifecycle();
 	}
+	else {
+		// Let the other round_start handlers (including cosmetic setup) settle.
+		// No gameplay freeze is applied on maps opting out of the no-door lock.
+		g_hTimer = CreateTimer(0.6, tmrImmediateLive, _, TIMER_FLAG_NO_MAPCHANGE);
+		BeginRoundLifecycle();
+	}
+}
+
+Action tmrImmediateLive(Handle timer) {
+	CompleteRoundLifecycle();
+	g_hTimer = null;
+	return Plugin_Stop;
 }
 
 Action tmrLoading(Handle timer) {
@@ -312,6 +364,7 @@ Action tmrLoading(Handle timer) {
 			UnLockDoor();
 			UnFreezeSurBots();
 			UnFreezePlayers();
+			CompleteRoundLifecycle();
 
 			PlaySound(SOUND_MOVEOUT);
 			PrintTextAll("%t", "DL_Moveout");

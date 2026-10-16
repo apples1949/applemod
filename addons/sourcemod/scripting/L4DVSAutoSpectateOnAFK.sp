@@ -10,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.10-2026/10/11"
+#define PLUGIN_VERSION "2.11-2026/10/16"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
 
@@ -418,7 +418,7 @@ bool TeamsHaveOpenSlots()
 		int iInfectedCount = 0;
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (IsClientInGame(i) && GetClientTeam(i) == 3)
+			if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == 3)
 				iInfectedCount++;
 		}
 		if (iInfectedCount < hMaxInfected.IntValue)

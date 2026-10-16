@@ -4,13 +4,8 @@
 #include <sourcemod>
 #include <sdktools>
 #include <colors>
+#include <beblock_voice>
 
-#define VOICE_NORMAL	0	/**< Allow the client to listen and speak normally. */
-#define VOICE_MUTED		1	/**< Mutes the client from speaking to everyone. */
-#define VOICE_SPEAKALL	2	/**< Allow the client to speak to everyone. */
-#define VOICE_LISTENALL	4	/**< Allow the client to listen to everyone. */
-#define VOICE_TEAM		8	/**< Allow the client to always speak to team, even when dead. */
-#define VOICE_LISTENTEAM	16	/**< Allow the client to always hear teammates, including dead ones. */
 
 #define TEAM_SPEC 1
 #define TEAM_SURVIVOR 2
@@ -18,7 +13,7 @@
 
 #define MUTE_TAG		"[X]"
 #define UNMUTE_TAG		"[√]"
-#define ITEMMARK(%0)	(%0 - (%0 % 7))
+int MenuPageStart(int selection) { return selection - (selection % 7); }
 
 Handle hAllTalk;
 
@@ -26,7 +21,7 @@ int g_iMenuSelection[MAXPLAYERS+1];
 bool g_bIsClientMuteTarget[MAXPLAYERS+1][MAXPLAYERS+1];
 char g_sClientauthId[MAXPLAYERS+1][32];
 
-#define PLUGIN_VERSION "2.1"
+#define PLUGIN_VERSION "2.2.0"
 public Plugin myinfo = 
 {
 	name = "SpecLister",
@@ -36,6 +31,77 @@ public Plugin myinfo =
 	url = "http://forums.alliedmods.net/showthread.php?t=95474"
 }
 
+
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+    MarkNativeAsOptional("BeBlock_IsVoiceBlocked");
+    MarkNativeAsOptional("BeBlock_SetVoiceBlocked");
+    return APLRes_Success;
+}
+
+bool HasVoiceProvider()
+{
+    return LibraryExists("beblock")
+        && GetFeatureStatus(FeatureType_Native, "BeBlock_IsVoiceBlocked") == FeatureStatus_Available
+        && GetFeatureStatus(FeatureType_Native, "BeBlock_SetVoiceBlocked") == FeatureStatus_Available;
+}
+
+bool IsTargetMuted(int listener, int speaker)
+{
+    return HasVoiceProvider() ? BeBlock_IsVoiceBlocked(listener, speaker) : g_bIsClientMuteTarget[listener][speaker];
+}
+
+void SetTargetMuted(int listener, int speaker, bool blocked)
+{
+    if (HasVoiceProvider()) {
+        if (!BeBlock_SetVoiceBlocked(listener, speaker, blocked))
+            CPrintToChat(listener, "[语音] 个人屏蔽插件已关闭，无法修改语音屏蔽。");
+        g_bIsClientMuteTarget[listener][speaker] = BeBlock_IsVoiceBlocked(listener, speaker);
+    } else {
+        g_bIsClientMuteTarget[listener][speaker] = blocked;
+        SetListenOverride(listener, speaker, blocked ? Listen_No : Listen_Default);
+    }
+}
+
+public void BeBlock_OnVoiceChanged(int listener, int speaker, bool blocked)
+{
+    if (listener > 0 && listener <= MaxClients && speaker > 0 && speaker <= MaxClients)
+        g_bIsClientMuteTarget[listener][speaker] = blocked;
+}
+
+public void OnAllPluginsLoaded() { RequestFrame(SyncVoiceProvider); }
+public void OnLibraryAdded(const char[] name)
+{
+    if (StrEqual(name, "beblock")) RequestFrame(SyncVoiceProvider);
+}
+public void OnLibraryRemoved(const char[] name)
+{
+    if (StrEqual(name, "beblock")) RequestFrame(RestoreFallbackVoice);
+}
+
+void SyncVoiceProvider(any data)
+{
+    if (!HasVoiceProvider()) return;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsValidClient(i)) continue;
+        for (int j = 1; j <= MaxClients; j++) {
+            if (i == j || !IsValidClient(j)) continue;
+            if (g_bIsClientMuteTarget[i][j] && !BeBlock_IsVoiceBlocked(i, j)) {
+                // Release our legacy write before the owner snapshots the underlying override.
+                SetListenOverride(i, j, Listen_Default);
+                BeBlock_SetVoiceBlocked(i, j, true);
+            }
+            g_bIsClientMuteTarget[i][j] = BeBlock_IsVoiceBlocked(i, j);
+        }
+    }
+}
+
+void RestoreFallbackVoice(any data)
+{
+    if (HasVoiceProvider()) return;
+    for (int i = 1; i <= MaxClients; i++)
+        if (IsValidClient(i)) SetListenOverrideEx(i);
+}
 
 public void OnPluginStart()
 {
@@ -51,12 +117,23 @@ public void OnPluginStart()
 	LoadTranslations("SpecLister.phrases");
 }
 
+public void OnPluginEnd()
+{
+    if (HasVoiceProvider()) return;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (!IsValidClient(i)) continue;
+        for (int j = 1; j <= MaxClients; j++)
+            if (i != j && IsValidClient(j) && g_bIsClientMuteTarget[i][j])
+                SetListenOverride(i, j, Listen_Default);
+    }
+}
+
 public void OnClientPutInServer(int client)
 {
 	if (!IsFakeClient(client)) {
 		char authId[32];
-		GetClientAuthId(client, AuthId_SteamID64, authId, sizeof(authId));
-		if (StrEqual(g_sClientauthId[client], authId))
+		bool verified = GetClientAuthId(client, AuthId_SteamID64, authId, sizeof(authId));
+		if (verified && authId[0] != '\0' && StrEqual(g_sClientauthId[client], authId))
 			SetListenOverrideEx(client);
 		else {
 			strcopy(g_sClientauthId[client], 32, authId);
@@ -66,7 +143,7 @@ public void OnClientPutInServer(int client)
 	}
 }
 
-public Action Cmd_hear(int client,any args)
+public Action Cmd_hear(int client, int args)
 {
 	if (IsValidClient(client))
 		CreateMuteMenu(client);
@@ -100,7 +177,7 @@ void CreateMuteMenu(int client) {
 			}
 		}		
 	}
-	menu.DisplayAt(client, ITEMMARK(g_iMenuSelection[client]), MENU_TIME_FOREVER);	
+	menu.DisplayAt(client, MenuPageStart(g_iMenuSelection[client]), MENU_TIME_FOREVER);	
 }
 
 int MuteMenu_VoteHandler(Menu menu, MenuAction action, int client, int position) {
@@ -135,8 +212,7 @@ int MuteMenu_VoteHandler(Menu menu, MenuAction action, int client, int position)
 				target = GetClientOfUserId(target);
 				if (target && GetClientTeam(client) == GetClientTeam(target))
 				{
-					g_bIsClientMuteTarget[client][target] = !g_bIsClientMuteTarget[client][target];
-					SetListenOverride(client, target, GetListenOverride(client, target) == Listen_No ? Listen_Default : Listen_No);
+					SetTargetMuted(client, target, !IsTargetMuted(client, target));
 				}
 			}
 		}
@@ -150,8 +226,7 @@ stock void ToggleMuteTeamAll(int client, int team, bool mute) {
 	for(int i = 1;i <= MaxClients; i++) {
 		if (IsValidClient(i) && GetClientTeam(i) == team && client != i)
 		{
-			g_bIsClientMuteTarget[client][i] = mute;
-			SetListenOverride(client, i, mute ? Listen_No : Listen_Default);
+			SetTargetMuted(client, i, mute);
 		}
 	}
 }
@@ -184,8 +259,12 @@ void ResetListenOverride(int client = 0, int target = 0) {
 		if (IsValidClient(i)) {
 			for (int j = (target ? target : 1); j <= (target ? target : MaxClients); j++) {
 				if (IsValidClient(j) && i != j) {
-					SetListenOverride(i, j, Listen_Default);
-					g_bIsClientMuteTarget[i][j] = false;
+                    if (HasVoiceProvider())
+                        g_bIsClientMuteTarget[i][j] = BeBlock_IsVoiceBlocked(i, j);
+                    else {
+                        SetListenOverride(i, j, Listen_Default);
+                        g_bIsClientMuteTarget[i][j] = false;
+                    }
 				}
 			}
 		}
@@ -195,8 +274,13 @@ void ResetListenOverride(int client = 0, int target = 0) {
 void SetListenOverrideEx(int client) {
 	for (int i = 1; i <= MaxClients; i++) {
 		if (IsValidClient(i) && i != client) {
-			SetListenOverride(client, i, g_bIsClientMuteTarget[client][i] ? Listen_No : Listen_Default);
-			SetListenOverride(i, client, g_bIsClientMuteTarget[i][client] ? Listen_No : Listen_Default);
+            if (HasVoiceProvider()) {
+                g_bIsClientMuteTarget[client][i] = BeBlock_IsVoiceBlocked(client, i);
+                g_bIsClientMuteTarget[i][client] = BeBlock_IsVoiceBlocked(i, client);
+            } else {
+                SetListenOverride(client, i, g_bIsClientMuteTarget[client][i] ? Listen_No : Listen_Default);
+                SetListenOverride(i, client, g_bIsClientMuteTarget[i][client] ? Listen_No : Listen_Default);
+            }
 		}
 	}
 }
@@ -212,7 +296,7 @@ stock char[] Translate(int client, const char[] format, any ...)
 stock char[] NameAddTag(int client, int target, char[] name)
 {
 	char buffer[64];
-	Format(buffer, sizeof(buffer), "%s %s", (GetListenOverride(client, target) == Listen_No ? MUTE_TAG : UNMUTE_TAG), name);
+	Format(buffer, sizeof(buffer), "%s %s", (IsTargetMuted(client, target) ? MUTE_TAG : UNMUTE_TAG), name);
 	return buffer;
 }
 

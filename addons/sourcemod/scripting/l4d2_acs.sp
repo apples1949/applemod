@@ -83,7 +83,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION	"v2.3.0"
+#define PLUGIN_VERSION	"v2.3.1"
 
 //Define the wait time after round before changing to the next map in each game mode
 #define WAIT_TIME_BEFORE_SWITCH_COOP			5.0
@@ -146,6 +146,9 @@ ConVar g_hCVar_PreventEmptyServer;		//If enabled, the server automatically switc
 Handle g_hTimer_DisplayVoteAdToAll;
 Handle g_hTimer_ChMapBroadcast;
 Handle g_hTimer_CheckEmpty;
+Handle g_hTimer_ChangeMap;
+Handle g_hTimer_NextMapAd;
+int g_iEmptyCheckCounter;
 
 
 /*========================================================
@@ -761,7 +764,8 @@ public int MapChooserMenuHandler(Menu menu, MenuAction action, int client, int i
 		int missionIndex = StringToInt(buffer_split[0]);
 		int mapIndex = StringToInt(buffer_split[1]);	
 
-		if (StrEqual(menuInfo, "1", false)) {
+		ExplodeString(menuInfo, ",", buffer_split, 3, MMC_ITEM_LEN_NAME);
+		if (StringToInt(buffer_split[0]) == 1) {
 			// Vote mode
 			VoteMenuHandler(client, false, missionIndex, mapIndex);
 		} else {
@@ -903,6 +907,10 @@ public int ChampVoteHandler(Menu menu, MenuAction action, int param1, int param2
 }
 
 void CreateChangeMapTimer(const char[] mapName) {
+	// Repeated finale events must not queue several level changes.
+	if (g_hTimer_ChangeMap != null)
+		return;
+
 	float delay = 5.0;
 	switch (g_iGameMode) {
 		case LMM_GAMEMODE_COOP: {delay=WAIT_TIME_BEFORE_SWITCH_COOP;}
@@ -912,15 +920,20 @@ void CreateChangeMapTimer(const char[] mapName) {
 	}
 	
 	DataPack dp;
-	CreateDataTimer(delay, Timer_ChangeMap, dp);
+	g_hTimer_ChangeMap = CreateDataTimer(delay, Timer_ChangeMap, dp, TIMER_FLAG_NO_MAPCHANGE);
 	dp.WriteString(mapName);
 }
 
 public Action Timer_ChangeMap(Handle timer, DataPack dp) {
+	g_hTimer_ChangeMap = null;
 	char mapName[LEN_MAP_FILENAME];
 	
 	dp.Reset();
 	dp.ReadString(mapName, sizeof(mapName));
+	if (!IsMapValid(mapName)) {
+		LogError("Cancelled change to invalid map: %s", mapName);
+		return Plugin_Stop;
+	}
 	
 	if(g_bMapChanger)
 	{
@@ -958,6 +971,7 @@ public void OnAllPluginsLoaded()
 }
 
 public void OnPluginEnd() {
+	ClearMapTimers();
 	ACS_FreeLists();
 }
 
@@ -1061,23 +1075,24 @@ public Action Command_ChangeMapVote2(int iClient, int args) {
 
 public void OnConfigsExecuted() {
 	MakeChMapBroadcastTimer();
+	delete g_hTimer_NextMapAd;
+	delete g_hTimer_DisplayVoteAdToAll;
 
 	//Display advertising for the next campaign or map
-	if(g_hCVar_NextMapAdMode.IntValue != DISPLAY_MODE_DISABLED)
-		CreateTimer(g_hCVar_NextMapAdInterval.FloatValue, Timer_AdvertiseNextMap, _, TIMER_FLAG_NO_MAPCHANGE);
+	if(g_hCVar_NextMapAdMode.IntValue != DISPLAY_MODE_DISABLED && g_hCVar_NextMapAdInterval.FloatValue > 0.0)
+		g_hTimer_NextMapAd = CreateTimer(g_hCVar_NextMapAdInterval.FloatValue, Timer_AdvertiseNextMap, _, TIMER_FLAG_NO_MAPCHANGE);
 	
 	if(g_hCVar_VotingEnabled.BoolValue)
 	{
-		delete g_hTimer_DisplayVoteAdToAll;
-		g_hTimer_DisplayVoteAdToAll = CreateTimer(g_hCVar_VotingAdDelayTime.FloatValue, Timer_DisplayVoteAdToAll, _, TIMER_REPEAT);
+		g_hTimer_DisplayVoteAdToAll = CreateTimer(g_hCVar_VotingAdDelayTime.FloatValue, Timer_DisplayVoteAdToAll, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 	}
 }
 
 void MakeChMapBroadcastTimer() {
+	delete g_hTimer_ChMapBroadcast;
 	if(g_hCVar_ChMapPolicy.FloatValue != 0 && g_hCVar_ChMapBroadcastInterval.FloatValue > 0)
 	{
-		delete g_hTimer_ChMapBroadcast;
-		g_hTimer_ChMapBroadcast = CreateTimer(g_hCVar_ChMapBroadcastInterval.FloatValue, Timer_WelcomeMessage, INVALID_HANDLE, TIMER_REPEAT);
+		g_hTimer_ChMapBroadcast = CreateTimer(g_hCVar_ChMapBroadcastInterval.FloatValue, Timer_WelcomeMessage, INVALID_HANDLE, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 	}
 }
 
@@ -1276,6 +1291,14 @@ public void OnMapStart() {
 }
 
 public void OnMapEnd() {
+	ClearMapTimers();
+}
+
+void ClearMapTimers() {
+	delete g_hTimer_ChangeMap;
+	delete g_hTimer_NextMapAd;
+	delete g_hTimer_DisplayVoteAdToAll;
+	delete g_hTimer_ChMapBroadcast;
 	KillEmptyCheckTimer();
 }
 
@@ -1349,7 +1372,7 @@ public Action Event_PlayerDisconnect(Handle hEvent, const char[] strName, bool b
 void CheckEmptyServer() {
 	if (IsEmptyServer()) {
 		if (g_hTimer_CheckEmpty == null) {
-			g_hTimer_CheckEmpty = CreateTimer(5.0, Timer_CheckEmptyServer, INVALID_HANDLE, TIMER_REPEAT);
+			g_hTimer_CheckEmpty = CreateTimer(5.0, Timer_CheckEmptyServer, INVALID_HANDLE, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
 		}
 	}
 }
@@ -1382,6 +1405,7 @@ bool IsEmptyServer() {
 }
 
 void KillEmptyCheckTimer() {
+	g_iEmptyCheckCounter = 0;
 	if (g_hTimer_CheckEmpty != null) {
 		KillTimer(g_hTimer_CheckEmpty);
 		g_hTimer_CheckEmpty = null;
@@ -1389,11 +1413,9 @@ void KillEmptyCheckTimer() {
 }
 
 public Action Timer_CheckEmptyServer(Handle timer, any param) {
-	static int counter = 0;
 	if (IsEmptyServer()){
-		counter++;
-		if (counter > 10) {	// Idle for 50s
-			counter = 0;
+		g_iEmptyCheckCounter++;
+		if (g_iEmptyCheckCounter > 10) {	// Idle for 50s
 			KillEmptyCheckTimer();
 			
 			char mapName[LEN_MAP_FILENAME];
@@ -1572,11 +1594,12 @@ void ChangeScavengeMap() {
 ======================================================================================*/
 
 public Action Timer_AdvertiseNextMap(Handle timer, any param) {
+	g_hTimer_NextMapAd = null;
 	//If next map advertising is enabled, display the text and start the timer again
-	if(g_hCVar_NextMapAdMode.IntValue != DISPLAY_MODE_DISABLED)	{
+	if(g_hCVar_NextMapAdMode.IntValue != DISPLAY_MODE_DISABLED && g_hCVar_NextMapAdInterval.FloatValue > 0.0)	{
 		if (OnFinaleOrScavengeMap())
 			DisplayNextMapToAll();
-		CreateTimer(g_hCVar_NextMapAdInterval.FloatValue, Timer_AdvertiseNextMap, _, TIMER_FLAG_NO_MAPCHANGE);
+		g_hTimer_NextMapAd = CreateTimer(g_hCVar_NextMapAdInterval.FloatValue, Timer_AdvertiseNextMap, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
 	
 	return Plugin_Stop;

@@ -6,12 +6,12 @@
 #include <l4d2lib>
 #include <sdktools>
 #include <colors>
+#undef REQUIRE_PLUGIN
+#include <confogl>
+#define REQUIRE_PLUGIN
 
 #define Z_TANK 8
 #define TEAM_INFECTED 3
-
-#define ZOMBIEMANAGER_GAMEDATA "l4d2_zombiemanager"
-#define LEFT4FRAMEWORK_GAMEDATA "left4dhooks.l4d2"
 
 #define HORDE_MIN_SIZE_AUDIAL_FEEDBACK 120
 #define MAX_CHECKPOINTS 4
@@ -22,108 +22,127 @@ ConVar
 	hCvarNoEventHordeDuringTanks,
 	hCvarHordeCheckpointAnnounce;
 
-Address
-	pZombieManager = Address_Null;
-
 int
-	commonLimit,
+	commonLimit = -1,
 	commonTank,
 	commonTotal,
-	lastCheckpoint,
-	m_nPendingMobCount;
+	lastCheckpoint;
 
 bool
 	announcedInChat,
 	announcedEventEnd,
-	checkpointAnnounced[MAX_CHECKPOINTS];
+	finiteHordeActive;
 
 public Plugin myinfo = 
 {
 	name = "L4D2 Horde Equaliser (tranchi)",
 	author = "apples1949",
 	description = "Make certain event hordes finite",
-	version = "3.0.11",
+	version = "3.0.12-applefix",
 	url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 };
 
 public void OnPluginStart()
 {
 	LoadTranslation("l4d2_horde_equaliser.phrases");
-	InitGameData();
 	
 	hCvarNoEventHordeDuringTanks = CreateConVar("l4d2_heq_no_tank_horde", "0", "有坦克时停止刷新尸潮");
 	hCvarHordeCheckpointAnnounce = CreateConVar("l4d2_heq_checkpoint_sound", "1", "在检测点播放尸潮声音(每清理1/4的尸潮),以模拟求生1");
 
 	HookEvent("round_start", RoundStartEvent, EventHookMode_PostNoCopy);
+	RegConsoleCmd("sm_hordestatus", Command_HordeStatus, "Print finite map-event horde state (does not change the event).");
 }
 
-void InitGameData()
+void RefreshMapLimits()
 {
-	Handle hDamedata = LoadGameConfigFile(LEFT4FRAMEWORK_GAMEDATA);
-	if (!hDamedata) {
-		SetFailState("%s gamedata missing or corrupt", LEFT4FRAMEWORK_GAMEDATA);
+	// Confogl's map context is authoritative when present. The always-loaded
+	// L4D2Lib may have selected its fallback file before the match config loaded.
+	if (GetFeatureStatus(FeatureType_Native, "LGO_IsMapDataAvailable") == FeatureStatus_Available
+		&& GetFeatureStatus(FeatureType_Native, "LGO_GetMapValueInt") == FeatureStatus_Available
+		&& LGO_IsMapDataAvailable()) {
+		commonLimit = LGO_GetMapValueInt("horde_limit", -1);
+		commonTank = LGO_GetMapValueInt("horde_tank", -1);
+	} else {
+		commonLimit = L4D2_GetMapValueInt("horde_limit", -1);
+		commonTank = L4D2_GetMapValueInt("horde_tank", -1);
 	}
-
-	pZombieManager = GameConfGetAddress(hDamedata, "ZombieManager");
-	if (!pZombieManager) {
-		SetFailState("Couldn't find the 'ZombieManager' address");
-	}
-	
-	delete hDamedata;
-
-	Handle hDamedata2 = LoadGameConfigFile(ZOMBIEMANAGER_GAMEDATA);
-	if (!hDamedata2) {
-		SetFailState("%s gamedata missing or corrupt", ZOMBIEMANAGER_GAMEDATA);
-	}
-	
-	m_nPendingMobCount = GameConfGetOffset(hDamedata2, "ZombieManager->m_nPendingMobCount");
-	if (m_nPendingMobCount == -1) {
-		SetFailState("Failed to get offset 'ZombieManager->m_nPendingMobCount'.");
-	}
-
-	delete hDamedata2;
 }
 
 public void OnMapStart()
 {
-	commonLimit = L4D2_GetMapValueInt("horde_limit", -1);
-	commonTank = L4D2_GetMapValueInt("horde_tank", -1);
-
+	RefreshMapLimits();
+	ResetHorde();
 	PrecacheSound(HORDE_SOUND);
 }
 
 void RoundStartEvent(Event hEvent, const char[] name, bool dontBroadcast)
 {
+	ResetHorde();
+	RefreshMapLimits();
+}
+
+void ResetHorde()
+{
 	commonTotal = 0;
 	lastCheckpoint = 0;
 	announcedInChat = false;
 	announcedEventEnd = false;
-	for (int i = 0; i < MAX_CHECKPOINTS; i++) {
-		checkpointAnnounced[i] = false;
+	finiteHordeActive = false;
+}
+
+public void OnMapEnd()
+{
+	ResetHorde();
+	commonLimit = -1;
+	commonTank = -1;
+}
+
+public void OnConfigsExecuted()
+{
+	if (!finiteHordeActive) RefreshMapLimits();
+}
+
+Action Command_HordeStatus(int client, int args)
+{
+	if (!finiteHordeActive) RefreshMapLimits();
+	char map[128];
+	GetCurrentMap(map, sizeof(map));
+	ReplyToCommand(client, "[Horde] v3.0.12-applefix | map=%s | limit=%d | spawned=%d | active=%d | finished=%d | countdown=%d | pending=%d | tank_pause=%d",
+		map, commonLimit, commonTotal, finiteHordeActive, announcedEventEnd,
+		GetHordeCountdown(), L4D2Direct_GetPendingMobCount(), IsHordePausedForTank());
+	ReplyToCommand(client, "[Horde] limit=-1: this map has no finite-event override. Boomer/bile hordes and map objective completion use separate rules.");
+	return Plugin_Handled;
+}
+
+bool IsHordePausedForTank()
+{
+	return (hCvarNoEventHordeDuringTanks.BoolValue || commonTank > 0) && IsTankUp();
+}
+
+void FinishFiniteHorde()
+{
+	L4D2Direct_SetPendingMobCount(0);
+	if (!announcedEventEnd) {
+		CPrintToChatAll("<{olive}Horde{default}> {olive}尸潮事件 {default}结束，开始冲锋!");
+		announcedEventEnd = true;
 	}
 }
 
 public void OnEntityCreated(int entity, const char[] classname)
 {
-	// TO-DO: Find a value that tells wanderers from active event commons?
-	if (strcmp(classname, "infected") == 0 && IsInfiniteHordeActive()) {
-		// Don't count in boomer hordes, alarm cars and wanderers during a Tank fight
-		if (hCvarNoEventHordeDuringTanks.BoolValue && IsTankUp()) {
+	// Arm only from a map-event SpawnMob request. Once queued, its commons can
+	// spawn after the Director has reset the countdown above ten seconds.
+	if (strcmp(classname, "infected") == 0 && finiteHordeActive && !announcedEventEnd) {
+		if (IsHordePausedForTank()) {
 			return;
 		}
-		
-		// Our job here is done
-		if (commonTotal >= commonLimit) {
-			if (!announcedEventEnd){
-				CPrintToChatAll("<{olive}Horde{default}> {olive}尸潮事件 {default}结束，开始冲锋!");
-				announcedEventEnd = true;
-			}
-			return;
-		}
-		
 		commonTotal++;
-		if (hCvarHordeCheckpointAnnounce.BoolValue && 
-			(commonTotal >= ((lastCheckpoint + 1) * RoundFloat(float(commonLimit / MAX_CHECKPOINTS))))
+		if (commonTotal >= commonLimit) {
+			FinishFiniteHorde();
+			return;
+		}
+		if (hCvarHordeCheckpointAnnounce.BoolValue && lastCheckpoint < MAX_CHECKPOINTS &&
+			(commonTotal >= ((lastCheckpoint + 1) * RoundToCeil(float(commonLimit) / float(MAX_CHECKPOINTS))))
 		) {
 			if (commonLimit >= HORDE_MIN_SIZE_AUDIAL_FEEDBACK) {
 				EmitSoundToAll(HORDE_SOUND);
@@ -134,7 +153,6 @@ public void OnEntityCreated(int entity, const char[] classname)
 				CPrintToChatAll("<{olive}Horde{default}> 还剩 {olive}%i{default} 个..", remaining);
 			}
 			
-			checkpointAnnounced[lastCheckpoint] = true;
 			lastCheckpoint++;
 		}
 	}
@@ -153,8 +171,9 @@ public Action L4D_OnSpawnMob(int &amount)
 	////////////////////////////////////
 	
 	// "Pause" the infinite horde during the Tank fight
-	if ((hCvarNoEventHordeDuringTanks.BoolValue || commonTank > 0) 
-		&& IsTankUp() && IsInfiniteHordeActive()
+	if (!finiteHordeActive) RefreshMapLimits();
+
+	if (IsHordePausedForTank() && IsInfiniteHordeActive()
 	){
 		SetPendingMobCount(0);
 		amount = 0;
@@ -168,6 +187,10 @@ public Action L4D_OnSpawnMob(int &amount)
 
 	// If it's a "finite" infinite horde...
 	if (IsInfiniteHordeActive()) {
+		// Earlier hooks can block a request (for example during a Tank).
+		// Such a request does not begin a new finite event.
+		if (amount <= 0 && !finiteHordeActive) return Plugin_Continue;
+		finiteHordeActive = true;
 		if (!announcedInChat) {
 			CPrintToChatAll("<{olive}Horde{default}> {blue}有限尸潮事件{default} 已经开始, 将刷出 {olive}%i{default} 个僵尸! 冲或者守，决定在于你们!", commonLimit);
 			announcedInChat = true;
@@ -175,33 +198,33 @@ public Action L4D_OnSpawnMob(int &amount)
 		
 		// ...and it's overlimit...
 		if (commonTotal >= commonLimit) {
-			SetPendingMobCount(0);
+			FinishFiniteHorde();
 			amount = 0;
 			return Plugin_Handled;
 		}
-		// commonTotal += amount;
 	}
 	
 	// ...or not.
 	return Plugin_Continue;
 }
 
+public void L4D_OnSpawnMob_PostHandled(int amount)
+{
+	// Run after all pre-hooks: another monitor must not revive a completed
+	// event's pending queue, regardless of plugin load order.
+	if (finiteHordeActive && announcedEventEnd && IsInfiniteHordeActive())
+		L4D2Direct_SetPendingMobCount(0);
+}
+
 bool IsInfiniteHordeActive()
 {
 	int countdown = GetHordeCountdown();
-	return (/*GetPendingMobCount() > 0 &&*/ countdown > -1 && countdown <= 10);
+	return (countdown > -1 && countdown <= 10);
 }
-
-/*
-int GetPendingMobCount()
-{
-	return LoadFromAddress(pZombieManager + view_as<Address>(m_nPendingMobCount), NumberType_Int32);
-}
-*/
 
 void SetPendingMobCount(int count)
 {
-	StoreToAddress(pZombieManager + view_as<Address>(m_nPendingMobCount), count, NumberType_Int32);
+	L4D2Direct_SetPendingMobCount(count);
 }
 
 int GetHordeCountdown()

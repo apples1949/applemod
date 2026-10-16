@@ -1,0 +1,64 @@
+AppleMod 12v12 独立配置 / R4 / 2026-10-16
+
+本轮只改配置和地图配置资源，没有修改或重新编译 SMX。此前 R3 的 SuperVersus 2.5.3-core、R2 的多人入队和尸潮修复、医疗和 Lerp 设置继续保留。
+
+12v12 不再 exec cfgogl/applemod/ 的任何配置，也不再指向 cfg/stripper/applemod。
+cfg/cfgogl/applemod12v12/ 现在共有 13 个独立文件：
+  generalfixes.cfg          通用修复和前置依赖的本模式副本
+  confogl_plugins.cfg       本模式插件入口和 12v12 专属插件
+  shared_plugins.cfg        由原配置复制并修改的基础插件清单
+  sharedplugins.cfg         通用附加插件的本模式副本
+  confogl.cfg               12v12 参数主入口
+  shared_cvars.cfg          独立的基础参数
+  applemod12v12.cfg         12v12 插件、武器和 Boomer 参数
+  shared_settings.cfg       独立的插件参数与唯一追踪提交
+  confogl_rates.cfg         私有速率定制入口，默认沿用 server.cfg
+  confogl_personalize.cfg   私有额外参数定制入口
+  confogl_off.cfg           本模式退出、参数还原和插件卸载
+  mapinfo.txt               保留本模式原有地图数据
+  entityremove.txt          实体规则的私有副本
+
+插件加载过程：
+  server.cfg 的 sm_fm applemod12v12 / 模式投票选择 applemod12v12
+    -> Confogl 设置当前模式目录
+    -> 优先读取本目录 generalfixes.cfg
+    -> 本目录 confogl_plugins.cfg
+         -> 本目录 shared_plugins.cfg
+         -> MVP、统计和 12v12 专属插件
+         -> Confogl、医疗即时保护参数、Match Vote
+    -> 本目录 sharedplugins.cfg
+    -> 框架重载后读取本目录 confogl.cfg
+
+参数执行过程：
+  confogl.cfg 的 12v12 主参数
+    -> shared_cvars.cfg
+         -> confogl_rates.cfg
+    -> applemod12v12.cfg
+         -> 12v12 特有参数
+         -> 本模式功能设置、直接登记 12v12 武器限制和 12 项 Boomer 表
+         -> shared_settings.cfg
+              -> confogl_personalize.cfg
+              -> confogl_setcvars（整个链只有一次）
+              -> confogl_resetclientcvars
+
+退出过程：
+  当前模式 confogl_off.cfg
+    -> 关闭准备控制、重置静态地图和面板状态
+    -> 还原客户端及服务器跟踪参数
+    -> predictable_unloader 卸载模式插件
+    -> 解锁插件加载并恢复通用服务器标签
+
+独立资源：
+  自动载入名称为 applemod12v12。
+  Stripper 指向 cfg/stripper/applemod12v12/，已复制 175 个原规则文件，内容与复制来源一致。
+  MapInfo 和实体规则优先读取 cfg/cfgogl/applemod12v12/ 内的私有文件。
+  不再存在缺失的 confogl_rates.cfg / confogl_personalize.cfg 引用。
+
+所有 366 个跟踪参数与独立前的有效值做了对照；只有自动载入名称、Stripper 路径和模式标题三个值按独立模式修改。283 个最终加载插件的集合不变；只加载一次 12v12 Boomer，取消先加载再卸载 4v4 Boomer 的步骤。原 AppleMod 4v4 配置逐文件哈希核对未改变。没有重复 addcvar，也没有在追踪提交后再追加参数。
+
+插件 SMX 继续按现有安装位置加载。optional/applemod/ 下的名称是插件二进制目录，不是跨模式读取 4v4 配置；未复制同名插件造成重复库或补丁注册。
+
+安装：已安装 R3 时，停服，将 AppleMod-hotfix-20261016-r4.zip 的 cfg 按目录覆盖到 left4dead2，再启动并重载地图或重新加载 applemod12v12 模式。补丁包含整个独立模式目录和私有 Stripper 目录。无需删除原 AppleMod 文件夹。
+尚未安装此前修复时，使用 AppleMod-full-fix-20261016-r4.zip；完整包包含原工作区的服务器及管理配置，请保留自己服务器的个性化设置。
+
+本轮已完成加载链展开、循环/缺失检查、有效值对照、插件存在性和配置/资源哈希检查；没有连接游戏引擎实测。实服可用 sm_multistatus、sm_startitemsstatus、sm_lerpstatus、sm_hordestatus 核对状态。

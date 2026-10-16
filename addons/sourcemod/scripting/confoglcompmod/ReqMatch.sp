@@ -16,11 +16,16 @@ static bool
 	RM_bIsAMatchActive	  = false,
 	RM_bIsPluginsLoaded	  = false,
 	RM_bIsMapRestarted	  = false,
+	RM_bRestorePending    = false,
 	RM_bIsChmatchRequest = false;
 
 static Handle
 	RM_hFwdMatchLoad   = null,
 	RM_hFwdMatchUnload = null;
+
+static char
+	RM_sPendingConfig[128],
+	RM_sPendingMap[PLATFORM_MAX_PATH];
 
 static ConVar
 	RM_hSbAllBotGame	   = null,
@@ -30,6 +35,7 @@ static ConVar
 	RM_hChangeMap		   = null,
 	RM_hAutoLoad		   = null,
 	RM_hAutoCfg			   = null,
+	RM_hPersistentActive   = null,
 	RM_hConfigFile_On	   = null,
 	RM_hConfigFile_Plugins = null,
 	RM_hConfigFile_Off	   = null;
@@ -59,8 +65,11 @@ void RM_OnModuleStart()
 	RegAdminCmd("sm_resetmatch", RM_Cmd_ResetMatch, ADMFLAG_CONFIG, "Forces match mode to turn off REGRADLESS for always on or forced match");
 	RegAdminCmd("sm_forcechangematch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
 	RegAdminCmd("sm_fchmatch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
+	RegAdminCmd("sm_confoglstatus", RM_Cmd_Status, ADMFLAG_CONFIG, "Show the loaded config, match state and CVar commit status");
 
 	RM_hSbAllBotGame = FindConVar("sb_all_bot_game");
+	// Engine ConVars survive a plugin reload; never include this in tracked match settings.
+	RM_hPersistentActive = CreateConVarEx("match_active", "0", "Internal match recovery state. Do not change.", FCVAR_DONTRECORD | FCVAR_UNLOGGED);
 
 	RM_hReloaded	 = FindConVarEx("match_reloaded");
 	if (RM_hReloaded == null)
@@ -74,6 +83,31 @@ void RM_OnModuleStart()
 		RM_hChangeMap = CreateConVarEx("match_map", "", "DONT TOUCH THIS CVAR! This is to store the map that we'll be changing to", FCVAR_DONTRECORD | FCVAR_UNLOGGED);
 	}
 
+}
+
+void RM_OnAllModulesStarted()
+{
+	if (!RM_hReloaded.BoolValue && !RM_hPersistentActive.BoolValue)
+	{
+		return;
+	}
+
+	RM_bIsPluginsLoaded = true;
+	RM_bIsMapRestarted = !RM_hReloaded.BoolValue;
+	RM_bRestorePending = true;
+	// A late load also receives OnMapStart after OnPluginStart. Restore once,
+	// after that callback, so it cannot queue the entry CFG a second time.
+	RequestFrame(RM_RestoreMatchAfterLoad);
+}
+
+void RM_RestoreMatchAfterLoad()
+{
+	if (!RM_bRestorePending)
+	{
+		return;
+	}
+	RM_bRestorePending = false;
+
 	if (RM_hReloaded.BoolValue)
 	{
 		if (RM_bDebugEnabled || IsDebugEnabled())
@@ -81,8 +115,15 @@ void RM_OnModuleStart()
 			LogMessage("[%s] Plugin was reloaded from match mode, executing match load", RM_MODULE_NAME);
 		}
 
-		RM_bIsPluginsLoaded = true;
 		RM_hReloaded.SetInt(0);
+		RM_Match_Load();
+	}
+	else if (RM_hPersistentActive.BoolValue)
+	{
+		// A normal framework reload must rebuild tracking, without restarting the map.
+		char sConfig[PLATFORM_MAX_PATH];
+		Configs_GetConfigName(sConfig, sizeof(sConfig));
+		LogMessage("[%s] Restoring active match after framework reload (mode='%s')", RM_MODULE_NAME, sConfig);
 		RM_Match_Load();
 	}
 }
@@ -104,7 +145,7 @@ void RM_OnMapStart()
 
 void RM_OnClientPutInServer()
 {
-	if (!RM_hAutoLoad.BoolValue || RM_bIsAMatchActive)
+	if (!RM_hAutoLoad.BoolValue || RM_bIsAMatchActive || RM_bRestorePending || RM_bIsChmatchRequest)
 	{
 		return;
 	}
@@ -112,8 +153,10 @@ void RM_OnClientPutInServer()
 	char buffer[128];
 	RM_hAutoCfg.GetString(buffer, sizeof(buffer));
 
-	RM_UpdateCfgOn(buffer);
-	RM_Match_Load();
+	if (RM_UpdateCfgOn(buffer))
+	{
+		RM_Match_Load();
+	}
 }
 
 static void RM_Match_Load()
@@ -123,13 +166,28 @@ static void RM_Match_Load()
 		LogMessage("[%s] Match Load", RM_MODULE_NAME);
 	}
 
+	char sBuffer[128];
+	RM_hConfigFile_On.GetString(sBuffer, sizeof(sBuffer));
+	if (!Configs_CfgExists(sBuffer))
+	{
+		char sConfig[PLATFORM_MAX_PATH];
+		Configs_GetConfigName(sConfig, sizeof(sConfig));
+		LogError("[%s] Match mode '%s': entry config '%s' is missing. No new settings were committed; loaded=%d.", RM_MODULE_NAME, sConfig, sBuffer, RM_bIsMatchModeLoaded);
+		if (!RM_bIsMatchModeLoaded)
+		{
+			RM_hPersistentActive.SetInt(0);
+			RM_hReloaded.SetInt(0);
+			RM_bIsAMatchActive = false;
+		}
+		return;
+	}
+
 	if (!RM_bIsAMatchActive)
 	{
 		RM_bIsAMatchActive = true;
 	}
 
 	RM_hSbAllBotGame.SetInt(1);
-	char sBuffer[128];
 
 	if (!RM_bIsPluginsLoaded)
 	{
@@ -161,7 +219,17 @@ static void RM_Match_Load()
 	}
 
 	RM_hConfigFile_On.GetString(sBuffer, sizeof(sBuffer));
-	ExecuteCfg(sBuffer);
+	if (!ExecuteCfg(sBuffer))
+	{
+		if (!RM_bIsMatchModeLoaded)
+		{
+			RM_hPersistentActive.SetInt(0);
+			RM_bIsAMatchActive = false;
+		}
+		return;
+	}
+	RM_hPersistentActive.SetInt(1);
+	CreateTimer(0.5, RM_CheckConfigCommit);
 
 	if (RM_bDebugEnabled || IsDebugEnabled())
 	{
@@ -246,6 +314,9 @@ static void RM_Match_Unload(bool bForced = false)
 	IsPluginEnabled(true, false);
 	RM_bIsMapRestarted	= false;
 	RM_bIsPluginsLoaded = false;
+	RM_bRestorePending = false;
+	RM_hPersistentActive.SetInt(0);
+	RM_hReloaded.SetInt(0);
 
 	Call_StartForward(RM_hFwdMatchUnload);
 	Call_Finish();
@@ -258,6 +329,8 @@ static void RM_Match_Unload(bool bForced = false)
 	if (!RM_bIsChmatchRequest)
 	{
 		ExecuteCfg(sBuffer);
+		// The off-config path has already been queued; forget the selected mode on reset.
+		SetCustomCfg("");
 	}
 	else
 	{
@@ -272,6 +345,34 @@ static void RM_Match_Unload(bool bForced = false)
 	{
 		LogMessage("[%s] Match mode unloaded!", RM_MODULE_NAME);
 	}
+}
+
+static Action RM_CheckConfigCommit(Handle timer)
+{
+#if MODULE_CVARSETTINGS
+	if (RM_bIsMatchModeLoaded && !CVS_IsTrackingStarted())
+	{
+		char sConfig[PLATFORM_MAX_PATH];
+		Configs_GetConfigName(sConfig, sizeof(sConfig));
+		LogError("[%s] Mode '%s' is active but its CVar settings were not committed. Check the exec chain and confogl_setcvars; run sm_confoglstatus.", RM_MODULE_NAME, sConfig);
+	}
+#endif
+	return Plugin_Stop;
+}
+
+static Action RM_Cmd_Status(int client, int args)
+{
+	char sFile[PLATFORM_MAX_PATH], sConfig[PLATFORM_MAX_PATH], sEntry[128], sAuto[128];
+	GetPluginFilename(null, sFile, sizeof(sFile));
+	Configs_GetConfigName(sConfig, sizeof(sConfig));
+	RM_hConfigFile_On.GetString(sEntry, sizeof(sEntry));
+	RM_hAutoCfg.GetString(sAuto, sizeof(sAuto));
+	ReplyToCommand(client, "[Confogl] v%s | file=%s | cfg='%s' | entry=%s | autoconfig='%s'", PLUGIN_VERSION, sFile, sConfig, sEntry, sAuto);
+	ReplyToCommand(client, "[Confogl] enabled=%d | active=%d | loaded=%d | plugins=%d | reloaded=%d | recovery=%d | restoring=%d | restarted=%d", IsPluginEnabled(), RM_bIsAMatchActive, RM_bIsMatchModeLoaded, RM_bIsPluginsLoaded, RM_hReloaded.IntValue, RM_hPersistentActive.IntValue, RM_bRestorePending, RM_bIsMapRestarted);
+#if MODULE_CVARSETTINGS
+	CVS_ReplyStatus(client);
+#endif
+	return Plugin_Handled;
 }
 
 static Action RM_Match_MapRestart_Timer(Handle hTimer, DataPack hDp)
@@ -320,7 +421,7 @@ static bool RM_UpdateCfgOn(const char[] cfgfile, bool bIsPrint = true)
 
 static Action RM_Cmd_ForceMatch(int client, int args)
 {
-	if (RM_bIsMatchModeLoaded)
+	if (RM_bIsMatchModeLoaded || RM_bRestorePending || RM_bIsChmatchRequest)
 	{
 		return Plugin_Handled;
 	}
@@ -351,7 +452,7 @@ static Action RM_Cmd_ForceMatch(int client, int args)
 
 	// RM_UpdateCfgOn(sBuffer); //old code
 
-	if (!RM_UpdateCfgOn(sBuffer, false))
+	if (!Configs_CustomCfgExists(sBuffer))
 	{
 		if (client == 0)
 		{
@@ -384,8 +485,12 @@ static Action RM_Cmd_ForceMatch(int client, int args)
 		}
 
 		GetMapDisplayName(sDisplayName, sDisplayName, sizeof(sDisplayName));
-		RM_hChangeMap.SetString(sDisplayName);
 	}
+	if (!RM_UpdateCfgOn(sBuffer, false))
+	{
+		return Plugin_Handled;
+	}
+	RM_hChangeMap.SetString(sDisplayName);
 
 	RM_Match_Load();
 
@@ -394,7 +499,7 @@ static Action RM_Cmd_ForceMatch(int client, int args)
 
 static Action RM_Cmd_ResetMatch(int client, int args)
 {
-	if (!RM_bIsMatchModeLoaded)
+	if (!RM_bIsMatchModeLoaded && !RM_bRestorePending && !RM_bIsChmatchRequest)
 	{
 		return Plugin_Handled;
 	}
@@ -404,6 +509,9 @@ static Action RM_Cmd_ResetMatch(int client, int args)
 		LogMessage("[%s] Match mode forced to unload!", RM_MODULE_NAME);
 	}
 
+	RM_bIsChmatchRequest = false;
+	RM_sPendingConfig[0] = 0;
+	RM_sPendingMap[0] = 0;
 	RM_Match_Unload(true);
 
 	return Plugin_Handled;
@@ -426,7 +534,7 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 	char sBuffer[128];
 	GetCmdArg(1, sBuffer, sizeof(sBuffer));
 
-	if (!RM_UpdateCfgOn(sBuffer, false))
+	if (!Configs_CustomCfgExists(sBuffer))
 	{
 		if (client == 0)
 		{
@@ -458,11 +566,10 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 		}
 
 		GetMapDisplayName(sDisplayName, sDisplayName, sizeof(sDisplayName));
-		RM_hChangeMap.SetString(sDisplayName);
 	}
 
 	// Unload
-	if (!RM_bIsMatchModeLoaded)
+	if (!RM_bIsMatchModeLoaded && !RM_bRestorePending)
 	{
 		return Plugin_Handled;
 	}
@@ -473,6 +580,10 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 	}
 
 	RM_bIsChmatchRequest = true;
+	// Keep the old resolver until its off-config has been queued. The new
+	// target must not redirect cleanup or survive a failed map validation.
+	strcopy(RM_sPendingConfig, sizeof(RM_sPendingConfig), sBuffer);
+	strcopy(RM_sPendingMap, sizeof(RM_sPendingMap), sDisplayName);
 
 	RM_Match_Unload(true);
 
@@ -485,10 +596,24 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 static Action Timer_DelayToLoadMatchMode(Handle timer)
 {
 	// Load
-	if (RM_bIsMatchModeLoaded)
+	if (RM_bIsMatchModeLoaded || !strlen(RM_sPendingConfig))
 	{
 		return Plugin_Handled;
 	}
+	if (!RM_UpdateCfgOn(RM_sPendingConfig, false))
+	{
+		LogError("[%s] Pending match config '%s' is no longer available; match remains inactive", RM_MODULE_NAME, RM_sPendingConfig);
+		RM_sPendingConfig[0] = 0;
+		RM_sPendingMap[0] = 0;
+		RM_bIsChmatchRequest = false;
+		return Plugin_Handled;
+	}
+	RM_hChangeMap.SetString(RM_sPendingMap);
+	RM_sPendingConfig[0] = 0;
+	RM_sPendingMap[0] = 0;
+	// The old off-config finished. A missing new entry must leave an inactive,
+	// retryable match rather than retain the transition guard indefinitely.
+	RM_bIsChmatchRequest = false;
 
 	if (RM_bDebugEnabled || IsDebugEnabled())
 	{

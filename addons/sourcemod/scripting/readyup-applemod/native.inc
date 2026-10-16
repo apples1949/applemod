@@ -51,7 +51,47 @@ any Native_GetFooterStringAtIndex(Handle plugin, int numParams)
 
 any Native_IsInReady(Handle plugin, int numParams)
 {
-	return inReadyUp;
+	return inReadyUp || externalReadyActive;
+}
+
+void ResetExternalReadyState()
+{
+	externalReadyNotified = false;
+	externalReadyActive = false;
+	externalLiveNotified = false;
+}
+
+any Native_ExternalBegin(Handle plugin, int numParams)
+{
+	if (l4d_ready_enabled == null || l4d_ready_enabled.IntValue != 0 || inReadyUp || externalLiveNotified)
+		return false;
+
+	externalReadyActive = true;
+	if (!externalReadyNotified)
+	{
+		externalReadyNotified = true;
+		UTIL_WrapperForward(g_hPreInitiateForward);
+		UTIL_WrapperForward(g_hInitiateForward);
+	}
+	return true;
+}
+
+any Native_ExternalLive(Handle plugin, int numParams)
+{
+	if (l4d_ready_enabled == null || l4d_ready_enabled.IntValue != 0 || !externalReadyActive || externalLiveNotified)
+		return false;
+
+	externalReadyActive = false;
+	externalLiveNotified = true;
+	UTIL_WrapperForward(g_hPreLiveForward);
+	UTIL_WrapperForward(g_hLiveForward);
+	return true;
+}
+
+any Native_ExternalCancel(Handle plugin, int numParams)
+{
+	externalReadyActive = false;
+	return 0;
 }
 
 any Native_IsReady(Handle plugin, int numParams)

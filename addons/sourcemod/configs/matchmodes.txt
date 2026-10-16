@@ -15,7 +15,7 @@
 	{
 		"zonemodedi"
 		{
-			"name" "ZoneMod 2.9.2 混野匹配"
+			"name" "ZoneMod 2.9.2b 混野匹配"
 		}
 	}
 }

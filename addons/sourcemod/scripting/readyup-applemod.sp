@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.0"
+#define PLUGIN_VERSION "10.3.0-audit2"
 
 public Plugin myinfo =
 {
@@ -191,9 +191,14 @@ public void OnAllPluginsLoaded()
 	FindCasterSystem();
 }
 
+public void OnLibraryAdded(const char[] name)
+{
+	if (StrEqual(name, "caster_system")) casterSystemAvailable = true;
+}
+
 public void OnLibraryRemoved(const char[] name)
 {
-	FindCasterSystem();
+	if (StrEqual(name, "caster_system")) casterSystemAvailable = false;
 }
 
 void FindCasterSystem()
@@ -229,6 +234,7 @@ void RoundStart_Event(Event event, const char[] name, bool dontBroadcast)
 void ExternalRoundEnd_Event(Event event, const char[] name, bool dontBroadcast)
 {
 	ResetExternalReadyState();
+	if (inReadyUp) InitiateLive(false);
 }
 
 void GameInstructorDraw_Event(Event event, const char[] name, bool dontBroadcast)

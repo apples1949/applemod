@@ -792,6 +792,7 @@ public Action Timed_PostMapSet(Handle timer)
 // (should be the first and only one)
 stock Handle GetPoolThatContainsMap(char[] map, int index, char[] tag) 
 {
+	#pragma unused index
 	Handle hArrayMapPool;
 
 	for (int i = 0; i < GetArraySize(g_hArrayTags); i++) 

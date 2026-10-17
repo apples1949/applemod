@@ -8,7 +8,7 @@
 #define PLUGIN_NAME				"Give Item Menu"
 #define PLUGIN_AUTHOR			"sorallll"
 #define PLUGIN_DESCRIPTION		"多功能插件"
-#define PLUGIN_VERSION			"1.2.3b"
+#define PLUGIN_VERSION			"1.2.3b-audit2"
 #define PLUGIN_URL				""
 
 #define GAMEDATA				"rygive"
@@ -499,7 +499,7 @@ int Gun_MenuHandler(Menu menu, MenuAction action, int client, int param2) {
 			menu.GetItem(param2, item, sizeof item);
 			g_iFunction[client] = 1;
 			g_iSelection[client] = menu.Selection;
-			FormatEx(g_sNamedItem[client], sizeof g_sNamedItem, "give %s", item);
+			FormatEx(g_sNamedItem[client], sizeof g_sNamedItem[], "give %s", item);
 			ShowAliveSur(client);
 		}
 
@@ -540,7 +540,7 @@ int Melee_MenuHandler(Menu menu, MenuAction action, int client, int param2) {
 			menu.GetItem(param2, item, sizeof item);
 			g_iFunction[client] = 2;
 			g_iSelection[client] = menu.Selection;
-			FormatEx(g_sNamedItem[client], sizeof g_sNamedItem, "give %s", item);
+			FormatEx(g_sNamedItem[client], sizeof g_sNamedItem[], "give %s", item);
 			ShowAliveSur(client);
 		}
 
@@ -592,9 +592,9 @@ int Item_MenuHandler(Menu menu, MenuAction action, int client, int param2) {
 			g_iSelection[client] = menu.Selection;
 
 			if (param2 < 17)
-				FormatEx(g_sNamedItem[client], sizeof g_sNamedItem, "give %s", item);
+				FormatEx(g_sNamedItem[client], sizeof g_sNamedItem[], "give %s", item);
 			else
-				FormatEx(g_sNamedItem[client], sizeof g_sNamedItem, "upgrade_add %s", item);
+				FormatEx(g_sNamedItem[client], sizeof g_sNamedItem[], "upgrade_add %s", item);
 				
 			ShowAliveSur(client);
 		}

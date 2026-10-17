@@ -261,10 +261,10 @@ static void RM_Match_Unload(bool bForced = false)
 	}
 	else
 	{
-		// if we are using chmatch, don't let predictable_unloader unload confogl itself.
+		// if we are using chmatch, don't let predictable_unloader_edi unload confogl itself.
 		// all plugins will be unload and load when the new config excuted.
 		ServerCommand("sm plugins load_unlock");
-		ServerCommand("sm plugins unload optional/predictable_unloader.smx");
+		ServerCommand("sm plugins unload optional/another/predictable_unloader_edi.smx");
 		ExecuteCfg(sBuffer);
 	}
 

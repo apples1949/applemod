@@ -697,4 +697,12 @@
 		"chi"			"伺服器位置已满，没有空位给AI特感生成!"
 		"zho"			"伺服器位置已滿，沒有空位給AI特感生成!"
 	}
+
+	"Could not find a valid spawn position for zombie in 5 tries"
+	{
+		"en"		"Couldn't find a valid spawn position for zombie in 5 tries."
+		"chi"		"尝试5次后无法为此感染者找到有效的生成位置"
+		"zho"		"嘗試5次後無法爲此感染者找到有效的生成位置"
+		"es"		"No se pudo encontrar una posición válida para el zombi en 5 intentos."
+	}
 }

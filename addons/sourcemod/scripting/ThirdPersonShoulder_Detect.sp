@@ -16,8 +16,8 @@ public Plugin myinfo =
 };
 
 static bool bVersus = false;
-static bool bThirdPerson[MAXPLAYERS+1] = false;
-static bool bThirdPersonFix[MAXPLAYERS+1] = false;
+static bool bThirdPerson[MAXPLAYERS+1] = { false, ... };
+static bool bThirdPersonFix[MAXPLAYERS+1] = { false, ... };
 
 static Handle hCvar_GameMode = INVALID_HANDLE;
 Handle g_hOnThirdPersonChanged = INVALID_HANDLE;
@@ -91,6 +91,7 @@ public Action tThirdPersonCheck(Handle hTimer)
 		
 		QueryClientConVar(i, "c_thirdpersonshoulder", QueryClientConVarCallback);
 	}
+	return Plugin_Continue;
 }
 
 public void QueryClientConVarCallback(QueryCookie sCookie, int iClient, ConVarQueryResult sResult, const char[] sCvarName, const char[] sCvarValue)

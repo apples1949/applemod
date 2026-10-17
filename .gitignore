@@ -24,6 +24,5 @@ $RECYCLE.BIN/
 
 # Visual Studio Code files
 /.vscode
-addons/sourcemod/gamedata/l4d2_sv_tags.txt
-addons/sourcemod/plugins/l4d2_sv_tags.smx
-applemod12v12-交接状态.md
+l4d2_sv_tags
+私人文件/

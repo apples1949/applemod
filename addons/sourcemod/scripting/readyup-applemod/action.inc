@@ -10,12 +10,26 @@ static int
 
 static Handle
 	s_readyCountdownTimer,
-	s_autoStartTimer;
+	s_autoStartTimer,
+	s_autoStartHelperTimer,
+	s_autoStartInitiateTimer;
+
+// Own every phase timer so a same-map round restart cannot reuse old callbacks.
+void StopReadyTimers()
+{
+	delete s_readyCountdownTimer;
+	delete s_autoStartTimer;
+	delete s_autoStartHelperTimer;
+	delete s_autoStartInitiateTimer;
+	StopReadyPanelTimers();
+}
 
 void InitiateReadyUp(bool real = true)
 {
 	if (real)
 	{
+		if (inReadyUp) InitiateLive(false);
+		else StopReadyTimers();
 		readyUpMode = l4d_ready_enabled.IntValue;
 		if (!readyUpMode) return;
 
@@ -59,7 +73,7 @@ void InitiateReadyUp(bool real = true)
 		if (readyUpMode == ReadyMode_AutoStart)
 		{
 			s_expireTime = l4d_ready_autostart_wait.IntValue;
-			CreateTimer(1.0, Timer_AutoStartHelper, _, TIMER_FLAG_NO_MAPCHANGE | TIMER_REPEAT);
+			s_autoStartHelperTimer = CreateTimer(1.0, Timer_AutoStartHelper, _, TIMER_FLAG_NO_MAPCHANGE | TIMER_REPEAT);
 		}
 		
 		UTIL_WrapperForward(g_hInitiateForward);
@@ -68,6 +82,7 @@ void InitiateReadyUp(bool real = true)
 
 void InitiateLive(bool real = true)
 {
+	StopReadyTimers();
 	if (real)
 	{
 		UTIL_WrapperForward(g_hPreLiveForward);
@@ -115,9 +130,11 @@ void InitiateLiveCountdown()
 
 static Action ReadyCountdownDelay_Timer(Handle timer)
 {
+	if (!inReadyUp || !inLiveCountdown || timer != s_readyCountdownTimer) return Plugin_Stop;
 	if (s_readyDelay == 0)
 	{
 		PrintHintTextToAll("比赛开始！");
+		s_readyCountdownTimer = null; // this callback closes its own timer with Plugin_Stop
 		InitiateLive();
 		PlayLiveSound();
 		s_readyCountdownTimer = null;
@@ -132,6 +149,11 @@ static Action ReadyCountdownDelay_Timer(Handle timer)
 
 static Action Timer_AutoStartHelper(Handle timer)
 {
+	if (!inReadyUp || readyUpMode != ReadyMode_AutoStart)
+	{
+		s_autoStartHelperTimer = null;
+		return Plugin_Stop;
+	}
 	if (GetSeriousClientCount(true) <= GetMaxAllowedPlayers() * l4d_ready_autostart_min.FloatValue)
 	{
 		// not enough players in game
@@ -150,13 +172,15 @@ static Action Timer_AutoStartHelper(Handle timer)
 		}
 	}
 	
-	CreateTimer(8.0, Timer_InitiateAutoStart, _, TIMER_FLAG_NO_MAPCHANGE);
+	s_autoStartInitiateTimer = CreateTimer(8.0, Timer_InitiateAutoStart, _, TIMER_FLAG_NO_MAPCHANGE);
+	s_autoStartHelperTimer = null;
 	return Plugin_Stop;
 }
 
 static Action Timer_InitiateAutoStart(Handle timer)
 {
-	InitiateAutoStart();
+	s_autoStartInitiateTimer = null;
+	if (inReadyUp && readyUpMode == ReadyMode_AutoStart) InitiateAutoStart();
 	return Plugin_Stop;
 }
 
@@ -164,7 +188,7 @@ void InitiateAutoStart(bool real = true)
 {
 	if (!real)
 	{
-		s_autoStartTimer = null;
+		delete s_autoStartTimer;
 		return;
 	}
 	
@@ -178,6 +202,11 @@ void InitiateAutoStart(bool real = true)
 
 static Action AutoStartDelay_Timer(Handle timer)
 {
+	if (!inReadyUp || readyUpMode != ReadyMode_AutoStart)
+	{
+		s_autoStartTimer = null;
+		return Plugin_Stop;
+	}
 	if (s_autoStartDelay == 0)
 	{
 		s_autoStartTimer = null;

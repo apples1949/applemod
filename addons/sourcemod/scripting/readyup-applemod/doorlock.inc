@@ -435,93 +435,79 @@ Action DL_tmrLoading(Handle timer)
 
 void DL_LoadingPanel()
 {
-	int i = 1;
-	int loading;
-	int connected;
-	int loadFailed;
-	for (; i <= MaxClients; i++)
+	int clients[MAXPLAYERS + 1], groups[MAXPLAYERS + 1], count;
+	int totals[3];
+	char name[128], text[192], headings[3][64];
+	int fullBytes;
+	for (int group = 0; group < 3; group++)
 	{
-		if (IsClientConnected(i) && !IsFakeClient(i))
+		if (group == 2 && DL_g_iDisplayPanel < 2) continue;
+		for (int client = 1; client <= MaxClients; client++)
 		{
-			if (DL_g_bIsLoading[i])
-				loading++;
-			else if (DL_g_iTimeout[i] >= DL_g_iClientTimeOut)
-				loadFailed++;
-			else
-				connected++;
+			if (!IsClientConnected(client) || IsFakeClient(client)) continue;
+			int state = DL_g_bIsLoading[client] ? 0 : (DL_g_iTimeout[client] >= DL_g_iClientTimeOut ? 2 : 1);
+			if (state != group) continue;
+			clients[count] = client;
+			groups[count++] = group;
+			totals[group]++;
+			RU_GetPanelName(client, name, sizeof(name));
+			FormatEx(text, sizeof(text), "->%d. %s", totals[group], name);
+			fullBytes += strlen(text) + 1;
 		}
 	}
-
-	Panel panel;
-	static char buffer[254];
-
+	Panel panel = new Panel();
+	RU_DrawPanelText(panel, DL_TXT_MENU_HEADER);
+	int headingBytes;
+	for (int group = 0; group < 3; group++)
+	{
+		if (!totals[group]) continue;
+		FormatEx(headings[group], sizeof(headings[]), "%s (%d)", group == 0 ? DL_TXT_MENU_CONNECTING : (group == 1 ? DL_TXT_MENU_INGAME : DL_TXT_MENU_FAIL), totals[group]);
+		headingBytes += strlen(headings[group]) + 1;
+	}
+	int available = panel.TextRemaining - headingBytes;
+	int visible = count, nameBudget = 127;
+	if (fullBytes > available && count)
+	{
+		char note[] = "~表示名字缩略";
+		available -= strlen(note) + 1;
+		nameBudget = available / count - 7; // ->NN. + name + newline
+		if (nameBudget < 5)
+		{
+			available -= 40;
+			visible = available / 12;
+			if (visible < 0) visible = 0;
+			if (visible > count) visible = count;
+			nameBudget = 5;
+		}
+		RU_DrawPanelText(panel, note);
+	}
+	int lastGroup = -1, ordinal;
+	for (int i = 0; i < visible; i++)
+	{
+		if (groups[i] != lastGroup)
+		{
+			lastGroup = groups[i];
+			ordinal = 0;
+			RU_DrawPanelText(panel, headings[lastGroup]);
+		}
+		RU_GetPanelName(clients[i], name, sizeof(name));
+		char shortName[128];
+		RU_CopyPanelText(name, shortName, sizeof(shortName), nameBudget);
+		FormatEx(text, sizeof(text), "->%d. %s", ++ordinal, shortName);
+		RU_DrawPanelText(panel, text);
+	}
+	if (visible < count)
+	{
+		for (int group = lastGroup + 1; group < 3; group++)
+			if (totals[group]) RU_DrawPanelText(panel, headings[group]);
+		FormatEx(text, sizeof(text), "另%d名玩家未展开", count - visible);
+		RU_DrawPanelText(panel, text);
+	}
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsClientInGame(client) && !IsFakeClient(client))
-		{
-			panel = new Panel();
-
-			FormatEx(buffer, sizeof buffer, "%s", DL_TXT_MENU_HEADER);
-			panel.DrawText(buffer);
-
-			if (loading)
-			{
-				FormatEx(buffer, sizeof buffer, "%s", DL_TXT_MENU_CONNECTING);
-				panel.DrawText(buffer);
-
-				loading = 0;
-				for (i = 1; i <= MaxClients; i++)
-				{
-					if (IsClientConnected(i) && !IsFakeClient(i) && DL_g_bIsLoading[i])
-					{
-						loading++;
-						FormatEx(buffer, sizeof buffer, "->%d. %N", loading, i);
-						panel.DrawText(buffer);
-					}
-				}
-			}
-
-			if (connected)
-			{
-				FormatEx(buffer, sizeof buffer, "%s", DL_TXT_MENU_INGAME);
-				panel.DrawText(buffer);
-
-				connected = 0;
-				for (i = 1; i <= MaxClients; i++)
-				{
-					if (IsClientConnected(i) && !IsFakeClient(i) && !DL_g_bIsLoading[i] && DL_g_iTimeout[i] < DL_g_iClientTimeOut)
-					{
-						connected++;
-						FormatEx(buffer, sizeof buffer, "->%d. %N", connected, i);
-						panel.DrawText(buffer);
-					}
-				}
-			}
-
-			if (DL_g_iDisplayPanel > 1)
-			{
-				if (loadFailed)
-				{
-					FormatEx(buffer, sizeof buffer, "%s", DL_TXT_MENU_FAIL);
-					panel.DrawText(buffer);
-
-					loadFailed = 0;
-					for (i = 1; i <= MaxClients; i++)
-					{
-						if (IsClientConnected(i) && !IsFakeClient(i) && !DL_g_bIsLoading[i] && DL_g_iTimeout[i] >= DL_g_iClientTimeOut)
-						{
-							loadFailed++;
-							FormatEx(buffer, sizeof buffer, "->%d. %N", loadFailed, i);
-							panel.DrawText(buffer);
-						}
-					}
-				}
-			}
-
-			panel.Send(client, DL_PanelHandler, 5);
-			delete panel;
-		}
+		if (IsClientInGame(client) && !IsFakeClient(client)) panel.Send(client, DL_PanelHandler, 5);
 	}
+	delete panel;
 }
 
 int DL_PanelHandler(Menu menu, MenuAction action, int param1, int param2)
@@ -672,7 +658,7 @@ bool DL_IsFinishedLoading()
 			if (!IsClientInGame(i) && !IsFakeClient(i))
 			{
 				DL_g_iTimeout[i]++;
-				if (DL_g_bIsLoading[i] && DL_g_iTimeout[i] == 1)
+				if (DL_g_iTimeout[i] == 1)
 					DL_g_bIsLoading[i] = true;
 
 				if (DL_g_iTimeout[i] == DL_g_iClientTimeOut)

@@ -6,8 +6,12 @@
 #include <colors>
 #include <l4d2util>
 
+#if !defined TEAM_SPECTATOR
 #define TEAM_SPECTATOR 1
+#endif
+#if !defined TEAM_SURVIVOR
 #define TEAM_SURVIVOR  2
+#endif
 #define TEAM_INFECTED  3
 
 #define BOOMER_STAGGER_TIME 4.0    // Amount of time after a boomer has been meleed that we consider the meleer the person who

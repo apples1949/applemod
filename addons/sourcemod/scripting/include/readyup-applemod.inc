@@ -59,7 +59,7 @@ forward void OnRoundIsLive();
  * @param client 			The client index.
  * @param sDisruptReason 	The reason why cancel the live countdown
  */
-forward void OnReadyCountdownCancelled(int client, char sDisruptReason);
+forward void OnReadyCountdownCancelled(int client, const char[] sDisruptReason);
 
 /**
  * Called when client is ready

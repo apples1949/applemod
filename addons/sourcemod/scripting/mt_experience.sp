@@ -3,7 +3,7 @@
 
 #include <sourcemod>
 #include <mix_team>
-#include <steamworks>
+#include <SteamWorks>
 #include <colors>
 
 

@@ -12,7 +12,7 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.5-core"
+#define PLUGIN_VERSION "2.5.9-core"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -33,6 +33,26 @@ char gameMode[16];
 char gameName[16];
 bool L4D1;
 bool InfectedAllowed;
+
+// m_survivorCharacter order in L4D2: Nick, Rochelle, Coach, Ellis,
+// Bill, Zoey, Francis, Louis. L4D1 uses the last four models with IDs 0..3.
+static const char SurvivorModels[][] =
+{
+	"models/survivors/survivor_gambler.mdl",
+	"models/survivors/survivor_producer.mdl",
+	"models/survivors/survivor_coach.mdl",
+	"models/survivors/survivor_mechanic.mdl",
+	"models/survivors/survivor_namvet.mdl",
+	"models/survivors/survivor_teenangst.mdl",
+	"models/survivors/survivor_biker.mdl",
+	"models/survivors/survivor_manager.mdl"
+};
+bool SurvivorMapReady;
+bool SurvivorModelErrorLogged[8];
+int SurvivorModelsReady;
+int TakeoverBlocked;
+int SurvivorCharacterRepairs;
+float NextTakeoverWarning;
 
 ConVar SurvivorLimit;
 ConVar InfectedLimit;
@@ -55,9 +75,11 @@ ConVar Management;
 
 ConVar SiSpMoreDelay;
 ConVar cvar_minsurvivor;
+ConVar RoundStateCache;
 
 Handle SubDirector					= null;
 Handle BotsUpdateTimer				= null;
+Handle EmptyServerTimer = null;
 Handle TeamPanelTimer[MAXPLAYERS+1];
 Handle JoinTimer[MAXPLAYERS+1];
 bool JoinPending[MAXPLAYERS+1];
@@ -66,6 +88,8 @@ bool NewConnection[MAXPLAYERS+1];
 int JoinTarget[MAXPLAYERS+1];
 int JoinAttempts[MAXPLAYERS+1];
 bool SurvivorPlaceholder[MAXPLAYERS+1];
+bool SurvivorDied[MAXPLAYERS+1];
+bool LateLoad;
 
 enum JoinResult
 {
@@ -83,6 +107,7 @@ float SiTimes[MAXPLAYERS+1] = {0.0, ...};
 
 StringMap SteamIDs;
 StringMap TransitionPlayers;
+StringMap DeadSurvivors;
 
 public Plugin myinfo =
 {
@@ -101,7 +126,8 @@ public void OnPluginStart()
 	GetGameFolderName(gameName, sizeof(gameName));
 	L4D1 = StrEqual(gameName, "left4dead", false);
 
-	CreateConVar("sm_superversus_version", PLUGIN_VERSION, "L4D Super Versus 插件版本", CVAR_FLAGS|FCVAR_DONTRECORD);
+	ConVar version = CreateConVar("sm_superversus_version", PLUGIN_VERSION, "L4D Super Versus 插件版本", CVAR_FLAGS|FCVAR_DONTRECORD);
+	version.SetString(PLUGIN_VERSION); // Existing ConVars survive a plugin reload.
 	
 	L4DSurvivorLimit = FindConVar("survivor_limit");
 	L4DInfectedLimit = FindConVar("z_max_player_zombies");
@@ -164,6 +190,8 @@ public void OnPluginStart()
 	
 	SteamIDs = new StringMap();
 	TransitionPlayers = new StringMap();
+	DeadSurvivors = new StringMap();
+	RoundStateCache = CreateConVar("l4d_superversus_round_state", "", "Internal round state for plugin reloads", FCVAR_DONTRECORD|FCVAR_HIDDEN);
 
 	// Core settings are owned by the mode CFG. Do not execute a legacy
 	// l4d_superversus.cfg containing removed features or stale team limits.
@@ -193,12 +221,39 @@ public void OnConfigsExecuted()
 	GameType.GetString(gameMode, sizeof(gameMode));
 	InfectedAllowed = AreInfectedAllowed();
 	SyncTeamLimits();
+	if (LateLoad)
+	{
+		LateLoad = false;
+		RestoreRunningRound();
+	}
+	if (!SvBotsAllowed()) QueueEmptyBotCleanup();
 }
 
 public void OnClientPutInServer(int client)
 {
 	CancelJoin(client);
 	SurvivorPlaceholder[client] = false;
+	if (!IsFakeClient(client)) ResumeBotPopulation();
+	else if (!SvBotsAllowed()) QueueEmptyBotCleanup();
+}
+
+// PutInServer may precede authentication. PostAdminCheck retries this once the
+// human is both in game and authenticated; connecting/loading clients do not count.
+void ResumeBotPopulation()
+{
+	if (!SvBotsAllowed()) return;
+	delete EmptyServerTimer;
+	if (!RoundStarted) return;
+	delete BotsUpdateTimer;
+	BotsUpdateTimer = CreateTimer(0.2, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
+	StartInfectedCounter();
+}
+
+void QueueEmptyBotCleanup()
+{
+	// Keep the first deadline so repeated engine bot joins cannot postpone cleanup.
+	if (EmptyServerTimer == null)
+		EmptyServerTimer = CreateTimer(0.2, Timer_RecycleBotsOnEmpty, _, TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public void OnClientConnected(int client)
@@ -206,11 +261,61 @@ public void OnClientConnected(int client)
 	// PutInServer/PostAdminCheck run again on maps and late plugin loads. Only a
 	// connection observed here may override the engine's initial team assignment.
 	CancelJoin(client);
+	SurvivorDied[client] = false;
 	NewConnection[client] = !IsFakeClient(client);
 }
 
 
-public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max){MarkNativeAsOptional("L4D_LobbyUnreserve"); return APLRes_Success;}
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+	LateLoad = late;
+	MarkNativeAsOptional("L4D_LobbyUnreserve");
+	return APLRes_Success;
+}
+
+void RestoreRunningRound()
+{
+	// A late load misses round_start and safe-area exit events. Preserve an ended
+	// round across reloads; upgrading from an older build falls back to survivors.
+	if (RoundStarted || !IsServerProcessing()) return;
+	if (!L4D1 && GameRules_GetProp("m_bIsTransitioningToNextMap")) return;
+	char state[PLATFORM_MAX_PATH], expected[PLATFORM_MAX_PATH], map[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	RoundStateCache.GetString(state, sizeof(state));
+	Format(expected, sizeof(expected), "%s:0", map);
+	if (StrEqual(state, expected)) return;
+	Format(expected, sizeof(expected), "%s:1", map);
+	bool knownActive = StrEqual(state, expected);
+	bool aliveSurvivor;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SURVIVOR) continue;
+		if (IsPlayerAlive(client)) aliveSurvivor = true;
+		if (!IsFakeClient(client))
+		{
+			RecordSteamID(client);
+			SetSurvivorDeath(client, !IsPlayerAlive(client));
+		}
+		else if (GetIdlePlayer(client) > 0)
+		{
+			int owner = GetIdlePlayer(client);
+			RecordSteamID(owner);
+			SetSurvivorDeath(owner, !IsPlayerAlive(client));
+		}
+	}
+	if (!knownActive && !aliveSurvivor) return;
+	RoundStarted = true;
+	CacheRoundState(true);
+	StartRoundTimers();
+}
+
+void CacheRoundState(bool active)
+{
+	char map[PLATFORM_MAX_PATH], state[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	Format(state, sizeof(state), "%s:%d", map, active);
+	RoundStateCache.SetString(state);
+}
 
 // ------------------------------------------------------------------------
 // Return true if the lobby-unreserve provider is available
@@ -226,8 +331,14 @@ bool l4dt()
 
 public void OnMapStart() 
 {
+	SurvivorMapReady = true;
+	SurvivorModelsReady = 0;
+	NextTakeoverWarning = 0.0;
+	for (int i = 0; i < sizeof(SurvivorModelErrorLogged); i++) SurvivorModelErrorLogged[i] = false;
+	EnsureSurvivorModels();
 	GameType.GetString(gameMode, sizeof(gameMode));
 	InfectedAllowed = AreInfectedAllowed();
+	if (!LateLoad) CacheRoundState(false);
 }
 
 // ------------------------------------------------------------------------
@@ -235,6 +346,10 @@ public void OnMapStart()
 // ------------------------------------------------------------------------
 public void OnMapEnd()
 {
+	// Do not restore idle players through TakeOverBot while the map is unloading.
+	SurvivorMapReady = false;
+	SurvivorModelsReady = 0;
+	delete EmptyServerTimer;
 	// Some game transitions reconnect players. Preserve those players' teams even
 	// when the engine produces another Connected/PostAdminCheck callback pair.
 	TransitionPlayers.Clear();
@@ -259,6 +374,8 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 // ------------------------------------------------------------------------
 void GameEnd()
 {
+	RoundStarted = false;
+	CacheRoundState(false);
 	delete SubDirector;
 	delete BotsUpdateTimer;
 	
@@ -266,13 +383,12 @@ void GameEnd()
 	{
 		delete JoinTimer[i];
 		delete TeamPanelTimer[i];
-		TakeOver(i);
+		if (SurvivorMapReady) TakeOver(i);
 	}
 
 	// Reset SteamIDs, so previous players who join next round can respawn alive
 	SteamIDs.Clear();
 	
-	RoundStarted = false;
 	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
 }
 
@@ -282,7 +398,16 @@ void GameEnd()
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 	RoundStarted = true;
+	CacheRoundState(true);
+	DeadSurvivors.Clear();
+	for (int client = 1; client <= MaxClients; client++) SurvivorDied[client] = false;
 	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
+	delete SubDirector;
+	StartRoundTimers();
+}
+
+void StartRoundTimers()
+{
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		delete JoinTimer[client];
@@ -294,30 +419,17 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	}
 	delete BotsUpdateTimer;
 	BotsUpdateTimer = CreateTimer(0.2, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
+	StartInfectedCounter();
 }
 
 
 
 // ------------------------------------------------------------------------
-// FinaleEnd() Thanks to Damizean for smarter method of detecting safe survivors.
+// Stop filling teams after rescue; the engine decides who actually escaped.
 // ------------------------------------------------------------------------
 public void Event_FinaleVehicleLeaving(Event event, const char[] name, bool dontBroadcast)
 {
-	int edict_index = FindEntityByClassname(-1, "info_survivor_position");
-	if (edict_index != -1)
-	{
-		float pos[3];
-		GetEntPropVector(edict_index, Prop_Send, "m_vecOrigin", pos);
-		for(int i = 1; i <= MaxClients; i++)
-		{
-			if (!IsClientConnected(i)) continue;
-			if (!IsClientInGame(i)) continue;
-			if (GetClientTeam(i) != TEAM_SURVIVOR) continue;
-			if (!IsPlayerAlive(i)) continue;
-			if (GetEntProp(i, Prop_Send, "m_isIncapacitated", 1) == 1) continue;
-			TeleportEntity(i, pos, NULL_VECTOR, NULL_VECTOR);
-		}
-	}
+	GameEnd();
 }
 
 // *********************************************************************************
@@ -330,6 +442,12 @@ public void Event_FinaleVehicleLeaving(Event event, const char[] name, bool dont
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (!IsValidClient(client)) return;
+	if (IsFakeClient(client) && !SvBotsAllowed())
+	{
+		QueueEmptyBotCleanup();
+		return;
+	}
 	
 	// Adds very brief invulnerability to spawned SI infected bots in versus/scavenge. Otherwise they keep respawning dead
 	if (GetClientTeam(client) == TEAM_INFECTED && InfectedAllowed && MoreSiBotsVersus.BoolValue && IsFakeClient(client)) SetGodMode(client, 0.1);
@@ -337,9 +455,16 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	// Each survivor spawn updates bot capacity and records respawn eligibility.
 	if (GetClientTeam(client) == TEAM_SURVIVOR)
 	{
-		// Reset the bot check timer, if one exists	
-		delete BotsUpdateTimer;
-		BotsUpdateTimer = CreateTimer(2.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
+		if (IsPlayerAlive(client))
+		{
+			int owner = IsFakeClient(client) ? GetIdlePlayer(client) : client;
+			if (owner > 0) SetSurvivorDeath(owner, false);
+		}
+		if (RoundStarted)
+		{
+			delete BotsUpdateTimer;
+			BotsUpdateTimer = CreateTimer(2.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
+		}
 		
 		if (!IsFakeClient(client) && !InfectedAllowed && IsFirstTime(client))
 			RecordSteamID(client); // Record SteamID of player.
@@ -398,17 +523,18 @@ public void OnClientDisconnect(int client)
 	delete TeamPanelTimer[client];			//	Clean up Panel timer
 	CheckIdle[client] = false;				//  Turn off idle check
 
-	if(RoundStarted)			// if not bot or during transition
+	if(RoundStarted && SvBotsAllowed())
 	{
 		// Reset the timer, if one exists
 		delete BotsUpdateTimer;
 		BotsUpdateTimer = CreateTimer(1.0, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);	// re-update the bots
 	}
 	
-	// 最后一个真人走了 -> 立刻走一遍回收（上面那个 1s 定时器会再兜底一次）
-	if (!IsFakeClient(client) && GetHumanCount() == 0)
+	// The disconnecting client may still be counted here. Check after disconnect.
+	if (!IsFakeClient(client))
 	{
-		CreateTimer(1.5, Timer_RecycleBotsOnEmpty, _, TIMER_FLAG_NO_MAPCHANGE);
+		delete EmptyServerTimer;
+		EmptyServerTimer = CreateTimer(1.5, Timer_RecycleBotsOnEmpty, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
 }
 
@@ -417,7 +543,11 @@ public void OnClientDisconnect(int client)
 // ------------------------------------------------------------------------
 public Action Timer_RecycleBotsOnEmpty(Handle timer)
 {
-	if (GetHumanCount() > 0) return Plugin_Stop;		// 期间又有人进来了，别动
+	EmptyServerTimer = null;
+	if (SvBotsAllowed()) return Plugin_Stop;
+	delete BotsUpdateTimer;
+	delete SubDirector;
+	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
 	SvRecycleSurvivorBots();
 	SvRecycleInfectedBots();
 	return Plugin_Stop;
@@ -447,8 +577,7 @@ void SpawnCheck()
 {
 	if(RoundStarted != true)  return;      // if during transition, don't do anything
 	
-	// 空服不养 bot：服务器里一个真人都没有时，不补 AI bot，并把已经存在的生还者 bot 回收掉。
-	// 真人一进服（GetHumanCount() > 0）就恢复正常的补位逻辑，所以"进人了才创建 bot"。
+	// 只在真人已经完成进服和身份验证后补位；连接中、读图中均不算。
 	if (!SvBotsAllowed())
 	{
 		SvRecycleSurvivorBots();
@@ -482,8 +611,10 @@ stock bool IsValidSurvivorBot(int client)
 // Spawn a survivor bot
 // ------------------------------------------------------------------------
 
-bool SpawnFakeSurvivorClient()
+bool SpawnFakeSurvivorClient(const char[] botName = "SurvivorBot", bool manual = false)
 {
+	// Also covers manual/RCON creation and direct join requests.
+	if (!SvBotsAllowed() || !EnsureSurvivorModels()) return false;
 	int ClientsCount = GetSurvivorTeam();
 	
 	bool fakeclientKicked = false;
@@ -493,7 +624,7 @@ bool SpawnFakeSurvivorClient()
 
 	if (ClientsCount < SurvivorLimit.IntValue)
 	{
-		fakeclient = CreateFakeClient("SurvivorBot");
+		fakeclient = CreateFakeClient(botName);
 	}
 	
 	// if entity is valid
@@ -507,8 +638,13 @@ bool SpawnFakeSurvivorClient()
 		if (DispatchKeyValue(fakeclient, "classname", "survivorbot") == true)
 		{
 			// spawn the client
-			if (DispatchSpawn(fakeclient) == true)
+			if (DispatchSpawn(fakeclient) == true && PrepareSurvivorModel(fakeclient))
 			{	
+				if (manual)
+				{
+					if (!IsPlayerAlive(fakeclient)) Respawn(fakeclient);
+					TeleportToSurvivor(fakeclient);
+				}
 				// kick the fake client to make the bot take over
 				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, GetClientUserId(fakeclient), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 				fakeclientKicked = true;
@@ -532,6 +668,7 @@ public void OnClientPostAdminCheck(int client)
 	}
 	
 	if (IsFakeClient(client)) return;
+	ResumeBotPopulation();
 	
 	char auth[MAX_AUTHID_LENGTH];
 	int returningPlayer;
@@ -737,17 +874,22 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 {
 	// Event is triggered when a player dies
 	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (!IsValidClient(client)) return Plugin_Continue;
+	int owner;
+	if (GetClientTeam(client) == TEAM_SURVIVOR)
+		owner = IsFakeClient(client) ? GetIdlePlayer(client) : client;
 	TakeOver(client);
+	// A takeover can emit spawn events. Record the death after that operation.
+	if (owner > 0) SetSurvivorDeath(owner, true);
 	return Plugin_Continue;
 }
 
 void TakeOver(int bot)
 {
-	if(bot > 0 && IsClientInGame(bot) &&  IsFakeClient(bot) && GetClientTeam(bot) == TEAM_SURVIVOR && GetIdlePlayer(bot))
+	if (IsValidClient(bot) && IsFakeClient(bot) && GetClientTeam(bot) == TEAM_SURVIVOR)
 	{
 		int idleplayer = GetIdlePlayer(bot);
-		SetHumanIdle(bot, idleplayer);
-		TakeOverBot(idleplayer);		
+		if (idleplayer > 0) SafeTakeOverSurvivor(idleplayer, bot);
 	}
 }
 
@@ -845,12 +987,16 @@ Action RequestJoin(int client, int team)
 JoinResult TryJoinTeam(int client, int team, bool announce)
 {
 	if (!IsValidClient(client) || IsFakeClient(client) || !Management.BoolValue) return Join_Failed;
+	if (!IsClientAuthorized(client) || IsClientInKickQueue(client)) return Join_Failed;
+	if (!SurvivorMapReady) return Join_Wait;
 	if (TeamChangesLocked())
 	{
 		if (announce) PrintToChat(client, "\x03[SV] \x01正在还原换图队伍，完成后将处理你的入队请求。");
 		return Join_Wait;
 	}
 	int current = GetClientTeam(client);
+	if (current == TEAM_SURVIVOR)
+		SetSurvivorDeath(client, !IsPlayerAlive(client));
 	if (current == TEAM_INFECTED && GetClientZC(client) == ZC_JOCKEY
 		&& GetEntProp(client, Prop_Send, "m_jockeyVictim") > 0)
 		return Join_Failed;
@@ -872,11 +1018,12 @@ JoinResult TryJoinTeam(int client, int team, bool announce)
 				: (infected < survivors ? TEAM_INFECTED : TEAM_SURVIVOR));
 		}
 	}
-	if (current == team && (team != TEAM_SURVIVOR || IsPlayerAlive(client))) return Join_Success;
+	if (current == team && (team != TEAM_SURVIVOR || IsPlayerAlive(client))
+		&& (team != TEAM_SPECTATOR || GetBotOfIdle(client) == 0)) return Join_Success;
 	if (team == TEAM_SPECTATOR)
 	{
 		int ownedBot = GetBotOfIdle(client);
-		if (ownedBot > 0) L4D_TakeOverBot(client);
+		if (ownedBot > 0 && !SafeTakeOverSurvivor(client, ownedBot)) return Join_Wait;
 		ChangeClientTeam(client, TEAM_SPECTATOR);
 		return Join_Success;
 	}
@@ -889,30 +1036,46 @@ JoinResult TryJoinTeam(int client, int team, bool announce)
 		}
 		if (!MakeInfectedRoom()) return Join_Wait;
 		int ownedBot = GetBotOfIdle(client);
-		if (ownedBot > 0) L4D_TakeOverBot(client);
+		if (ownedBot > 0 && !SafeTakeOverSurvivor(client, ownedBot)) return Join_Wait;
 		ChangeClientTeam(client, TEAM_INFECTED);
 		return GetClientTeam(client) == TEAM_INFECTED ? Join_Success : Join_Wait;
 	}
 	if (team != TEAM_SURVIVOR) return Join_Failed;
+	if (!EnsureSurvivorModels()) return Join_Wait;
+	bool died = HasSurvivorDied(client);
+	if (died && current == TEAM_SURVIVOR)
+	{
+		if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，请等待救援、复活或下一回合。");
+		return Join_Failed;
+	}
 	int bot = GetBotOfIdle(client);
 	if (bot <= 0 && current != TEAM_SURVIVOR && GetTeamPlayers(TEAM_SURVIVOR, false) >= SurvivorLimit.IntValue)
 	{
 		if (announce) PrintToChat(client, "\x03[SV] \x01生还者队伍的真人位置已满。");
 		return Join_Failed;
 	}
-	if (bot <= 0) bot = FindJoinSurvivorBot();
+	if (died && bot > 0 && IsPlayerAlive(bot))
+	{
+		if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，不能接管存活的 AI。");
+		return Join_Failed;
+	}
+	if (bot <= 0) bot = FindJoinSurvivorBot(!died);
 	if (bot <= 0)
 	{
+		if (died)
+		{
+			if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，不能接管存活的 AI。请等待救援、复活或下一回合。");
+			return Join_Failed;
+		}
 		if (GetSurvivorTeam() < SurvivorLimit.IntValue) SpawnFakeSurvivorClient();
 		return Join_Wait;
 	}
 	// The original jointeam command has its own four-player checks. Bypass only that
 	// route after checking our human limit, and reserve exactly this available bot.
-	bool canRespawn = !InfectedAllowed && RespawnJoin.BoolValue && IsFirstTime(client);
-	if (current != TEAM_SPECTATOR) ChangeClientTeam(client, TEAM_SPECTATOR);
-	ChangeClientTeam(client, 0);
-	bool reserved = L4D_SetHumanSpec(bot, client);
-	bool taken = reserved && L4D_TakeOverBot(client);
+	bool canRespawn = !died && !InfectedAllowed && RespawnJoin.BoolValue && IsFirstTime(client);
+	int requestUserid = GetClientUserId(client);
+	bool taken = SafeTakeOverSurvivor(client, bot);
+	if (!IsValidClient(client) || GetClientUserId(client) != requestUserid) return Join_Failed;
 	if (!taken || GetClientTeam(client) != TEAM_SURVIVOR)
 	{
 		ChangeClientTeam(client, TEAM_SPECTATOR);
@@ -927,14 +1090,18 @@ JoinResult TryJoinTeam(int client, int team, bool announce)
 	return Join_Success;
 }
 
-int FindJoinSurvivorBot()
+int FindJoinSurvivorBot(bool allowAlive = true)
 {
 	int deadBot = -1;
 	for (int bot = 1; bot <= MaxClients; bot++)
 	{
 		if (!IsBotValid(bot) || GetClientTeam(bot) != TEAM_SURVIVOR || SurvivorPlaceholder[bot]) continue;
-		if (IsPlayerAlive(bot)) return bot;
-		deadBot = bot;
+		if (!PrepareSurvivorModel(bot)) continue;
+		if (IsPlayerAlive(bot))
+		{
+			if (allowAlive) return bot;
+		}
+		else deadBot = bot;
 	}
 	return deadBot;
 }
@@ -981,6 +1148,10 @@ public Action MultiStatus(int client, int args)
 	ReplyToCommand(client, "[Multi] survivor humans=%d AI=%d | infected humans=%d AI=%d | auto=%d management=%d | round=%d restorelock=%d | waiting=%d auto_waiting=%d",
 		GetTeamPlayers(TEAM_SURVIVOR, false), CountBots(TEAM_SURVIVOR), GetTeamPlayers(TEAM_INFECTED, false),
 		CountBots(TEAM_INFECTED), AutoJoin.IntValue, Management.IntValue, RoundStarted, TeamChangesLocked(), waiting, automatic);
+	ReplyToCommand(client, "[Multi] ready_humans=%d | bots_allowed=%d | empty_cleanup=%d",
+		GetReadyHumanCount(), SvBotsAllowed(), EmptyServerTimer != null);
+	ReplyToCommand(client, "[Multi] survivor_models=%d/%d | map_ready=%d | takeover_blocked=%d | character_repairs=%d",
+		SurvivorModelsReady, L4D1 ? 4 : 8, SurvivorMapReady, TakeoverBlocked, SurvivorCharacterRepairs);
 	return Plugin_Handled;
 }
 
@@ -1003,54 +1174,15 @@ public Action GO_AFK(int client, int args) {
 // ------------------------------------------------------------------------
 // Create a bot. Useful if less bots than SurvivorLimit because the later got increased
 // ------------------------------------------------------------------------
-public Action Create_Player(int client, int args) {
-
-	bool fakeclientKicked = false;
-
-	int ClientsCount = GetSurvivorTeam();
-
+public Action Create_Player(int client, int args)
+{
 	if (Management.IntValue < 2) return Plugin_Continue;
-
-	char arg[MAX_NAME_LENGTH];
-	if (args > 0) {
-		GetCmdArg(1, arg, sizeof(arg));
-		PrintToChatAll("\x03[SV] \x01Player %s has joined the game", arg);
-		CreateFakeClient(arg);
-	}
-	else {
-		// create fakeclient
-		int Bot = 0;
-
-		if (ClientsCount < SurvivorLimit.IntValue) {
-			Bot = CreateFakeClient("SurvivorBot");
-		}
-
-		if (Bot == 0) return Plugin_Handled;
-
-		ChangeClientTeam(Bot, TEAM_SURVIVOR);
-		SurvivorPlaceholder[Bot] = true;
-		if (!DispatchKeyValue(Bot, "classname", "survivorbot")) return Plugin_Handled;
-
-		if (!DispatchSpawn(Bot)) return Plugin_Handled; // if dispatch failed		
-
-		if (!IsPlayerAlive(Bot)) Respawn(Bot);
-
-		// check if entity classname is survivorbot
-		if (DispatchKeyValue(Bot, "classname", "survivorbot") == true) {
-			// spawn the client
-			if (DispatchSpawn(Bot) == true) {
-
-				// teleport client to the position of any active alive player
-				TeleportToSurvivor(Bot);
-				// kick the fake client to make the bot take over
-				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, GetClientUserId(Bot), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
-				fakeclientKicked = true;
-			}
-		}
-		// if something went wrong, kick the created FakeClient
-		if (fakeclientKicked == false) KickClient(Bot, "Kicking FakeClient");
-
-	}
+	char name[MAX_NAME_LENGTH] = "SurvivorBot";
+	if (args > 0) GetCmdArg(1, name, sizeof(name));
+	// Named and unnamed requests share the same limit and cleanup. Previously
+	// named bots never joined a team, and failed/double dispatches leaked slots.
+	if (!SpawnFakeSurvivorClient(name, true))
+		ReplyToCommand(client, "[SV] Could not create survivor: no ready human, team full or bot creation failed.");
 	return Plugin_Handled;
 }
 
@@ -1142,6 +1274,28 @@ bool IsFirstTime(int client)
 	return Allowed;
 }
 
+// Keep deaths by identity for the round so spectator/team changes and reconnects
+// cannot turn a dead survivor into a live bot. A real respawn clears the entry.
+void SetSurvivorDeath(int client, bool died)
+{
+	SurvivorDied[client] = died;
+	char auth[MAX_AUTHID_LENGTH];
+	if (GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+	{
+		if (died) DeadSurvivors.SetValue(auth, true);
+		else DeadSurvivors.Remove(auth);
+	}
+}
+
+bool HasSurvivorDied(int client)
+{
+	if (SurvivorDied[client]) return true;
+	char auth[MAX_AUTHID_LENGTH];
+	int died;
+	return GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth))
+		&& DeadSurvivors.GetValue(auth, died) && died != 0;
+}
+
 // ------------------------------------------------------------------------
 // Stores the Steam ID, so if reconnect we don't allow free respawn
 // ------------------------------------------------------------------------
@@ -1219,12 +1373,22 @@ int GetHumanCount()
 }
 
 // ------------------------------------------------------------------------
-// 空服不养 bot：只有真有真人玩家在服务器里时，才允许补 AI bot。
-// 人类玩家加入前的空服状态 -> false（不补 bot，并回收已有 bot）。
+// 空服不养 bot：真人完成进服、身份验证且未处于踢出队列后才允许补位。
 // ------------------------------------------------------------------------
+int GetReadyHumanCount()
+{
+	int humans;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && !IsFakeClient(i) && IsClientAuthorized(i)
+			&& !IsClientInKickQueue(i)) humans++;
+	}
+	return humans;
+}
+
 stock bool SvBotsAllowed()
 {
-	return GetHumanCount() > 0;
+	return GetReadyHumanCount() > 0;
 }
 
 // ------------------------------------------------------------------------
@@ -1276,7 +1440,8 @@ int GetAnyValidSurvivorBot()
 {
 	for(int i = MaxClients ; i >= 1; i--)  // kick bots in reverse order they have been spawned
 	{
-		if (IsBotValid(i) && GetClientTeam(i) == TEAM_SURVIVOR)
+		if (IsBotValid(i) && GetClientTeam(i) == TEAM_SURVIVOR && !SurvivorPlaceholder[i]
+			&& PrepareSurvivorModel(i))
 			return i;
 	}
 	return -1;
@@ -1310,42 +1475,9 @@ stock int CountBots(int team)
 	return num;
 }
 
-int GetAnyValidClient()
-{
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsClientInGame(i) && !IsClientInKickQueue(i) )
-			return i;
-	} 
-	return -1;
-}
-
 bool AnySurvivorLeftSafeArea()
 {
-	int ent = -1, maxents = GetMaxEntities();
-	for (int i = MaxClients+1; i <= maxents; i++)
-	{
-		if (IsValidEntity(i))
-		{
-			char netclass[64];
-			GetEntityNetClass(i, netclass, sizeof(netclass));
-			
-			if (StrEqual(netclass, "CTerrorPlayerResource", false))
-			{
-				ent = i;
-				break;
-			}
-		}
-	}
-	
-	if (ent > -1)
-	{
-		if(GetEntProp(ent, Prop_Send, "m_hasAnySurvivorLeftSafeArea"))
-		{
-			return true;
-		}
-	}
-	return false;
+	return L4D_HasAnySurvivorLeftSafeArea();
 }
 
 // *********************************************************************************
@@ -1560,10 +1692,15 @@ int GetClientRealHealth(int client)
 //  Start counter when a survivor leaves safe area
 // ------------------------------------------------------------------------
 public void Event_PlayerLeftStartArea(Event event, const char[] name, bool dontBroadcast)
-{ 
-	if(SubDirector == null && InfectedAllowed && AnySurvivorLeftSafeArea())
+{
+	StartInfectedCounter();
+}
+
+void StartInfectedCounter()
+{
+	if(RoundStarted && SvBotsAllowed() && SubDirector == null && InfectedAllowed && AnySurvivorLeftSafeArea())
 	{
-		SubDirector = CreateTimer(5.0, BotInfectedCounter, true);
+		SubDirector = CreateTimer(5.0, BotInfectedCounter, true, TIMER_FLAG_NO_MAPCHANGE);
 	}
 }
 
@@ -1580,19 +1717,19 @@ public Action BotInfectedCounter(Handle timer, bool recheck)
 	if (!SvBotsAllowed())
 	{
 		SvRecycleInfectedBots();
-		SubDirector = CreateTimer(5.0, BotInfectedCounter, false);
+		for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
 		return Plugin_Stop;
 	}
 	
 	if (!MoreSiBotsVersus.BoolValue || GetTeamPlayers(TEAM_INFECTED, false) >= InfectedLimit.IntValue) // if no extra bots wanted
 	{
-		SubDirector = CreateTimer(10.0, BotInfectedCounter, false); // check back in 10 secs to see if setting changed
+		SubDirector = CreateTimer(10.0, BotInfectedCounter, false, TIMER_FLAG_NO_MAPCHANGE); // check back in 10 secs to see if setting changed
 		return Plugin_Stop;
 	}
 	
 	SiSpawnCheck();
 	
-	SubDirector = CreateTimer(2.0, BotInfectedCounter, false);
+	SubDirector = CreateTimer(2.0, BotInfectedCounter, false, TIMER_FLAG_NO_MAPCHANGE);
 	return Plugin_Stop;
 }
 
@@ -1601,6 +1738,7 @@ public Action BotInfectedCounter(Handle timer, bool recheck)
 // ------------------------------------------------------------------------
 void SiSpawnCheck()
 {
+	if (!SvBotsAllowed()) return;
 	// For each missing SI, add to queue
 	for (int i = GetTeamPlayers(TEAM_INFECTED, true) + CountSiQueue(); i < InfectedLimit.IntValue; i++)
 	{
@@ -1693,9 +1831,6 @@ int CountSiQueue()
 //  Spawn a Special Infected bot
 // ------------------------------------------------------------------------
 void SetGhostStatus(int client, bool ghost) { SetEntProp(client, Prop_Send, "m_isGhost",   ghost); }
-void SetLifeState  (int client, bool ready) { SetEntProp(client, Prop_Send, "m_lifeState", ready); }
-bool IsPlayerGhost (int client) 			{ return GetEntProp(client, Prop_Send, "m_isGhost") ? true : false;}
-char SiNames[9][] = {"none", "smoker", "boomer", "hunter", "spitter", "jockey", "charger", "witch", "tank"};
 
 int GetSiType(int client)
 {
@@ -1705,54 +1840,22 @@ int GetSiType(int client)
 
 void SiSpawn(int type = -1)
 {
+	if (!SvBotsAllowed()) return;
 	if (type == -1) type = PickSiType();
-	if (type == -1) return;
+	if (type < ZC_SMOKER || type > (L4D1 ? ZC_HUNTER : ZC_CHARGER)) return;
 
-	// Stores Ghost / Life, & set to nonghost/not alive. Otherwise players may autospawn
-	/////////////////////////////////////////////////////
-	bool resetGhost[MAXPLAYERS+1];
-	bool resetLife[MAXPLAYERS+1];
-	
-	for(int i = 1; i <= MaxClients; i++)
+	// Spawn an AI directly. z_spawn_old can select human infected and required
+	// temporarily corrupting their ghost/life state (including respawn timers).
+	// A failed position search/spawn leaves the queue intact for the next tick.
+	float pos[3];
+	float angles[3];
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		if(IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_INFECTED)
-		{
-			if(IsPlayerGhost(i))
-			{
-				resetGhost[i] = true;
-				SetGhostStatus(i, false);
-			}
-			else if(!IsPlayerAlive(i))
-			{
-				resetLife[i] = true;
-				SetLifeState(i, false);
-			}
-		}
-	}
-
-	int client = GetAnyValidClient();
-	if (client > 0) 
-	{
-		int Bot = CreateFakeClient("InfectedBot");
-		if(Bot != 0)
-		{
-			ChangeClientTeam(Bot, TEAM_INFECTED);
-			DispatchKeyValue(Bot, "classname", "InfectedBot");
-			if (L4D1) CheatCommand(client, "z_spawn", SiNames[type], "auto");
-			else  CheatCommand(client, "z_spawn_old", SiNames[type], "auto"); // z_spawn_old required or they spawn in front of survivors
-			KickClient(Bot, "Kicked Fake Bot");
-		}
-	}
-	
-	// We restore the player's status
-	/////////////////////////////////
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_INFECTED)
-		{
-			if (resetGhost[i]) SetGhostStatus(i, true); 
-			if ( resetLife[i]) SetLifeState(i, true);
-		}
+		if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SURVIVOR
+			|| !IsPlayerAlive(client) || IsClientInKickQueue(client)) continue;
+		if (!L4D_GetRandomPZSpawnPosition(client, type, 20, pos)) continue;
+		L4D2_SpawnSpecial(type, pos, angles);
+		return;
 	}
 }
 
@@ -1827,45 +1930,163 @@ int PickSiType()
 // SIGNATURE METHODS
 // *********************************************************************************
 
+bool EnsureSurvivorModels()
+{
+	if (!SurvivorMapReady) return false;
+	SurvivorModelsReady = 0;
+	int first = L4D1 ? 4 : 0;
+	for (int i = first; i < sizeof(SurvivorModels); i++)
+	{
+		if (!IsModelPrecached(SurvivorModels[i]))
+		{
+			int index = PrecacheModel(SurvivorModels[i], true);
+			if (index <= 0 || !IsModelPrecached(SurvivorModels[i]))
+			{
+				if (!SurvivorModelErrorLogged[i])
+				{
+					LogError("[SV model guard] Cannot precache %s; survivor creation/takeover blocked.", SurvivorModels[i]);
+					SurvivorModelErrorLogged[i] = true;
+				}
+				continue;
+			}
+		}
+		SurvivorModelsReady++;
+	}
+	return SurvivorModelsReady == (L4D1 ? 4 : 8);
+}
+
+void LogUnsafeSurvivor(int bot, int character, const char[] model, const char[] reason)
+{
+	TakeoverBlocked++;
+	// A broken bot may be considered by several join timers. Keep evidence without
+	// flooding the log on every retry. Counters remain visible in sm_multistatus.
+	float now = GetEngineTime();
+	if (now < NextTakeoverWarning) return;
+	NextTakeoverWarning = now + 10.0;
+	LogError("[SV model guard] Blocked unsafe survivor: bot=%d userid=%d character=%d model='%s' reason=%s",
+		bot, GetClientUserId(bot), character, model, reason);
+}
+
+bool PrepareSurvivorModel(int bot)
+{
+	if (!IsValidClient(bot) || !IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR) return false;
+	if (!EnsureSurvivorModels()) return false;
+	char model[PLATFORM_MAX_PATH];
+	GetClientModel(bot, model, sizeof(model));
+	int character = GetEntProp(bot, Prop_Send, "m_survivorCharacter");
+	if (!model[0] || !IsModelPrecached(model))
+	{
+		LogUnsafeSurvivor(bot, character, model, "empty or unprecached current model");
+		return false;
+	}
+	// Restore() chooses a model by character as well as copying the bot's state.
+	// Repair an invalid ID only when its existing stock model identifies the role.
+	// Do not guess a role for an unknown/custom model or overwrite valid IDs/skins.
+	if (character < 0 || character >= (L4D1 ? 4 : 8))
+	{
+		int first = L4D1 ? 4 : 0;
+		for (int i = first; i < sizeof(SurvivorModels); i++)
+		{
+			if (!StrEqual(model, SurvivorModels[i], false)) continue;
+			int repaired = i - first;
+			SetEntProp(bot, Prop_Send, "m_survivorCharacter", repaired);
+			SurvivorCharacterRepairs++;
+			LogMessage("[SV model guard] Repaired bot userid=%d character=%d -> %d from model='%s'",
+				GetClientUserId(bot), character, repaired, model);
+			return true;
+		}
+		LogUnsafeSurvivor(bot, character, model, "invalid character with no stock model match");
+		return false;
+	}
+	return true;
+}
+
+bool IsTakeoverPairValid(int client, int bot)
+{
+	if (!SurvivorMapReady || !IsValidClient(client) || IsFakeClient(client)
+		|| !IsClientAuthorized(client) || IsClientInKickQueue(client)) return false;
+	if (!IsValidClient(bot) || !IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR
+		|| SurvivorPlaceholder[bot] || IsClientInKickQueue(bot)
+		|| !HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) return false;
+	int owner = GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID");
+	return owner == 0 || owner == GetClientUserId(client);
+}
+
+int FindReservedSurvivorBot(int client)
+{
+	if (!IsValidClient(client)) return 0;
+	int userid = GetClientUserId(client);
+	for (int bot = 1; bot <= MaxClients; bot++)
+	{
+		if (!IsClientInGame(bot) || !IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR
+			|| !HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) continue;
+		// SetHumanSpec/TakeOverBot can run while the human is on team 0. The normal
+		// GetBotOfIdle helper only recognizes spectators (team 1), so cannot be used here.
+		if (GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID") == userid) return bot;
+	}
+	return 0;
+}
+
+bool SafeTakeOverSurvivor(int client, int bot)
+{
+	if (!IsTakeoverPairValid(client, bot) || !PrepareSurvivorModel(bot)) return false;
+	int clientUserid = GetClientUserId(client);
+	int botUserid = GetClientUserId(bot);
+	if (GetClientTeam(client) != TEAM_SPECTATOR && GetClientTeam(client) != 0)
+		ChangeClientTeam(client, TEAM_SPECTATOR);
+	if (!IsTakeoverPairValid(client, bot) || GetClientUserId(client) != clientUserid
+		|| GetClientUserId(bot) != botUserid) return false;
+	if (FindReservedSurvivorBot(client) != bot)
+	{
+		ChangeClientTeam(client, 0);
+		// Team changes invoke other plugins synchronously. Recheck the target identity
+		// before passing it into an SDKCall, even though no timer has elapsed.
+		if (!IsTakeoverPairValid(client, bot) || GetClientUserId(client) != clientUserid || GetClientUserId(bot) != botUserid
+			|| !PrepareSurvivorModel(bot) || !L4D_SetHumanSpec(bot, client))
+		{
+			if (IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == 0)
+				ChangeClientTeam(client, TEAM_SPECTATOR);
+			return false;
+		}
+	}
+	if (!IsTakeoverPairValid(client, bot) || GetClientUserId(client) != clientUserid || GetClientUserId(bot) != botUserid
+		|| FindReservedSurvivorBot(client) != bot || !PrepareSurvivorModel(bot))
+	{
+		if (IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == 0)
+			ChangeClientTeam(client, TEAM_SPECTATOR);
+		return false;
+	}
+	bool taken = L4D_TakeOverBot(client);
+	if (!taken && IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == 0)
+		ChangeClientTeam(client, TEAM_SPECTATOR);
+	return taken && IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == TEAM_SURVIVOR;
+}
+
+// Also protects assigned survivor bots taken over by the engine or another plugin
+// (e.g. the map team-restoration timer) while this multiplayer mode is loaded.
+public Action L4D_OnTakeOverBot(int client)
+{
+	if (!EnsureSurvivorModels()) return Plugin_Handled;
+	int bot = FindReservedSurvivorBot(client);
+	if (bot > 0 && (!IsTakeoverPairValid(client, bot) || !PrepareSurvivorModel(bot)))
+		return Plugin_Handled;
+	return Plugin_Continue;
+}
+
 void Respawn(int client)
 {
-	static Handle hRoundRespawn;
-	if (hRoundRespawn == null)
-	{
-		Handle hGameConf = LoadGameConfigFile("l4d_superversus");
-		StartPrepSDKCall(SDKCall_Player);
-		PrepSDKCall_SetFromConf(hGameConf, SDKConf_Signature, "RoundRespawn");
-		hRoundRespawn = EndPrepSDKCall();
-
-  	}
-	SDKCall(hRoundRespawn, client);
+	L4D_RespawnPlayer(client);
 }
 
 void SetHumanIdle(int bot, int client)
 {
-	L4D_SetHumanSpec(bot, client);
-	SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
-}
-
-void TakeOverBot(int client)
-{
-	L4D_TakeOverBot(client);
+	if (!IsTakeoverPairValid(client, bot) || !PrepareSurvivorModel(bot)) return;
+	if (L4D_SetHumanSpec(bot, client)) SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
 }
 
 // *********************************************************************************
 // CHEAT METHODS
 // *********************************************************************************
-
-void CheatCommand(int client, const char[] command, const char[] argument1, const char[] argument2)
-{
-	int userFlags = GetUserFlagBits(client);
-	SetUserFlagBits(client, ADMFLAG_ROOT);
-	int flags = GetCommandFlags(command);
-	SetCommandFlags(command, flags & ~FCVAR_CHEAT);
-	FakeClientCommand(client, "%s %s %s", command, argument1, argument2);
-	SetCommandFlags(command, flags);
-	SetUserFlagBits(client, userFlags);
-}
 
 stock void PrintConsoleToAll(const char[] format, any ...) 
 { 

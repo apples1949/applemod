@@ -66,6 +66,7 @@ void RM_OnModuleStart()
 	RegAdminCmd("sm_forcechangematch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
 	RegAdminCmd("sm_fchmatch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
 	RegAdminCmd("sm_confoglstatus", RM_Cmd_Status, ADMFLAG_CONFIG, "Show the loaded config, match state and CVar commit status");
+	RegAdminCmd("sm_confoglplugins", RM_Cmd_Plugins, ADMFLAG_CONFIG, "Check expected mode plugins for missing/failed/paused states");
 
 	RM_hSbAllBotGame = FindConVar("sb_all_bot_game");
 	// Engine ConVars survive a plugin reload; never include this in tracked match settings.
@@ -208,15 +209,9 @@ static void RM_Match_Load()
 		ServerCommand("sm plugins load_unlock");
 		ServerCommand("sm plugins unload_all");
 
-		// 【必须在 exec 大 cfg 之前重建溢出补丁】
-		// unload_all 会把 fixes/command_buffer.smx 一起卸掉 → 它的引擎补丁（patch
-		// CCommandBuffer::InsertCommand）随之失效；紧接着下面 exec 的
-		// generalfixes/confogl_plugins/sharedplugins 等大 cfg 会被一次性灌进引擎命令缓冲，
-		// 触发 "Cbuf_AddText: buffer overflow"，排不进去的命令被【静默丢弃】。
-		// 实测被吞的命令是随机的：轻则 4 个发光插件没加载，重则 confoglcompmod 自身那一行
-		// 被吞 → 框架不重载 → 整条插件链断掉（只剩 24 个 SM 自带插件）。
-		// 所以这里趁缓冲区还空、先把这个小插件装回来，后面的大文件就不会再溢出。
-		// （以前它排在 generalfixes.cfg 第 9 行，等它加载时第一波溢出已经发生，来不及。）
+		// Restore the overflow fallback before any plugin CFG. The 12v12 CFGs are
+		// also chained in bounded chunks: retrying after overflow alone cannot
+		// guarantee ordering against commands already in the engine queue.
 		ServerCommand("sm plugins load fixes/command_buffer.smx");
 
 		// Loading Plugins.
@@ -345,10 +340,10 @@ static void RM_Match_Unload(bool bForced = false)
 	}
 	else
 	{
-		// if we are using chmatch, don't let predictable_unloader unload confogl itself.
+		// if we are using chmatch, don't let predictable_unloader_edi unload confogl itself.
 		// all plugins will be unload and load when the new config excuted.
 		ServerCommand("sm plugins load_unlock");
-		ServerCommand("sm plugins unload optional/predictable_unloader.smx");
+		ServerCommand("sm plugins unload optional/another/predictable_unloader_edi.smx");
 		ExecuteCfg(sBuffer);
 	}
 
@@ -360,6 +355,7 @@ static void RM_Match_Unload(bool bForced = false)
 
 static Action RM_CheckConfigCommit(Handle timer)
 {
+	if (RM_bIsMatchModeLoaded) RM_AuditPlugins(0);
 #if MODULE_CVARSETTINGS
 	if (RM_bIsMatchModeLoaded && !CVS_IsTrackingStarted())
 	{
@@ -386,8 +382,78 @@ static Action RM_Cmd_Status(int client, int args)
 	return Plugin_Handled;
 }
 
+static Action RM_Cmd_Plugins(int client, int args)
+{
+	RM_AuditPlugins(client);
+	return Plugin_Handled;
+}
+
+static bool RM_AuditPlugins(int client)
+{
+	char config[PLATFORM_MAX_PATH], manifest[PLATFORM_MAX_PATH];
+	Configs_GetConfigName(config, sizeof(config));
+	if (!config[0]) return true;
+	BuildPath(Path_SM, manifest, sizeof(manifest), "../../cfg/cfgogl/%s/plugins_expected.txt", config);
+	// Other mode packs may not ship a manifest. 12v12 must have one.
+	if (!FileExists(manifest))
+	{
+		if (!StrEqual(config, "applemod12v12")) return true;
+		LogError("[%s] Missing plugin manifest: %s", RM_MODULE_NAME, manifest);
+		ReplyToCommand(client, "[Confogl] Missing plugins_expected.txt for %s", config);
+		return false;
+	}
+	File file = OpenFile(manifest, "r");
+	if (file == null)
+	{
+		LogError("[%s] Cannot read plugin manifest: %s", RM_MODULE_NAME, manifest);
+		return false;
+	}
+	int expected, failed;
+	char filename[PLATFORM_MAX_PATH];
+	while (file.ReadLine(filename, sizeof(filename)))
+	{
+		TrimString(filename);
+		if (!filename[0] || filename[0] == '/' || filename[0] == '#') continue;
+		expected++;
+		Handle plugin = FindPluginByFile(filename);
+		if (plugin == null)
+		{
+			failed++;
+			LogError("[%s] Expected plugin missing: %s", RM_MODULE_NAME, filename);
+			ReplyToCommand(client, "[Confogl] MISSING: %s", filename);
+		}
+		else if (GetPluginStatus(plugin) != Plugin_Running)
+		{
+			failed++;
+			LogError("[%s] Expected plugin not running: %s (status=%d)", RM_MODULE_NAME, filename, GetPluginStatus(plugin));
+			ReplyToCommand(client, "[Confogl] NOT RUNNING: %s (status=%d)", filename, GetPluginStatus(plugin));
+		}
+	}
+	delete file;
+	if (!expected)
+	{
+		LogError("[%s] Empty plugin manifest for %s", RM_MODULE_NAME, config);
+		return false;
+	}
+	ReplyToCommand(client, "[Confogl] %s: expected=%d running=%d missing_or_failed=%d", config, expected, expected - failed, failed);
+	return failed == 0;
+}
+
 static Action RM_Match_MapRestart_Timer(Handle hTimer, DataPack hDp)
 {
+	// Never lock plugin loading and restart into a partially loaded mode.
+	if (!RM_AuditPlugins(0))
+	{
+		LogError("[%s] Match restart/load_lock cancelled: plugin audit failed. Check sm_confoglplugins and SourceMod error logs.", RM_MODULE_NAME);
+		return Plugin_Stop;
+	}
+#if MODULE_CVARSETTINGS
+	if (!CVS_IsTrackingStarted())
+	{
+		LogError("[%s] Match restart/load_lock cancelled: confogl_setcvars has not committed the mode settings.", RM_MODULE_NAME);
+		return Plugin_Stop;
+	}
+#endif
 	ServerCommand("sm plugins load_lock");	  // rework
 
 	if (RM_bDebugEnabled || IsDebugEnabled())

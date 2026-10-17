@@ -115,7 +115,7 @@
 	"Tank kill Tank"
 	{
 		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank {olive}{1}{default} {2}another Tank."
+		"en"	"{green}[SM] {green}Tank {olive}{1}{default} another Tank."
 		"zho"	"{green}[提示] {green}Tank {olive}{1}死{default} 另一隻Tank."
 		"chi"	"{green}[提示] {green}坦克 {olive}{1}死{default} 另一只Tank。"
 	}

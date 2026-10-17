@@ -53,7 +53,7 @@ void MI_OnMapStart()
 
 void MI_OnMapEnd()
 {
-	kMIData.Rewind();
+	if (kMIData != null) kMIData.Rewind();
 
 	MapDataAvailable = false;
 
@@ -78,6 +78,10 @@ static void PlayerDisconnect_Event(Event hEvent, const char[] sEventName, bool b
 
 static Action MI_KV_CmdSave(int client, int args)
 {
+	if (kMIData == null) {
+		ReplyToCommand(client, "MapInfo data is unavailable; fix mapinfo.txt before saving.");
+		return Plugin_Handled;
+	}
 	char sCurMap[128];
 	GetCurrentMap(sCurMap, sizeof(sCurMap));
 
@@ -103,6 +107,11 @@ static Action MI_KV_CmdSaveLoc(int client, int args)
 	// This command saves the caller's own position, so it needs an in-game caller.
 	if (!client || !IsClientInGame(client)) {
 		ReplyToCommand(client, "This command can only be used by an in-game player.");
+		return Plugin_Handled;
+	}
+
+	if (kMIData == null) {
+		ReplyToCommand(client, "MapInfo data is unavailable; fix mapinfo.txt before saving.");
 		return Plugin_Handled;
 	}
 
@@ -208,7 +217,8 @@ static void MI_KV_Load()
 	kMIData = new KeyValues("MapInfo");
 	BuildConfigPath(sNameBuff, sizeof(sNameBuff), "mapinfo.txt"); //Build our filepath
 	if (!kMIData.ImportFromFile(sNameBuff)) {
-		Debug_LogError(MI_MODULE_NAME, "Couldn't load MapInfo data!");
+		Debug_LogError(MI_MODULE_NAME, "Couldn't load MapInfo data from %s!", sNameBuff);
+		MapDataAvailable = false;
 		MI_KV_Close();
 		return;
 	}
@@ -219,7 +229,7 @@ static void MI_KV_UpdateMapInfo()
 	char sCurMap[128];
 	GetCurrentMap(sCurMap, sizeof(sCurMap));
 
-	if (kMIData.JumpToKey(sCurMap)) {
+	if (kMIData != null && kMIData.JumpToKey(sCurMap)) {
 		kMIData.GetVector("start_point", Start_Point);
 		kMIData.GetVector("end_point", End_Point);
 
@@ -364,27 +374,35 @@ stock bool IsEntityInSaferoom(int ent, int saferoom = 3) //ItemTracking (comment
 
 stock int GetMapValueInt(const char[] key, int defvalue = 0) //BossSpawning
 {
-	return kMIData.GetNum(key, defvalue);
+	return kMIData != null ? kMIData.GetNum(key, defvalue) : defvalue;
 }
 
 stock float GetMapValueFloat(const char[] key, float defvalue = 0.0) //BossSpawning
 {
-	return kMIData.GetFloat(key, defvalue);
+	return kMIData != null ? kMIData.GetFloat(key, defvalue) : defvalue;
 }
 
 stock void GetMapValueVector(const char[] key, float vector[3], float defvalue[3] = NULL_VECTOR) //BossSpawning
 {
+	if (kMIData == null) {
+		CopyVector(vector, defvalue);
+		return;
+	}
 	kMIData.GetVector(key, vector, defvalue);
 }
 
 stock void GetMapValueString(const char[] key, char[] value, const int maxlength, const char[] defvalue)
 {
+	if (kMIData == null) {
+		strcopy(value, maxlength, defvalue);
+		return;
+	}
 	kMIData.GetString(key, value, maxlength, defvalue);
 }
 
 stock void CopyMapSubsection(KeyValues kv, const char[] section) //ItemTracking
 {
-	if (kMIData.JumpToKey(section, false)) {
+	if (kMIData != null && kMIData.JumpToKey(section, false)) {
 		kv.Import(kMIData); // KvCopySubkeys(kMIData, kv);
 		kMIData.GoBack();
 	}

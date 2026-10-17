@@ -2306,7 +2306,7 @@ bool IsDoubleCharged(int victim)
 
 // Todo: check if clearing with netprops causes the jockey teleport to shadow realm bug.
 // WARNING!!! This will permanently freeze the victim, but I'm killing him so IDGAF.
-void ClearAllPinners(int victim)
+stock void ClearAllPinners(int victim)
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -2537,7 +2537,7 @@ void ResetKarma(int client)
 	delete SmokeRegisterTimer[client];
 }
 
-void OnCheckKarmaZoneTouch(int victim, int entity, const char[] zone_name, int pinner = 0)
+stock void OnCheckKarmaZoneTouch(int victim, int entity, const char[] zone_name, int pinner = 0)
 {
 	if (!IsPlayerAlive(victim) || L4D_IsPlayerGhost(victim))
 		return;

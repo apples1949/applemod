@@ -1,5 +1,6 @@
 #pragma semicolon 1
 #pragma newdecls required
+#pragma dynamic 8192 // Fixed stack/heap budget for reproducible SourcePawn 1.12 builds.
 
 #include <sourcemod>
 #include <builtinvotes>
@@ -36,7 +37,7 @@ public Plugin myinfo =
 	name		= "Match Vote",
 	author		= "vintik, Sir, StarterX4",
 	description = "!match !rmatch !chmatch - Change Hostname and Slots while you're at it!",
-	version		= "1.5.1",
+	version		= "1.5.1-applefix",
 	url			= "https://github.com/L4D-Community/L4D2-Competitive-Framework"
 };
 

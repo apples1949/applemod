@@ -11,7 +11,7 @@
 //  - 符号统一 DL_ 前缀，避免与 readyup 侧重名
 // ============================================================================
 
-#define DL_PLUGIN_VERSION		"2.7.3"
+#define DL_PLUGIN_VERSION		"2.7.4-applefix"
 
 #define DL_SOUND_COUNTDOWN		"buttons/blip1.wav"
 #define DL_SOUND_MOVEOUT		"ui/survival_teamrec.wav"
@@ -28,6 +28,12 @@
 #define DL_TXT_MENU_FAIL		"失败"
 
 Handle DL_g_hTimer;
+Handle DL_g_hRecoveryTimer;
+int DL_g_iCurrentMode;
+bool DL_g_bConfigsReady, DL_g_bRoundEnded, DL_g_bRoundLive;
+bool DL_g_bOwnSbStop, DL_g_bOwnNbStop;
+int DL_g_iSavedSbStop, DL_g_iSavedNbStop;
+int DL_g_iFrozenUserId[MAXPLAYERS + 1];
 
 ConVar
 	DL_g_cSbStop,
@@ -77,6 +83,7 @@ void DL_BeginRoundLifecycle()
 
 void DL_CompleteRoundLifecycle()
 {
+	DL_g_bRoundLive = true;
 	if (DL_g_bLifecycleStarted)
 		RU_ExternalPhaseLive();
 	DL_g_bLifecycleStarted = false;
@@ -136,25 +143,29 @@ void DL_OnPluginStart()
 	DL_g_cDisplayMode.AddChangeHook(DL_CvarChanged);
 	DL_g_cDisplayPanel.AddChangeHook(DL_CvarChanged);
 	DL_g_cFreezeNodoor.AddChangeHook(DL_CvarChanged);
+	// Observe round boundaries even while confogl has not committed the cvars.
+	DL_HookEvents(true);
 }
 
 void DL_OnConfigsExecuted()
 {
+	DL_g_bConfigsReady = true;
 	DL_IsAllowed();
 }
 
 void DL_OnPluginEnd()
 {
-	DL_UnLockDoor();
-	if (DL_g_iStartDoor && EntRefToEntIndex(DL_g_iStartDoor) != -1)
-		UnhookSingleEntityOutput(DL_g_iStartDoor, "OnOpen", DL_OnOpen);
-	DL_DeleteTimer();
+	DL_ResetPlugin();
 }
 
 void DL_OnMapStart()
 {
 	DL_g_bMapStarted = true;
 	DL_g_bFirstRound = true;
+	DL_g_bConfigsReady = false;
+	DL_g_bRoundEnded = false;
+	DL_g_bRoundLive = false;
+	DL_g_iCurrentMode = 0;
 
 	PrecacheSound(DL_SOUND_BREAK1);
 	PrecacheSound(DL_SOUND_BREAK2);
@@ -166,12 +177,15 @@ void DL_OnMapEnd()
 {
 	DL_ResetPlugin();
 	DL_g_bMapStarted = false;
+	DL_g_bConfigsReady = false;
+	DL_g_bCvarAllow = false;
 }
 
 void DL_OnClientDisconnect(int client)
 {
 	DL_g_iTimeout[client] = 0;
 	DL_g_bIsLoading[client] = false;
+	DL_g_iFrozenUserId[client] = 0;
 }
 
 void DL_CvarChanged_Allow(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -206,31 +220,26 @@ void DL_GetCvars()
 //Silvers
 void DL_IsAllowed()
 {
-	bool bCvarAllow = DL_g_cAllow.BoolValue;
+	bool bCvarAllow = DL_g_cAllow.BoolValue && DL_IsDoorLockReadyMode();
 	bool bAllowMode = DL_IsAllowedGameMode();
 	DL_GetCvars();
 
 	if (DL_g_bCvarAllow == false && bCvarAllow == true && bAllowMode == true)
 	{
 		DL_g_bCvarAllow = true;
-		DL_HookEvents(true);
 	}
 	else if (DL_g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false))
 	{
 		DL_g_bCvarAllow = false;
-		DL_HookEvents(false);
-		DL_UnLockDoor();
-		if (DL_g_iStartDoor && EntRefToEntIndex(DL_g_iStartDoor) != -1)
-			UnhookSingleEntityOutput(DL_g_iStartDoor, "OnOpen", DL_OnOpen);
 		DL_ResetPlugin();
 	}
+	DL_ScheduleRecovery();
 }
-
-int DL_g_iCurrentMode;
 
 void DL_L4D_OnGameModeChange(int gamemode)
 {
 	DL_g_iCurrentMode = gamemode;
+	DL_IsAllowed();
 }
 
 bool DL_IsAllowedGameMode()
@@ -238,11 +247,10 @@ bool DL_IsAllowedGameMode()
 	if (!DL_g_cGameMode)
 		return false;
 
-	if (!DL_g_iCurrentMode)
-		DL_g_iCurrentMode = L4D_GetGameModeType();
-
 	if (!DL_g_bMapStarted)
 		return false;
+	// Query after mp_gamemode changes instead of trusting the old mode cache.
+	DL_g_iCurrentMode = L4D_GetGameModeType();
 
 	int iCvarModesTog = DL_g_cModesTog.IntValue;
 	if (iCvarModesTog && !(iCvarModesTog & DL_g_iCurrentMode))
@@ -291,53 +299,104 @@ void DL_HookEvents(bool hook)
 
 void DL_OnPlayerRunCmd(int client)
 {
-	if (!DL_g_iCountDown || !DL_g_bFreezeAllowed)
+	if (!DL_g_hTimer || !DL_g_bFreezeAllowed)
 		return;
 
-	if (GetClientTeam(client) == 2)
+	if (GetClientTeam(client) == 2 && IsPlayerAlive(client)
+		&& GetEntityMoveType(client) != MOVETYPE_NONE && GetEntityMoveType(client) != MOVETYPE_NOCLIP)
+	{
+		DL_g_iFrozenUserId[client] = GetClientUserId(client);
 		SetEntityMoveType(client, MOVETYPE_NONE);
+	}
 }
 
 void DL_Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	DL_ResetPlugin();
+	DL_g_bRoundEnded = true;
 	DL_g_bFirstRound = false;
 }
 
 void DL_Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	if (DL_g_iRoundStart == 0 && DL_g_iPlayerSpawn == 1)
-		DL_InitPlugin();
+	DL_ResetPlugin();
+	DL_g_bRoundEnded = false;
+	DL_g_bRoundLive = false;
 	DL_g_iRoundStart = 1;
+	DL_IsAllowed();
 }
 
 void DL_Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
-	if (DL_g_iRoundStart == 1 && DL_g_iPlayerSpawn == 0)
-		DL_InitPlugin();
 	DL_g_iPlayerSpawn = 1;
+	DL_ScheduleRecovery();
 }
 
 void DL_ResetPlugin()
 {
+	delete DL_g_hRecoveryTimer;
+	// Release the owned door/timer before forgetting their references.
+	DL_UnLockDoor();
+	if (DL_g_iStartDoor && EntRefToEntIndex(DL_g_iStartDoor) != -1)
+		UnhookSingleEntityOutput(DL_g_iStartDoor, "OnOpen", DL_OnOpen);
+	DL_DeleteTimer();
 	DL_g_iCountDown = 0;
 	DL_g_iStartDoor = 0;
 	DL_g_iRoundStart = 0;
 	DL_g_iPlayerSpawn = 0;
 	DL_g_bFreezeAllowed = false;
+}
 
-	DL_DeleteTimer();
+bool DL_HasConfirmedHuman()
+{
+	for (int client = 1; client <= MaxClients; client++)
+		if (IsClientInGame(client) && !IsFakeClient(client) && !IsClientInKickQueue(client) && IsClientAuthorized(client))
+			return true;
+	return false;
+}
+
+bool DL_HasLivingSurvivor()
+{
+	for (int client = 1; client <= MaxClients; client++)
+		if (IsClientInGame(client) && !IsClientInKickQueue(client) && GetClientTeam(client) == 2 && IsPlayerAlive(client))
+			return true;
+	return false;
+}
+
+void DL_ScheduleRecovery()
+{
+	if (!DL_g_bMapStarted || !DL_g_bConfigsReady || !DL_g_bCvarAllow || DL_g_bRoundEnded || DL_g_bRoundLive || DL_g_hTimer || DL_g_hRecoveryTimer)
+		return;
+	DL_g_hRecoveryTimer = CreateTimer(0.5, DL_tmrRecover, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action DL_tmrRecover(Handle timer)
+{
+	if (timer != DL_g_hRecoveryTimer) return Plugin_Stop;
+	if (!DL_g_bMapStarted || !DL_g_bCvarAllow || DL_g_bRoundEnded || DL_g_bRoundLive || DL_g_hTimer)
+	{
+		DL_g_hRecoveryTimer = null;
+		return Plugin_Stop;
+	}
+	if (!DL_HasConfirmedHuman() || !DL_HasLivingSurvivor()) return Plugin_Continue;
+	// A late reload must not freeze players who have already left the start area.
+	if (L4D_HasAnySurvivorLeftSafeArea())
+	{
+		DL_g_bRoundLive = true;
+		DL_g_hRecoveryTimer = null;
+		return Plugin_Stop;
+	}
+	DL_g_hRecoveryTimer = null;
+	DL_InitPlugin();
+	return Plugin_Stop;
 }
 
 void DL_DeleteTimer()
 {
 	DL_CancelRoundLifecycle();
-	if (DL_g_hTimer)
-	{
-		DL_UnFreezeSurBots();
-		DL_UnFreezePlayers();
-	}
 	delete DL_g_hTimer;
+	DL_UnFreezeSurBots();
+	DL_UnFreezePlayers();
 }
 
 void DL_Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
@@ -368,7 +427,7 @@ void DL_StartSequence()
 		DL_g_iCountDown = -1;
 		DL_LockDoor();
 		DL_FreezeSurBots();
-		DL_g_hTimer = CreateTimer(1.0, DL_tmrLoading, _, TIMER_REPEAT);
+		DL_g_hTimer = CreateTimer(1.0, DL_tmrLoading, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 		DL_BeginRoundLifecycle();
 	}
 	else if (DL_g_bFreezeNodoor)
@@ -376,8 +435,12 @@ void DL_StartSequence()
 		DL_g_iCountDown = -1;
 		DL_g_bFreezeAllowed = true;
 		if (DL_g_cNbStop != null)
-			DL_g_cNbStop.SetInt(1); // 没有安全门则连同僵尸特感一起定住
-		DL_g_hTimer = CreateTimer(1.0, DL_tmrLoading, _, TIMER_REPEAT);
+		{
+			DL_g_iSavedNbStop = DL_g_cNbStop.IntValue;
+			DL_g_bOwnNbStop = true;
+			DL_g_cNbStop.SetInt(1);
+		}
+		DL_g_hTimer = CreateTimer(1.0, DL_tmrLoading, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 		DL_BeginRoundLifecycle();
 	}
 	else
@@ -391,13 +454,22 @@ void DL_StartSequence()
 
 Action DL_tmrImmediateLive(Handle timer)
 {
-	DL_CompleteRoundLifecycle();
+	if (timer != DL_g_hTimer) return Plugin_Stop;
 	DL_g_hTimer = null;
+	DL_CompleteRoundLifecycle();
 	return Plugin_Stop;
 }
 
 Action DL_tmrLoading(Handle timer)
 {
+	if (timer != DL_g_hTimer) return Plugin_Stop;
+	// The multiplayer plugin intentionally removes bots on empty servers.
+	// Never consume the preparation period before a human has actually joined.
+	if (!DL_HasConfirmedHuman() || !DL_HasLivingSurvivor())
+	{
+		DL_g_iCountDown = -1;
+		return Plugin_Continue;
+	}
 	if (DL_g_iCountDown >= 0)
 	{
 		if (DL_g_iCountDown >= (DL_g_bFirstRound ? DL_g_iPrepareTime1r : DL_g_iPrepareTime2r))
@@ -407,12 +479,13 @@ Action DL_tmrLoading(Handle timer)
 			DL_UnLockDoor();
 			DL_UnFreezeSurBots();
 			DL_UnFreezePlayers();
+			DL_g_bFreezeAllowed = false;
+			DL_g_hTimer = null; // forwards may synchronously cancel/restart the phase
 			DL_CompleteRoundLifecycle();
 
 			DL_PlaySound(DL_SOUND_MOVEOUT);
 			DL_PrintTextAll("%s", DL_TXT_MOVEOUT);
 
-			DL_g_hTimer = null;
 			return Plugin_Stop;
 		}
 		else
@@ -530,39 +603,50 @@ void DL_UnLockDoor()
 void DL_FreezeSurBots()
 {
 	if (DL_g_cSbStop != null)
+	{
+		DL_g_iSavedSbStop = DL_g_cSbStop.IntValue;
+		DL_g_bOwnSbStop = true;
 		DL_g_cSbStop.SetInt(1);
+	}
 }
 
 void DL_UnFreezeSurBots()
 {
-	if (DL_g_cSbStop != null)
-		DL_g_cSbStop.SetInt(0);
+	if (DL_g_bOwnSbStop && DL_g_cSbStop != null && DL_g_cSbStop.IntValue == 1)
+		DL_g_cSbStop.SetInt(DL_g_iSavedSbStop);
+	DL_g_bOwnSbStop = false;
 }
 
 void DL_UnFreezePlayers()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsClientInGame(i) && GetEntityMoveType(i) == MOVETYPE_NONE)
+		if (DL_g_iFrozenUserId[i] && IsClientInGame(i) && GetClientUserId(i) == DL_g_iFrozenUserId[i]
+			&& GetClientTeam(i) == 2 && GetEntityMoveType(i) == MOVETYPE_NONE)
 		{
 			SetEntityMoveType(i, MOVETYPE_WALK);
 		}
+		DL_g_iFrozenUserId[i] = 0;
 	}
 
-	if (DL_g_cNbStop != null)
-		DL_g_cNbStop.SetInt(0);
+	if (DL_g_bOwnNbStop && DL_g_cNbStop != null && DL_g_cNbStop.IntValue == 1)
+		DL_g_cNbStop.SetInt(DL_g_iSavedNbStop);
+	DL_g_bOwnNbStop = false;
 }
 
 void DL_InitPlugin()
 {
 	// 只有门锁准备模式（l4d_ready_enabled = 4）才由门锁接管开局；
 	// 1/2/3 交给 ReadyUp 自己的准备流程，0 表示两者都不跑。
-	if (!DL_IsDoorLockReadyMode())
+	if (!DL_g_bCvarAllow || !DL_IsDoorLockReadyMode() || DL_g_bRoundEnded || DL_g_bRoundLive || DL_g_hTimer)
 		return;
+	if (DL_g_iCurrentMode == GAMEMODE_VERSUS)
+		DL_g_bFirstRound = !GameRules_GetProp("m_bInSecondHalfOfRound");
 
 	DL_g_iStartDoor = 0;
 	int ent = L4D_GetCheckpointFirst();
-	if (ent != -1 && GetEntProp(ent, Prop_Send, "m_bLocked") == 1)
+	// A closed checkpoint can already be engine-unlocked on a late load.
+	if (ent > MaxClients && IsValidEntity(ent) && HasEntProp(ent, Prop_Send, "m_eDoorState") && GetEntProp(ent, Prop_Send, "m_eDoorState") == 0)
 	{
 		DL_g_iStartDoor = EntIndexToEntRef(ent);
 		if (!DL_g_bBreakTheDoor)
@@ -575,13 +659,34 @@ void DL_InitPlugin()
 	}
 
 	DL_StartSequence();
+	LogMessage("[ReadyUp] DoorLock started: door=%d round_events=%d/%d", EntRefToEntIndex(DL_g_iStartDoor), DL_g_iRoundStart, DL_g_iPlayerSpawn);
 }
 
 //https://forums.alliedmods.net/showthread.php?p=2700212
 void DL_OnOpen(const char[] output, int entity, int activator, float delay)
 {
+	if (entity <= MaxClients || !IsValidEntity(entity)) return;
 	char sModel[PLATFORM_MAX_PATH];
 	GetEntPropString(entity, Prop_Data, "m_ModelName", sModel, sizeof sModel);
+	if (!sModel[0] || !IsModelPrecached(sModel))
+	{
+		LogError("[ReadyUp] Skipping physics door: model is not precached (%s)", sModel);
+		return;
+	}
+	// Do not hide the working door until its replacement has actually spawned.
+	int ent = CreateEntityByName("prop_physics");
+	if (ent == -1)
+	{
+		LogError("[ReadyUp] Could not create physics door (entity limit)");
+		return;
+	}
+	DispatchKeyValue(ent, "spawnflags", "4");
+	DispatchKeyValue(ent, "model", sModel);
+	if (!DispatchSpawn(ent))
+	{
+		RemoveEntity(ent);
+		return;
+	}
 
 	float vPos[3], vAng[3], vDir[3];
 	GetEntPropVector(entity, Prop_Data, "m_vecAbsOrigin", vPos);
@@ -602,12 +707,6 @@ void DL_OnOpen(const char[] output, int entity, int activator, float delay)
 	SetEntityRenderColor(entity, 0, 0, 0, 0);
 
 	UnhookSingleEntityOutput(entity, "OnOpen", DL_OnOpen);
-
-	// Create new physics door
-	int ent = CreateEntityByName("prop_physics");
-	DispatchKeyValue(ent, "spawnflags", "4"); // Prevent collision - make non-solid
-	DispatchKeyValue(ent, "model", sModel);
-	DispatchSpawn(ent);
 
 	// Teleport to current door, ready to take it's attachments
 	TeleportEntity(ent, vPos, vAng, NULL_VECTOR);
@@ -661,7 +760,7 @@ bool DL_IsFinishedLoading()
 				if (DL_g_iTimeout[i] == 1)
 					DL_g_bIsLoading[i] = true;
 
-				if (DL_g_iTimeout[i] == DL_g_iClientTimeOut)
+				if (DL_g_iTimeout[i] >= DL_g_iClientTimeOut)
 					DL_g_bIsLoading[i] = false;
 			}
 			else

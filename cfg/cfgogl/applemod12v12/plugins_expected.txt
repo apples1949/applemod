@@ -1,8 +1,10 @@
+// Generated from the 12v12 startup chain; checked by sm_confoglplugins.
 left4dhooks.smx
 optional/another/l4d2lib_edi.smx
 optional/another/predictable_unloader_edi.smx
-fixes/bequiet.smx
-fixes/l4d_skip_intro.smx
+fixes/Hunter_pounce_alignment_fix.smx
+optional/another/bequiet_edi.smx
+optional/another/l4d_skip_intro_edi.smx
 fixes/command_buffer.smx
 fixes/TickrateFixes.smx
 fixes/l4d2_pistol_delay.smx
@@ -72,7 +74,6 @@ fixes/l4d_vomit_trace_patch.smx
 optional/l4d2_block_autoaim.smx
 anticheat/l4d2_noghostcheat.smx
 fixes/float_nan_inf_detector.smx
-fixes/Hunter_pounce_alignment_fix.smx
 basebans.smx
 basecommands.smx
 basecomm.smx
@@ -217,7 +218,6 @@ optional/another/l4d2_callvote.smx
 optional/another/l4d_death_soul.smx
 optional/another/l4d2_karma_kill.smx
 optional/another/l4d_pig_infected_notify.smx
-optional/applemod/AI_HardSI.smx
 optional/another/l4d_bot_healing.smx
 optional/another/l4d2_global_shadow_fix.smx
 optional/another/l4d2_Survivor_Legs.smx
@@ -271,7 +271,6 @@ optional/another/ThirdPersonShoulder_Detect.smx
 optional/another/show_mic.smx
 optional/another/l4d2_block_no_steam_logon_all.smx
 optional/another/l4d_reservedslots.smx
-optional/another/l4d2_unreservelobby.smx
 optional/another/l4d2_server_ragdoll.smx
 optional/another/l4d_jump_beamring.smx
 optional/another/l4d_freely_round_end.smx

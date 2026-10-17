@@ -1,0 +1,124 @@
+#pragma semicolon 1
+
+#include <colors>
+#pragma newdecls required
+#include <sourcemod>
+
+
+ConVar hCvarCvarChange, hCvarNameChange, hCvarSpecNameChange, hCvarSpecSeeChat;
+bool bCvarChange, bNameChange, bSpecNameChange, bSpecSeeChat;
+
+public Plugin myinfo = 
+{
+    name = "BeQuiet",
+    author = "Sir",
+    description = "Please be Quiet!",
+    version = "1.33.7",
+    url = "https://github.com/SirPlease/SirCoding"
+}
+
+public void OnPluginStart()
+{
+    AddCommandListener(Say_Callback, "say");
+    AddCommandListener(TeamSay_Callback, "say_team");
+
+    //Server CVar
+    HookEvent("server_cvar", Event_ServerConVar, EventHookMode_Pre);
+    HookEvent("player_changename", Event_NameChange, EventHookMode_Pre);
+
+    //Cvars
+    hCvarCvarChange = CreateConVar("bq_cvar_change_suppress", "1", "静音服务器 Cvar 变更提示，让聊天栏保持干净无干扰。");
+    hCvarNameChange = CreateConVar("bq_name_change_suppress", "1", "静音玩家改名提示。");
+    hCvarSpecNameChange = CreateConVar("bq_name_change_spec_suppress", "1", "静音旁观玩家改名提示。");
+    hCvarSpecSeeChat = CreateConVar("bq_show_player_team_chat_spec", "0", "向旁观者显示生还者和感染者的队伍聊天？");
+
+    bCvarChange = GetConVarBool(hCvarCvarChange);
+    bNameChange = GetConVarBool(hCvarNameChange);
+    bSpecNameChange = GetConVarBool(hCvarSpecNameChange);
+    bSpecSeeChat = GetConVarBool(hCvarSpecSeeChat);
+
+    hCvarCvarChange.AddChangeHook(cvarChanged);
+    hCvarNameChange.AddChangeHook(cvarChanged);
+    hCvarSpecNameChange.AddChangeHook(cvarChanged);
+    hCvarSpecSeeChat.AddChangeHook(cvarChanged);
+
+    //AutoExecConfig(true);
+    LoadTranslations("bequiet.phrases");
+}
+
+Action Say_Callback(int client, char[] command, int args)
+{
+    char sayWord[MAX_NAME_LENGTH];
+    GetCmdArg(1, sayWord, sizeof(sayWord));
+    
+    if(sayWord[0] == '!' || sayWord[0] == '/')
+    {
+        return Plugin_Handled;
+    }
+    return Plugin_Continue; 
+}
+
+Action TeamSay_Callback(int client, char[] command, int args)
+{
+    char sayWord[MAX_NAME_LENGTH];
+    GetCmdArg(1, sayWord, sizeof(sayWord));
+    
+    if(sayWord[0] == '!' || sayWord[0] == '/')
+    {
+        return Plugin_Handled;
+    }
+    
+    if (bSpecSeeChat && IsValidClient(client) && GetClientTeam(client) != 1)
+    {
+        char sChat[256];
+        GetCmdArgString(sChat, 256);
+        StripQuotes(sChat);
+        int i = 1;
+        while (i <= 65)
+        {
+            if (IsValidClient(i) && GetClientTeam(i) == 1)
+            {
+                if (GetClientTeam(client) == 2)
+                {
+                    CPrintToChat(i, "%t", "SurvivorSay", client, sChat);
+                }
+                else CPrintToChat(i, "%t", "InfectedSay", client, sChat);
+            }
+            i++;
+        }
+    }
+    return Plugin_Continue;
+}
+
+Action Event_ServerConVar(Event event, const char[] name, bool dontBroadcast)
+{
+    if (bCvarChange) return Plugin_Handled;
+    return Plugin_Continue;
+}
+
+Action Event_NameChange(Event event, const char[] name, bool dontBroadcast)
+{
+    int clientid = event.GetInt("userid");
+    int client = GetClientOfUserId(clientid); 
+
+    if (IsValidClient(client))
+    {
+        if (GetClientTeam(client) == 1 && bSpecNameChange) return Plugin_Handled;
+        else if (bNameChange) return Plugin_Handled;
+    }
+    return Plugin_Continue;
+}
+
+void cvarChanged(Handle convar, const char[] oldValue, const char[] newValue)
+{
+    bCvarChange = hCvarCvarChange.BoolValue;
+    bNameChange = hCvarNameChange.BoolValue;
+    bSpecNameChange = hCvarSpecNameChange.BoolValue;
+    bSpecSeeChat = hCvarSpecSeeChat.BoolValue;
+}
+
+bool IsValidClient(int client)
+{ 
+    if (client <= 0 || client > MaxClients || !IsClientConnected(client) || !IsClientInGame(client)) return false; 
+    return true;
+}

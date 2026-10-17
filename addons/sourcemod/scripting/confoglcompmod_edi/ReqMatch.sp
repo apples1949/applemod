@@ -20,6 +20,7 @@ static bool
 	RM_bIsChmatchRequest = false;
 
 static Handle
+	RM_hRestartTimer = null,
 	RM_hFwdMatchLoad   = null,
 	RM_hFwdMatchUnload = null;
 
@@ -66,7 +67,6 @@ void RM_OnModuleStart()
 	RegAdminCmd("sm_forcechangematch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
 	RegAdminCmd("sm_fchmatch", RM_CMD_ChangeMatch, ADMFLAG_CONFIG, "Forces the match to be changed");
 	RegAdminCmd("sm_confoglstatus", RM_Cmd_Status, ADMFLAG_CONFIG, "Show the loaded config, match state and CVar commit status");
-	RegAdminCmd("sm_confoglplugins", RM_Cmd_Plugins, ADMFLAG_CONFIG, "Check expected mode plugins for missing/failed/paused states");
 
 	RM_hSbAllBotGame = FindConVar("sb_all_bot_game");
 	// Engine ConVars survive a plugin reload; never include this in tracked match settings.
@@ -142,6 +142,13 @@ void RM_OnMapStart()
 	}
 
 	RM_Match_Load();
+}
+
+void RM_OnMapEnd()
+{
+	// A pending restart belongs to the old map, not the map loaded by another plugin.
+	if (RM_hRestartTimer) RM_bIsMapRestarted = true;
+	delete RM_hRestartTimer;
 }
 
 void RM_OnClientPutInServer()
@@ -235,7 +242,7 @@ static void RM_Match_Load()
 		return;
 	}
 	RM_hPersistentActive.SetInt(1);
-	CreateTimer(0.5, RM_CheckConfigCommit);
+	CreateTimer(0.5, RM_CheckConfigCommit, _, TIMER_FLAG_NO_MAPCHANGE);
 
 	if (RM_bDebugEnabled || IsDebugEnabled())
 	{
@@ -258,7 +265,22 @@ static void RM_Match_Load()
 	// PrintToChatAll("\x01[\x05Confogl\x01] Match mode loaded!");
 	CPrintToChatAll("{blue}[{default}Confogl{blue}]{default} Match mode loaded!");
 
-	if (!RM_bIsMapRestarted && RM_hDoRestart.BoolValue)
+	// Restart is scheduled by RM_CheckConfigCommit after queued CFGs execute.
+	// Reading match_restart here could still see the previous mode's value.
+	if (RM_bDebugEnabled || IsDebugEnabled())
+	{
+		LogMessage("[%s] Match mode loaded!", RM_MODULE_NAME);
+	}
+
+	RM_bIsChmatchRequest = false;
+
+	Call_StartForward(RM_hFwdMatchLoad);
+	Call_Finish();
+}
+
+static void RM_QueueMapRestart()
+{
+	if (RM_bIsMatchModeLoaded && !RM_bIsMapRestarted && !RM_hRestartTimer && RM_hDoRestart.BoolValue)
 	{
 		char sMap[PLATFORM_MAX_PATH];
 		RM_hChangeMap.GetString(sMap, sizeof(sMap));
@@ -275,19 +297,9 @@ static void RM_Match_Load()
 		}
 
 		DataPack hDp;
-		CreateDataTimer(MAPRESTARTTIME, RM_Match_MapRestart_Timer, hDp);
+		RM_hRestartTimer = CreateDataTimer(MAPRESTARTTIME, RM_Match_MapRestart_Timer, hDp, TIMER_FLAG_NO_MAPCHANGE);
 		hDp.WriteString(sMap);
 	}
-
-	if (RM_bDebugEnabled || IsDebugEnabled())
-	{
-		LogMessage("[%s] Match mode loaded!", RM_MODULE_NAME);
-	}
-
-	RM_bIsChmatchRequest = false;
-
-	Call_StartForward(RM_hFwdMatchLoad);
-	Call_Finish();
 }
 
 static void RM_Match_Unload(bool bForced = false)
@@ -316,6 +328,7 @@ static void RM_Match_Unload(bool bForced = false)
 	}
 
 	char sBuffer[128];
+	delete RM_hRestartTimer;
 	RM_bIsMatchModeLoaded = false;
 	IsPluginEnabled(true, false);
 	RM_bIsMapRestarted	= false;
@@ -355,15 +368,17 @@ static void RM_Match_Unload(bool bForced = false)
 
 static Action RM_CheckConfigCommit(Handle timer)
 {
-	if (RM_bIsMatchModeLoaded) RM_AuditPlugins(0);
+	if (!RM_bIsMatchModeLoaded) return Plugin_Stop;
 #if MODULE_CVARSETTINGS
 	if (RM_bIsMatchModeLoaded && !CVS_IsTrackingStarted())
 	{
 		char sConfig[PLATFORM_MAX_PATH];
 		Configs_GetConfigName(sConfig, sizeof(sConfig));
 		LogError("[%s] Mode '%s' is active but its CVar settings were not committed. Check the exec chain and confogl_setcvars; run sm_confoglstatus.", RM_MODULE_NAME, sConfig);
+		return Plugin_Stop;
 	}
 #endif
+	RM_QueueMapRestart();
 	return Plugin_Stop;
 }
 
@@ -376,77 +391,18 @@ static Action RM_Cmd_Status(int client, int args)
 	RM_hAutoCfg.GetString(sAuto, sizeof(sAuto));
 	ReplyToCommand(client, "[Confogl] v%s | file=%s | cfg='%s' | entry=%s | autoconfig='%s'", PLUGIN_VERSION, sFile, sConfig, sEntry, sAuto);
 	ReplyToCommand(client, "[Confogl] enabled=%d | active=%d | loaded=%d | plugins=%d | reloaded=%d | recovery=%d | restoring=%d | restarted=%d", IsPluginEnabled(), RM_bIsAMatchActive, RM_bIsMatchModeLoaded, RM_bIsPluginsLoaded, RM_hReloaded.IntValue, RM_hPersistentActive.IntValue, RM_bRestorePending, RM_bIsMapRestarted);
+	ReplyToCommand(client, "[Confogl] restart_enabled=%d | restart_pending=%d", RM_hDoRestart.IntValue, RM_hRestartTimer != null);
 #if MODULE_CVARSETTINGS
 	CVS_ReplyStatus(client);
 #endif
 	return Plugin_Handled;
 }
 
-static Action RM_Cmd_Plugins(int client, int args)
-{
-	RM_AuditPlugins(client);
-	return Plugin_Handled;
-}
-
-static bool RM_AuditPlugins(int client)
-{
-	char config[PLATFORM_MAX_PATH], manifest[PLATFORM_MAX_PATH];
-	Configs_GetConfigName(config, sizeof(config));
-	if (!config[0]) return true;
-	BuildPath(Path_SM, manifest, sizeof(manifest), "../../cfg/cfgogl/%s/plugins_expected.txt", config);
-	// Other mode packs may not ship a manifest. 12v12 must have one.
-	if (!FileExists(manifest))
-	{
-		if (!StrEqual(config, "applemod12v12")) return true;
-		LogError("[%s] Missing plugin manifest: %s", RM_MODULE_NAME, manifest);
-		ReplyToCommand(client, "[Confogl] Missing plugins_expected.txt for %s", config);
-		return false;
-	}
-	File file = OpenFile(manifest, "r");
-	if (file == null)
-	{
-		LogError("[%s] Cannot read plugin manifest: %s", RM_MODULE_NAME, manifest);
-		return false;
-	}
-	int expected, failed;
-	char filename[PLATFORM_MAX_PATH];
-	while (file.ReadLine(filename, sizeof(filename)))
-	{
-		TrimString(filename);
-		if (!filename[0] || filename[0] == '/' || filename[0] == '#') continue;
-		expected++;
-		Handle plugin = FindPluginByFile(filename);
-		if (plugin == null)
-		{
-			failed++;
-			LogError("[%s] Expected plugin missing: %s", RM_MODULE_NAME, filename);
-			ReplyToCommand(client, "[Confogl] MISSING: %s", filename);
-		}
-		else if (GetPluginStatus(plugin) != Plugin_Running)
-		{
-			failed++;
-			LogError("[%s] Expected plugin not running: %s (status=%d)", RM_MODULE_NAME, filename, GetPluginStatus(plugin));
-			ReplyToCommand(client, "[Confogl] NOT RUNNING: %s (status=%d)", filename, GetPluginStatus(plugin));
-		}
-	}
-	delete file;
-	if (!expected)
-	{
-		LogError("[%s] Empty plugin manifest for %s", RM_MODULE_NAME, config);
-		return false;
-	}
-	ReplyToCommand(client, "[Confogl] %s: expected=%d running=%d missing_or_failed=%d", config, expected, expected - failed, failed);
-	return failed == 0;
-}
-
 static Action RM_Match_MapRestart_Timer(Handle hTimer, DataPack hDp)
 {
-	// Never lock plugin loading and restart into a partially loaded mode.
-	if (!RM_AuditPlugins(0))
-	{
-		LogError("[%s] Match restart/load_lock cancelled: plugin audit failed. Check sm_confoglplugins and SourceMod error logs.", RM_MODULE_NAME);
-		return Plugin_Stop;
-	}
+	if (hTimer != RM_hRestartTimer) return Plugin_Stop;
+	RM_hRestartTimer = null;
+	if (!RM_bIsMatchModeLoaded || RM_bIsMapRestarted) return Plugin_Stop;
 #if MODULE_CVARSETTINGS
 	if (!CVS_IsTrackingStarted())
 	{
@@ -465,9 +421,8 @@ static Action RM_Match_MapRestart_Timer(Handle hTimer, DataPack hDp)
 	hDp.Reset();
 	hDp.ReadString(sMap, sizeof(sMap));
 
-	ForceChangeLevel(sMap, "Match restart");
-
 	RM_bIsMapRestarted = true;
+	ForceChangeLevel(sMap, "Match restart");
 
 	return Plugin_Stop;
 }

@@ -3,7 +3,7 @@
 
 #define DEBUG_ALL				   0
 
-#define PLUGIN_VERSION			   "2.5.3-applefix-audit3"
+#define PLUGIN_VERSION			   "2.5.3-applefix5"
 
 // Using these macros, you can disable unnecessary modules,
 // and they will not be included in the plugin at compile time,
@@ -298,6 +298,9 @@ public void OnMapStart()
 
 public void OnMapEnd()
 {
+#if MODULE_REQMATCH
+	RM_OnMapEnd();
+#endif
 	// Modules
 	#if MODULE_MAPINFO
 	MI_OnMapEnd();	  // MapInfo

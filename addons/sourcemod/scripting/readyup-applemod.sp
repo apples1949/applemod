@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.0-audit2"
+#define PLUGIN_VERSION "10.3.1-audit3"
 
 public Plugin myinfo =
 {
@@ -133,6 +133,7 @@ char g_sDisruptReason[disruptType_SIZE][] =
 };
 
 // Sub modules are included here
+#include "readyup-applemod/doorlock.inc"
 #include "readyup-applemod/action.inc"
 #include "readyup-applemod/command.inc"
 #include "readyup-applemod/game.inc"
@@ -143,7 +144,6 @@ char g_sDisruptReason[disruptType_SIZE][] =
 #include "readyup-applemod/sound.inc"
 #include "readyup-applemod/util.inc"
 // 原 optional/12v12/l4d2_doorlock.smx：门锁 + 加载等待 + 倒计时开门，已并入本插件
-#include "readyup-applemod/doorlock.inc"
 
 // ========================
 //  Plugin Setup
@@ -173,11 +173,14 @@ public void OnPluginStart()
 
 	// 门锁模块（原 l4d2_doorlock.smx）
 	DL_OnPluginStart();
+	l4d_ready_enabled.AddChangeHook(CvarChg_ReadyMode);
+	RegAdminCmd("sm_readystatus", ReadyStatus_Cmd, ADMFLAG_CONFIG, "Show ReadyUp / door lock lifecycle state");
 }
 
 public void OnPluginEnd()
 {
-	InitiateLive(false);
+	if (inReadyUp) InitiateLive(false);
+	else StopReadyTimers();
 	DL_OnPluginEnd();
 }
 
@@ -209,6 +212,21 @@ void FindCasterSystem()
 // ========================
 //  ConVar Change
 // ========================
+
+void CvarChg_ReadyMode(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (inReadyUp) InitiateLive(false);
+	readyUpMode = convar.IntValue;
+	DL_IsAllowed();
+}
+
+Action ReadyStatus_Cmd(int client, int args)
+{
+	ReplyToCommand(client, "[ReadyUp %s] mode=%d manual=%d external=%d live=%d", PLUGIN_VERSION, l4d_ready_enabled.IntValue, inReadyUp, externalReadyActive, DL_g_bRoundLive);
+	ReplyToCommand(client, "[DoorLock] allow=%d effective=%d map=%d configs=%d ended=%d events=%d/%d", DL_g_cAllow.IntValue, DL_g_bCvarAllow, DL_g_bMapStarted, DL_g_bConfigsReady, DL_g_bRoundEnded, DL_g_iRoundStart, DL_g_iPlayerSpawn);
+	ReplyToCommand(client, "[DoorLock] human=%d survivor=%d door=%d countdown=%d timer=%d recovery=%d freeze=%d modebits=%d/%d", DL_HasConfirmedHuman(), DL_HasLivingSurvivor(), EntRefToEntIndex(DL_g_iStartDoor), DL_g_iCountDown, DL_g_hTimer != null, DL_g_hRecoveryTimer != null, DL_g_bFreezeAllowed, DL_g_iCurrentMode, DL_g_cModesTog.IntValue);
+	return Plugin_Handled;
+}
 
 void CvarChg_SurvFreeze(ConVar convar, const char[] oldValue, const char[] newValue)
 {
@@ -417,6 +435,12 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
 
 public Action L4D_OnFirstSurvivorLeftSafeArea(int client)
 {
+	if (DL_g_bCvarAllow && !DL_g_bRoundLive && !DL_g_bRoundEnded && (externalReadyActive || DL_g_hRecoveryTimer != null))
+	{
+		// Cover the short recovery interval before the lock timer starts as well.
+		ReturnPlayerToSaferoom(client, false);
+		return Plugin_Handled;
+	}
 	if (inReadyUp)
 	{
 		CreateTimer(0.1, Timer_RestartCountdowns, false, TIMER_FLAG_NO_MAPCHANGE);

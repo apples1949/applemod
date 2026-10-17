@@ -24,6 +24,11 @@ void ToggleCommandListeners(bool hook)
 
 Action Ready_Cmd(int client, int args)
 {
+	if (DL_IsDoorLockReadyMode())
+	{
+		ReplyToCommand(client, "[ReadyUp] 当前为自动门锁准备：等待玩家加载后自动倒计时，无需 !ready。管理员可用 !fs 提前结束等待。");
+		return Plugin_Handled;
+	}
 	if (inReadyUp && IsPlayer(client))
 	{
 		if (!SetPlayerReady(client, true))
@@ -38,6 +43,11 @@ Action Ready_Cmd(int client, int args)
 
 Action Unready_Cmd(int client, int args)
 {
+	if (DL_IsDoorLockReadyMode())
+	{
+		ReplyToCommand(client, "[ReadyUp] 当前为自动门锁准备，!unready 不会暂停自动倒计时。");
+		return Plugin_Handled;
+	}
 	if (l4d_ready_autoready.BoolValue)
 	{
 		return Plugin_Handled;
@@ -79,6 +89,7 @@ Action Unready_Cmd(int client, int args)
 
 Action ToggleReady_Cmd(int client, int args)
 {
+	if (DL_IsDoorLockReadyMode()) return Ready_Cmd(client, args);
 	if (inReadyUp)
 	{
 		return IsPlayerReady(client) ? Unready_Cmd(client, 0) : Ready_Cmd(client, 0);
@@ -92,6 +103,16 @@ Action ToggleReady_Cmd(int client, int args)
 
 Action ForceStart_Cmd(int client, int args)
 {
+	if (DL_IsDoorLockReadyMode())
+	{
+		if (CheckCommandAccess(client, "sm_ban", ADMFLAG_BAN) && externalReadyActive && DL_g_hTimer)
+		{
+			DL_g_iCountDown = DL_g_bFirstRound ? DL_g_iPrepareTime1r : DL_g_iPrepareTime2r;
+			ReplyToCommand(client, "[ReadyUp] 已请求开局，将在下一次门锁计时检查时解锁。");
+		}
+		else ReplyToCommand(client, "[ReadyUp] 当前没有可强制结束的门锁准备阶段；管理员可用 sm_readystatus 查看状态。");
+		return Plugin_Handled;
+	}
 	if (inReadyUp && readyUpMode != ReadyMode_AutoStart)
 	{
 		// Check if admin always allowed to do so

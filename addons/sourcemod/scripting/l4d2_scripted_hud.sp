@@ -1348,6 +1348,17 @@ void GetHUD1_Text(char[] output, int size)
             Format(output, size, "%s    女巫: [ 固定 ]", output);
     }
 
+    // 第二行：队伍人数概览。无条件输出, 不依赖 l4d2_hybrid_scoremod 是否加载,
+    // 否则 12v12 这类未装 scoremod 的配置里 hud1 永远只有一行进度.
+    // 取数口径见 GetHUDRoundCounts() / GetTeamLimit() 的注释.
+    int survivorsAlive, survivorsUp, infectedCount, spectatorCount;
+    GetHUDRoundCounts(survivorsAlive, survivorsUp, infectedCount, spectatorCount);
+    int survivorLimit = GetTeamLimit("l4d_survivor_limit", "survivor_limit");
+    int infectedLimit = GetTeamLimit("l4d_infected_limit", "z_max_player_zombies");
+    Format(output, size, "%s\n生还者：%d/%d/%d；感染者：%d/%d；旁观者：%d",
+        output, survivorsAlive, survivorsUp, survivorLimit, infectedCount, infectedLimit, spectatorCount);
+
+    // 装了 scoremod 才有奖励分; 作为第三行追加, 不打乱上面的人数行格式.
     if (g_bhybridScoringAvailable)
     {
         float maxBouns = float(SMPlus_GetHealthBonus()) + float(SMPlus_GetDamageBonus()) + float(SMPlus_GetPillsBonus());
@@ -1356,6 +1367,74 @@ void GetHUD1_Text(char[] output, int size)
         float pillsBpnusPercent = float(SMPlus_GetPillsBonus()) / float(SMPlus_GetMaxPillsBonus()) * 100;
         Format(output, size, "%s\n奖励分: %.0f [实血分: %.0f%% | 虚血分: %.0f%% | 药分: %.0f%% ]", output, maxBouns, healthBonusPercent, damageBonusPercent, pillsBpnusPercent);
     }
+}
+
+// 生还者存活/未倒地、感染者、旁观者人数.
+// 口径(12v12 语境), 与用户给的原话「生还者：当前总存活人数/未倒地人数/12；
+// 感染者：当前感染者玩家数量/12；旁观者：旁观者人数」逐项对应:
+//   - 生还者「总存活人数」= 在队生还者里 IsPlayerAlive 为真的数量, **包含 bot**.
+//     12v12 里空位会被 bot 填上, bot 也是要清掉的实际目标, 漏掉它们会让数字比场上实况小.
+//   - 「未倒地人数」= 上述存活者里 m_isIncapacitated 为 0 的数量, 即还能自由行动的战力.
+//     挂在边缘(m_isHangingFromLedge)不算倒地, 不计入扣减, 与社区口径一致.
+//   - 感染者「玩家数量」= 在队感染者里的真人玩家(!IsFakeClient). 原版 L4D2 对抗没有
+//     AI 特感 bot, 若服上装了会生成 SI bot 的插件, 那些也不算「玩家」.
+//   - 旁观者 = 在游戏但不在生还者/感染者两队的真人(含 caster_system 上的解说),
+//     与本插件其它地方「旁观/解说都算旁观者」的口径一致.
+void GetHUDRoundCounts(int &survivorsAlive, int &survivorsUp, int &infectedCount, int &spectatorCount)
+{
+    survivorsAlive = 0;
+    survivorsUp = 0;
+    infectedCount = 0;
+    spectatorCount = 0;
+
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (!IsClientInGame(i))
+            continue;
+
+        int team = GetClientTeam(i);
+        if (team == 2) // TEAM_SURVIVOR: 本文件没有该宏, 沿用文件里既有的字面量写法
+        {
+            if (!IsPlayerAlive(i))
+                continue;
+
+            survivorsAlive++;
+            if (!IsPlayerIncapacitated(i))
+                survivorsUp++;
+        }
+        else if (team == TEAM_INFECTED)
+        {
+            if (!IsFakeClient(i))
+                infectedCount++;
+        }
+        else
+        {
+            if (!IsFakeClient(i))
+                spectatorCount++;
+        }
+    }
+}
+
+// 队伍上限: 先读 primary(applemod 12v12 用的 l4d_*_limit), 再回退 fallback(游戏自带 cvar),
+// 都读不到才回退 12; 结果夹在 [1, MaxClients] 内, 避免 cvar 被改坏时打出荒谬的分母.
+int GetTeamLimit(const char[] primary, const char[] fallback)
+{
+    ConVar cv = FindConVar(primary);
+    int limit = (cv != null) ? cv.IntValue : 0;
+    if (limit <= 0)
+    {
+        cv = FindConVar(fallback);
+        if (cv != null)
+            limit = cv.IntValue;
+    }
+
+    if (limit <= 0)
+        limit = 12;
+
+    if (limit > MaxClients)
+        limit = MaxClients;
+
+    return limit;
 }
 
 // ====================================================================================================
@@ -1434,7 +1513,7 @@ void GetHUD2_Text(char[] output, int size)
     char sTime[16];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
     FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
-    FormatEx(output, size, "%s(%d/%d/%d)\n%s !onhud/!offhud开关HUD", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+    FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
 }
 
 // ====================================================================================================

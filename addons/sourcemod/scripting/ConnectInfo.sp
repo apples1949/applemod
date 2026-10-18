@@ -44,15 +44,32 @@ enum struct ClientGeo {
 ClientGeo g_ClientGeo[MAXPLAYERS+1];
 char g_ClientIPs[MAXPLAYERS+1][36];
 
+// ============ 连接期缓存（供加载失败/未完成授权的玩家使用） ============
+// 加载失败（连接超时、被拒、Steam 验证失败等）的玩家不会走到 OnClientPostAdminCheck，
+// 而 player_disconnect 事件派发时引擎往往已经清掉该 client 的 in-game 状态，
+// 于是 ResolvePlaceholders 里的 IsClientInGame(client) 为假，{PLAYERNAME} 退化成
+// 空串或 "Unknown" —— 这就是「加载失败的玩家名字显示不出来」的根因。
+// 这里在 player_connect 阶段把引擎持有的原始名字与地址缓存下来做兜底。
+// 注意 client 槽位会被复用，所以每个槽位额外记录 userid（引擎内单调递增、不复用），
+// 读取时必须 userid 对得上，避免把上一个玩家的名字套到下一个玩家身上。
+char g_ConnectNames[MAXPLAYERS+1][MAX_NAME_LENGTH];
+int g_ConnectUserIds[MAXPLAYERS+1];
+
 public Plugin myinfo = {
     name = "Connect info",
     author = "HoongDou apples1949",
     description = "Print SteamID, IP and geo location (geoip) on player connect/disconnect",
-    version = "2.3",
+    version = "2.4",
     url = ""
 };
 
 public void OnPluginStart() {
+    // player_connect 早于授权与进游戏，此时引擎仍持有玩家在连接界面的原始名字与地址，
+    // 用它做缓存给 player_disconnect 兜底（加载失败的玩家拿不到 in-game 客户端名字）。
+    // 两个事件都挂：player_connect_client 是新版事件（来源较可靠），
+    // player_connect 是旧版事件（额外携带 address 字段），两者先后触发时按 userid 幂等处理。
+    HookEventEx("player_connect_client", Event_PlayerConnect, EventHookMode_Pre);
+    HookEventEx("player_connect", Event_PlayerConnect, EventHookMode_Pre);
     HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
     
     // 显示在场所有玩家归属地
@@ -129,56 +146,216 @@ public void OnClientPostAdminCheck(int client) {
     PrintJoinMessage(client);
 }
 
-public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
-    SetEventBroadcast(event, true);
-    
-    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+// ============ 连接期缓存写入 ============
+
+// 清空某个槽位的 geo（同一槽位换人时调用，避免把上一位玩家的归属地串给下一位）
+void ClearClientGeo(int client) {
+    g_ClientGeo[client].countryName[0] = '\0';
+    g_ClientGeo[client].countryCode[0] = '\0';
+    g_ClientGeo[client].region[0] = '\0';
+    g_ClientGeo[client].city[0] = '\0';
+}
+
+// player_connect 的 address 形如 "1.2.3.4:27005"；IPv6 形如 "2001:db8::1"。
+// 只有「恰好一个冒号、且冒号后全是数字」才判定为 IPv4:端口 并去掉端口部分。
+void NormalizeAddress(char[] address) {
+    TrimString(address);
+    int first = FindCharInString(address, ':');
+    if (first <= 0) {
+        return;
+    }
+    if (FindCharInString(address, ':', true) != first) {
+        return; // 多个冒号 → IPv6，原样保留
+    }
+    for (int i = first + 1; address[i] != '\0'; i++) {
+        if (address[i] < '0' || address[i] > '9') {
+            return;
+        }
+    }
+    address[first] = '\0';
+}
+
+// userid 已从引擎客户端表移除时 GetClientOfUserId 返回 0，
+// 用连接期记录的 userid 反查槽位，让加载失败的玩家也能正常播报。
+int FindClientSlotByUserId(int userid) {
+    if (userid <= 0) {
+        return 0;
+    }
+    for (int i = 1; i <= MaxClients; i++) {
+        if (g_ConnectUserIds[i] == userid) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// player_connect / player_connect_client 回调：缓存玩家在连接界面的原始名字与地址。
+// 加载失败（连接超时、被拒、Steam 验证失败等）的玩家不会走到 OnClientPostAdminCheck，
+// 而 player_disconnect 事件派发时该 client 通常已经不在游戏内（IsClientInGame 为假），
+// GetClientName 取不到名字 —— 这份缓存就是为了让这类断开也能显示正确名字。
+public void Event_PlayerConnect(Event event, const char[] name, bool dontBroadcast) {
+    int userid = GetEventInt(event, "userid");
+
+    // player_connect 自带 index（客户端槽位）；拿不到时再用 userid 反查
+    int client = GetEventInt(event, "index");
+    if (client <= 0 || client > MaxClients) {
+        client = GetClientOfUserId(userid);
+    }
     if (client <= 0 || client > MaxClients || IsFakeClient(client)) {
         return;
     }
-    
-    // 播放断开声音
-    PlayDisconnectSound();
-    
-    char steamId[32];
-    GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
-    
-    if (StrEqual(steamId, "BOT", false)) {
+
+    // 同一槽位换人了：先清掉上一位玩家残留的 geo / IP，避免串数据
+    if (g_ConnectUserIds[client] != userid) {
+        g_ConnectUserIds[client] = userid;
+        g_ConnectNames[client][0] = '\0';
+        g_ClientIPs[client][0] = '\0';
+        ClearClientGeo(client);
+    }
+
+    char rawName[MAX_NAME_LENGTH];
+    GetEventString(event, "name", rawName, sizeof(rawName));
+    TrimString(rawName);
+    // 只在拿到有效名字时覆盖：后续事件（player_connect_client）字段为空时不能冲掉已缓存的名字
+    if (rawName[0] != '\0' && !StrEqual(rawName, "unconnected", false)) {
+        strcopy(g_ConnectNames[client], sizeof(g_ConnectNames[]), rawName);
+    }
+
+    char rawAddress[64];
+    GetEventString(event, "address", rawAddress, sizeof(rawAddress));
+    if (rawAddress[0] == '\0') {
+        GetEventString(event, "ip", rawAddress, sizeof(rawAddress));
+    }
+    NormalizeAddress(rawAddress);
+    // 只缓存看起来像 IP 的值：address 也可能是 "loopback"/"localhost" 之类，
+    // 那种值显示在 {PLAYERIP} 里没有意义，留给后面的 GetClientIP 覆盖即可。
+    if (rawAddress[0] != '\0' && IsValidIpString(rawAddress)) {
+        // 授权完成后 OnClientPostAdminCheck 会用 GetClientIP 覆盖为权威值，
+        // 但从未完成授权的玩家只能靠这里的地址显示 {PLAYERIP}
+        strcopy(g_ClientIPs[client], sizeof(g_ClientIPs[]), rawAddress);
+    }
+}
+
+// 解析断开播报用的玩家名：事件 name 字段 → 连接期缓存 → 客户端实时名字。
+void ResolveDisconnectName(Event event, int client, int userid, char[] buffer, int maxlen) {
+    buffer[0] = '\0';
+
+    char eventName[MAX_NAME_LENGTH];
+    GetEventString(event, "name", eventName, sizeof(eventName));
+    TrimString(eventName);
+    if (eventName[0] != '\0' && !StrEqual(eventName, "unconnected", false) && !StrEqual(eventName, "Console", false)) {
+        strcopy(buffer, maxlen, eventName);
         return;
     }
-    
+
+    if (client > 0 && client <= MaxClients) {
+        if (g_ConnectUserIds[client] == userid && g_ConnectNames[client][0] != '\0') {
+            strcopy(buffer, maxlen, g_ConnectNames[client]);
+            return;
+        }
+        if (IsClientConnected(client) || IsClientInGame(client)) {
+            GetClientName(client, buffer, maxlen);
+            TrimString(buffer);
+            if (buffer[0] != '\0') {
+                return;
+            }
+        }
+    }
+
+    strcopy(buffer, maxlen, "Unknown");
+}
+
+public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
+    SetEventBroadcast(event, true);
+
+    // userid 可能在事件派发前就已从引擎客户端表移除（加载失败/连接中断的玩家尤其如此），
+    // 此时 GetClientOfUserId 返回 0，但事件里仍然带着 userid / name / networkid，
+    // 所以这里不再用「client 无效就直接 return」的写法，而是靠 userid + 连接期缓存兜底。
+    int userid = GetEventInt(event, "userid");
+    int client = GetClientOfUserId(userid);
+    if (client <= 0 || client > MaxClients) {
+        // 用连接期记录的 userid 反查槽位（仅用于读缓存，不代表客户端还在线）
+        client = FindClientSlotByUserId(userid);
+    }
+    if (client > 0 && client <= MaxClients && IsClientConnected(client) && IsFakeClient(client)) {
+        return;
+    }
+
+    // 解析显示名：事件 name → 连接期缓存 → 客户端实时名字。
+    // 加载失败的玩家走前两条，避免名字被填成空串 / Unknown。
+    char playerName[MAX_NAME_LENGTH];
+    ResolveDisconnectName(event, client, userid, playerName, sizeof(playerName));
+
+    // 机器人网络名同样以 BOT 结尾，客户端已失效时靠事件 networkid 判定
+    char steamId[32];
+    steamId[0] = '\0';
+    if (client > 0 && client <= MaxClients && (IsClientConnected(client) || IsClientInGame(client))) {
+        GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId));
+    } else {
+        GetEventString(event, "networkid", steamId, sizeof(steamId));
+    }
+    // 机器人的 auth 是字面量 "BOT"；客户端已失效时靠事件 networkid 判定。
+    // 注意这里不能用「steamId 为空就 return」：加载失败的真人玩家也可能取不到 auth，
+    // 那样反而把要修的播报整个吞掉。
+    if (StrEqual(steamId, "BOT", false) || StrContains(steamId, "BOT", false) != -1) {
+        return;
+    }
+
+    // 播放断开声音
+    PlayDisconnectSound();
+
     char reason[128];
     GetEventString(event, "reason", reason, sizeof(reason));
     // 去除换行，替换为空格（与 cannounce 一致）
     ReplaceString(reason, sizeof(reason), "\n", " ");
-    
+
     // 原因翻译为中文
     char reasonZh[128];
     GetReasonInChinese(reason, reasonZh, sizeof(reasonZh));
-    
+
     // 内置 cannounce 风格离开消息（有地区/城市用完整模板，否则用简版），原因始终显示
     char message[MSG_MAXLEN];
-    if (GetGeoLevel(client) >= 2) {
+    if (client > 0 && client <= MaxClients && GetGeoLevel(client) >= 2) {
         strcopy(message, sizeof(message), DISC_MSG_FULL);
     } else {
         strcopy(message, sizeof(message), DISC_MSG_NOGEO);
     }
-    ResolvePlaceholders(message, sizeof(message), client, reasonZh);
-    
+    ResolvePlaceholders(message, sizeof(message), client, reasonZh, playerName);
+
     // 用 multicolors（L4D1/2 修复版）输出，标签 {GREEN} 等自动按 L4D2 色码渲染
     CPrintToChatAll("%s", message);
-    
-    LogMessage("[Connect Info] Player %s <%s> left the game: %s", name, steamId, reason);
+
+    LogMessage("[Connect Info] Player %s <%s> left the game: %s", playerName, steamId, reason);
 }
 
 public void OnClientDisconnect(int client) {
-    if (!IsFakeClient(client)) {
-        g_ClientIPs[client][0] = '\0';
-        g_ClientGeo[client].countryName[0] = '\0';
-        g_ClientGeo[client].countryCode[0] = '\0';
-        g_ClientGeo[client].region[0] = '\0';
-        g_ClientGeo[client].city[0] = '\0';
+    if (IsFakeClient(client)) {
+        return;
     }
+
+    // 不能在此时立即清数据：player_disconnect 的 Pre hook 与 OnClientDisconnect 的先后顺序
+    // 取决于引擎的实现路径，若本回调先跑，播报里的名字/地区/IP 就会被提前抹掉。
+    // 因此延后一帧再清，保证本次断开的播报一定用得上这些数据。
+    CreateTimer(0.0, Timer_ClearDisconnectedClient, client, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_ClearDisconnectedClient(Handle timer, any client) {
+    if (client < 1 || client > MaxClients) {
+        return Plugin_Stop;
+    }
+
+    // 该槽位已被新玩家占用（player_connect 已写入新数据）：不能清，否则串数据
+    if (IsClientConnected(client) || IsClientInGame(client)) {
+        return Plugin_Stop;
+    }
+
+    g_ClientIPs[client][0] = '\0';
+    ClearClientGeo(client);
+    // g_ConnectNames / g_ConnectUserIds 故意不在这里清：
+    // 引擎的 userid 单调递增且永不复用，缓存里的旧 userid 不可能再匹配到新玩家，
+    // 所以留着不会串数据（Event_PlayerConnect 在该槽位换人时会整体重置），
+    // 却能让任何晚到的断开播报仍拿得到名字。
+    return Plugin_Stop;
 }
 
 // ==================== 消息输出 ====================
@@ -416,23 +593,36 @@ bool IsValidIpString(const char[] ip) {
 }
 
 // 替换消息模板占位符
-void ResolvePlaceholders(char[] message, int maxlen, int client, const char[] reason = "") {
+// nameOverride 非空时优先用作 {PLAYERNAME}（断开播报传入连接期缓存的名字，
+// 因为此时 IsClientInGame 往往已为假，GetClientName 取不到有效名字）
+void ResolvePlaceholders(char[] message, int maxlen, int client, const char[] reason = "", const char[] nameOverride = "") {
     char buffer[128];
     bool clientValid = (client > 0 && client <= MaxClients && IsClientInGame(client));
-    
+
+    // geo / IP 的读取统一走「槽位合法性」判断，而不是 clientValid：
+    // 加载失败的玩家不在游戏内，但连接期缓存里仍有其 IP，仍应显示出来
+    bool slotValid = (client > 0 && client <= MaxClients);
+
     if (StrContains(message, "{PLAYERNAME}") != -1) {
-        if (clientValid) {
+        if (nameOverride[0] != '\0') {
+            strcopy(buffer, sizeof(buffer), nameOverride);
+        } else if (clientValid) {
             GetClientName(client, buffer, sizeof(buffer));
+        } else if (slotValid && g_ConnectNames[client][0] != '\0') {
+            strcopy(buffer, sizeof(buffer), g_ConnectNames[client]);
         } else {
             strcopy(buffer, sizeof(buffer), "Unknown");
         }
         ReplaceString(message, maxlen, "{PLAYERNAME}", buffer);
     }
-    
+
     if (StrContains(message, "{STEAMID}") != -1) {
-        if (clientValid) {
+        buffer[0] = '\0';
+        if (client > 0 && client <= MaxClients && (IsClientConnected(client) || IsClientInGame(client))) {
+            // 取不到时 buffer 保持空串，下面统一回退，避免输出上一次循环/上一次调用残留的内容
             GetClientAuthId(client, AuthId_Steam2, buffer, sizeof(buffer));
-        } else {
+        }
+        if (buffer[0] == '\0') {
             strcopy(buffer, sizeof(buffer), "Unknown");
         }
         ReplaceString(message, maxlen, "{STEAMID}", buffer);

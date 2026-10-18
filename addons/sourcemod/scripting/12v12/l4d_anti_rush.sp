@@ -35,9 +35,32 @@
 	- 限速值改为黄血瘸腿速度: 引擎 cvar "survivor_limp_walk_speed" = 85, 故 "l4d_anti_rush_slow" 默认 85.0 (原 100.0).
 	  运行时还会读取 survivor_limp_walk_speed, 若它比 l4d_anti_rush_slow 更低则以它为准, 保证限速不超过黄血瘸腿速度.
 	- 坦克存活时不限速: "l4d_anti_rush_tanks" 默认值由 1 改为 0 (0=有坦克时暂停防跑图). 需要坦克在场也限速时设为 1.
-	- 距离参数 (range_last/range_lead/warn_last/warn_lead) 保持原版默认值不变.
 	- 不生成 cfg (AutoExecConfig 保持注释), 全部行为由代码内默认值决定.
 	- 修正 TimerTest 中 CheckCommandAccess 误用未初始化变量 client 的问题.
+
+12v12 (applemod) - 阈值与处罚行为调整:
+	- "l4d_anti_rush_range_lead" 默认值 3000.0 -> 1500.0 (更早介入跑图).
+	- "l4d_anti_rush_range_last" 默认值 2500.0 -> 0.0, 并重新定义语义:
+	  0.0 = 不按距离做落后判定 (默认, 只按 range_lead 判定跑图); 大于 0 时才启用落后判定.
+	  原版 "0.0=关闭" 与新默认值是同一含义, 因此不再冲突.
+	  注意: range_lead/warn_last/warn_lead 的 CreateConVar 最小值限制已移除, 否则填 0 会被引擎抬到 1500
+	  而无法关闭; 非 0 但小于 1500 的值仍在 GetCvars() 内部被抬到 1500 (MINIMUM_RANGE).
+	- 倒地(incapacitated)/挂边(hanging from ledge) 的幸存者一律计入队伍平均流距离, 不再豁免:
+	  删除原 cvar "l4d_anti_rush_incapped" (原语义为"倒地人数达到 N 人后才开始忽略倒地者",
+	  与"倒地者不能被豁免"直接冲突, 且找不到第二种自洽语义); 现在没有任何开关可以把倒地者排除出距离计算.
+	- 检测到跑图即刻限速: 去掉原版"必须 flow 比上一 tick 更大才挂限速钩子"的判断
+	  (该判断会导致坦克战后 / 有效人数不足后 / 失去 flow 后 g_bInhibit 已清而 g_fLastFlow 仍是旧值,
+	  玩家明明在跑图却永远不再被限速). 现在一旦判定领先超过 range_lead, 立刻挂 SDKHook_PreThinkPost
+	  并当场写 m_flMaxspeed = l4d_anti_rush_slow (= 瘸腿速度), 不等下一帧、不等警告;
+	  每个 tick 结束时统一解除"本 tick 未被判定为跑图"的限速, 不再依赖 flow 增减猜测.
+	- 落后玩家不再弹出"落后传送回队伍"菜单: 删除菜单本体 BackwardTransmissionMenu 及其处理函数
+	  与全局 g_fPos, 只保留聊天提示. 配合 range_last 默认 0.0, 默认配置下不会出现任何落后传送面板.
+	- "l4d_anti_rush_warn_last" / "l4d_anti_rush_warn_lead" 默认值改为 0.0 (关闭预提示):
+	  预提示只有在 warn_* < range_* 时才可能触发, 而 range_lead 默认已是紧阈值 1500,
+	  内部又有 1500 的最小值抬升, 默认不可能形成预提示区间, 故默认关闭;
+	  需要"先提示后处罚"时把 range_lead 调大, 再把 warn_lead 设在两者之间.
+	- 聊天提示改为受 warn_time 控制: warn_time = 0 时不再发送任何提示 (原版会在 0 时每次都发).
+	- 全部 cvar 说明改写为中文, 写清默认值含义与关闭方式.
 
 1.21 (28-Jan-2024)
 	- Fixed memory leak caused by clearing StringMap/ArrayList data instead of deleting.
@@ -150,14 +173,13 @@ float g_iBenchTicks;
 #define EVENTS_CONFIG		"data/l4d_anti_rush.cfg"
 #define LIMP_WALK_SPEED		85.0			// 黄血(瘸腿)移动速度 = 引擎 cvar "survivor_limp_walk_speed" 默认值 (survivor_limp_health = 40 以下进入瘸腿).
 
-ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarIncap, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
+ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
 float g_fCvarRangeLast, g_fCvarRangeLead, g_fCvarSlow, g_fCvarWarnLast, g_fCvarWarnLead, g_fCvarWarnTime;
-int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarIncap, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
+int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
 bool g_bCvarAllow, bCvarAllow, g_bMapStarted, g_bLeft4Dead2;
 
 bool g_bInhibit[MAXPLAYERS+1];
-float g_fExecute[MAXPLAYERS+1], g_fHintWarn[MAXPLAYERS+1], g_fLastFlow[MAXPLAYERS+1];
-float g_fPos[3];
+float g_fExecute[MAXPLAYERS+1], g_fHintWarn[MAXPLAYERS+1];
 Handle g_hTimer;
 
 char g_sMap[PLATFORM_MAX_PATH];
@@ -201,23 +223,22 @@ public void OnPluginStart()
 	RegAdminCmd("sm_fpt", CmdAntiRush, ADMFLAG_ROOT, "插件开关.");
 	CreateConVar("l4d_anti_rush_version", PLUGIN_VERSION, "Anti Rush plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
-	g_hCvarAllow =		CreateConVar("l4d_anti_rush_allow",			"1",							"0=插件关闭, 1=插件启用.", CVAR_FLAGS);
-	g_hCvarModes =		CreateConVar("l4d_anti_rush_modes",			"",								"在这些游戏模式下打开插件, 并用逗号分隔开(无=空格), (空=全部).", CVAR_FLAGS);
-	g_hCvarModesOff =	CreateConVar("l4d_anti_rush_modes_off",		"",								"在这些游戏模式下, 请关闭插件, 并以逗号分隔(无=空格), (空=无).", CVAR_FLAGS);
-	g_hCvarModesTog =	CreateConVar("l4d_anti_rush_modes_tog",		"0",							"在这些游戏模式下启用插件. 0=所有, 1=战役, 2=生还者, 4=对抗, 8=清道夫. 同时启用将数字加起来.", CVAR_FLAGS);
-	g_hCvarFinale =		CreateConVar("l4d_anti_rush_finale",		g_bLeft4Dead2 ? "1" : "0",		"该插件是否在救援关激活.0=关闭, 1=所有结局, 2=Gauntlet type finales (L4D2 only).", CVAR_FLAGS);
-	g_hCvarFlags =		CreateConVar("l4d_anti_rush_flags",			"",								"带有Z标志的玩家将不会在落后时向前移动或在前进时减慢移动速度.", CVAR_FLAGS);
-	g_hCvarIgnore =		CreateConVar("l4d_anti_rush_ignore",		"0",							"带有免疫标志的玩家是否应计入总移动距离. 0=忽略它们, 1=包括它们.", CVAR_FLAGS);
-	g_hCvarIncap =		CreateConVar("l4d_anti_rush_incapped",		"0",							"0=关闭. 在计算反跑图中有多少幸存者必须检测在忽略他们之前.", CVAR_FLAGS);
-	g_hCvarPlayers =	CreateConVar("l4d_anti_rush_players",		"3",							"该功能启动之前的存活幸存者最少数量. 必须为3或更大, 否则无法检测到跑图/落后的平均值. (即存活人数低于这个数插件自动失效).", CVAR_FLAGS, true, 3.0);
-	g_hCvarRangeLast =	CreateConVar("l4d_anti_rush_range_last",	"2500.0",						"0.0=关闭. 某人在被传送之前可以落后幸存者的平均距离多远.", CVAR_FLAGS);
-	g_hCvarRangeLead =	CreateConVar("l4d_anti_rush_range_lead",	"3000.0",						"0.0=关闭. 某人在被传送或减速之前可以领先幸存者的平均距离多远.", CVAR_FLAGS, true, MINIMUM_RANGE);
-	g_hCvarSlow =		CreateConVar("l4d_anti_rush_slow",			"85.0",							"跑图玩家减速时能走动的最大速度. 默认 85.0 = 黄血瘸腿速度 (引擎 cvar \"survivor_limp_walk_speed\").", CVAR_FLAGS, true, 20.0);
-	g_hCvarTank =		CreateConVar("l4d_anti_rush_tanks",			"0",							"0=坦克存活时暂停防跑图(默认, 不限速不传送). 1=坦克在场也照常执行.", CVAR_FLAGS);
-	g_hCvarType =		CreateConVar("l4d_anti_rush_type",			"1",							"对于跑图领先的玩家怎么处罚. 1=当跑图玩家向前冲时降低他们的移动速度. 2=传送回团队.", CVAR_FLAGS);
-	g_hCvarWarnLast =	CreateConVar("l4d_anti_rush_warn_last",		"2000.0",						"0.0=关闭. 在被提示并执行传送前, 玩家能落后平均幸存者位置多远距离.", CVAR_FLAGS, true, MINIMUM_RANGE);
-	g_hCvarWarnLead =	CreateConVar("l4d_anti_rush_warn_lead",		"2500.0",						"0.0=关闭. 在被提示并执行减速或传送前, 玩家能领先平均幸存者位置多远距离.", CVAR_FLAGS, true, MINIMUM_RANGE);
-	g_hCvarWarnTime =	CreateConVar("l4d_anti_rush_warn_time",		"10.0",							"0.0=关闭. 多久提示玩家一次, 当跑图或落后时会被减速或传送.", CVAR_FLAGS);
+	g_hCvarAllow =		CreateConVar("l4d_anti_rush_allow",			"1",							"插件总开关. 0=关闭(解除所有限速并停用检测), 1=启用. 默认 1.", CVAR_FLAGS);
+	g_hCvarModes =		CreateConVar("l4d_anti_rush_modes",			"",								"白名单: 只在这些游戏模式下启用插件. 逗号分隔多个模式名, 空=不限制. 默认空.", CVAR_FLAGS);
+	g_hCvarModesOff =	CreateConVar("l4d_anti_rush_modes_off",		"",								"黑名单: 在这些游戏模式下禁用插件. 逗号分隔多个模式名, 空=无. 默认空.", CVAR_FLAGS);
+	g_hCvarModesTog =	CreateConVar("l4d_anti_rush_modes_tog",		"0",							"按模式类型启用: 0=全部模式(默认), 1=战役, 2=生还者, 4=对抗, 8=清道夫. 多种模式相加, 例如 4+8=12.", CVAR_FLAGS);
+	g_hCvarFinale =		CreateConVar("l4d_anti_rush_finale",		g_bLeft4Dead2 ? "1" : "0",		"救援关是否生效. 0=救援关不生效, 1=全部救援关生效(默认), 2=仅 Gauntlet 类型救援关(L4D2).", CVAR_FLAGS);
+	g_hCvarFlags =		CreateConVar("l4d_anti_rush_flags",			"",								"豁免: 拥有这些管理标志位的玩家既不会被限速也不会被传送. 填标志字符串(如 \"z\"), 空=无人豁免. 默认空.", CVAR_FLAGS);
+	g_hCvarIgnore =		CreateConVar("l4d_anti_rush_ignore",		"0",							"配合 flags 使用. 0=默认, 被豁免的玩家不计入队伍平均距离; 1=仍把被豁免玩家计入平均距离.", CVAR_FLAGS);
+	g_hCvarPlayers =	CreateConVar("l4d_anti_rush_players",		"3",							"检测门槛: 存活幸存者(含倒地/挂边)少于该人数时插件不判定跑图, 并解除全部限速. 最小 3. 默认 3.", CVAR_FLAGS, true, 3.0);
+	g_hCvarRangeLast =	CreateConVar("l4d_anti_rush_range_last",	"0.0",							"落后判定距离: 某人落后队伍平均流距离超过多少才算落后. 0.0=不按距离判定落后(默认, 只判定跑图); 大于 0 才启用落后判定, 非 0 值最小 1500.", CVAR_FLAGS);
+	g_hCvarRangeLead =	CreateConVar("l4d_anti_rush_range_lead",	"1500.0",						"跑图判定距离: 某人领先队伍平均流距离超过多少即判定为跑图. 0.0=关闭跑图判定; 非 0 值最小 1500. 默认 1500.", CVAR_FLAGS);
+	g_hCvarSlow =		CreateConVar("l4d_anti_rush_slow",			"85.0",							"被判定跑图后立即限制到的最大移动速度. 默认 85.0 = 黄血瘸腿速度(引擎 cvar \"survivor_limp_walk_speed\"). 实际生效值不会超过 survivor_limp_walk_speed. 最小 20.0.", CVAR_FLAGS, true, 20.0);
+	g_hCvarTank =		CreateConVar("l4d_anti_rush_tanks",			"0",							"坦克存活时是否照常判定. 0=坦克存活时暂停防跑图并解除已有减速(默认), 1=坦克在场也照常限速/传送.", CVAR_FLAGS);
+	g_hCvarType =		CreateConVar("l4d_anti_rush_type",			"1",							"跑图处罚方式: 1=立即限速到 l4d_anti_rush_slow(默认), 2=传送回队伍. 两种都不影响落后判定.", CVAR_FLAGS);
+	g_hCvarWarnLast =	CreateConVar("l4d_anti_rush_warn_last",		"0.0",							"落后预提示距离: 落后超过该值但未达 range_last 时先发聊天提示. 0.0=关闭(默认); 由于 range_last 默认 0.0, 落后判定默认整体关闭, 本项也随之无效.", CVAR_FLAGS);
+	g_hCvarWarnLead =	CreateConVar("l4d_anti_rush_warn_lead",		"0.0",							"跑图预提示距离: 领先超过该值但未达 range_lead 时先发聊天提示. 0.0=关闭(默认); 若 range_lead 用默认 1500, 预提示区间不存在, 无提示.", CVAR_FLAGS);
+	g_hCvarWarnTime =	CreateConVar("l4d_anti_rush_warn_time",		"10.0",							"聊天提示的最小间隔(秒). 0.0=完全不发提示. 默认 10.0. 注意: 不影响限速/传送是否生效, 检测到即处罚.", CVAR_FLAGS);
 
 	//AutoExecConfig(true, "l4d_anti_rush");
 
@@ -230,7 +251,6 @@ public void OnPluginStart()
 	g_hCvarFinale.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarFlags.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarIgnore.AddChangeHook(ConVarChanged_Cvars);
-	g_hCvarIncap.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarPlayers.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarRangeLast.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarRangeLead.AddChangeHook(ConVarChanged_Cvars);
@@ -277,7 +297,6 @@ void GetCvars()
 	g_iCvarIgnore = g_hCvarIgnore.IntValue;
 
 	g_iCvarFinale = g_hCvarFinale.IntValue;
-	g_iCvarIncap = g_hCvarIncap.IntValue;
 	g_iCvarPlayers = g_hCvarPlayers.IntValue;
 	g_iCvarTank = g_hCvarTank.IntValue;
 	g_fCvarSlow = g_hCvarSlow.FloatValue;
@@ -643,7 +662,6 @@ void ResetClient(int i)
 	g_bInhibit[i] = false;
 	g_fExecute[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
-	g_fLastFlow[i] = 0.0;
 
 	SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
 }
@@ -707,11 +725,13 @@ Action TimerTest(Handle timer)
 	// Get survivors flow distance
 	ArrayList aList = new ArrayList(2);
 
-	// Account for incapped
 	int clients[MAXPLAYERS+1];
-	int incapped, client;
+	int client;
 
-	// Check valid survivors, count incapped
+	// 12v12: 本 tick 被判定为跑图的玩家标记, 用于 tick 末统一解除其它人的限速.
+	bool bRushing[MAXPLAYERS+1];
+
+	// Check valid survivors
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
@@ -724,42 +744,45 @@ Action TimerTest(Handle timer)
 
 			// Count
 			clients[count++] = i;
-
-			if (g_iCvarIncap)
-			{
-				if (GetEntProp(i, Prop_Send, "m_isIncapacitated", 1))
-					incapped++;
-			}
 		}
 	}
 
 	for (int i = 0; i < count; i++)
 	{
 		client = clients[i];
-		// Ignore incapped
-		if (g_iCvarIncap && incapped >= g_iCvarIncap && GetEntProp(client, Prop_Send, "m_isIncapacitated", 1))
-			continue;
 
-		// Ignore healing / using stuff
-		if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_useActionTarget") > 0)
-			continue;
+		// 12v12: 倒地 / 挂边玩家不再豁免, 必须计入队伍平均流距离.
+		// 原版 cvar "l4d_anti_rush_incapped" 允许把它们排除在计算之外(默认 0 = 不排除),
+		// 一旦开启就会让队伍平均值被"能跑的人"拉高, 跑图判定反而更难触发, 跑图者更容易逃脱.
+		// 因此该 cvar 已整体删除: 倒地者永远计入平均距离, 不存在豁免开关.
+		// 倒地者本身不会收到"请跟上队伍"的提示(见下方 SurvivorsState 判断), 只影响平均值.
+		bool bImmobile = GetEntProp(client, Prop_Send, "m_isIncapacitated", 1) != 0
+						|| GetEntProp(client, Prop_Send, "m_isHangingFromLedge", 1) != 0;
 
-		// Ignore reviving
-		if (GetEntPropEnt(client, Prop_Send, "m_reviveOwner") > 0 || GetEntPropEnt(client, Prop_Send, "m_reviveTarget") > 0)
-			continue;
-
-		// Ignore pinned by Charger
-		if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1)
-			continue;
-
-		// Ignore in Elevator
-		int lift = GetEntPropEnt(client, Prop_Send, "m_hGroundEntity");
-
-		if (lift > MaxClients)
+		// 以下过滤只针对"能自己走动"的玩家, 倒地/挂边者不能因为正在被救/正在被控而被剔除.
+		if (!bImmobile)
 		{
-			lift = EntIndexToEntRef(lift);
-			if (g_hElevators.FindValue(lift) != -1)
+			// Ignore healing / using stuff
+			if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_useActionTarget") > 0)
 				continue;
+
+			// Ignore reviving
+			if (GetEntPropEnt(client, Prop_Send, "m_reviveOwner") > 0 || GetEntPropEnt(client, Prop_Send, "m_reviveTarget") > 0)
+				continue;
+
+			// Ignore pinned by Charger
+			if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1)
+				continue;
+
+			// Ignore in Elevator
+			int lift = GetEntPropEnt(client, Prop_Send, "m_hGroundEntity");
+
+			if (lift > MaxClients)
+			{
+				lift = EntIndexToEntRef(lift);
+				if (g_hElevators.FindValue(lift) != -1)
+					continue;
+			}
 		}
 
 		// Get flow
@@ -800,7 +823,6 @@ Action TimerTest(Handle timer)
 					continue;
 				}
 
-				bool flowBack = true;
 				// Only check nearest half of survivor pack.
 				if (i < countflow / 2)
 				{
@@ -827,37 +849,37 @@ Action TimerTest(Handle timer)
 						if (distance > g_fCvarRangeLead)
 						{
 							// PrintToServer("RUSH: %N %f", client, distance);
-							flowBack = false;
+							// 12v12: 倒地 / 挂边 / 被控的玩家无法自主移动, 不施加处罚(但仍计入平均距离, 见上方).
+							bool bCanPunish = SurvivorsState(client) && !SurvivorsUnderControl(client);
+
 							// Slowdown enabled?
-							if (g_iCvarType == 1)
+							if (g_iCvarType == 1 && bCanPunish)
 							{
-								// Inhibit moving forward
-								// Only check > or < because when == the same flow distance, they're either already being slowed or running back, so we don't want to change/affect them within the same flow NavMesh.
-								if (flow > g_fLastFlow[client])
+								// 12v12: 检测到跑图即刻限速, 不再等待"玩家继续前进"这一条件.
+								// 原版只在 flow > g_fLastFlow[client](玩家比上次更靠前)时才挂 PreThinkPost,
+								// 导致站定不动 / 卡住 / 轻微回退的跑图玩家反而拿不到减速, 只有真正往前冲才被限速.
+								// 现在只要判定成立就立刻挂钩并立即写入速度, 不依赖上一 tick 的 flow.
+								bRushing[client] = true;
+
+								if (g_bInhibit[client] == false)
 								{
-									g_fLastFlow[client] = flow;
-
-									if (g_iCvarType == 1 && g_bInhibit[client] == false)
-									{
-										g_bInhibit[client] = true;
-										SDKHook(client, SDKHook_PreThinkPost, PreThinkPost);
-									}
-
-									if (g_fExecute[client] < GetGameTime())
-									{
-										g_fExecute[client] = GetGameTime() + g_fCvarWarnTime;
-										PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远\x04已限速\x05,请回退队伍.");
-									}
+									g_bInhibit[client] = true;
+									SDKHook(client, SDKHook_PreThinkPost, PreThinkPost);
 								}
-								else if (flow < g_fLastFlow[client])
+
+								// PreThinkPost 要到下一帧才跑, 这里同步写一次, 保证本 tick 立即降到瘸腿速度.
+								SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
+
+								// 聊天提示仍受 warn_time 节流, 但节流只影响提示, 不影响限速.
+								if (g_fCvarWarnTime && g_fExecute[client] < GetGameTime())
 								{
-									flowBack = true;
-									g_fLastFlow[client] = flow;
+									g_fExecute[client] = GetGameTime() + g_fCvarWarnTime;
+									PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远\x04已限速\x05,请回退队伍.");
 								}
 							}
 
 							// Teleport enabled?
-							if (g_iCvarType == 2 && SurvivorsState(client) && !SurvivorsUnderControl(client))
+							if (g_iCvarType == 2 && bCanPunish)
 							{
 								clientAvg = aList.Get(x, 1);
 								float vPos[3];
@@ -870,13 +892,6 @@ Action TimerTest(Handle timer)
 							break;
 						}
 					}
-				}
-
-				// Running back, allow full speed
-				if (flowBack && g_bInhibit[client] == true)
-				{
-					g_bInhibit[client] = false;
-					SDKUnhook(client, SDKHook_PreThinkPost, PreThinkPost);
 				}
 			}
 		}
@@ -911,20 +926,30 @@ Action TimerTest(Handle timer)
 					}
 
 					// Compare lower flow with next survivor, they're behind
+					// 12v12: 落后玩家只发聊天提示, 不再弹出"落后传送回队伍"菜单 (任务要求: 落后玩家不显示传送面板).
+					// 传送仅保留给"跑图领先"这一条路径 (l4d_anti_rush_type = 2), 落后侧没有任何 UI.
 					if (distance > g_fCvarRangeLast && SurvivorsState(client) && !SurvivorsUnderControl(client) && g_fExecute[client] < GetGameTime())
 					{
-						// PrintToServer("SLOW: %N %f", client, distance);
 						g_fExecute[client] = GetGameTime() + g_fCvarWarnTime;
-						clientAvg = aList.Get(x, 1);
-						float vPos[3];
-						GetClientAbsOrigin(clientAvg, vPos);
-
-						g_fPos = vPos;
-						BackwardTransmissionMenu(client);
-						PrintToChat(client, "\x04[提示]\x05你\x03落后\x05幸存者队伍太远,使用\x04菜单\x05选择传送.");
+						PrintToChat(client, "\x04[提示]\x05你\x03落后\x05幸存者队伍太远\x03请加速\x05,尽快跟上队伍.");
 						break;
 					}
 				}
+			}
+		}
+
+		// 12v12: tick 末统一解除"本 tick 未被判定为跑图"的玩家减速.
+		// 原版用 flow 与 g_fLastFlow 的增减来猜"是否在往回跑", 一旦 g_bInhibit 被别处清掉
+		// (坦克暂停 / 人数不足 / flow 无效 / 换图) 而 g_fLastFlow 残留旧值, 就会出现
+		// "明明在跑图却永远不再被限速"的失效. 现在改为每 tick 重算, 与历史 flow 无关.
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (g_bInhibit[i] && !bRushing[i])
+			{
+				if (IsClientInGame(i))
+					SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
+
+				g_bInhibit[i] = false;
 			}
 		}
 	}
@@ -950,47 +975,6 @@ Action TimerTest(Handle timer)
 	#endif
 
 	return Plugin_Continue;
-}
-
-void BackwardTransmissionMenu(int client)
-{
-	Menu menu = new Menu(BackwardTransmissionHandleMenu);
-
-	menu.SetTitle("落后传送回队伍");
-	menu.AddItem("", "确定");
-	menu.AddItem("", "取消");
-
-	menu.ExitButton = true;
-	menu.Display(client, 30);
-}
-
-int BackwardTransmissionHandleMenu(Menu menu, MenuAction action, int client, int param2)
-{
-	switch (action)
-	{
-		case MenuAction_Select:
-		{
-			if (param2 == 0 && IsPlayerAlive(client))
-			{
-				if (SurvivorsState(client) && !SurvivorsUnderControl(client))
-				{
-					SetEntProp(client, Prop_Send, "m_bDucked", 1);
-					SetEntityFlags(client, GetEntityFlags(client)|FL_DUCKING);
-					TeleportEntity(client, g_fPos, NULL_VECTOR, NULL_VECTOR);
-					PrintToChat(client, "\x04[提示]\x05你已\x04传送\x05回幸存者队伍.");
-				}
-				else
-				{
-					BackwardTransmissionMenu(client);
-					PrintToChat(client, "\x04[提示]\x03正常状态\x05才能使用传送功能.");
-				}
-			}
-		}
-		case MenuAction_End:
-			delete menu;
-	}
-
-	return 0;
 }
 
 void PreThinkPost(int client)

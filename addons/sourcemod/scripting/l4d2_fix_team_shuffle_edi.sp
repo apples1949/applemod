@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.1.0"
+#define PLUGIN_VERSION "2.2.0"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -17,6 +17,8 @@
 StringMap g_hTeamRecords;
 // 尚未还原成功的 SteamID 集合，g_iPendingCount 恒等于其 Size
 StringMap g_hPendingRecords;
+// final_map_disable=2 时，新章节随机打乱后的 SteamID -> 目标队伍
+StringMap g_hShuffleTargets;
 
 int g_iPendingCount;      // 尚未还原成功的人数
 bool g_bTeamLock;         // 当前是否处于队伍锁定（还原进行中）
@@ -27,6 +29,9 @@ bool g_bOldTeamFlipped;   // 记录时游戏规则的 m_bAreTeamsFlipped
 bool g_bNewTeamFlipped;   // 新地图该属性值，两者不同即代表发生了换边
 bool g_bRecordedAtRoundEnd;    // 记录是否由回合结束触发（回合结束游戏必换边；中途换图不换边）
 bool g_bMapChangedSinceRecord; // 记录之后是否真的换过图（OnMapStart 消费换图标记时置位）
+bool g_bShuffleMode;           // 本次还原是否使用"随机打乱"而不是按记录归位（final_map_disable=2）
+int g_iShuffleTotal;           // 本次打乱参与人数（公告用）
+int g_iShuffleSurvivors;       // 本次打乱后的生还者名额（公告用）
 char g_sRecordedMap[64];       // 记录时所在的地图名（同图重开不算跨战役）
 
 bool g_bChecked[MAXPLAYERS + 1];      // 某玩家是否正在等待自己的还原计时器
@@ -59,7 +64,7 @@ bool g_bCvarNotify;
 bool g_bCvarNoVotes;
 int g_iCvarAttempts;
 float g_fCvarTime;
-bool g_bCvarFinalMapDisable;
+int g_iCvarFinalMapDisable;   // final_map_disable 的整数取值（0/1/2）
 bool g_bCvarChangeMapDisable;
 bool g_bCvarIgnoreOffline;
 int g_iZMaxPlayerZombies;
@@ -119,6 +124,7 @@ public void OnPluginStart()
 
 	g_hTeamRecords = new StringMap();
 	g_hPendingRecords = new StringMap();
+	g_hShuffleTargets = new StringMap();
 
 	g_hFwdFixComplete = new GlobalForward("L4D2_FixTeamShuffle_OnFixComplete", ET_Ignore);
 
@@ -165,8 +171,8 @@ public void OnPluginStart()
 	g_cvEnabled.AddChangeHook(OnCvarChange_Enabled);
 
 	g_cvFinalMapDisable = CreateConVar("l4d2_fix_team_shuffle_final_map_disable", "0",
-		"为 1 时章节最后一关结束不记录队伍，下一章按游戏默认分边；0=记录并在下一章还原（跨战役按换边处理）",
-		FCVAR_NONE, true, 0.0, true, 1.0);
+		"0=章节最后一关结束仍记录队伍，下一章按记录还原（跨战役按换边处理）；1=章节最后一关结束不记录，下一章按游戏默认分边；2=仍记录队伍，但切换到新章节时把所有非旁观玩家重新随机打乱分队（手动 changelevel 与换图插件自动换图均生效；c6c7、c9c14 两条混图链组内换图不打乱）",
+		FCVAR_NONE, true, 0.0, true, 2.0);
 
 	g_cvChangeMapDisable = CreateConVar("l4d2_fix_team_shuffle_change_map_disable", "0",
 		"为 1 时回合中途（未到回合结束）换图不记录队伍；0=记录并在新图还原（中途换图不发生换边，按原队伍还原）",
@@ -203,7 +209,9 @@ public void OnPluginStart()
 
 void GetCvars()
 {
-	g_bCvarFinalMapDisable = g_cvFinalMapDisable.BoolValue;
+	g_iCvarFinalMapDisable = g_cvFinalMapDisable.IntValue;
+	if (g_iCvarFinalMapDisable < 0 || g_iCvarFinalMapDisable > 2)
+		g_iCvarFinalMapDisable = 0;
 	g_bCvarChangeMapDisable = g_cvChangeMapDisable.BoolValue;
 	g_bCvarIgnoreOffline = g_cvIgnoreOffline.BoolValue;
 
@@ -259,7 +267,14 @@ public void OnCvarChange_Enabled(ConVar convar, const char[] oldValue, const cha
 
 public void OnCvarChange_FinalMapDisable(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-	g_bCvarFinalMapDisable = convar.BoolValue;
+	int value = convar.IntValue;
+	if (value < 0 || value > 2)
+	{
+		convar.IntValue = 0;
+		value = 0;
+	}
+
+	g_iCvarFinalMapDisable = value;
 }
 
 public void OnCvarChange_ChangeMapDisable(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -362,8 +377,9 @@ void OnVersusRoundEnd()
 	if (!g_bCvarEnabled || !L4D_IsVersusMode())
 		return;
 
-	// 最终关且启用 final_map_disable：直接返回，不记录
-	if (g_bFinalMap && g_bCvarFinalMapDisable)
+	// 最终关且 final_map_disable=1：直接返回，不记录
+	// final_map_disable=2 仍需记录（新章节要按记录的人数规模随机打乱）
+	if (g_bFinalMap && g_iCvarFinalMapDisable == 1)
 		return;
 
 	if (g_bRoundEnd)
@@ -391,8 +407,8 @@ public Action Command_Changelevel(int client, const char[] command, int argc)
 	if (!g_bCvarEnabled || !L4D_IsVersusMode())
 		return Plugin_Continue;
 
-	// 最终关且启用 final_map_disable：放行，不记录
-	if (g_bFinalMap && g_bCvarFinalMapDisable)
+	// 最终关且 final_map_disable=1：放行，不记录（=2 仍需记录，供新章节打乱使用）
+	if (g_bFinalMap && g_iCvarFinalMapDisable == 1)
 		return Plugin_Continue;
 
 	// 回合还没结束就换图（中途投票/管理员换图）且启用 change_map_disable：放行，不记录
@@ -429,8 +445,10 @@ void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 
 	g_hTeamRecords.Clear();
 	g_hPendingRecords.Clear();
+	g_hShuffleTargets.Clear();
 	g_iPendingCount = 0;
 	g_bTeamLock = false;
+	g_bShuffleMode = false;
 
 	g_bOldTeamFlipped = view_as<bool>(GameRules_GetProp("m_bAreTeamsFlipped"));
 	g_bMapTransition = true;
@@ -526,6 +544,13 @@ public void OnMapStart()
 
 	Start();
 
+	// 再决定本次是"按记录归位"还是"新战役随机打乱"。打乱判定只用
+	// g_bMapChangedSinceRecord（Start 消费的是 g_bMapTransition），所以放在
+	// Start 之后调用不受影响；个人计时器 1 秒后才第一次执行，能读到最终结果。
+	// 没进入锁队说明本次不需要还原，也就不打乱。
+	if (g_bTeamLock)
+		PrepareShuffleMode();
+
 	// 消费本次换图标记：Start 执行时它必须仍为真
 	g_bMapTransition = false;
 }
@@ -536,7 +561,7 @@ public void OnMapEnd()
 	// ForceChangeLevel、或引擎自动过关都不经过 changelevel 命令监听。
 	// 仅在允许中途记录时补一次；读不到实体就放弃（宁可不记录，也不能记错）。
 	if (g_bCvarEnabled && L4D_IsVersusMode() && !g_bRoundEnd && !g_bCvarChangeMapDisable
-		&& !(g_bFinalMap && g_bCvarFinalMapDisable))
+		&& !(g_bFinalMap && g_iCvarFinalMapDisable == 1))
 	{
 		KeepTeams(false, true);
 
@@ -719,9 +744,17 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		return Plugin_Stop;
 	}
 
-	// 对抗换边：生还者/特感对调，旁观不变
-	if (IsTeamSwapped())
+	// final_map_disable=2 且已进入新战役：用随机打乱后的目标队伍，
+	// 而不是"记录队伍 + 换边对调"的归位结果
+	if (g_bShuffleMode)
 	{
+		int shuffleTeam;
+		if (g_hShuffleTargets.GetValue(auth, shuffleTeam))
+			targetTeam = shuffleTeam;
+	}
+	else if (IsTeamSwapped())
+	{
+		// 对抗换边：生还者/特感对调，旁观不变
 		if (targetTeam == TEAM_SURVIVOR)
 			targetTeam = TEAM_INFECTED;
 		else if (targetTeam == TEAM_INFECTED)
@@ -828,6 +861,187 @@ bool IsNewCampaignMap()
 		return false;
 
 	return L4D_IsFirstMapInScenario();
+}
+
+// 取地图所属的"战役组"：混图流程把两段战役接成一条链，
+// c6/c7（短暂时刻→牺牲）、c9/c14（坠机险途→背水一战）组内换图算同一章节。
+// 只识别官方 c<数字>m<数字> 命名；其他地图（三方图）返回 false。
+bool GetCampaignChain(const char[] sMap, char[] sChain, int iMaxLen)
+{
+	if (sMap[0] != 'c' && sMap[0] != 'C')
+		return false;
+
+	// 形如 c<数字>m<数字>_<名称>：截到 'm' 之前
+	int iLen = 0;
+	while (sMap[iLen] != 0 && sMap[iLen] != 'm' && sMap[iLen] != 'M' && iLen < 15)
+	{
+		if (iLen > 0 && (sMap[iLen] < '0' || sMap[iLen] > '9'))
+			return false;
+		iLen++;
+	}
+
+	// 'm' 之后必须紧跟一位地图编号数字，否则不是标准命名
+	if (iLen < 2 || (sMap[iLen] != 'm' && sMap[iLen] != 'M')
+		|| sMap[iLen + 1] < '0' || sMap[iLen + 1] > '9')
+		return false;
+
+	char sCampaign[16];
+	strcopy(sCampaign, sizeof(sCampaign), sMap);
+	sCampaign[iLen] = 0;
+
+	if (strcmp(sCampaign, "c6", false) == 0 || strcmp(sCampaign, "c7", false) == 0)
+		strcopy(sChain, iMaxLen, "c6c7");
+	else if (strcmp(sCampaign, "c9", false) == 0 || strcmp(sCampaign, "c14", false) == 0)
+		strcopy(sChain, iMaxLen, "c9c14");
+	else
+		strcopy(sChain, iMaxLen, sCampaign);
+
+	return true;
+}
+
+// 本次换图是否切到了"新的章节"：按战役组比较，而不是按"是否战役第一关"。
+//   · 战役组不同（c2m5 -> c3m1、c1m5 -> c2m1、手动跳到别的战役）=> 新章节
+//   · 战役组相同且属于混图链 c6c7 / c9c14 => 同一章节，不打乱
+//   · 战役组相同的一局结束了又回到本战役第一关（c1m5 -> c1m1）=> 视为新一局，打乱
+//   · 三方图命名无法解析 => 退回引擎判定（新图是所在战役第一关即算新章节）
+bool IsNewChapterSwitch()
+{
+	char sCurrentMap[64];
+	GetCurrentMap(sCurrentMap, sizeof(sCurrentMap));
+
+	// 同一张图重开（半场重打 / 重载当前关）不算新章节
+	if (strcmp(sCurrentMap, g_sRecordedMap, false) == 0)
+		return false;
+
+	char sOldChain[32], sNewChain[32];
+	bool bOldKnown = GetCampaignChain(g_sRecordedMap, sOldChain, sizeof(sOldChain));
+	bool bNewKnown = GetCampaignChain(sCurrentMap, sNewChain, sizeof(sNewChain));
+
+	// 至少一侧是三方图（命名无法解析）：交给引擎判断
+	if (!bOldKnown || !bNewKnown)
+		return L4D_IsFirstMapInScenario();
+
+	// 换到了另一个战役：新章节
+	if (strcmp(sOldChain, sNewChain, false) != 0)
+		return true;
+
+	// 混图链组内换图（c6m3 -> c7m1、c9m2 -> c14m1 等）：仍算同一章节
+	if (strcmp(sNewChain, "c6c7", false) == 0 || strcmp(sNewChain, "c9c14", false) == 0)
+		return false;
+
+	// 同一战役内又回到了第一关：上一局已结束、这是新开的一局，按新章节处理
+	return L4D_IsFirstMapInScenario();
+}
+
+// final_map_disable=2：切到新章节时不按记录归位，而是按记录的人数规模随机重排。
+// 同战役内换关、同图重开、c6↔c7 与 c9↔c14 混图链内换图都不打乱，仍按记录还原。
+void PrepareShuffleMode()
+{
+	g_bShuffleMode = false;
+	g_hShuffleTargets.Clear();
+	g_iShuffleTotal = 0;
+	g_iShuffleSurvivors = 0;
+
+	if (g_iCvarFinalMapDisable != 2 || !g_bMapChangedSinceRecord)
+		return;
+
+	if (!IsNewChapterSwitch())
+		return;
+
+	g_bShuffleMode = true;
+	BuildShuffleTargets();
+}
+
+// 以记录表为基准：旁观者继续旁观；非旁观玩家按记录时的生还者/特感人数规模
+// 重新随机分配，而不是回到各自的原始队伍位置。
+void BuildShuffleTargets()
+{
+	char aAuths[MAXPLAYERS + 1][MAX_AUTHID_LENGTH];
+	int iTotal = 0;
+
+	StringMapSnapshot snapshot = g_hTeamRecords.Snapshot();
+	char sAuth[MAX_AUTHID_LENGTH];
+	int iTeam;
+
+	for (int i = 0; i < snapshot.Length; i++)
+	{
+		snapshot.GetKey(i, sAuth, sizeof(sAuth));
+		if (!g_hTeamRecords.GetValue(sAuth, iTeam))
+			continue;
+
+		// 旁观者保持旁观，不参与打乱
+		if (iTeam == TEAM_SPECTATOR)
+		{
+			g_hShuffleTargets.SetValue(sAuth, TEAM_SPECTATOR);
+			continue;
+		}
+
+		if (iTotal < MAXPLAYERS + 1)
+			strcopy(aAuths[iTotal], MAX_AUTHID_LENGTH, sAuth);
+		iTotal++;
+	}
+
+	delete snapshot;
+
+	// 没有需要打乱的玩家：退回按记录归位，避免留下空的打乱表
+	if (iTotal <= 0)
+	{
+		g_bShuffleMode = false;
+		return;
+	}
+
+	if (iTotal > MAXPLAYERS + 1)
+		iTotal = MAXPLAYERS + 1;
+
+	// Fisher-Yates 洗牌
+	for (int i = iTotal - 1; i > 0; i--)
+	{
+		int j = GetRandomInt(0, i);
+		char sTemp[MAX_AUTHID_LENGTH];
+		strcopy(sTemp, sizeof(sTemp), aAuths[i]);
+		strcopy(aAuths[i], MAX_AUTHID_LENGTH, aAuths[j]);
+		strcopy(aAuths[j], MAX_AUTHID_LENGTH, sTemp);
+	}
+
+	// 记录时有多少生还者，打乱后就保留多少个生还者名额，其余为特感
+	int iSurvivorCount = 0;
+
+	snapshot = g_hTeamRecords.Snapshot();
+	for (int i = 0; i < snapshot.Length; i++)
+	{
+		snapshot.GetKey(i, sAuth, sizeof(sAuth));
+		if (g_hTeamRecords.GetValue(sAuth, iTeam) && iTeam == TEAM_SURVIVOR)
+			iSurvivorCount++;
+	}
+	delete snapshot;
+
+	// 生还者名额不能超过参与打乱的人数
+	if (iSurvivorCount > iTotal)
+		iSurvivorCount = iTotal;
+
+	for (int i = 0; i < iTotal; i++)
+	{
+		int targetTeam = (i < iSurvivorCount) ? TEAM_SURVIVOR : TEAM_INFECTED;
+		g_hShuffleTargets.SetValue(aAuths[i], targetTeam);
+	}
+
+	// OnMapStart 时玩家往往还没进游戏，聊天公告要延后到他们进来之后
+	g_iShuffleTotal = iTotal;
+	g_iShuffleSurvivors = iSurvivorCount;
+	CreateTimer(5.0, Timer_AnnounceShuffle, _, TIMER_FLAG_NO_MAPCHANGE);
+
+	LogMessage("[队伍修正] 切换新章节，随机分队：%d 人，生还者名额 %d（final_map_disable=2）", iTotal, iSurvivorCount);
+}
+
+public Action Timer_AnnounceShuffle(Handle timer)
+{
+	if (!g_bCvarNotify || g_iShuffleTotal <= 0)
+		return Plugin_Stop;
+
+	PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d）",
+		g_iShuffleTotal, g_iShuffleSurvivors);
+
+	return Plugin_Stop;
 }
 
 bool IsTeamSwapped()
@@ -971,13 +1185,17 @@ void ClearVars()
 {
 	g_hTeamRecords.Clear();
 	g_hPendingRecords.Clear();
+	g_hShuffleTargets.Clear();
 
 	g_bTeamLock = false;
 	g_iPendingCount = 0;
 	g_bMapTransition = false;
 	g_bRecordedAtRoundEnd = false;
 	g_bMapChangedSinceRecord = false;
+	g_bShuffleMode = false;
 
+	// 公告计数不在这里清零：还原可能在 5 秒内完成并走到这里，
+	// 清掉会让延后的分队公告打不出来。它们由 PrepareShuffleMode 重置。
 	CancelProcessTimers();
 	ResetClientFlags();
 }

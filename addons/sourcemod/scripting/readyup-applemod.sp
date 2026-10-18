@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.1-audit3"
+#define PLUGIN_VERSION "10.3.2-audit4"
 
 public Plugin myinfo =
 {
@@ -225,6 +225,11 @@ Action ReadyStatus_Cmd(int client, int args)
 	ReplyToCommand(client, "[ReadyUp %s] mode=%d manual=%d external=%d live=%d", PLUGIN_VERSION, l4d_ready_enabled.IntValue, inReadyUp, externalReadyActive, DL_g_bRoundLive);
 	ReplyToCommand(client, "[DoorLock] allow=%d effective=%d map=%d configs=%d ended=%d events=%d/%d", DL_g_cAllow.IntValue, DL_g_bCvarAllow, DL_g_bMapStarted, DL_g_bConfigsReady, DL_g_bRoundEnded, DL_g_iRoundStart, DL_g_iPlayerSpawn);
 	ReplyToCommand(client, "[DoorLock] human=%d survivor=%d door=%d countdown=%d timer=%d recovery=%d freeze=%d modebits=%d/%d", DL_HasConfirmedHuman(), DL_HasLivingSurvivor(), EntRefToEntIndex(DL_g_iStartDoor), DL_g_iCountDown, DL_g_hTimer != null, DL_g_hRecoveryTimer != null, DL_g_bFreezeAllowed, DL_g_iCurrentMode, DL_g_cModesTog.IntValue);
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || (GetClientTeam(i) != 2 && GetEntityMoveType(i) != MOVETYPE_NONE)) continue;
+		ReplyToCommand(client, "[ReadyFreeze] userid=%d team=%d bot=%d alive=%d move=%d owned=%d recent=%d frozenflag=%d speed=%.2f", GetClientUserId(i), GetClientTeam(i), IsFakeClient(i), IsPlayerAlive(i), GetEntityMoveType(i), DL_g_iFrozenUserId[i] == GetClientUserId(i), DL_g_fReleaseUntil > GetGameTime() && DL_g_iReleasedUserId[i] == GetClientUserId(i), (GetEntityFlags(i) & FL_FROZEN) != 0, GetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue"));
+	}
 	return Plugin_Handled;
 }
 

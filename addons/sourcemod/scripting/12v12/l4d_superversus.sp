@@ -159,15 +159,21 @@ public void OnPluginStart()
 	PainPillsDR = FindConVar("pain_pills_decay_rate");
 	MinionLimit = FindConVar("z_minion_limit");
 	
+	// 入队命令统一门禁：sm_join / sm_jg / sm_survivor / sm_sur / sm_infected / sm_inf
+	// 全部经 RequestJoin() -> TryJoinTeam()，在 TryJoinTeam 开头由 TeamChangesLocked()
+	// 拦截（l4d2_fix_team_shuffle_edi 尚未修复完队伍时一律返回 Join_Wait），
+	// 再由 RequestJoin 的 QueueJoin 逐秒重试，队伍修复完成后的下一次重试才真正换队。
 	RegConsoleCmd("sm_join", Join_Game, "Join Survivor or Infected team");
 	RegConsoleCmd("sm_jg", Join_Game, "Join Survivor or Infected team");
-	RegConsoleCmd("sm_multistatus", MultiStatus, "Show actual multiplayer limits and pending joins");
+	//RegConsoleCmd("sm_multistatus", MultiStatus, "Show actual multiplayer limits and pending joins");
 	RegConsoleCmd("sm_survivor", Join_Survivor, "Join Survivor Team");
+	RegConsoleCmd("sm_sur", Join_Survivor, "Join Survivor Team");
 	RegConsoleCmd("sm_infected", Join_Infected, "Join Infected Team");
+	RegConsoleCmd("sm_inf", Join_Infected, "Join Infected Team");
 	RegConsoleCmd("sm_spectate", Join_Spectator, "Join Spectator Team");
-	RegConsoleCmd("sm_afk", GO_AFK, "Go Idle (Survivor) or Join Spectator Team (Infected)");
-	RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
-	RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
+	//RegConsoleCmd("sm_afk", GO_AFK, "Go Idle (Survivor) or Join Spectator Team (Infected)");
+	//RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
+	//RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Post);
@@ -185,7 +191,8 @@ public void OnPluginStart()
 	AddCommandListener(Cmd_StaySpectator, "sm_spec");
 	AddCommandListener(Cmd_StaySpectator, "sm_s");
 	AddCommandListener(Cmd_StaySpectator, "sm_spectate");
-	AddCommandListener(Cmd_StaySpectator, "sm_afk");
+	// sm_afk 命令注册已取消，同名监听一并取消；恢复注册时同时恢复此行。
+	//AddCommandListener(Cmd_StaySpectator, "sm_afk");
 	AddCommandListener(Cmd_StaySpectator, "go_away_from_keyboard");
 	
 	SteamIDs = new StringMap();
@@ -907,7 +914,9 @@ public Action Cmd_spec_next(int client, char[] command, int argc)
 {
 	if (client > 0 && IsClientInGame(client) && GetClientTeam(client) == TEAM_SPECTATOR && !GetBotOfIdle(client))
 	{
-		FakeClientCommand(client, "sm_teams");
+		// sm_teams 不再注册为控制台命令，直接调用同一入口（TeamMenu 内含
+		// l4d_management < 3 的权限判断与重复面板保护，语义与旧 FakeClientCommand 等价）。
+		TeamMenu(client, 0);
 	}
 	return Plugin_Continue;	
 }

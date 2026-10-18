@@ -376,7 +376,13 @@ public void OnRoundIsLive()
 		bStaticTank = bTankifier && IsStaticTankMap();
 		bStaticWitch = bTankifier && IsStaticWitchMap();
 		
-		iMaxDistance = L4D_GetVersusMaxCompletionScore() / 4 * iSurvivorLimit;
+		// 12v12 的路程分插件已经把「人数缩放」写进 vs_max_completion_score 本身
+		// （900 = 300 × 12/4），这里再 /4*人数 会二次放大成 2700。
+		// 其它模式没有该库，继续用旧的 /4*人数 换算，显示不变。
+		if (LibraryExists("l4d2_applemod_scoremod_12v12"))
+			iMaxDistance = L4D_GetVersusMaxCompletionScore();
+		else
+			iMaxDistance = L4D_GetVersusMaxCompletionScore() / 4 * iSurvivorLimit;
 		
 		iTankCount = 0;
 		iWitchCount = 0;

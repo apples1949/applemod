@@ -3,14 +3,16 @@
 #pragma newdecls required
 #include <sourcemod>
 
-#define PLUGIN_VERSION	"1.8"
+#define PLUGIN_VERSION	"1.9"
 
-#define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒)
+#define SPRAY_WINDOW_TIME		2.5		// Boomer 存活喷吐的一次性判定窗口(秒); 窗口只在 boomer 存活时播报,
+									// 若窗口未结束就死亡, 人数并入死亡后的累积总结(不重复播)
 #define EXPLODE_WINDOW_TIME		1.5		// Boomer 爆炸糊人的判定窗口(秒)
 #define EXPLODE_SAME_WINDOW_TIME	0.5	// 同一次爆炸事件的最大到达时间差(秒): 窗口开启超过此时长后到达的事件视为新一次爆炸
 #define EXPLODE_SCAN_INTERVAL	0.25	// 爆炸窗口结算扫描间隔(秒)
 #define TANK_HIT_WINDOW_TIME	0.5		// Tank 左键一爪/拍打移动物品的一次性判定窗口(秒)
-#define BOOMER_REPORT_DELAY		0.5		// Boomer 死亡后等待爆炸糊人的 player_now_it 事件到齐再播报累积胆汁的延迟(秒)
+#define BOOMER_REPORT_DELAY		0.5		// Boomer 死亡后播报累积胆汁的最小延迟(秒): 等爆炸糊人的 player_now_it 到齐;
+									// 若死亡爆炸的窗口还没结算, 死亡总结会再顺延到爆炸播报之后(保证爆炸先于累积)
 #define PINNED_CHECK_INTERVAL	0.5		// 多控检测间隔(秒)
 
 // ====================================================================================================
@@ -33,6 +35,7 @@ bool  g_bSprayActive[MAXPLAYERS+1];		// 当前是否处于一次喷吐窗口内
 float g_fSprayStart[MAXPLAYERS+1];		// 本次喷吐窗口起始时间
 int   g_iSprayCount[MAXPLAYERS+1];		// 本次喷到的不重复生还者数
 bool  g_bSprayVictim[MAXPLAYERS+1][MAXPLAYERS+1];
+int   g_iSpraySerial[MAXPLAYERS+1];		// 窗口代号: 开窗/关窗时自增, 旧窗口遗留的计时器据此作废
 
 // ====================================================================================================
 // Boomer 爆炸糊人状态(按 boomer 玩家索引)
@@ -51,7 +54,8 @@ float g_fLastExplodedTime;				// 最近爆炸发生的游戏时间
 bool  g_bBoomerBiledTracked[MAXPLAYERS+1];			// 本轮生命是否已有胆汁命中记录(死亡瞬间类别被重置时的兜底判据)
 bool  g_bBoomerBiled[MAXPLAYERS+1][MAXPLAYERS+1];	// 本轮被胆汁命中过的不重复生还者(主动喷吐 + 死亡爆炸)
 int   g_iBoomerBiledCount[MAXPLAYERS+1];			// 本轮被胆汁命中的不重复生还者数
-int   g_iBoomerSprayMax[MAXPLAYERS+1];				// 本轮已结算喷吐窗口中"一次性喷中"的最大人数(判断累积播报是否与之重复)
+bool  g_bBoomerAnnouncedVictim[MAXPLAYERS+1][MAXPLAYERS+1];	// 本轮已经向队伍播报过的生还者(一次性喷中/爆炸/累积共用),
+															// 后三条播报只要凑不出"没播过的人"就说明是重复内容, 直接不播
 bool  g_bBoomerReportPending[MAXPLAYERS+1];			// 死亡后等待爆炸糊人事件到齐再播报
 float g_fBoomerDeathTime[MAXPLAYERS+1];				// 死亡时刻(游戏时间)
 char  g_sBoomerDeathName[MAXPLAYERS+1][MAX_NAME_LENGTH];	// 死亡时缓存的名字(播报时角色可能已失效)
@@ -198,15 +202,18 @@ public void OnMapEnd()
 
 public void OnClientDisconnect(int client)
 {
+	// 死亡播报还挂着(死亡后 0.5 秒内断线)或爆炸窗口还没结算: 先按「爆炸 → 累积总结」的顺序补播再清空。
+	// 直接清空会漏掉「爆炸炸到N名」, 死亡总结也就少了去重基准, 反而会把同样的人数再播一遍。
+	if (g_bBoomerReportPending[client] || g_bExplodeActive[client])
+		FlushBoomerLife(client);
+	else
+		ResetBoomerBiled(client);
+
 	ResetSpray(client);
 	ResetExplode(client);
 	ResetCharger(client);
 	ResetTankHit(TankHit_Claw, client);
 	ResetTankHit(TankHit_Prop, client);
-
-	// 待播报的累积胆汁记录保留(播报只用已缓存的名字与计数), 否则直接清空
-	if (!g_bBoomerReportPending[client])
-		ResetBoomerBiled(client);
 }
 
 // ====================================================================================================
@@ -261,17 +268,12 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 
 	if (!g_bSprayActive[attacker])
 	{
-		g_bSprayActive[attacker] = true;
-		g_fSprayStart[attacker] = now;
-		CreateTimer(SPRAY_WINDOW_TIME, Timer_EndSpray, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+		OpenSprayWindow(attacker);
 	}
 	else if (now - g_fSprayStart[attacker] > SPRAY_WINDOW_TIME)
 	{
 		// 窗口已过期但结算计时器尚未运行(如换图被清除), 重新开窗
-		ResetSpray(attacker);
-		g_bSprayActive[attacker] = true;
-		g_fSprayStart[attacker] = now;
-		CreateTimer(SPRAY_WINDOW_TIME, Timer_EndSpray, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+		OpenSprayWindow(attacker);
 	}
 
 	if (!g_bSprayVictim[attacker][victim])
@@ -284,11 +286,77 @@ public void Event_PlayerNowIt(Event event, const char[] name, bool dontBroadcast
 	MarkBoomerBiled(attacker, victim);
 }
 
-public Action Timer_EndSpray(Handle timer, int userid)
+// 打开一次喷吐窗口。计时器里带窗口代号, 窗口被提前结算(死亡/新开窗)后旧计时器到达时直接作废,
+// 否则旧计时器会把新窗口提前结算(甚至给已经死了的 boomer 补播)。
+void OpenSprayWindow(int boomer)
 {
+	g_iSpraySerial[boomer]++;
+	g_bSprayActive[boomer] = true;
+	g_fSprayStart[boomer] = GetGameTime();
+	g_iSprayCount[boomer] = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+		g_bSprayVictim[boomer][i] = false;
+
+	DataPack pack = new DataPack();
+	pack.WriteCell(GetClientUserId(boomer));
+	pack.WriteCell(g_iSpraySerial[boomer]);
+	CreateTimer(SPRAY_WINDOW_TIME, Timer_EndSpray, pack, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_EndSpray(Handle timer, DataPack pack)
+{
+	pack.Reset();
+	int userid = pack.ReadCell();
+	int serial = pack.ReadCell();
+	delete pack;
+
 	int boomer = GetClientOfUserId(userid);
 
-	if (boomer > 0 && g_bSprayActive[boomer] && g_iSprayCount[boomer] >= g_iBoomerSprayMin)
+	if (boomer <= 0)
+		return Plugin_Continue;
+
+	// 窗口已被结算过(死亡结算/新窗口): 本计时器作废, 不能去结算新窗口
+	if (serial != g_iSpraySerial[boomer] || !g_bSprayActive[boomer])
+		return Plugin_Continue;
+
+	// 只在 boomer 还活着时播「一次性喷中」; 已经死亡则只结算不播, 内容由死亡总结统一输出,
+	// 避免「一次喷吐 + 死亡总结」两条报同一批人(用户反馈的重复与顺序问题)
+	SettleSpray(boomer, IsPlayerAlive(boomer));
+
+	return Plugin_Continue;
+}
+
+// 统计一组生还者里"本轮还没播报过"的人数。bMark=true 时把他们标记为已播报。
+// 三种播报(一次性喷中/爆炸炸到/累积胆汁)共用同一份已播报名单, 任何一条只要能凑出新人就播,
+// 凑不出新人(全是别的播报已经报过的人)就整条不播 —— 这就是用户要的"同一次喷吐不会重复播"。
+int CountUnannounced(int boomer, bool bSet[][MAXPLAYERS+1], bool bMark)
+{
+	int n = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!bSet[boomer][i] || g_bBoomerAnnouncedVictim[boomer][i])
+			continue;
+
+		n++;
+
+		if (bMark)
+			g_bBoomerAnnouncedVictim[boomer][i] = true;
+	}
+
+	return n;
+}
+
+// 结算一次喷吐窗口。bAnnounce=false 时只清窗口不播报(boomer 已死亡, 由死亡总结代播)。
+// 调用后窗口必定关闭且代号自增, 晚到的旧计时器不会再命中。
+void SettleSpray(int boomer, bool bAnnounce)
+{
+	if (boomer <= 0 || boomer > MaxClients)
+		return;
+
+	if (bAnnounce && g_bSprayActive[boomer] && g_iSprayCount[boomer] >= g_iBoomerSprayMin
+		&& CountUnannounced(boomer, g_bSprayVictim, true) > 0)
 	{
 		char name[MAX_NAME_LENGTH];
 		GetActorName(boomer, name, sizeof(name));
@@ -297,16 +365,7 @@ public Action Timer_EndSpray(Handle timer, int userid)
 			name, g_iSprayCount[boomer]);
 	}
 
-	if (boomer > 0)
-	{
-		// 记下本次"一次性喷中"的人数(取本轮各窗口中最大值), 供死亡播报判断累积数是否与之重复
-		if (g_bSprayActive[boomer] && g_iSprayCount[boomer] > g_iBoomerSprayMax[boomer])
-			g_iBoomerSprayMax[boomer] = g_iSprayCount[boomer];
-
-		ResetSpray(boomer);
-	}
-
-	return Plugin_Continue;
+	ResetSpray(boomer);
 }
 
 public void Event_BoomerExploded(Event event, const char[] name, bool dontBroadcast)
@@ -354,14 +413,19 @@ public Action Timer_ScanExplode(Handle timer)
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
+		// 1) 先结算到期的爆炸窗口。必须排在死亡总结之前: 死亡总结只等 0.5 秒, 爆炸窗口要等 1.5 秒,
+		//    如果各播各的, 「累积N名」会先于「爆炸炸到N名」播出, 就是用户反馈的顺序颠倒。
 		if (g_bExplodeActive[i] && now - g_fExplodeStart[i] >= EXPLODE_WINDOW_TIME)
 		{
 			PrintExplode(i);
 			ResetExplode(i);
 		}
 
-		// boomer 死亡后等爆炸糊人事件到齐, 再播报本轮(生成到死亡)累积喷中的生还者数
-		if (g_bBoomerReportPending[i] && now - g_fBoomerDeathTime[i] >= BOOMER_REPORT_DELAY)
+		// 2) boomer 死亡总结: 等爆炸窗口结算完(保证爆炸糊到的人已经统计完整、且爆炸播报先出),
+		//    并且延迟到齐后再播; 播完立刻清空, 保证一轮生命只播一次。
+		if (g_bBoomerReportPending[i]
+			&& !g_bExplodeActive[i]
+			&& now - g_fBoomerDeathTime[i] >= BOOMER_REPORT_DELAY)
 		{
 			PrintBoomerBiled(i);
 			ResetBoomerBiled(i);
@@ -376,6 +440,11 @@ void PrintExplode(int boomer)
 	if (g_iExplodeCount[boomer] < g_iBoomerExplodeMin)
 		return;
 
+	// 炸到的人全都在本轮已经播报过(典型情况: 爆炸前刚播过「一次性喷中N名」, 炸的还是同一批人):
+	// 属于重复内容, 不再播 —— 这就是用户反馈的「爆炸和一次性喷吐同时冒出来」
+	if (CountUnannounced(boomer, g_bExplodeVictim, true) == 0)
+		return;
+
 	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01爆炸炸到\x04%d\x05名生还者",
 		g_sExplodeName[boomer], g_iExplodeCount[boomer]);
 }
@@ -385,6 +454,7 @@ void ResetSpray(int boomer)
 	g_bSprayActive[boomer] = false;
 	g_fSprayStart[boomer] = 0.0;
 	g_iSprayCount[boomer] = 0;
+	g_iSpraySerial[boomer]++;	// 作废还没到达的窗口计时器
 
 	for (int i = 1; i <= MaxClients; i++)
 		g_bSprayVictim[boomer][i] = false;
@@ -414,11 +484,14 @@ void MarkBoomerBiled(int boomer, int victim)
 	g_iBoomerBiledCount[boomer]++;
 }
 
-// boomer 死亡: 缓存名字并挂起播报, 等爆炸糊人的 player_now_it 事件到齐后由周期扫描统一输出
+// boomer 死亡: 先结算还开着的存活喷吐窗口(不播, 否则它的计时器会在死亡总结之后补播一条
+// 「一次性喷中N名」, 造成重复 + 顺序颠倒), 再缓存名字并挂起播报, 由周期扫描统一输出
 void ScheduleBoomerReport(int boomer)
 {
 	if (g_bBoomerReportPending[boomer])
 		return;
+
+	SettleSpray(boomer, false);
 
 	g_bBoomerReportPending[boomer] = true;
 	g_fBoomerDeathTime[boomer] = GetGameTime();
@@ -431,31 +504,47 @@ void PrintBoomerBiled(int boomer)
 	if (g_iBoomerBiledCount[boomer] < g_iBoomerBiledMin)
 		return;
 
-	// 本轮"一次性喷中"的人数: 已结算窗口的最大值, 加上尚未结算的当前窗口(死亡后才关闭的窗口)
-	int spray = g_iBoomerSprayMax[boomer];
-
-	if (g_bSprayActive[boomer] && g_iSprayCount[boomer] > spray)
-		spray = g_iSprayCount[boomer];
-
-	// 累积数与已播报的"一次性喷中N名生还者"完全相同时属于重复内容, 不再输出累积提示
-	if (spray >= g_iBoomerSprayMin && g_iBoomerBiledCount[boomer] == spray)
+	// 累积名单里全是已经播报过的人(例如本轮只炸了一次, 爆炸播报已经把同一批人报过):
+	// 属于重复内容, 不再输出。只有真有额外累积(之后又糊到新的人)时才播这一条。
+	if (CountUnannounced(boomer, g_bBoomerBiled, true) == 0)
 		return;
 
 	PrintToInfectedTeam("\x04[\x03!\x04] \x05Boomer(\x03%s\x05) \x01累积对\x04%d\x05名生还者喷射胆汁",
 		g_sBoomerDeathName[boomer], g_iBoomerBiledCount[boomer]);
 }
 
+// 一轮生命结束时的兜底结算(新生命生成前/断线前调用): 把还开着的喷吐窗口、爆炸窗口与待播的
+// 死亡总结按正确顺序(喷吐结算 → 爆炸 → 累积总结)补出来, 保证任何中断点都不会漏播或乱序。
+void FlushBoomerLife(int boomer)
+{
+	// 存活喷吐窗口: 这一轮已经结束, 只结算不播(人数会并入累积总结)
+	SettleSpray(boomer, false);
+
+	if (g_bExplodeActive[boomer])
+	{
+		PrintExplode(boomer);
+		ResetExplode(boomer);
+	}
+
+	if (g_bBoomerReportPending[boomer])
+		PrintBoomerBiled(boomer);
+
+	ResetBoomerBiled(boomer);
+}
+
 void ResetBoomerBiled(int boomer)
 {
 	g_bBoomerBiledTracked[boomer] = false;
 	g_iBoomerBiledCount[boomer] = 0;
-	g_iBoomerSprayMax[boomer] = 0;
 	g_bBoomerReportPending[boomer] = false;
 	g_fBoomerDeathTime[boomer] = 0.0;
 	g_sBoomerDeathName[boomer][0] = '\0';
 
 	for (int i = 1; i <= MaxClients; i++)
+	{
 		g_bBoomerBiled[boomer][i] = false;
+		g_bBoomerAnnouncedVictim[boomer][i] = false;
+	}
 }
 
 // ====================================================================================================
@@ -600,11 +689,9 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	if (client <= 0)
 		return;
 
-	// 任何一次生成都是一轮新生命: 清空上一轮的 boomer 累积胆汁记录
-	ResetBoomerBiled(client);
-
-	if (IsBoomer(client))
-		ResetSpray(client);
+	// 任何一次生成都是一轮新生命: 先把上一轮还没播完的播报补出来(喷吐结算/爆炸/累积总结),
+	// 再清空状态。否则 boomer 死得快、复活也快时, 待播的总结会被静默丢掉。
+	FlushBoomerLife(client);
 
 	if (!IsCharger(client))
 		return;

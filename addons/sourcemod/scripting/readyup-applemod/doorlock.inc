@@ -659,6 +659,13 @@ Action DL_tmrLoading(Handle timer)
 	else
 		DL_g_iCountDown = DL_IsFinishedLoading() ? 0 : -1;
 
+	// 加载状态面板：任何回合（含对抗第二回合 / 下半场）都要显示。
+	// 旧版只在 g_bFirstRound 为真的回合里画，而对抗第二回合 g_bFirstRound 已经是 false
+	// ⇒ 整段准备期一个面板都不发（用户反馈的「第二回合没显示」）。
+	// 现在只要 displaypanel > 0，等加载阶段和倒计时阶段都发，回合序号不参与判断。
+	if (DL_g_iDisplayPanel > 0)
+		DL_LoadingPanel();
+
 	return Plugin_Continue;
 }
 
@@ -808,9 +815,38 @@ void DL_LoadingPanel()
 	}
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsClientInGame(client) && !IsFakeClient(client)) panel.Send(client, DL_PanelHandler, 5);
+		// 显示时长 2 秒：面板每秒重发一次，2 秒足够无缝衔接；而准备阶段结束时
+		// 最后一次发送后最多 2 秒就自动消失，不会挡着开局的准星。
+		if (DL_CanSendPanel(client)) panel.Send(client, DL_PanelHandler, 2);
 	}
 	delete panel;
+}
+
+// 会不会「抢掉」玩家正在用的投票面板。
+// 面板现在每秒重发一次、且贯穿整段准备期，所以必须先避开投票，否则会把投票 UI 关掉。
+// 这里刻意**不**用 GetClientMenu 过滤：Panel 本身就是菜单，加了会把自己的面板判成
+// 「客户端正在看菜单」而永久跳过重发，人数就不再刷新（原始 doorlock 也没有这层判断）。
+bool DL_CanSendPanel(int client)
+{
+	if (!IsClientInGame(client) || IsFakeClient(client))
+		return false;
+
+	// 玩家用 !hide 隐藏了准备面板，就一并尊重：他显式要求「别挡着别的菜单」。
+	// （同一个标记位由 readyup 侧的 !hide / !show 维护，见 command.inc:137/147）
+	if (IsPlayerHiddenPanel(client))
+		return false;
+
+	if (BuiltinVote_IsVoteInProgress() && IsClientInBuiltinVotePool(client))
+		return false;
+
+	if (Game_IsVoteInProgress())
+	{
+		int voteteam = Game_GetVoteTeam();
+		if (voteteam == -1 || voteteam == GetClientTeam(client))
+			return false;
+	}
+
+	return true;
 }
 
 int DL_PanelHandler(Menu menu, MenuAction action, int param1, int param2)
@@ -898,7 +934,11 @@ void DL_InitPlugin()
 	}
 
 	DL_StartSequence();
-	LogMessage("[ReadyUp] DoorLock started: door=%d round_events=%d/%d", EntRefToEntIndex(DL_g_iStartDoor), DL_g_iRoundStart, DL_g_iPlayerSpawn);
+	// 日志里带上回合序号与面板开关：万一「第二回合没显示」再复发，看这一行就能立刻区分
+	// 是「流程没启动」还是「面板被条件挡住」。
+	LogMessage("[ReadyUp] DoorLock started: door=%d round_events=%d/%d first_round=%d half=%d displaypanel=%d",
+		EntRefToEntIndex(DL_g_iStartDoor), DL_g_iRoundStart, DL_g_iPlayerSpawn,
+		DL_g_bFirstRound, GameRules_GetProp("m_bInSecondHalfOfRound"), DL_g_iDisplayPanel);
 }
 
 //https://forums.alliedmods.net/showthread.php?p=2700212
@@ -1009,8 +1049,9 @@ bool DL_IsFinishedLoading()
 			DL_g_bIsLoading[i] = false;
 	}
 
-	if (DL_g_iDisplayPanel > 0 && DL_g_bFirstRound)
-		DL_LoadingPanel();
+	// 注意：面板不在这里画。旧版把 DL_LoadingPanel() 放在这里并附加「仅第一回合」条件，
+	// 结果对抗第二回合整段都不显示面板。现在统一由 DL_tmrLoading 每 tick 调用，
+	// 覆盖「等加载」+「锁门倒计时」整段准备期，且不再和回合序号绑定。
 
 	return !DL_IsAnyClientLoading();
 }

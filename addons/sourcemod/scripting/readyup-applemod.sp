@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.2-audit4"
+#define PLUGIN_VERSION "10.3.3"
 
 public Plugin myinfo =
 {
@@ -225,6 +225,8 @@ Action ReadyStatus_Cmd(int client, int args)
 	ReplyToCommand(client, "[ReadyUp %s] mode=%d manual=%d external=%d live=%d", PLUGIN_VERSION, l4d_ready_enabled.IntValue, inReadyUp, externalReadyActive, DL_g_bRoundLive);
 	ReplyToCommand(client, "[DoorLock] allow=%d effective=%d map=%d configs=%d ended=%d events=%d/%d", DL_g_cAllow.IntValue, DL_g_bCvarAllow, DL_g_bMapStarted, DL_g_bConfigsReady, DL_g_bRoundEnded, DL_g_iRoundStart, DL_g_iPlayerSpawn);
 	ReplyToCommand(client, "[DoorLock] human=%d survivor=%d door=%d countdown=%d timer=%d recovery=%d freeze=%d modebits=%d/%d", DL_HasConfirmedHuman(), DL_HasLivingSurvivor(), EntRefToEntIndex(DL_g_iStartDoor), DL_g_iCountDown, DL_g_hTimer != null, DL_g_hRecoveryTimer != null, DL_g_bFreezeAllowed, DL_g_iCurrentMode, DL_g_cModesTog.IntValue);
+	// 加载状态面板：现在每一回合都会显示（不再只限第一回合），这里把两个判据打出来便于核对。
+	ReplyToCommand(client, "[DoorLock] first_round=%d half=%d displaypanel=%d", DL_g_bFirstRound, GameRules_GetProp("m_bInSecondHalfOfRound"), DL_g_iDisplayPanel);
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (!IsClientInGame(i) || (GetClientTeam(i) != 2 && GetEntityMoveType(i) != MOVETYPE_NONE)) continue;

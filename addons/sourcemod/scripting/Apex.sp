@@ -70,6 +70,13 @@ enum ApexSkillCostType
 #define PRED_WINDOW		   1.2	  /* 坦克起手扔石后, 预测线最多持续多久(秒); 掷出/取消/超时都会结束 */
 #define PRED_MIN_STEP_DIST 2.0	  /* 一步推进不足这个距离就当成"起点自撞(startsolid)"处理, 不算命中 */
 #define PRED_SEG_MAX	   64	  /* tank_pred_seg 上限, 也是画线采样点数组尺寸 */
+/* 起点自救: 合成出来的起点若插在实心几何里(脚下地面/楼梯/墙角)或贴着地面, 这里往上抬着找空域。
+   每次抬 PRED_START_LIFT_STEP 点, 最多抬 PRED_START_LIFT_TRIES 次; 仍不行就退回眼睛锚点
+   (见 Pred_FixStart)。只在起点确实不可用时才生效, 正常起点一个坐标都不改。
+   PRED_START_CLEAR: 起点正下方要求的最低净空(点), 比"一步推进阈值"略大, 保证第一步不会擦地。 */
+#define PRED_START_LIFT_STEP  16.0
+#define PRED_START_LIFT_TRIES 8
+#define PRED_START_CLEAR	  6.0
 /* 世界几何那一次碰撞检测用的掩码: MASK_SOLID 去掉 CONTENTS_MONSTER
    —— 石头的碰撞是 MASK_SOLID 级别, 但会从感染者/普通僵尸身上穿过去(实战验证: 预测在这儿停下而石头继续飞),
    所以感染者不算阻挡; 生还者单独用射线查(见 Pred_SurvivorFilter) */
@@ -94,7 +101,7 @@ enum ApexSkillCostType
 #define PRED_DEBUG_FULL	  2 /* 详细: 起手/结束、贴图索引、画了几段、命中与否(写日志+发给玩家) */
 
 /* 调试日志版本标记: 进服看服务器日志里这一行就知道跑的是哪个 build */
-#define PRED_BUILD		  "2026-10-13p-hints"
+#define PRED_BUILD		  "2026-10-20-startsolid"
 
 Handle g_hFwdSkillCost;
 Handle g_hFwdTracRockHit;
@@ -1508,6 +1515,130 @@ void Pred_ComposeStart(const float vis[3], const float angles[3], const float lo
 	out[1] = vis[1] + right[1] * local[0] + up[1] * local[1] + fwd[1] * local[2];
 	out[2] = vis[2] + right[2] * local[0] + up[2] * local[1] + fwd[2] * local[2];
 }
+
+/* 起点自救专用的碰撞过滤器: 除坦克自己外, 再把所有玩家排除 ——
+   别的生还者站在坦克旁边/脚下不该让起点被判定成"贴地", 也不该把起点往上抬。
+   隐形物理阻挡体(env_physics_blocker)同样不算(石头从它身上穿过去)。 */
+bool Pred_StartFilter(int entity, int contentsMask, any data)
+{
+	if (entity == data)
+		return false;
+
+	if (entity > 0 && entity <= MaxClients)
+		return false;
+
+	if (entity > 0 && entity < sizeof(g_bPredIgnoreEnt) && g_bPredIgnoreEnt[entity])
+		return false;
+
+	return true;
+}
+
+/**
+ * 起点是否"没法用": 插在实心几何里, 或者离脚下地面近到石头盒已经贴上了。
+ *
+ * 为什么必须查这一条: 起点是"眼睛锚点 + 手部偏移"拼出来的, 手部偏移是学来的固定值
+ * (起手快照那一档来自动作刚开始时的手部附着点, 那时手臂还在蓄力位置 —— 手比眼睛低得多)。
+ * 一旦偏移把起点压到脚边, 就会出现"被脚下挡住"的两种真身:
+ *   1) 起点插在地面/台阶里: 石头盒一出生就在实心的, 引擎每次 hull 扫描都返回 startsolid,
+ *      整段抛物线在地下走, 玩家看到的线就是"刚出来就被地面切断";
+ *   2) 起点离地不足 4+6 点: 石头盒已经贴着地面, 第一个物理步(0.02 秒)的扫描就会和地面
+ *      擦上, 距离刚好越过 PRED_MIN_STEP_DIST 被当成真命中 -> 落点光柱插在脚边。
+ *
+ * 判据用三条, 任一成立就算不可用:
+ *   a) 该点的世界内容含实心标志(点在固体里);
+ *   b) ±4 石头盒的零长度 hull 扫描报 startsolid(盒子与实心几何重叠);
+ *   c) 以 ±4 石头盒向下走 4+6 点, 扫到了东西(脚下贴地/贴着道具)。
+ * 掩码跟正式轨迹检测完全一致(去掉感染者与玩家夹子), 结论才能和 Pred_StepTrace 对上;
+ * 过滤器额外排除玩家(见 Pred_StartFilter)。
+ */
+bool Pred_StartBad(int client, const float pos[3])
+{
+	/* a) 点内容: 只看"实心几何"那几位, 感染者(MONSTER)与玩家夹子(PLAYERCLIP)照旧不算 */
+	if ((TR_GetPointContents(pos) & PRED_WORLD_MASK) != 0)
+		return true;
+
+	float hullMin[3] = { -PRED_HULL_SIZE, -PRED_HULL_SIZE, -PRED_HULL_SIZE };
+	float hullMax[3] = { PRED_HULL_SIZE, PRED_HULL_SIZE, PRED_HULL_SIZE };
+
+	/* b) 零长度 hull: 石头盒在这里放得下吗 */
+	TR_TraceHullFilter(pos, pos, hullMin, hullMax, PRED_WORLD_MASK, Pred_StartFilter, client);
+	if (TR_StartSolid() || TR_AllSolid())
+		return true;
+
+	/* c) 脚下净空: 只向下扫 10 点, 能扫到就说明贴着地/贴着道具 */
+	float down[3];
+	down[0] = pos[0];
+	down[1] = pos[1];
+	down[2] = pos[2] - (PRED_HULL_SIZE + PRED_START_CLEAR);
+
+	TR_TraceHullFilter(pos, down, hullMin, hullMax, PRED_WORLD_MASK, Pred_StartFilter, client);
+	return TR_DidHit();
+}
+
+/**
+ * 起点自救: 只在起点"没法用"(见 Pred_StartBad)时才动它, 正常起点一个坐标都不改,
+ * 所以平时的轨迹形状和落点跟改动前完全一样。
+ *
+ * 修法优先小幅上抬(每次 16 点, 最多 8 次 = 128 点):
+ *   元凶是水平的地面/台阶, 沿着抛物线方向往前推还在土里, 往上抬一次就出来了;
+ *   而且上抬对弹道的影响是"整条线一起抬高一点", 落点只略微变远, 不会像前推那样
+ *   把起点塞进坦克正前方的墙里(那会造出一个新的假命中)。
+ * 上抬到上限仍然不行(站在低矮夹缝里, 连手部偏移带出来的点被几何包住), 才退回纯眼睛锚点 ——
+ * 玩家眼位一定在空域里, 否则他本人早就卡在墙里了。
+ *
+ * @param start 输入输出: 合成出来的起点, 不可用时在这里被就地改写
+ * @param vis   GetPredStart 的眼睛锚点, 最后兜底用
+ * @return true = 起点被改写过(日志里能看到改了多少, 便于实测确认)
+ */
+bool Pred_FixStart(int client, float start[3], const float vis[3])
+{
+	if (!Pred_StartBad(client, start))
+		return false;
+
+	float bad[3];
+	bad[0] = start[0];
+	bad[1] = start[1];
+	bad[2] = start[2];
+
+	/* 1) 上抬: 每次 16 点, 最多 8 次, 找到第一个"能用"的高度就停 */
+	for (int i = 1; i <= PRED_START_LIFT_TRIES; i++)
+	{
+		float probe[3];
+		probe[0] = bad[0];
+		probe[1] = bad[1];
+		probe[2] = bad[2] + PRED_START_LIFT_STEP * float(i);
+
+		if (Pred_StartBad(client, probe))
+			continue;
+
+		start[0] = probe[0];
+		start[1] = probe[1];
+		start[2] = probe[2];
+
+		if (PredLogCanSpam(client))
+			PredLog(client, PRED_DEBUG_KEY, "起点自救: 合成起点(%.0f,%.0f,%.0f)卡在脚下几何/贴地里, 上抬 %.0f 点 -> (%.0f,%.0f,%.0f)",
+					bad[0], bad[1], bad[2], PRED_START_LIFT_STEP * float(i), start[0], start[1], start[2]);
+		return true;
+	}
+
+	/* 2) 上抬也救不回来: 退回眼睛锚点(比原起点更靠上、更靠后, 一定比埋在土里强) */
+	if (!Pred_StartBad(client, vis))
+	{
+		start[0] = vis[0];
+		start[1] = vis[1];
+		start[2] = vis[2];
+
+		if (PredLogCanSpam(client))
+			PredLog(client, PRED_DEBUG_KEY, "起点自救: 上抬 %d 次仍不可用, 退回眼睛锚点(%.0f,%.0f,%.0f)(原起点 %.0f,%.0f,%.0f)",
+					PRED_START_LIFT_TRIES, vis[0], vis[1], vis[2], bad[0], bad[1], bad[2]);
+		return true;
+	}
+
+	/* 3) 连眼位都在实心里(极端情况): 保持原起点不动, 只留一条日志说明为什么没救 */
+	if (PredLogCanSpam(client))
+		PredLog(client, PRED_DEBUG_KEY, "起点自救失败: 眼位(%.0f,%.0f,%.0f)也在实心几何里, 保持原起点不动", vis[0], vis[1], vis[2]);
+	return false;
+}
 /**
  * 石头实飞记录(调试): 掷出后逐帧记住石头位置; 石头碎裂消失(或超过 6 秒)时,
  * 用最后位置当作实际落点, 打印"实际落点/实飞时间 vs 预测落点/预测时间/误差"。
@@ -1641,15 +1772,30 @@ bool Pred_StepTraceOnce(int client, const float from[3], float to[3], const floa
 	TR_TraceHullFilter(from, to, hullMin, hullMax, PRED_WORLD_MASK, TraceFilter_Pred, client);
 	if (TR_DidHit())
 	{
-		TR_GetEndPosition(endpos);
-		float d = GetVectorDistance(from, endpos);
-		if (d >= PRED_MIN_STEP_DIST)
+		/* startsolid 要单独识别: 这一步的起点本身就在实心里(脚下地面/台阶/墙角), 引擎会给出
+		   "几乎零距离的命中点"。以前只靠 PRED_MIN_STEP_DIST 这个距离阈值把它挡掉, 但阈值是
+		   双刃剑 —— 距离刚好越过 2 点就会被当成真命中, 于是落点光柱插在脚边(坦克自己脚下)。
+		   这里显式区分: 起点在实心里的这次命中一律不算, 只跳过世界几何那一路, 第 2 步的生还者
+		   射线照旧跑(别漏掉"起点卡在门槛里、前面正好站着生还者"这种组合);
+		   起点在空域里、只是贴脸擦过真墙的, 仍然照距离阈值处理, 薄墙不会被放过。 */
+		if (TR_StartSolid() || TR_AllSolid())
 		{
-			best	= d;
-			bestEnt = TR_GetEntityIndex();
-			to[0]	= endpos[0];
-			to[1]	= endpos[1];
-			to[2]	= endpos[2];
+			if (PredLogCanSpam(client))
+				PredLog(client, PRED_DEBUG_FULL, "这一步起点在实心几何里(startsolid), 世界几何不算命中: 从(%.0f,%.0f,%.0f) 到 (%.0f,%.0f,%.0f)",
+						from[0], from[1], from[2], to[0], to[1], to[2]);
+		}
+		else
+		{
+			TR_GetEndPosition(endpos);
+			float d = GetVectorDistance(from, endpos);
+			if (d >= PRED_MIN_STEP_DIST)
+			{
+				best	= d;
+				bestEnt = TR_GetEntityIndex();
+				to[0]	= endpos[0];
+				to[1]	= endpos[1];
+				to[2]	= endpos[2];
+			}
 		}
 	}
 
@@ -1759,7 +1905,9 @@ void Pred_Calc(int client, const float angles[3], const float start[3], const fl
 
 		Pred_EvalAt(start, vel, gravity, tNext, probe);
 
-		/* 空域快速通道: 这一段连"拱起的弦"都扫不到东西, 抛物线自然也能过 */
+		/* 空域快速通道: 这一段连"拱起的弦"都扫不到东西, 抛物线自然也能过。
+		   (起点卡在实心里时这一扫也会"假命中", 会掉进下面的逐步精查 —— 那里已经显式识别
+		     startsolid 并当作没撞, 代价只是这几帧多几次短扫描, 换来的是不漏掉真墙和生还者) */
 		TR_TraceHullFilter(cur, probe, hullMin, hullMax, PRED_WORLD_MASK, TraceFilter_Pred, client);
 		if (!TR_DidHit())
 		{
@@ -2076,6 +2224,7 @@ void Pred_Update(int client, const float angles[3])
 		GetPredStart(client, angles, vis);
 		GetPredPhysOffset(client, angles, local); /* 自检: 直接用当前手部偏移, 方便对照 */
 		Pred_ComposeStart(vis, angles, local, s);
+		Pred_FixStart(client, s, vis); /* 自检也要自救: 蓄力时手部附着点在低处, 起点常被压到脚边 */
 		GetPredVelocity(client, angles, v);
 
 		Pred_DrawPath(client, angles, s, v);
@@ -2155,6 +2304,12 @@ void Pred_Update(int client, const float angles[3])
 	}
 
 	Pred_ComposeStart(vis, angles, local, start);
+
+	/* 起点自救: 合成出来的起点如果插在脚下地面/台阶里(或者贴着地面), 引擎第一步扫描就会
+	   当成撞地 —— 线刚出来就被"脚下"切断、落点插在脚边。这里只在起点确实不可用时才上抬,
+	   正常起点一个坐标都不改, 所以平时的轨迹形状和落点跟改动前完全一样。
+	   (放在"本发起点"日志之前, 日志里打的就是真正拿去算的起点) */
+	Pred_FixStart(client, start, vis);
 
 	if (!g_bPredStartLogged[client])
 	{

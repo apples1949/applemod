@@ -12,7 +12,7 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.9-core"
+#define PLUGIN_VERSION "2.5.10-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -72,6 +72,11 @@ ConVar RespawnJoin;
 ConVar MoreSiBotsVersus;
 ConVar AutoJoin;
 ConVar Management;
+ConVar AllowSpectate;
+ConVar BlockSpecInTank;
+ConVar SuppressSpectate;
+float NextSpectateNotice[MAXPLAYERS + 1];
+int QueuedPummelOffset = -1;
 
 ConVar SiSpMoreDelay;
 ConVar cvar_minsurvivor;
@@ -171,6 +176,16 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_infected", Join_Infected, "Join Infected Team");
 	RegConsoleCmd("sm_inf", Join_Infected, "Join Infected Team");
 	RegConsoleCmd("sm_spectate", Join_Spectator, "Join Spectator Team");
+	RegConsoleCmd("sm_spec", Join_Spectator, "Join Spectator Team");
+	RegConsoleCmd("sm_s", Join_Spectator, "Join Spectator Team");
+	AllowSpectate = CreateConVar("sm_allow_spectate_command", "1", "Allow !spectate/!spec/!s");
+	BlockSpecInTank = CreateConVar("sm_blockspecintank", "0", "Block survivor spectating during a Tank", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SuppressSpectate = CreateConVar("l4d_pm_supress_spectate", "0", "Don't announce spectator moves");
+	GameData teamData = new GameData("l4d2_si_ability");
+	if (teamData == null) SetFailState("Missing l4d2_si_ability gamedata");
+	QueuedPummelOffset = teamData.GetOffset("CTerrorPlayer->m_queuedPummelAttacker");
+	delete teamData;
+	if (QueuedPummelOffset == -1) SetFailState("Missing CTerrorPlayer->m_queuedPummelAttacker offset");
 	//RegConsoleCmd("sm_afk", GO_AFK, "Go Idle (Survivor) or Join Spectator Team (Infected)");
 	//RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
 	//RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
@@ -238,6 +253,7 @@ public void OnConfigsExecuted()
 
 public void OnClientPutInServer(int client)
 {
+	NextSpectateNotice[client] = 0.0;
 	CancelJoin(client);
 	SurvivorPlaceholder[client] = false;
 	if (!IsFakeClient(client)) ResumeBotPopulation();
@@ -276,8 +292,76 @@ public void OnClientConnected(int client)
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	LateLoad = late;
+	RegPluginLibrary("applemod12v12_multiplayer");
+	CreateNative("SV12_CanManageTeams", Native_CanManageTeams);
+	CreateNative("SV12_RequestTeam", Native_RequestTeam);
+	CreateNative("SV12_GetHumanTeam", Native_GetHumanTeam);
+	CreateNative("SV12_ReconcileSurvivors", Native_ReconcileSurvivors);
 	MarkNativeAsOptional("L4D_LobbyUnreserve");
 	return APLRes_Success;
+}
+
+bool CanManageTeams()
+{
+	return SurvivorMapReady && Management != null && Management.BoolValue
+		&& L4D_IsVersusMode() && !TeamChangesLocked();
+}
+
+public any Native_CanManageTeams(Handle plugin, int numParams)
+{
+	return CanManageTeams();
+}
+
+public any Native_GetHumanTeam(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (!IsValidClient(client) || IsFakeClient(client)) return 0;
+	return GetBotOfIdle(client) > 0 ? TEAM_SURVIVOR : GetClientTeam(client);
+}
+
+public any Native_RequestTeam(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	int team = GetNativeCell(2);
+	if (!CanManageTeams() || !IsValidClient(client) || IsFakeClient(client)
+		|| team < TEAM_SPECTATOR || team > TEAM_INFECTED) return false;
+	NewConnection[client] = false;
+	CancelJoin(client);
+	// Admin requests still use the same lock, human capacity, owned-bot and
+	// death checks. Only the voluntary-spectator policy is skipped.
+	JoinResult result = TryJoinTeam(client, team, false, true);
+	if (result == Join_Wait && team != TEAM_SPECTATOR)
+	{
+		QueueJoin(client, team, false, 0.3);
+		return true;
+	}
+	return result == Join_Success;
+}
+
+public any Native_ReconcileSurvivors(Handle plugin, int numParams)
+{
+	if (!CanManageTeams() || !RoundStarted) return false;
+	ReconcileSurvivors();
+	return true;
+}
+
+void ReconcileSurvivors()
+{
+	int count;
+	for (int client = 1; client <= MaxClients; client++)
+		if (IsClientInGame(client) && GetClientTeam(client) == TEAM_SURVIVOR
+			&& !IsClientInKickQueue(client)) count++;
+	int limit = SurvivorLimit.IntValue;
+	for (int bot = MaxClients; bot >= 1 && count > limit; bot--)
+	{
+		if (!IsValidSurvivorBot(bot) || IsClientInKickQueue(bot) || SurvivorPlaceholder[bot]
+			|| HasIdlePlayer(bot)) continue;
+		// Detach before the asynchronous kick, so repeated checks count it once.
+		ChangeClientTeam(bot, TEAM_SPECTATOR);
+		KickClient(bot, "Removing excess unowned survivor bot");
+		count--;
+	}
+	SpawnCheck();
 }
 
 void RestoreRunningRound()
@@ -749,7 +833,7 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 				{
 					// An engine/third-party initial assignment must not create a
 					// thirteenth human seat after both configured teams are full.
-					if (GetClientTeam(client) > TEAM_SPECTATOR) TryJoinTeam(client, TEAM_SPECTATOR, false);
+					if (GetClientTeam(client) > TEAM_SPECTATOR) TryJoinTeam(client, TEAM_SPECTATOR, false, true);
 					result = Join_Failed;
 				}
 			}
@@ -993,7 +1077,7 @@ Action RequestJoin(int client, int team)
 	return Plugin_Handled;
 }
 
-JoinResult TryJoinTeam(int client, int team, bool announce)
+JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer = false)
 {
 	if (!IsValidClient(client) || IsFakeClient(client) || !Management.BoolValue) return Join_Failed;
 	if (!IsClientAuthorized(client) || IsClientInKickQueue(client)) return Join_Failed;
@@ -1031,9 +1115,16 @@ JoinResult TryJoinTeam(int client, int team, bool announce)
 		&& (team != TEAM_SPECTATOR || GetBotOfIdle(client) == 0)) return Join_Success;
 	if (team == TEAM_SPECTATOR)
 	{
+		if (!adminTransfer && !CanVoluntarilySpectate(client, announce)) return Join_Failed;
 		int ownedBot = GetBotOfIdle(client);
 		if (ownedBot > 0 && !SafeTakeOverSurvivor(client, ownedBot)) return Join_Wait;
 		ChangeClientTeam(client, TEAM_SPECTATOR);
+		if (!adminTransfer && announce && !SuppressSpectate.BoolValue
+			&& GetGameTime() >= NextSpectateNotice[client])
+		{
+			PrintToChatAll("\x03[队伍] \x01%N 已加入旁观。使用 !join、!sur 或 !inf 返回游戏。", client);
+			NextSpectateNotice[client] = GetGameTime() + 7.0;
+		}
 		return Join_Success;
 	}
 	if (team == TEAM_INFECTED)
@@ -1097,6 +1188,29 @@ JoinResult TryJoinTeam(int client, int team, bool announce)
 		SetGodMode(client, 1.0);
 	}
 	return Join_Success;
+}
+
+bool CanVoluntarilySpectate(int client, bool announce)
+{
+	if (!AllowSpectate.BoolValue) return false;
+	int team = GetClientTeam(client);
+	if (team == TEAM_INFECTED && GetClientZC(client) == ZC_TANK)
+	{
+		if (announce) PrintToChat(client, "\x03[队伍] \x01控制坦克时不能主动转入旁观。");
+		return false;
+	}
+	int survivor = team == TEAM_SURVIVOR ? client : GetBotOfIdle(client);
+	if (survivor > 0)
+	{
+		if (BlockSpecInTank.BoolValue && L4D2_IsTankInPlay()) return false;
+		if ((L4D2_GetInfectedAttacker(survivor) != -1 && !L4D_IsPlayerIncapacitated(survivor))
+			|| GetEntDataEnt2(survivor, QueuedPummelOffset) != -1)
+		{
+			if (announce) PrintToChat(client, "\x03[队伍] \x01被特感控制时暂时不能转入旁观。");
+			return false;
+		}
+	}
+	return true;
 }
 
 int FindJoinSurvivorBot(bool allowAlive = true)

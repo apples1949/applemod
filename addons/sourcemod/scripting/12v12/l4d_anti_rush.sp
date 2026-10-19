@@ -16,7 +16,7 @@
 *	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define PLUGIN_VERSION 		"1.21"
+#define PLUGIN_VERSION 		"1.22-12v12"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark logic function.
 
 /*======================================================================================
@@ -30,6 +30,11 @@
 
 ========================================================================================
 	Change Log:
+
+12v12 1.22 修复:
+	- 只在对抗模式运行；按全部有效存活身体的平均 flow 判定，治疗/救人不再改变统计样本。
+	- 修复模式掩码缓存翻转；坦克暂停、无效 flow、半场重置统一解除限速。
+	- 同步瘸腿速度 CVar，限速只降低速度，不覆盖更低的引擎速度。
 
 12v12 (applemod) - 定制修改:
 	- 限速值改为黄血瘸腿速度: 引擎 cvar "survivor_limp_walk_speed" = 85, 故 "l4d_anti_rush_slow" 默认 85.0 (原 100.0).
@@ -226,7 +231,7 @@ public void OnPluginStart()
 	g_hCvarAllow =		CreateConVar("l4d_anti_rush_allow",			"1",							"插件总开关. 0=关闭(解除所有限速并停用检测), 1=启用. 默认 1.", CVAR_FLAGS);
 	g_hCvarModes =		CreateConVar("l4d_anti_rush_modes",			"",								"白名单: 只在这些游戏模式下启用插件. 逗号分隔多个模式名, 空=不限制. 默认空.", CVAR_FLAGS);
 	g_hCvarModesOff =	CreateConVar("l4d_anti_rush_modes_off",		"",								"黑名单: 在这些游戏模式下禁用插件. 逗号分隔多个模式名, 空=无. 默认空.", CVAR_FLAGS);
-	g_hCvarModesTog =	CreateConVar("l4d_anti_rush_modes_tog",		"0",							"按模式类型启用: 0=全部模式(默认), 1=战役, 2=生还者, 4=对抗, 8=清道夫. 多种模式相加, 例如 4+8=12.", CVAR_FLAGS);
+	g_hCvarModesTog =	CreateConVar("l4d_anti_rush_modes_tog", "4", "模式掩码: 0=不额外限制, 1=战役, 2=生还者, 4=对抗, 8=清道夫. 本构建仅用于对抗模式, 默认 4.", CVAR_FLAGS);
 	g_hCvarFinale =		CreateConVar("l4d_anti_rush_finale",		g_bLeft4Dead2 ? "1" : "0",		"救援关是否生效. 0=救援关不生效, 1=全部救援关生效(默认), 2=仅 Gauntlet 类型救援关(L4D2).", CVAR_FLAGS);
 	g_hCvarFlags =		CreateConVar("l4d_anti_rush_flags",			"",								"豁免: 拥有这些管理标志位的玩家既不会被限速也不会被传送. 填标志字符串(如 \"z\"), 空=无人豁免. 默认空.", CVAR_FLAGS);
 	g_hCvarIgnore =		CreateConVar("l4d_anti_rush_ignore",		"0",							"配合 flags 使用. 0=默认, 被豁免的玩家不计入队伍平均距离; 1=仍把被豁免玩家计入平均距离.", CVAR_FLAGS);
@@ -265,6 +270,8 @@ public void OnPluginStart()
 
 	// 12v12: 黄血(瘸腿)移动速度, 引擎 cvar, 运行时读取, 避免 cfg 改了 survivor_limp_walk_speed 后限速值不同步.
 	g_hCvarLimpSpeed = FindConVar("survivor_limp_walk_speed");
+	if (g_hCvarLimpSpeed != null)
+		g_hCvarLimpSpeed.AddChangeHook(ConVarChanged_Cvars);
 
 	#if DEBUG_BENCHMARK
 	g_Prof = CreateProfiler();
@@ -369,11 +376,13 @@ int g_iCurrentMode;
 public void L4D_OnGameModeChange(int gamemode)
 {
 	g_iCurrentMode = gamemode;
+	if (g_bMapStarted && g_hCvarAllow != null)
+		IsAllowed();
 }
 
 bool IsAllowedGameMode()
 {
-	if (g_hCvarMPGameMode == null)
+	if (g_hCvarMPGameMode == null || !L4D_IsVersusMode())
 		return false;
 
 	int iCvarModesTog = g_hCvarModesTog.IntValue;
@@ -385,15 +394,16 @@ bool IsAllowedGameMode()
 		if (g_iCurrentMode == 0)
 			return false;
 
-		switch (g_iCurrentMode) // Left4DHooks values are flipped for these modes, sadly
+		int modeMask = g_iCurrentMode;
+		switch (modeMask) // Convert locally; never rewrite the cached Left4DHooks mode.
 		{
 			case 2:
-				g_iCurrentMode = 4;
+				modeMask = 4;
 			case 4:
-				g_iCurrentMode = 2;
+				modeMask = 2;
 		}
 
-		if (!(iCvarModesTog & g_iCurrentMode))
+		if (!(iCvarModesTog & modeMask))
 			return false;
 	}
 
@@ -423,7 +433,7 @@ bool IsAllowedGameMode()
 Action CmdAntiRush(int client, int args)
 {
 	g_hCvarAllow.BoolValue = !bCvarAllow;
-	PrintToChat(client, "\x04[提示]\x05防跑图功能已\x03%s\x05.", bCvarAllow ? "开启" : "关闭");
+	ReplyToCommand(client, "[防跑图] 功能已%s。", bCvarAllow ? "开启" : "关闭");
 
 	return Plugin_Handled;
 }
@@ -571,7 +581,8 @@ int FindByClassTargetName(const char[] sClass, const char[] sTarget)
 // ====================================================================================================
 void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	delete g_hTimer;
+	ResetPlugin();
+	GetCurrentMap(g_sMap, sizeof(g_sMap));
 
 	// Finales allowed, or not finale
 	if (g_iCvarFinale || (g_iCvarFinale == 0 && L4D_IsMissionFinalMap() == false))
@@ -639,6 +650,16 @@ public void OnMapEnd()
 	ResetPlugin();
 }
 
+public void OnClientDisconnect(int client)
+{
+	ResetClient(client);
+}
+
+public void OnPluginEnd()
+{
+	ResetSlowdown();
+}
+
 void ResetPlugin()
 {
 	for (int i = 1; i <= MAXPLAYERS; i++)
@@ -659,11 +680,12 @@ void ResetPlugin()
 
 void ResetClient(int i)
 {
+	if (g_bInhibit[i] && i <= MaxClients && IsClientInGame(i))
+		SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
+
 	g_bInhibit[i] = false;
 	g_fExecute[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
-
-	SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
 }
 
 void ResetSlowdown()
@@ -684,7 +706,7 @@ bool FlowJudgment()
 	static int client;
 	static float flow;
 	flow = (client = L4D_GetHighestFlowSurvivor()) != -1 ? L4D2Direct_GetFlowDistance(client) : L4D2_GetFurthestSurvivorFlow();
-	if (flow / L4D2Direct_GetMapMaxFlowDistance() * 100 > 0.0)
+	if (L4D2Direct_GetMapMaxFlowDistance() > 0.0 && flow > 0.0)
 		return true;
 
 	return false;
@@ -693,293 +715,154 @@ bool FlowJudgment()
 // ====================================================================================================
 //					LOGIC
 // ====================================================================================================
+// Keep every living body in the distance sample. Temporary inability to move
+// affects punishment only, never the team's reference distance.
+bool CanPunishSurvivor(int client)
+{
+	if (!IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client)
+		|| !SurvivorsState(client) || SurvivorsUnderControl(client))
+		return false;
+	if (GetEntPropEnt(client, Prop_Send, "m_useActionTarget") > 0
+		|| GetEntPropEnt(client, Prop_Send, "m_reviveOwner") > 0
+		|| GetEntPropEnt(client, Prop_Send, "m_reviveTarget") > 0)
+		return false;
+	int ground = GetEntPropEnt(client, Prop_Send, "m_hGroundEntity");
+	return ground <= MaxClients || g_hElevators.FindValue(EntIndexToEntRef(ground)) == -1;
+}
+
 Action TimerTest(Handle timer)
 {
-	if (!g_bMapStarted || !FlowJudgment())
+	if (!g_bMapStarted || !FlowJudgment() || (g_iCvarTank == 0 && L4D2_GetTankCount() > 0))
+	{
+		ResetSlowdown();
 		return Plugin_Continue;
+	}
 
 	#if DEBUG_BENCHMARK
 	StartProfiling(g_Prof);
 	#endif
 
-	// 12v12: 坦克存活时完全不限速/不传送 (默认 l4d_anti_rush_tanks=0; bTanks 记录状态, 首次检测到坦克时解除已有减速).
-	static bool bTanks;
-	if (g_iCvarTank == 0)
+	int clients[MAXPLAYERS + 1], count;
+	float flows[MAXPLAYERS + 1], totalFlow;
+	bool punishable[MAXPLAYERS + 1], rushing[MAXPLAYERS + 1];
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (L4D2_GetTankCount() > 0)
-		{
-			if (!bTanks)
-			{
-				bTanks = true;
-				ResetSlowdown();
-			}
-			return Plugin_Continue;
-		}
-		else
-			bTanks = false;
+		if (!IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client))
+			continue;
+		bool immune = g_iCvarFlags != 0 && CheckCommandAccess(client, "", g_iCvarFlags, true);
+		if (immune && g_iCvarIgnore == 0)
+			continue;
+		float flow = L4D2Direct_GetFlowDistance(client);
+		if (flow < 0.0) // Zero is a valid start-of-map sample.
+			continue;
+		clients[count] = client;
+		flows[count++] = flow;
+		totalFlow += flow;
+		punishable[client] = !immune && CanPunishSurvivor(client);
 	}
 
-	float flow;
-	int count, countflow, index;
-
-	// Get survivors flow distance
-	ArrayList aList = new ArrayList(2);
-
-	int clients[MAXPLAYERS+1];
-	int client;
-
-	// 12v12: 本 tick 被判定为跑图的玩家标记, 用于 tick 末统一解除其它人的限速.
-	bool bRushing[MAXPLAYERS+1];
-
-	// Check valid survivors
-	for (int i = 1; i <= MaxClients; i++)
+	if (count >= g_iCvarPlayers)
 	{
-		if (IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
+		float averageFlow = totalFlow / float(count);
+		float extension = g_bEventStarted ? g_fEventExtended : 0.0;
+		float now = GetGameTime();
+		for (int i = 0; i < count; i++)
 		{
-			// Immune players - ignore from flow calculations
-			if (g_iCvarFlags != 0 && g_iCvarIgnore == 0 && CheckCommandAccess(i, "", g_iCvarFlags, true))
+			int client = clients[i];
+			if (!punishable[client])
+				continue;
+			float lead = flows[i] - averageFlow - extension;
+			float behind = averageFlow - flows[i] - extension;
+			if (g_fCvarRangeLead > 0.0 && lead > g_fCvarRangeLead)
 			{
-				continue;
-			}
-
-			// Count
-			clients[count++] = i;
-		}
-	}
-
-	for (int i = 0; i < count; i++)
-	{
-		client = clients[i];
-
-		// 12v12: 倒地 / 挂边玩家不再豁免, 必须计入队伍平均流距离.
-		// 原版 cvar "l4d_anti_rush_incapped" 允许把它们排除在计算之外(默认 0 = 不排除),
-		// 一旦开启就会让队伍平均值被"能跑的人"拉高, 跑图判定反而更难触发, 跑图者更容易逃脱.
-		// 因此该 cvar 已整体删除: 倒地者永远计入平均距离, 不存在豁免开关.
-		// 倒地者本身不会收到"请跟上队伍"的提示(见下方 SurvivorsState 判断), 只影响平均值.
-		bool bImmobile = GetEntProp(client, Prop_Send, "m_isIncapacitated", 1) != 0
-						|| GetEntProp(client, Prop_Send, "m_isHangingFromLedge", 1) != 0;
-
-		// 以下过滤只针对"能自己走动"的玩家, 倒地/挂边者不能因为正在被救/正在被控而被剔除.
-		if (!bImmobile)
-		{
-			// Ignore healing / using stuff
-			if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_useActionTarget") > 0)
-				continue;
-
-			// Ignore reviving
-			if (GetEntPropEnt(client, Prop_Send, "m_reviveOwner") > 0 || GetEntPropEnt(client, Prop_Send, "m_reviveTarget") > 0)
-				continue;
-
-			// Ignore pinned by Charger
-			if (g_bLeft4Dead2 && GetEntPropEnt(client, Prop_Send, "m_carryAttacker") != -1)
-				continue;
-
-			// Ignore in Elevator
-			int lift = GetEntPropEnt(client, Prop_Send, "m_hGroundEntity");
-
-			if (lift > MaxClients)
-			{
-				lift = EntIndexToEntRef(lift);
-				if (g_hElevators.FindValue(lift) != -1)
-					continue;
-			}
-		}
-
-		// Get flow
-		flow = L4D2Direct_GetFlowDistance(client);
-		if (flow && flow != -9999.0) // Invalid flows
-		{
-			countflow++;
-			index = aList.Push(flow);
-			aList.Set(index, client, 1);
-		}
-		// Reset slowdown if players flow is invalid
-		else if (g_bInhibit[client] == true)
-		{
-			g_bInhibit[client] = false;
-			SDKUnhook(client, SDKHook_PreThinkPost, PreThinkPost);
-		}
-	}
-
-	// In case not enough players or some have invalid flow distance, we still need an average.
-	if (countflow >= g_iCvarPlayers)
-	{
-		aList.Sort(Sort_Descending, Sort_Float);
-
-		int clientAvg;
-		float lastFlow;
-		float distance;
-
-		// Detect rushers
-		if (g_fCvarRangeLead)
-		{
-			// Loop through survivors from highest flow
-			for (int i = 0; i < countflow; i++)
-			{
-				client = aList.Get(i, 1);
-				// Immune players
-				if (g_iCvarFlags != 0 && g_iCvarIgnore == 1 && CheckCommandAccess(client, "", g_iCvarFlags, true))
+				if (g_iCvarType == 1)
 				{
-					continue;
-				}
-
-				// Only check nearest half of survivor pack.
-				if (i < countflow / 2)
-				{
-					flow = aList.Get(i, 0);
-					// Loop through from next survivor to mid-way through the pack.
-					for (int x = i + 1; x <= countflow / 2; x++)
+					rushing[client] = true;
+					if (!g_bInhibit[client])
 					{
-						lastFlow = aList.Get(x, 0);
-						distance = flow - lastFlow;
-						if (g_bEventStarted) distance -= g_fEventExtended;
-
-						// Warn ahead hint
-						if (g_fCvarWarnTime && g_fCvarWarnLead && distance > g_fCvarWarnLead && distance < g_fCvarRangeLead && g_fHintWarn[client] < GetGameTime())
+						g_bInhibit[client] = true;
+						SDKHook(client, SDKHook_PreThinkPost, PreThinkPost);
+					}
+					PreThinkPost(client);
+					if (g_fCvarWarnTime > 0.0 && g_fExecute[client] < now)
+					{
+						g_fExecute[client] = now + g_fCvarWarnTime;
+						PrintToChat(client, "\x04[提示]\x05你领先队伍平均位置太远，已限速，请回退队伍。");
+					}
+				}
+				else if (g_iCvarType == 2)
+				{
+					// Choose a mobile, unpinned teammate near the mean; never teleport to a hanging body.
+					int target;
+					float nearest = 999999.0;
+					for (int x = 0; x < count; x++)
+					{
+						float delta = FloatAbs(flows[x] - averageFlow);
+						if (clients[x] != client && flows[x] < flows[i] && delta < nearest
+							&& CanPunishSurvivor(clients[x]))
 						{
-							g_fHintWarn[client] = GetGameTime() + g_fCvarWarnTime;
-
-							if (g_iCvarType == 1)
-								PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远\x03请回退\x05,否则将被限速.");
-							else
-								PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远\x03请回退\x05,否则将被传送遣返.");
+							target = clients[x];
+							nearest = delta;
 						}
-
-						// Compare higher flow with next survivor, they're rushing
-						if (distance > g_fCvarRangeLead)
+					}
+					if (target > 0)
+					{
+						float pos[3];
+						GetClientAbsOrigin(target, pos);
+						SetEntProp(client, Prop_Send, "m_bDucked", 1);
+						SetEntityFlags(client, GetEntityFlags(client) | FL_DUCKING);
+						TeleportEntity(client, pos, NULL_VECTOR, NULL_VECTOR);
+						if (g_fCvarWarnTime > 0.0 && g_fExecute[client] < now)
 						{
-							// PrintToServer("RUSH: %N %f", client, distance);
-							// 12v12: 倒地 / 挂边 / 被控的玩家无法自主移动, 不施加处罚(但仍计入平均距离, 见上方).
-							bool bCanPunish = SurvivorsState(client) && !SurvivorsUnderControl(client);
-
-							// Slowdown enabled?
-							if (g_iCvarType == 1 && bCanPunish)
-							{
-								// 12v12: 检测到跑图即刻限速, 不再等待"玩家继续前进"这一条件.
-								// 原版只在 flow > g_fLastFlow[client](玩家比上次更靠前)时才挂 PreThinkPost,
-								// 导致站定不动 / 卡住 / 轻微回退的跑图玩家反而拿不到减速, 只有真正往前冲才被限速.
-								// 现在只要判定成立就立刻挂钩并立即写入速度, 不依赖上一 tick 的 flow.
-								bRushing[client] = true;
-
-								if (g_bInhibit[client] == false)
-								{
-									g_bInhibit[client] = true;
-									SDKHook(client, SDKHook_PreThinkPost, PreThinkPost);
-								}
-
-								// PreThinkPost 要到下一帧才跑, 这里同步写一次, 保证本 tick 立即降到瘸腿速度.
-								SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
-
-								// 聊天提示仍受 warn_time 节流, 但节流只影响提示, 不影响限速.
-								if (g_fCvarWarnTime && g_fExecute[client] < GetGameTime())
-								{
-									g_fExecute[client] = GetGameTime() + g_fCvarWarnTime;
-									PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远\x04已限速\x05,请回退队伍.");
-								}
-							}
-
-							// Teleport enabled?
-							if (g_iCvarType == 2 && bCanPunish)
-							{
-								clientAvg = aList.Get(x, 1);
-								float vPos[3];
-								GetClientAbsOrigin(clientAvg, vPos);
-								SetEntProp(client, Prop_Send, "m_bDucked", 1);
-								SetEntityFlags(client, GetEntityFlags(client)|FL_DUCKING);
-								TeleportEntity(client, vPos, NULL_VECTOR, NULL_VECTOR);
-								PrintToChat(client, "\x04[提示]\x05你\x03领先\x05幸存者队伍太远,\x04已传送\x05回队伍.");
-							}
-							break;
+							g_fExecute[client] = now + g_fCvarWarnTime;
+							PrintToChat(client, "\x04[提示]\x05你领先队伍太远，已传送回队伍。");
 						}
 					}
 				}
 			}
-		}
-
-		// Teleport slacker
-		if (g_fCvarRangeLast)
-		{
-			// Loop through survivors from lowest flow to mid-way through the pack.
-			for (int i = countflow - 1; i > countflow / 2; i--)
+			else if (g_fCvarWarnTime > 0.0 && g_fCvarRangeLead > 0.0 && g_fCvarWarnLead > 0.0
+				&& lead > g_fCvarWarnLead && g_fHintWarn[client] < now)
 			{
-				client = aList.Get(i, 1);
-				// Immune players
-				if (g_iCvarFlags != 0 && g_iCvarIgnore == 1 && CheckCommandAccess(client, "", g_iCvarFlags, true))
-				{
-					continue;
-				}
-
-				flow = aList.Get(i, 0);
-				// Loop through from next survivor to mid-way through the pack.
-				for (int x = i - 1; x < countflow; x++)
-				{
-					lastFlow = aList.Get(x, 0);
-					distance = lastFlow - flow;
-					if (g_bEventStarted)
-						distance -= g_fEventExtended;
-
-					// Warn behind hint
-					if (g_fCvarWarnTime && g_fCvarWarnLast && distance > g_fCvarWarnLast && distance < g_fCvarRangeLast && g_fHintWarn[client] < GetGameTime())
-					{
-						g_fHintWarn[client] = GetGameTime() + g_fCvarWarnTime;
-						PrintToChat(client, "\x04[提示]\x05你\x03落后\x05幸存者队伍太远\x03请加速\x05,尽快跟上队伍.");
-					}
-
-					// Compare lower flow with next survivor, they're behind
-					// 12v12: 落后玩家只发聊天提示, 不再弹出"落后传送回队伍"菜单 (任务要求: 落后玩家不显示传送面板).
-					// 传送仅保留给"跑图领先"这一条路径 (l4d_anti_rush_type = 2), 落后侧没有任何 UI.
-					if (distance > g_fCvarRangeLast && SurvivorsState(client) && !SurvivorsUnderControl(client) && g_fExecute[client] < GetGameTime())
-					{
-						g_fExecute[client] = GetGameTime() + g_fCvarWarnTime;
-						PrintToChat(client, "\x04[提示]\x05你\x03落后\x05幸存者队伍太远\x03请加速\x05,尽快跟上队伍.");
-						break;
-					}
-				}
+				g_fHintWarn[client] = now + g_fCvarWarnTime;
+				PrintToChat(client, "\x04[提示]\x05你领先队伍太远，请回退队伍。");
 			}
-		}
-
-		// 12v12: tick 末统一解除"本 tick 未被判定为跑图"的玩家减速.
-		// 原版用 flow 与 g_fLastFlow 的增减来猜"是否在往回跑", 一旦 g_bInhibit 被别处清掉
-		// (坦克暂停 / 人数不足 / flow 无效 / 换图) 而 g_fLastFlow 残留旧值, 就会出现
-		// "明明在跑图却永远不再被限速"的失效. 现在改为每 tick 重算, 与历史 flow 无关.
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			if (g_bInhibit[i] && !bRushing[i])
+			if (g_fCvarWarnTime > 0.0 && g_fCvarRangeLast > 0.0
+				&& (behind > g_fCvarRangeLast || (g_fCvarWarnLast > 0.0 && behind > g_fCvarWarnLast))
+				&& g_fExecute[client] < now)
 			{
-				if (IsClientInGame(i))
-					SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
-
-				g_bInhibit[i] = false;
+				g_fExecute[client] = now + g_fCvarWarnTime;
+				PrintToChat(client, "\x04[提示]\x05你落后队伍太远，请尽快跟上队伍。");
 			}
 		}
 	}
-	else
-		ResetSlowdown();
-
-	delete aList;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (g_bInhibit[client] && !rushing[client])
+			ResetClient(client);
+	}
 
 	#if DEBUG_BENCHMARK
 	StopProfiling(g_Prof);
 	float speed = GetProfilerTime(g_Prof);
-
-	if (speed < g_fBenchMin)
-		g_fBenchMin = speed;
-
-	if (speed > g_fBenchMax)
-		g_fBenchMax = speed;
-
+	if (speed < g_fBenchMin) g_fBenchMin = speed;
+	if (speed > g_fBenchMax) g_fBenchMax = speed;
 	g_fBenchAvg += speed;
 	g_iBenchTicks++;
-
 	PrintToServer("Anti Rush benchmark: %f (Min %f. Avg %f. Max %f)", speed, g_fBenchMin, g_fBenchAvg / g_iBenchTicks, g_fBenchMax);
 	#endif
-
 	return Plugin_Continue;
 }
 
 void PreThinkPost(int client)
 {
-	SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
+	if (!CanPunishSurvivor(client))
+	{
+		ResetClient(client);
+		return;
+	}
+	// A cap must not raise an engine/other-plugin speed that is already lower.
+	if (GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") > g_fCvarSlow)
+		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
 }
 
 bool SurvivorsState(int client)

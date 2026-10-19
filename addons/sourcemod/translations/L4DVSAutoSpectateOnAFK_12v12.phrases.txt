@@ -1,0 +1,93 @@
+// English by StarterX4
+// Traditional Chinese by HarryPotter
+// Simplified Chinese by HarryPotter
+
+"Phrases"
+{
+	"You're spectating. Join any team to play."
+	{
+		"en"	"[12V12] Spectating: !join / !jg to join, !sur for Survivors, !inf for Infected."
+		"zho"	"[12V12] 旁觀中：!join / !jg 自動加入，!sur 生還者，!inf 感染者。"
+		"chi"	"[12V12] 旁观中：!join / !jg 自动加入，!sur 生还者，!inf 感染者。"
+		"hu"	"[12V12] Csatlakozas: !join / !jg; tulelok: !sur; fertozottek: !inf."
+	}	
+	"[AFK] Inactivity detected! 1"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Inactivity detected! You'll be moved to spectators in {1} seconds!"
+		"zho"	"[AFK] 偵測閒置! 你將於 {1} 秒後強制旁觀."
+		"chi"	"[AFK] 检测到闲置! 你将在 {1} 秒后强制旁观."
+		"hu"	"[AFK] Inaktivitás észlelve! {1} másodperc múlva átkerülsz a nézők közé!"
+	}
+	"[AFK] Inactivity detected! 2"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Inactivity detected! If you still don't act within {1} seconds after a survivor leaves the safe area, you will be forced to spectate!"
+		"zho"	"[AFK] 檢測到閒置! 當有生還者離開安全區域後{1}秒還未行動。將會被強制旁觀！"
+		"chi"	"[AFK] 检测到闲置! 当有生还者离开安全区域后{1}秒还未行动。将会被强制旁观！"
+		"hu"	"[AFK] Inaktivitás észlelve! Ha egy túlélő elhagyja a biztonságos területet, és {1} másodpercen belül nem cselekszel, a nézők közé kerülsz!"
+	}
+	"[AFK] Inactivity detected! 7"
+	{
+		"en"	"[AFK] Inactivity detected! You'll be moved to spectators as soon as a survivor leaves the safe area!"
+		"zho"	"[AFK] 檢測到閒置! 一旦有生還者離開安全區域你將被強制旁觀！"
+		"chi"	"[AFK] 检测到闲置! 一旦有生还者离开安全区域你将被强制旁观！"
+		"hu"	"[AFK] Inaktivitás észlelve! Amint egy túlélő elhagyja a biztonságos területet, a nézők közé kerülsz!"
+	}
+	"[AFK] Inactivity detected! 3"
+	{
+		"#format"		"{1:d}"
+		"en"	"[12V12 AFK] Open slot: !join to join, !sur for Survivors, !inf for Infected. Join within {1} seconds or be kicked."
+		"zho"	"[12V12 AFK] 有空位：!join 自動加入，!sur 生還者，!inf 感染者\n請在 {1} 秒內補位，否則踢出。"
+		"chi"	"[12V12 AFK] 有空位：!join 自动加入，!sur 生还者，!inf 感染者\n请在 {1} 秒内补位，否则踢出。"
+		"hu"	"[12V12 AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz {1} masodpercen belul, kulonben kirugunk."
+	}
+	"[AFK] Inactivity detected! 4"
+	{
+		"#format"		"{1:d}"
+		"en"	"[12V12 AFK] Open slot: use !join, !sur or !inf. Join before the survivors leave the safe area."
+		"zho"	"[12V12 AFK] 有空位：輸入 !join、!sur 或 !inf，在生還者離開安全區域前補位。"
+		"chi"	"[12V12 AFK] 有空位：输入 !join、!sur 或 !inf，在生还者离开安全区域前补位。"
+		"hu"	"[12V12 AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz, mielott a tulelok elhagyjak a biztonsagos teruletet."
+	}
+	"have been kicked from server due to inactivity"
+	{
+		"#format"		"{1:s},{2:d}"
+		"en"	"[AFK] {lightgreen}{1} Kicked for spectating and not joining the game for more than {2} seconds."
+		"zho"	"[AFK] {lightgreen}{1} 因旁觀不補位超過 {2} 秒而被踢出."
+		"chi"	"[AFK] {lightgreen}{1} 因旁观不补位超过 {2} 秒而被踢出."
+		"hu"	"[AFK] {lightgreen}{1} Kirúgtak a szerverről, mert több mint {2} másodpercig nem csatlakozott a játékhoz."
+	}	
+	"afkForceSpectate"
+	{
+		"en"	"[12V12 AFK] Moved to {lightgreen}Spectators. Return with !join, !sur or !inf."
+		"zho"	"[12V12 AFK] 你已轉為 {lightgreen}旁觀。輸入 !join 自動加入，!sur 生還者，!inf 感染者。"
+		"chi"	"[12V12 AFK] 你已转为 {lightgreen}旁观。输入 !join 自动加入，!sur 生还者，!inf 感染者。"
+		"hu"	"[12V12 AFK] Atkerultel a {lightgreen}nezok koze. Visszateres: !join, !sur vagy !inf."
+	}
+	"[AFK] Inactivity detected! 5"
+	{
+		"#format"		"{1:s}"
+		"en"	"[AFK] {lightgreen}{1} is moved to the sidelines for no response at the corresponding time!"
+		"zho"	"[AFK] {lightgreen}{1} 在相對應的時間無反應而被移動到旁觀!"
+		"chi"	"[AFK] {lightgreen}{1} 在相对应的时间无反应而被移动到旁观!"
+		"hu"	"[AFK] {lightgreen}{1} nem reagált a megadott időben, ezért a nézők közé került!"
+	}
+	"[AFK] Inactivity detected! 6"
+	{
+		"#format"		"{1:d}"
+		"en"	"[AFK] Teammates have left the safe area! Act now or you'll be moved to spectators in {1} seconds!"
+		"zho"	"[AFK] 隊友已離開安全區域! 立即行動, 否則将于 {1} 秒後強制旁觀!"
+		"chi"	"[AFK] 队友已离开安全区域! 立即行动, 否则将于 {1} 秒后强制旁观!"
+		"hu"	"[AFK] A csapattársaid elhagyták a biztonságos területet! Cselekedj most, különben {1} másodperc múlva a nézők közé kerülsz!"
+	}
+	"kickplayer"
+	{
+		"#format"		"{1:d}"
+		"en" 	"[AFK] You have been kicked for spectating and not joining the game for more than {1} seconds!"
+		"zho"	"[AFK] 你因旁觀不補位超過{1}秒而被踢出!"
+		"chi"	"[AFK] 你因旁观不补位超过{1}秒而被踢出!"
+		"hu"	"[AFK] Kirúgtak a szerverről, mert több mint {1} másodpercig néző voltál, és nem csatlakoztál a játékhoz!"
+	}
+}
+

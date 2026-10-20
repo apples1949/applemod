@@ -17,6 +17,20 @@ int TEAM_INFECTED                      = 3;
 #define MENU_REFRESH_DURATION          10.0
 #define MENU_REFRESH_INTERVAL          2.0
 
+/* ---- 分页面板容量 ----
+   L4D2 走 SourceMod 的 radio 菜单风格, 一屏最多 10 个槽位(按键 1-9 与 0);
+   这里只用前 9 个槽位(按键 1-9), 把 0 键留给引擎自己, 避免玩家误按 0 触发引擎侧关闭面板。 */
+#define MENU_SAFE_SLOTS                9
+#define MENU_PAGE_NAV_SLOTS            2   // "上一页" / "下一页"
+#define AUTO_MENU_FIXED_SLOTS          2   // "我自己玩" + "随便来个人"
+#define MANUAL_MENU_FIXED_SLOTS        1   // "除了我, 谁都行"
+// 每页能放下的候选玩家数量(固定项 + 本页候选 + 翻页项 不超过 MENU_SAFE_SLOTS)
+#define AUTO_TARGETS_PER_PAGE          (MENU_SAFE_SLOTS - AUTO_MENU_FIXED_SLOTS - MENU_PAGE_NAV_SLOTS)    // 5
+#define MANUAL_TARGETS_PER_PAGE        (MENU_SAFE_SLOTS - MANUAL_MENU_FIXED_SLOTS - MENU_PAGE_NAV_SLOTS)  // 6
+// 翻页项的 info 标识: 必须和客户端索引("1".."64")以及 "0"/"99" 完全不冲突
+#define MENU_INFO_PAGE_NEXT            "next"
+#define MENU_INFO_PAGE_PREV            "prev"
+
 ConVar cvar_SurrenderTimeLimit         = null;
 ConVar cvar_SurrenderChoiceType        = null;
 ConVar cvar_SurrenderGhostKill         = null;
@@ -37,6 +51,10 @@ int currentTank                       = 0;
 int tankNoTargetRetries               = 0;
 float menuRefreshUntil                = 0.0;
 bool tankMenuChosen                   = false;
+
+// 菜单分页: 每个坦克玩家各自记住"翻到第几页"(0 基)。
+// 面板重建/重弹时保持当前页, 只有新一次冲锋(新坦克/新接管)、回合结束、断线才归零。
+int g_iMenuPage[MAXPLAYERS + 1];
 
 // 给克时被 ReplaceWithBot 顶替出来的那只 AI 特感: 玩家去开坦克了, 不能把它留在场上占特感位
 int g_iSwapLeftoverBotUserId          = 0;
@@ -103,6 +121,8 @@ public void OnMapEnd()
 
 public void OnClientDisconnect(int client)
 {
+	ResetMenuPage(client);
+
 	if (primaryTankPlayer == client)
 	{
 		primaryTankPlayer = -1;
@@ -183,6 +203,9 @@ void ResetRoundState()
 	tankAttemptsFailed = 0;
 	tankNoTargetRetries = 0;
 	tankMenuChosen = false;
+
+	// 回合结束: 面板分页状态一起清掉
+	ResetAllMenuPages();
 }
 
 /* 停止"接管坦克后 10 秒内持续重弹面板"的循环 */
@@ -241,6 +264,9 @@ public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast
 	tankAttemptsFailed = 0;
 	tankNoTargetRetries = 0;
 	tankMenuChosen = false;
+
+	// 新一次冲锋: 面板从第 1 页重新开始
+	ResetAllMenuPages();
 
 	float PlayerControlDelay = 0.0;
 	if (cvar_TankLotteryTime != null)
@@ -372,6 +398,9 @@ void ScheduleTakeoverMenu(int player)
 	tankNoTargetRetries = 0;
 	tankMenuChosen = false;
 
+	// 换了坦克控制者: 新一次冲锋, 面板回到第 1 页
+	ResetAllMenuPages();
+
 	int userid = GetClientUserId(player);
 	if (cvar_SurrenderChoiceType.IntValue == 1)
 		notifyTimer = CreateTimer(CONTROL_DELAY_SAFETY, TS_DisplayNotificationToTank, userid);
@@ -465,6 +494,230 @@ bool IsHumanTank(int client)
 		&& IsPlayerAlive(client);
 }
 
+/* ---------------- 分页面板公共部分 ----------------
+   12v12 下坦克本人之外最多 11 个可转让目标, 而面板一屏只放得下 9 个槽位,
+   所以这里自己做翻页: 每页固定项 + 若干候选 + "上一页"/"下一页"。
+   为什么不直接用 SourceMod 原生分页: 原生按 7 项/页自己切页, 翻页状态在引擎内部,
+   插件拿不到"玩家现在看到第几页"; 而"接管坦克后 10 秒内每 2 秒重弹一次面板"每次都重建面板,
+   DisplayMenu 一律从第 1 项开始显示 —— 玩家刚翻到第 2 页就被弹回第 1 页, 那 11 个人实际点不到。 */
+
+void ResetMenuPage(int client)
+{
+	if (client > 0 && client <= MaxClients)
+		g_iMenuPage[client] = 0;
+}
+
+void ResetAllMenuPages()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		g_iMenuPage[i] = 0;
+}
+
+/* 收集当前所有可转让目标(按客户端索引升序, 保证翻页顺序稳定), 返回人数 */
+int CollectEligibleSwapTargets(int[] targets, int maxTargets)
+{
+	int count;
+
+	for (int i = 1; i <= MaxClients && count < maxTargets; i++)
+	{
+		if (IsEligibleSwapTarget(i))
+			targets[count++] = i;
+	}
+
+	return count;
+}
+
+int GetSwapMenuPageCount(int totalTargets, int targetsPerPage)
+{
+	if (totalTargets <= 0 || targetsPerPage <= 0)
+		return 0;
+
+	return (totalTargets + targetsPerPage - 1) / targetsPerPage;
+}
+
+/* 只数人头(翻页时只要总数, 不需要名单) */
+int CountEligibleSwapTargets()
+{
+	int count;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsEligibleSwapTarget(i))
+			count++;
+	}
+
+	return count;
+}
+
+/* 夹紧当前页: 面板弹着的这几秒里可能有人断线/变成灵魂, 总页数会变少 */
+int ClampSwapMenuPage(int client, int totalTargets, int targetsPerPage)
+{
+	int pages = GetSwapMenuPageCount(totalTargets, targetsPerPage);
+	int page = g_iMenuPage[client];
+
+	if (page < 0)
+		page = 0;
+
+	if (pages > 0 && page > pages - 1)
+		page = pages - 1;
+
+	g_iMenuPage[client] = page;
+
+	return page;
+}
+
+/* 关掉 SourceMod 原生分页: 由本插件自己翻页, 否则原生"7 项/页"会把我们的翻页项切开 */
+Handle CreateSwapMenu(MenuHandler handler)
+{
+	Handle menu = CreateMenu(handler);
+
+	if (menu == null)
+		return null;
+
+	SetMenuPagination(menu, MENU_NO_PAGINATION);
+	SetMenuExitButton(menu, false); // 面板必须留着, 由时间上限/换克来收, 不给"退出"
+
+	return menu;
+}
+
+/* 标题: 多页时带上"第 x/y 页"和候选人数, 让玩家知道还有下一页 */
+void SetSwapMenuTitle(Handle menu, int client, int page, int pages, int totalTargets)
+{
+	char buffer[256];
+
+	if (pages > 1)
+		Format(buffer, sizeof(buffer), "%T", "Menu_Title_Paged", client, page + 1, pages, totalTargets);
+	else
+		Format(buffer, sizeof(buffer), "%T", "Menu_Title", client);
+
+	SetMenuTitle(menu, buffer);
+}
+
+/* 翻页项: info 用 "next"/"prev", 与客户端索引("1".."64")及 "0"/"99" 不冲突 */
+void AddSwapMenuPageItems(Handle menu, int client, int page, int pages)
+{
+	if (pages <= 1)
+		return;
+
+	char buffer[64];
+
+	if (page > 0)
+	{
+		Format(buffer, sizeof(buffer), "%T", "Page_Prev", client);
+		AddMenuItem(menu, MENU_INFO_PAGE_PREV, buffer);
+	}
+
+	if (page < pages - 1)
+	{
+		Format(buffer, sizeof(buffer), "%T", "Page_Next", client);
+		AddMenuItem(menu, MENU_INFO_PAGE_NEXT, buffer);
+	}
+}
+
+/* 摘掉并取消当前面板: 先摘引用再取消, 旧面板的 End 回调就不会误清新面板 */
+void CloseActiveMenu()
+{
+	if (surrenderMenu == null)
+		return;
+
+	Handle menu = surrenderMenu;
+	surrenderMenu = null;
+	CancelMenu(menu);
+}
+
+/* 翻页项被选中: 返回 true 表示这次按键已被翻页消费掉.
+   注意这里不能 CancelMenu/CloseHandle 正在回调的旧面板(它还在回调栈上),
+   只摘掉引用, 旧句柄交给它自己的 MenuAction_End 关闭。 */
+bool HandleSwapMenuPageChoice(int client, const char[] info, bool autoMenu)
+{
+	int page = g_iMenuPage[client];
+
+	if (StrEqual(info, MENU_INFO_PAGE_NEXT, false))
+		page++;
+	else if (StrEqual(info, MENU_INFO_PAGE_PREV, false))
+		page--;
+	else
+		return false;
+
+	int targetsPerPage = autoMenu ? AUTO_TARGETS_PER_PAGE : MANUAL_TARGETS_PER_PAGE;
+
+	int total = CountEligibleSwapTargets();
+	int pages = GetSwapMenuPageCount(total, targetsPerPage);
+
+	if (pages <= 0)
+		return true; // 已经一个人都转不了, 不用翻
+
+	if (page < 0)
+		page = 0;
+
+	if (page > pages - 1)
+		page = pages - 1;
+
+	g_iMenuPage[client] = page;
+
+	surrenderMenu = null;
+
+	if (autoMenu)
+		ShowAutoMenuToTank(client);
+	else
+		ShowManualMenuToTank(client);
+
+	return true;
+}
+
+/* 手动投降面板(sm_tankpass). 每次重建都会把这几秒内新变成灵魂/复活的队友补进名单。
+   返回 false = 当前无人可转让 */
+bool ShowManualMenuToTank(int tank)
+{
+	int[] targets = new int[MaxClients + 1];
+	int total = CollectEligibleSwapTargets(targets, MaxClients + 1);
+
+	if (total == 0)
+	{
+		CPrintToChat(tank, "%t", "No_Target");
+		return false;
+	}
+
+	int page = ClampSwapMenuPage(tank, total, MANUAL_TARGETS_PER_PAGE);
+	int pages = GetSwapMenuPageCount(total, MANUAL_TARGETS_PER_PAGE);
+
+	CloseActiveMenu();
+
+	surrenderMenu = CreateSwapMenu(TS_MenuCallBack);
+
+	if (surrenderMenu == null)
+		return false;
+
+	SetSwapMenuTitle(surrenderMenu, tank, page, pages, total);
+
+	char buffer[256], number[16];
+
+	Format(buffer, sizeof(buffer), "%T", "Anyone_But_Me", tank);
+	AddMenuItem(surrenderMenu, "0", buffer);
+
+	int first = page * MANUAL_TARGETS_PER_PAGE;
+	int last = first + MANUAL_TARGETS_PER_PAGE;
+	if (last > total)
+		last = total;
+
+	for (int i = first; i < last; i++)
+	{
+		Format(number, sizeof(number), "%i", targets[i]);
+		Format(buffer, sizeof(buffer), "%N", targets[i]);
+		AddMenuItem(surrenderMenu, number, buffer);
+	}
+
+	AddSwapMenuPageItems(surrenderMenu, tank, page, pages);
+
+	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(GetSurrenderTimeLimit())))
+		return true;
+
+	// 弹不出去(玩家正开着别的面板): 句柄已由 End 回调关掉, 这里只保证引用干净
+	CloseActiveMenu();
+
+	return false;
+}
+
 public Action CallSurrenderMenu(int client, int args)
 {
 	if (!IsValidClient(client)
@@ -481,47 +734,11 @@ public Action CallSurrenderMenu(int client, int args)
 		return Plugin_Handled;
 	}
 
+	// 面板已经弹着: 再敲命令不重建, 免得把玩家翻到的页冲回第 1 页
 	if (surrenderMenu != null)
 		return Plugin_Handled;
 
-	surrenderMenu = CreateMenu(TS_MenuCallBack);
-
-	char buffer[256];
-	Format(buffer, sizeof(buffer), "%T", "Menu_Title", client);
-	SetMenuTitle(surrenderMenu, buffer);
-
-	char name[MAX_NAME_LENGTH], number[8];
-	int electables;
-
-	Format(buffer, sizeof(buffer), "%T", "Anyone_But_Me", client);
-	AddMenuItem(surrenderMenu, "0", buffer);
-
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsEligibleSwapTarget(i)) continue;
-
-		Format(name, sizeof(name), "%N", i);
-		Format(number, sizeof(number), "%i", i);
-		AddMenuItem(surrenderMenu, number, name);
-
-		electables++;
-	}
-
-	if (electables > 0) // only show it if there is someone to swap to
-	{
-		SetMenuExitButton(surrenderMenu, false);
-		if (!DisplayMenu(surrenderMenu, client, RoundToCeil(GetSurrenderTimeLimit())))
-		{
-			CloseHandle(surrenderMenu);
-			surrenderMenu = null;
-		}
-	}
-	else
-	{
-		CloseHandle(surrenderMenu);
-		surrenderMenu = null;
-		CPrintToChat(client, "%t", "No_Target");
-	}
+	ShowManualMenuToTank(client);
 
 	return Plugin_Handled;
 }
@@ -547,8 +764,12 @@ public int TS_MenuCallBack(Handle menu, MenuAction action, int param1, int param
 	if (!IsHumanTank(param1) || param1 != primaryTankPlayer)
 		return 0;
 
-	char number[8];
+	char number[16];
 	if (!GetMenuItem(menu, param2, number, sizeof(number)))
+		return 0;
+
+	// 翻页项: 记下新页并重建面板(旧面板句柄由它自己的 End 回调关闭)
+	if (HandleSwapMenuPageChoice(param1, number, false))
 		return 0;
 
 	int choice = StringToInt(number);
@@ -613,57 +834,56 @@ public Action TS_Display_Auto_MenuToTank(Handle timer, int clientid)
 	return Plugin_Stop;
 }
 
-/* 构建并弹出克面板. 每次都重建: 队友可能在几秒内才变成 ghost/复活, 重建才能把
-   新出现的可接管玩家补进名单(修复面板"人不全"). 返回 false = 当前无人可接管. */
+/* 构建并弹出自动克面板. 每次都重建: 队友可能在几秒内才变成 ghost/复活, 重建才能把
+   新出现的可接管玩家补进名单(修复面板"人不全"). 返回 false = 当前无人可接管.
+   重建时沿用 g_iMenuPage 里的页码, 所以"10 秒内每 2 秒重弹一次"不会把玩家翻到的页冲回第 1 页。 */
 bool ShowAutoMenuToTank(int tank)
 {
-	// 先数一下可接管的人: 一个都没有就别动已经弹着的面板
-	int electables;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsEligibleSwapTarget(i))
-			electables++;
-	}
+	int[] targets = new int[MaxClients + 1];
+	int total = CollectEligibleSwapTargets(targets, MaxClients + 1);
 
-	if (electables == 0)
+	// 一个可接管的人都没有: 别动已经弹着的面板
+	if (total == 0)
 		return false;
 
-	if (surrenderMenu != null)
-	{
-		// 先摘掉引用再取消: 旧面板的 End 回调不会误清新面板
-		Handle oldMenu = surrenderMenu;
-		surrenderMenu = null;
-		CancelMenu(oldMenu);
-	}
+	int page = ClampSwapMenuPage(tank, total, AUTO_TARGETS_PER_PAGE);
+	int pages = GetSwapMenuPageCount(total, AUTO_TARGETS_PER_PAGE);
 
-	surrenderMenu = CreateMenu(TS_Auto_MenuCallBack);
+	CloseActiveMenu();
 
-	char buffer[256];
-	Format(buffer, sizeof(buffer), "%T", "Menu_Title", tank);
-	SetMenuTitle(surrenderMenu, buffer);
+	surrenderMenu = CreateSwapMenu(TS_Auto_MenuCallBack);
 
-	char name[MAX_NAME_LENGTH], number[8];
+	if (surrenderMenu == null)
+		return false;
+
+	SetSwapMenuTitle(surrenderMenu, tank, page, pages, total);
+
+	char buffer[256], number[16];
 
 	Format(buffer, sizeof(buffer), "%T", "Stay_Me", tank);
 	AddMenuItem(surrenderMenu, "0", buffer);
 	Format(buffer, sizeof(buffer), "%T", "Anyone_But_Me", tank);
 	AddMenuItem(surrenderMenu, "99", buffer);
 
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsEligibleSwapTarget(i)) continue;
+	int first = page * AUTO_TARGETS_PER_PAGE;
+	int last = first + AUTO_TARGETS_PER_PAGE;
+	if (last > total)
+		last = total;
 
-		Format(name, sizeof(name), "%N", i);
-		Format(number, sizeof(number), "%i", i);
-		AddMenuItem(surrenderMenu, number, name);
+	for (int i = first; i < last; i++)
+	{
+		Format(number, sizeof(number), "%i", targets[i]);
+		Format(buffer, sizeof(buffer), "%N", targets[i]);
+		AddMenuItem(surrenderMenu, number, buffer);
 	}
 
-	SetMenuExitButton(surrenderMenu, false);
+	AddSwapMenuPageItems(surrenderMenu, tank, page, pages);
+
 	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(2.0 * GetSurrenderTimeLimit())))
 		return true;
 
-	CloseHandle(surrenderMenu);
-	surrenderMenu = null;
+	// 弹不出去(玩家正开着别的面板): 句柄已由 End 回调关掉, 这里只保证引用干净
+	CloseActiveMenu();
 
 	return false;
 }
@@ -744,8 +964,13 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 	if (!IsHumanTank(param1) || param1 != primaryTankPlayer)
 		return 0;
 
-	char number[8];
+	char number[16];
 	if (!GetMenuItem(menu, param2, number, sizeof(number)))
+		return 0;
+
+	// 翻页项: 记下新页并重建面板(旧面板句柄由它自己的 End 回调关闭)。
+	// 注意这不算"玩家已做出选择": tankMenuChosen 不置位, 重弹循环照旧继续。
+	if (HandleSwapMenuPageChoice(param1, number, true))
 		return 0;
 
 	int choice = StringToInt(number);
@@ -822,6 +1047,9 @@ public Action FindAnyTank(Handle timer, int client)
 		tankAttemptsFailed = 0;
 		tankNoTargetRetries = 0;
 		withinTimeLimit = false;
+
+		// 坦克已经没了: 分页状态一起清掉
+		ResetAllMenuPages();
 
 		if (notifyTimer != null)
 		{
@@ -943,6 +1171,9 @@ bool PerformTankSwap(int oldTank, int newTank)
 
 	primaryTankPlayer = newTank;
 	currentTank = newTank;
+
+	// 换成另一个人开坦克: 下一次面板是"新一次冲锋", 从第 1 页开始
+	ResetAllMenuPages();
 
 	// One surrender per Tank spawn: close the manual transfer window.
 	withinTimeLimit = false;

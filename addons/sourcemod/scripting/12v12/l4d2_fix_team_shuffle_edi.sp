@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.3.1-12v12"
+#define PLUGIN_VERSION "2.3.3-12v12"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -29,7 +29,8 @@ bool g_bOldTeamFlipped;   // 记录时游戏规则的 m_bAreTeamsFlipped
 bool g_bNewTeamFlipped;   // 新地图该属性值，两者不同即代表发生了换边
 bool g_bRecordedAtRoundEnd;    // 记录是否由回合结束触发（回合结束游戏必换边；中途换图不换边）
 bool g_bMapChangedSinceRecord; // 记录之后是否真的换过图（OnMapStart 消费换图标记时置位）
-bool g_bShuffleMode;           // 本次还原是否使用"随机打乱"而不是按记录归位（final_map_disable=2）
+bool g_bShuffleMode;           // 本次还原是否使用"随机打乱"而不是按记录归位（final_map_disable=2/3）
+bool g_bShuffleSmallLevel;     // 本次打乱是否由 final_map_disable=3（换小关卡就打乱）触发，仅影响公告/日志文案
 int g_iShuffleTotal;           // 本次打乱参与人数（公告用）
 int g_iShuffleSurvivors;       // 本次打乱后的生还者名额（公告用）
 char g_sRecordedMap[64];       // 记录时所在的地图名（同图重开不算跨战役）
@@ -173,8 +174,8 @@ public void OnPluginStart()
 	g_cvEnabled.AddChangeHook(OnCvarChange_Enabled);
 
 	g_cvFinalMapDisable = CreateConVar("l4d2_fix_team_shuffle_final_map_disable", "0",
-		"0=章节最后一关结束仍记录队伍，下一章按记录还原（跨战役按换边处理）；1=章节最后一关结束不记录，下一章按游戏默认分边；2=仍记录队伍，但切换到新章节时把所有非旁观玩家重新随机打乱分队（手动 changelevel 与换图插件自动换图均生效；c6c7、c9c14 两条混图链组内换图不打乱）",
-		FCVAR_NONE, true, 0.0, true, 2.0);
+		"0=章节最后一关结束仍记录队伍，下一章按记录还原（跨战役按换边处理）；1=章节最后一关结束不记录，下一章按游戏默认分边；2=仍记录队伍，但切换到新章节时把所有非旁观玩家重新随机打乱分队（手动 changelevel 与换图插件自动换图均生效；c6c7、c9c14 两条混图链组内换图不打乱）；3=仍记录队伍，且除同一张图重开外，任何换关都重新随机打乱分队（同战役内换关、c6c7 与 c9c14 混图链组内换图、跨战役换图、三方图换图均打乱）",
+		FCVAR_NONE, true, 0.0, true, 3.0);
 
 	g_cvChangeMapDisable = CreateConVar("l4d2_fix_team_shuffle_change_map_disable", "0",
 		"为 1 时回合中途（未到回合结束）换图不记录队伍；0=记录并在新图还原（中途换图不发生换边，按原队伍还原）",
@@ -212,7 +213,7 @@ public void OnPluginStart()
 void GetCvars()
 {
 	g_iCvarFinalMapDisable = g_cvFinalMapDisable.IntValue;
-	if (g_iCvarFinalMapDisable < 0 || g_iCvarFinalMapDisable > 2)
+	if (g_iCvarFinalMapDisable < 0 || g_iCvarFinalMapDisable > 3)
 		g_iCvarFinalMapDisable = 0;
 	g_bCvarChangeMapDisable = g_cvChangeMapDisable.BoolValue;
 	g_bCvarIgnoreOffline = g_cvIgnoreOffline.BoolValue;
@@ -270,7 +271,7 @@ public void OnCvarChange_Enabled(ConVar convar, const char[] oldValue, const cha
 public void OnCvarChange_FinalMapDisable(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	int value = convar.IntValue;
-	if (value < 0 || value > 2)
+	if (value < 0 || value > 3)
 	{
 		convar.IntValue = 0;
 		value = 0;
@@ -451,6 +452,7 @@ void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 	g_iPendingCount = 0;
 	g_bTeamLock = false;
 	g_bShuffleMode = false;
+	g_bShuffleSmallLevel = false;
 
 	g_bOldTeamFlipped = view_as<bool>(GameRules_GetProp("m_bAreTeamsFlipped"));
 	g_bMapTransition = true;
@@ -945,23 +947,47 @@ bool IsNewChapterSwitch()
 	return L4D_IsFirstMapInScenario();
 }
 
-// final_map_disable=2：切到新章节时不按记录归位，而是按记录的人数规模随机重排。
-// 同战役内换关、同图重开、c6↔c7 与 c9↔c14 混图链内换图都不打乱，仍按记录还原。
+// final_map_disable=2/3：不按记录归位，而是按记录的人数规模随机重排。
+//   模式 2：只在切换到"新章节"时打乱（同战役内换关、同图重开、c6↔c7 与 c9↔c14 混图链内换图都不打乱）
+//   模式 3：除同一张图重开外，任何换关都打乱（同战役内换关、c6↔c7 / c9↔c14 混图链内换图、跨战役、三方图换图）
 void PrepareShuffleMode()
 {
 	g_bShuffleMode = false;
+	g_bShuffleSmallLevel = false;
 	g_hShuffleTargets.Clear();
 	g_iShuffleTotal = 0;
 	g_iShuffleSurvivors = 0;
 
-	if (g_iCvarFinalMapDisable != 2 || !g_bMapChangedSinceRecord)
+	if (g_iCvarFinalMapDisable < 2 || !g_bMapChangedSinceRecord)
 		return;
 
-	if (!IsNewChapterSwitch())
+	/* 模式 2 只认"换到新章节"；模式 3 放宽到"同一战役内换小关也打乱"。
+	   两道闸门只差这一条判定，其余流程（BuildShuffleTargets 的人数规模、旁观者保持旁观、
+	   公告、native/forward）完全复用，不另写一套。 */
+	bool bAllow = (g_iCvarFinalMapDisable == 2) ? IsNewChapterSwitch() : IsSmallLevelShuffleAllowed();
+	if (!bAllow)
 		return;
 
 	g_bShuffleMode = true;
+	g_bShuffleSmallLevel = (g_iCvarFinalMapDisable == 3);
 	BuildShuffleTargets();
+}
+
+// final_map_disable=3：每过一个小关卡就打乱。
+// 与模式 2 的唯一区别是不再要求"必须换战役"——同战役内 c2m1 -> c2m2 这种换关也算。
+// 唯一不放行的情况是同一张图重开（半场重打 / 重载当前关）；
+// c6↔c7 与 c9↔c14 混图链组内换图（c6m3 -> c7m1、c9m2 -> c14m1）在本模式下同样算换关，照常打乱。
+bool IsSmallLevelShuffleAllowed()
+{
+	char sCurrentMap[64];
+	GetCurrentMap(sCurrentMap, sizeof(sCurrentMap));
+
+	// 同一张图重开不算换关
+	if (strcmp(sCurrentMap, g_sRecordedMap, false) == 0)
+		return false;
+
+	// 其余情况（同战役内换关、c6↔c7 / c9↔c14 混图链组内换图、跨战役换图、三方图换图）都算"过了一个小关卡"，打乱
+	return true;
 }
 
 // 以记录表为基准：旁观者继续旁观；非旁观玩家按记录时的生还者/特感人数规模
@@ -1042,7 +1068,8 @@ void BuildShuffleTargets()
 	g_iShuffleSurvivors = iSurvivorCount;
 	CreateTimer(5.0, Timer_AnnounceShuffle, _, TIMER_FLAG_NO_MAPCHANGE);
 
-	LogMessage("[队伍修正] 切换新章节，随机分队：%d 人，生还者名额 %d（final_map_disable=2）", iTotal, iSurvivorCount);
+	LogMessage("[队伍修正] %s，随机分队：%d 人，生还者名额 %d（final_map_disable=%d）",
+		g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", iTotal, iSurvivorCount, g_iCvarFinalMapDisable);
 }
 
 public Action Timer_AnnounceShuffle(Handle timer)
@@ -1050,8 +1077,14 @@ public Action Timer_AnnounceShuffle(Handle timer)
 	if (!g_bCvarNotify || g_iShuffleTotal <= 0)
 		return Plugin_Stop;
 
-	PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d）",
-		g_iShuffleTotal, g_iShuffleSurvivors);
+	/* 模式 3 是"换小关卡就打乱"，文案要和模式 2 的"切换新章节"区分开，
+	   玩家一眼能看出这次是过关换图导致的重新分队 */
+	if (g_bShuffleSmallLevel)
+		PrintToChatAll("[队伍修正] 本关换图，%d 人随机重新分队（生还者 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors);
+	else
+		PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors);
 
 	return Plugin_Stop;
 }
@@ -1206,7 +1239,9 @@ void ClearVars()
 	g_bMapChangedSinceRecord = false;
 	g_bShuffleMode = false;
 
-	// 公告计数不在这里清零：还原可能在 5 秒内完成并走到这里，
+	// 公告计数与"本次打乱是否由模式 3 触发"的标志都不在这里清零：
+	// 还原可能在 5 秒内完成并走到这里，清掉会让延后的分队公告打不出来或文案说错。
+	// 它们由 PrepareShuffleMode 在每张图开头重置。
 	// 清掉会让延后的分队公告打不出来。它们由 PrepareShuffleMode 重置。
 	CancelProcessTimers();
 	ResetClientFlags();
@@ -1444,8 +1479,15 @@ int FindBotToTakeOver(bool aliveOnly)
 	return candidates[GetRandomInt(0, count - 1)];
 }
 
+/* m_humanSpectatorUserID 只在"正被挂机托管"的 player 实体上才存在，
+   未托管的 Bot 直接 GetEntProp 会抛
+   'Property "m_humanSpectatorUserID" not found (entity N/player)'，
+   所以一律先 HasEntProp 探测再读（Left4DHooks 的 L4D_GetIdlePlayerOfBot 同款做法）。 */
 bool HasIdlePlayer(int bot)
 {
+	if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
+		return false;
+
 	int owner = GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID"));
 	return owner > 0 && IsClientInGame(owner) && !IsFakeClient(owner)
 		&& GetClientTeam(owner) == TEAM_SPECTATOR;
@@ -1463,6 +1505,9 @@ bool IsClientIdle(int client)
 	{
 		if (!IsClientInGame(bot) || !IsFakeClient(bot)
 			|| GetClientTeam(bot) != TEAM_SURVIVOR)
+			continue;
+
+		if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
 			continue;
 
 		if (GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID") == userId)

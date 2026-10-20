@@ -136,7 +136,11 @@ ConVar
 	g_hAllowShowAccuracy,
 	g_hAllowShowFailCount,
 	g_hAllowShowDetails,
-	g_hAllowShowRank;
+	g_hAllowShowRank,
+	// 只输出有数据玩家里排名靠前的那部分(百分比, 0 = 全部输出)
+	g_hShowPercent,
+	// 输出时是否排除已不在服务器的玩家(中途退出的存档行)
+	g_hExcludeOffline;
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
 	EngineVersion test = GetEngineVersion();
@@ -174,6 +178,11 @@ public void OnPluginStart()
 	g_hAllowShowFailCount = CreateConVar("mvp_show_fail_count", "0", "是否在团灭时显示团灭次数", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowShowDetails = CreateConVar("mvp_show_details", "1", "是否在过关或团灭时显示各项 MVP 数据 (每项 MVP 数据显示与否与 mvp_allow_show_xx Cvar 挂钩, 本 Cvar 关闭所有单项数据均不会显示)", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowShowRank = CreateConVar("mvp_show_your_rank", "1", "显示各项 MVP 数据时是否允许显示你的排名", CVAR_FLAG, true, 0.0, true, 1.0);
+
+	/* 输出裁剪(与 tank_damage 的同名 cvar 行为一致):
+	   先按 l4d2_mvp_exclude_offline 筛出"有数据玩家"集合, 再对该集合取 l4d2_mvp_show_percent%(上取整) */
+	g_hShowPercent = CreateConVar("l4d2_mvp_show_percent", "0", "MVP 表格只输出有数据玩家里排名靠前的多少百分比 (上取整, 0 = 全部输出; 例: 18 条数据 50 -> 输出 9 条, 19 条 50 -> 输出 10 条)", CVAR_FLAG, true, 0.0, true, 100.0);
+	g_hExcludeOffline = CreateConVar("l4d2_mvp_exclude_offline", "0", "输出 MVP 数据时是否排除已不在服务器的玩家(中途退出的存档行) (0 = 不排除, 1 = 排除)", CVAR_FLAG, true, 0.0, true, 1.0);
 
 	// HookEvents
 	HookEvent("player_death", siDeathHandler);
@@ -434,6 +443,58 @@ int collectStatRows(int[] rows) {
 }
 
 /**
+* 按 l4d2_mvp_exclude_offline 过滤统计行 (就地压缩数组, 保持原有相对顺序)
+* 值为 1 时剔除所有"已退出玩家记录"行; 值为 0(默认)时原样返回。
+* 与 l4d2_mvp_show_percent 的先后关系: 必须先调用本函数筛出"有数据玩家"的集合,
+* 再对该集合计算前 N% —— 否则百分比的分母会把离线玩家算进去, 却又因为被排除而不输出, 条数就对不上了。
+* @param rows  统计行数组
+* @param count 过滤前的行数
+* @return int  过滤后剩余的行数
+**/
+int filterStatRows(int[] rows, int count) {
+	if (!g_hExcludeOffline.BoolValue) {
+		return count;
+	}
+	int kept = 0;
+	for (int i = 0; i < count; i++) {
+		if (IsDepartedRow(rows[i])) {
+			continue;
+		}
+		rows[kept++] = rows[i];
+	}
+	return kept;
+}
+
+/**
+* 计算实际输出的条数: 上取整(条数 × 百分比 / 100)
+* 语义与 l4d2_mvp_show_percent / l4d2_tankdamage_show_percent 一致:
+*   - 百分比为 0(或 >= 100) = 全部输出, 向后兼容;
+*   - 百分比很小时至少输出 1 条(不会出现"设了百分比结果一条都不打");
+*   - 调用前必须已经排好序并做完"排除离线"筛选, 这样截断出来的确实是前 N 名。
+* 例: 18 条 × 50% = 9; 19 条 × 50% = 9.5 -> 10; 1 条 × 1% = 0.01 -> 1
+* @param count   过滤后剩余的条数(有数据玩家的条数)
+* @param percent 百分比(0..100)
+* @return int    需要输出的条数(0 表示无数据)
+**/
+int CalcDisplayLimit(int count, int percent) {
+	if (count < 1) {
+		return 0;
+	}
+	if (percent <= 0 || percent >= 100) {
+		return count;
+	}
+	// 整数上取整: ceil(count * percent / 100) = (count * percent + 99) / 100
+	int limit = (count * percent + 99) / 100;
+	if (limit < 1) {
+		limit = 1;
+	}
+	if (limit > count) {
+		limit = count;
+	}
+	return limit;
+}
+
+/**
 * 取统计表某一行的名字
 * 在场玩家用 \x03(队伍色, 配合 PrintChatWithAuthor 的生还者作者 = 蓝色),
 * 已退出玩家用 \x01(默认色 = 无颜色), BOT 追加 [BOT]
@@ -607,7 +668,7 @@ stock void FormatZeroPadded(char[] buffer, int maxlen, int value, int digits) {
 **/
 void printMvpStatus(int client)
 {
-	int[] rows = new int[MAX_STAT_ROWS];
+	int rows[MAX_STAT_ROWS];
 	int count = collectStatRows(rows);
 
 	PrintToChat(client, "\x03[生还者 MVP 统计]");
@@ -616,13 +677,22 @@ void printMvpStatus(int client)
 
 	SortCustom1D(rows, count, sortByDamageFunction);
 
-	// 团队总伤害, 用于伤害占比 (退出玩家的伤害同样计入)
+	/* 输出裁剪: 先按 l4d2_mvp_exclude_offline 筛出"有数据玩家"的集合(过滤掉已退出玩家记录),
+	   再对这个集合取 l4d2_mvp_show_percent(上取整)条。
+	   截断发生在排序之后, 所以输出的确实是"前 N 名"; 百分比为 0 时全部输出(默认, 向后兼容)。
+	   团队总伤害(伤害占比的分母)同样只统计参与输出的集合, 否则排除掉的离线玩家伤害
+	   会让表格里的百分比怎么都凑不满 100。 */
+	count = filterStatRows(rows, count);
+	if (count < 1) { return; }	// 全部离线且要求排除时, 不打印空表
+	int displayLimit = CalcDisplayLimit(count, g_hShowPercent.IntValue);
+
+	// 团队总伤害, 用于伤害占比 (退出玩家的伤害同样计入, 被排除时不参与)
 	int teamDamage = 0;
 	for (int i = 0; i < count; i++) { teamDamage += playerInfos[rows[i]].totalDamage; }
 
 	// ① 取每列每个数字子段的最大位数, 作为本列补 0 位宽
-	int[][] iDigits = new int[COL_MAX][COL_FIELDS];
-	for (int i = 0; i < count; i++) {
+	int iDigits[COL_MAX][COL_FIELDS];
+	for (int i = 0; i < displayLimit; i++) {
 		int row = rows[i], digits;
 
 		digits = CountDigits(playerInfos[row].siCount);
@@ -649,60 +719,65 @@ void printMvpStatus(int client)
 		}
 	}
 
-	// ② 按位宽补 0 生成每行的列数据
-	char[][][] sData = new char[count][COL_MAX][CHAT_CELL_SIZE];
+	// ② 逐行生成列数据并直接打印。
+	//    原来先把整张表预格式化进 new char[count][COL_MAX][CHAT_CELL_SIZE] 再打印,
+	//    12v12 下 count 最大可达 MaxClients+MAX_DEPARTED 行, 加上每个维度各自的
+	//    指针向量, 峰值会吃掉插件 stack/heap 共享区(编译期仅 17792 字节)的绝大部分,
+	//    一旦同时有多名中途退出的玩家在场就报 "Not enough space on the heap"。
+	//    改成复用同一份固定尺寸本地缓冲, 逐行格式化后立即发送: 堆分配 0 字节。
+	char cell[COL_MAX][CHAT_CELL_SIZE];
 	char part[2][16];
-	for (int i = 0; i < count; i++) {
+	char toPrint[1024], temp[CHAT_CELL_OUT], nameBuf[MAX_NAME_LENGTH + 24];
+	int author = FindSurvivorAuthor();
+	for (int i = 0; i < displayLimit; i++) {
 		int row = rows[i];
+
+		// ① 按位宽补 0 生成本行的列数据
 		if (g_hAllowShowSi.BoolValue) {
-			FormatZeroPadded(sData[i][COL_SI], CHAT_CELL_SIZE, playerInfos[row].siCount, iDigits[COL_SI][0]);
+			FormatZeroPadded(cell[COL_SI], CHAT_CELL_SIZE, playerInfos[row].siCount, iDigits[COL_SI][0]);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatZeroPadded(sData[i][COL_CI], CHAT_CELL_SIZE, playerInfos[row].ciCount, iDigits[COL_CI][0]);
+			FormatZeroPadded(cell[COL_CI], CHAT_CELL_SIZE, playerInfos[row].ciCount, iDigits[COL_CI][0]);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
 			FormatZeroPadded(part[0], sizeof(part[]), playerInfos[row].totalDamage, iDigits[COL_DAMAGE][0]);
 			FormatZeroPadded(part[1], sizeof(part[]), GetDamagePercent(row, teamDamage), iDigits[COL_DAMAGE][1]);
-			FormatEx(sData[i][COL_DAMAGE], CHAT_CELL_SIZE, "%s/%s%%", part[0], part[1]);
+			FormatEx(cell[COL_DAMAGE], CHAT_CELL_SIZE, "%s/%s%%", part[0], part[1]);
 		}
 		if (g_hAllowShowFF.BoolValue) {
 			FormatZeroPadded(part[0], sizeof(part[]), playerInfos[row].ffCount, iDigits[COL_FF][0]);
 			FormatZeroPadded(part[1], sizeof(part[]), playerInfos[row].gotFFCount, iDigits[COL_FF][1]);
-			FormatEx(sData[i][COL_FF], CHAT_CELL_SIZE, "%s/%s", part[0], part[1]);
+			FormatEx(cell[COL_FF], CHAT_CELL_SIZE, "%s/%s", part[0], part[1]);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
 			int hits = playerInfos[row].siCount + playerInfos[row].ciCount;
 			float accuracy = hits == 0 ? 0.0 : float(playerInfos[row].headShotCount) / float(hits);
-			FormatZeroPadded(sData[i][COL_ACC], CHAT_CELL_SIZE, RoundToNearest(accuracy * 100.0), iDigits[COL_ACC][0]);
-			StrCat(sData[i][COL_ACC], CHAT_CELL_SIZE, "%");
+			FormatZeroPadded(cell[COL_ACC], CHAT_CELL_SIZE, RoundToNearest(accuracy * 100.0), iDigits[COL_ACC][0]);
+			StrCat(cell[COL_ACC], CHAT_CELL_SIZE, "%");
 		}
-	}
 
-	// ③ 逐行打印: 每列 = 标签 + 空格 + 数值 + 2 个空格, 不使用括号
-	// 各行同列的字符个数完全一致(数值补 0), 所以列宽数学上相等 → 严格对齐, 0 像素误差
-	// \x03 需要生还者作者才会渲染成蓝色, 所以用 PrintChatWithAuthor 发送
-	char toPrint[1024], temp[CHAT_CELL_OUT], nameBuf[MAX_NAME_LENGTH + 24];
-	int author = FindSurvivorAuthor();
-	for (int i = 0; i < count; i++) {
+		// ② 逐行打印: 每列 = 标签 + 空格 + 数值 + 2 个空格, 不使用括号
+		// 各行同列的字符个数完全一致(数值补 0), 所以列宽数学上相等 → 严格对齐, 0 像素误差
+		// \x03 需要生还者作者才会渲染成蓝色, 所以用 PrintChatWithAuthor 发送
 		toPrint[0] = '\0';
 		if (g_hAllowShowSi.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03特感 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_SI]);
+			FormatEx(temp, sizeof(temp), "\x03特感 %s%s\x03  ", CELL_VALUE_COLOR, cell[COL_SI]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowCi.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03丧尸 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_CI]);
+			FormatEx(temp, sizeof(temp), "\x03丧尸 %s%s\x03  ", CELL_VALUE_COLOR, cell[COL_CI]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowTotalDmg.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03伤害 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_DAMAGE]);
+			FormatEx(temp, sizeof(temp), "\x03伤害 %s%s\x03  ", CELL_VALUE_COLOR, cell[COL_DAMAGE]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowFF.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03黑/被黑 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_FF]);
+			FormatEx(temp, sizeof(temp), "\x03黑/被黑 %s%s\x03  ", CELL_VALUE_COLOR, cell[COL_FF]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 		if (g_hAllowShowAccuracy.BoolValue) {
-			FormatEx(temp, sizeof(temp), "\x03爆头率 %s%s\x03  ", CELL_VALUE_COLOR, sData[i][COL_ACC]);
+			FormatEx(temp, sizeof(temp), "\x03爆头率 %s%s\x03  ", CELL_VALUE_COLOR, cell[COL_ACC]);
 			StrCat(toPrint, sizeof(toPrint), temp);
 		}
 
@@ -724,8 +799,10 @@ void printParticularMvp(int client) {
 	int dmgTotal, siTotal, ciTotal, ffTotal, gotFFTotal;
 
 	// 在线生还者 + 已退出玩家记录一起参与统计与排名
-	int[] rows = new int[MAX_STAT_ROWS];
+	int rows[MAX_STAT_ROWS];
 	int count = collectStatRows(rows);
+	// l4d2_mvp_exclude_offline = 1 时, 各项 MVP 的评选与合计值同样只算还在服务器里的玩家
+	count = filterStatRows(rows, count);
 
 	for (int i = 0; i < count; i++) {
 		int row = rows[i];
@@ -826,8 +903,10 @@ void printParticularMvp(int client) {
 
 		// 开始排名 (与表格一致: 在线生还者 + 已退出玩家记录)
 		int rank;
-		int[] rankRows = new int[MAX_STAT_ROWS];
+		int rankRows[MAX_STAT_ROWS];
 		int rankCount = collectStatRows(rankRows);
+		// 你的排名同样遵循 l4d2_mvp_exclude_offline (不应用百分比裁剪: 这不是玩家列表, 只是一个名次)
+		rankCount = filterStatRows(rankRows, rankCount);
 
 		// 是杀特高手 或 不是杀特高手也不是清僵尸高手, 显示他的杀丧尸排名
 		if (client == siMvpRow || client != ciMvpRow) {
@@ -955,7 +1034,7 @@ stock int sortByFFReceiveFunction(int x, int y, const int[] array, Handle hndl) 
 // Natives
 any Native_GetTotalDamageMvp(Handle plugin, int numParams) {
 	int count;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 	SortCustom1D(players, count, sortByTotalDamageFunction);
 	return players[0];
@@ -963,7 +1042,7 @@ any Native_GetTotalDamageMvp(Handle plugin, int numParams) {
 
 any Native_GetSiMvp(Handle plugin, int numParams) {
 	int count;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 	SortCustom1D(players, count, sortBySiCountFunction);
 	return players[0];
@@ -971,7 +1050,7 @@ any Native_GetSiMvp(Handle plugin, int numParams) {
 
 any Native_GetCiMvp(Handle plugin, int numParams) {
 	int count;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 	SortCustom1D(players, count, sortByCiCountFunction);
 	return players[0];
@@ -979,7 +1058,7 @@ any Native_GetCiMvp(Handle plugin, int numParams) {
 
 any Native_GetFFMvp(Handle plugin, int numParams) {
 	int count;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 	SortCustom1D(players, count, sortByFriendlyFireFunction);
 	return players[0];
@@ -987,7 +1066,7 @@ any Native_GetFFMvp(Handle plugin, int numParams) {
 
 any Native_GetFFReceiveMvp(Handle plugin, int numParams) {
 	int count;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 	SortCustom1D(players, count, sortByFFReceiveFunction);
 	return players[0];
@@ -1006,7 +1085,7 @@ any Native_GetClientRank(Handle plugin, int numParams) {
 	}
 
 	int i, count, rank;
-	int[] players = new int[MaxClients + 1];
+	int players[MAXPLAYERS + 1];
 	getSurvivorArray(players, count);
 
 	switch (type) {

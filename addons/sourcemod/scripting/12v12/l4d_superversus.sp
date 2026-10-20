@@ -19,6 +19,9 @@
 #define TEAM_INFECTED	               3
 #define DELAY_KICK_NONEEDBOT         0.7
 #define DELAY_KICK_FAKECLIENT        0.1
+/* 队伍修正插件锁队还原队伍期间，自动进队要无限期等待（不消耗 JoinAttempts 的次数）。
+   这里给一个独立的秒数上限，正常换图还原几秒内就结束，120 秒足以覆盖最慢的情况。 */
+#define LOCK_WAIT_MAX_SECONDS        120
 #define ZC_ZOMBIE                      0
 #define ZC_SMOKER                      1
 #define ZC_BOOMER                      2
@@ -92,6 +95,7 @@ bool JoinAutomatic[MAXPLAYERS+1];
 bool NewConnection[MAXPLAYERS+1];
 int JoinTarget[MAXPLAYERS+1];
 int JoinAttempts[MAXPLAYERS+1];
+int LockWaitSeconds[MAXPLAYERS+1];	// 因队伍修正锁队而等待的秒数（单独计数，不占 JoinAttempts）
 bool SurvivorPlaceholder[MAXPLAYERS+1];
 bool SurvivorDied[MAXPLAYERS+1];
 bool LateLoad;
@@ -104,8 +108,6 @@ enum JoinResult
 };
 
 bool RoundStarted = false;
-
-bool  CheckIdle[MAXPLAYERS+1];
 
 float SiTimes[MAXPLAYERS+1] = {0.0, ...};
 
@@ -186,7 +188,6 @@ public void OnPluginStart()
 	QueuedPummelOffset = teamData.GetOffset("CTerrorPlayer->m_queuedPummelAttacker");
 	delete teamData;
 	if (QueuedPummelOffset == -1) SetFailState("Missing CTerrorPlayer->m_queuedPummelAttacker offset");
-	//RegConsoleCmd("sm_afk", GO_AFK, "Go Idle (Survivor) or Join Spectator Team (Infected)");
 	//RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
 	//RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
@@ -196,7 +197,6 @@ public void OnPluginStart()
 	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
 	HookEvent("player_left_start_area", Event_PlayerLeftStartArea, EventHookMode_Post);
 	HookEvent("player_left_checkpoint", Event_PlayerLeftStartArea, EventHookMode_Post);
-	HookEvent("player_afk", Event_PlayerWentAFK, EventHookMode_Pre);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_Post);
 	HookEvent("round_end", Event_RoundEnd, EventHookMode_Pre);
 	HookEvent("finale_vehicle_leaving", Event_FinaleVehicleLeaving);
@@ -612,7 +612,6 @@ public void OnClientDisconnect(int client)
 	SurvivorPlaceholder[client] = false;
 
 	delete TeamPanelTimer[client];			//	Clean up Panel timer
-	CheckIdle[client] = false;				//  Turn off idle check
 
 	if(RoundStarted && SvBotsAllowed())
 	{
@@ -812,6 +811,23 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 		return Plugin_Stop;
 	}
 
+	/* 队伍修正插件正在锁队还原换图队伍时，jointeam 会被它整段拦截，此刻既不能判失败、
+	   也不能消耗 JoinAttempts 的次数（否则锁队久一点就会提前放弃并刷"没有位置"）。
+	   这里单独计时等待，锁队一结束就立刻继续走原来的 SelectBalancedTeam -> TryJoinTeam。 */
+	if (TeamChangesLocked())
+	{
+		if (++LockWaitSeconds[client] < LOCK_WAIT_MAX_SECONDS)
+		{
+			JoinTimer[client] = CreateTimer(1.0, Timer_AutoJoinTeam, userid, TIMER_FLAG_NO_MAPCHANGE);
+			return Plugin_Stop;
+		}
+		// 等满上限（异常情况）才放弃，避免永久占着一个 pending 请求
+		NewConnection[client] = false;
+		CancelJoin(client);
+		return Plugin_Stop;
+	}
+	LockWaitSeconds[client] = 0;
+
 	JoinAttempts[client]++;
 	JoinResult result = Join_Wait;
 	if (RoundStarted)
@@ -840,21 +856,71 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 			if (result != Join_Failed) result = TryJoinTeam(client, JoinTarget[client], false);
 		}
 	}
+	// 脱困：没排进去时不能把人留在"生还者队 + 已死亡"的槽位上，否则客户端会一直
+	// 显示原生"点击加入游戏"的闲置提示却点不动，玩家就卡死在这个界面。
+	bool rescued = (result != Join_Success) && RescueStuckDeadSurvivor(client);
+
 	if (result == Join_Wait && JoinAttempts[client] < 120)
 		JoinTimer[client] = CreateTimer(1.0, Timer_AutoJoinTeam, userid, TIMER_FLAG_NO_MAPCHANGE);
 	else
 	{
 		if (JoinAutomatic[client]) NewConnection[client] = false;
-		if (result != Join_Success)
+		// 脱困时已经给过"已退回旁观"的提示，不再重复刷一条同样的消息
+		if (result != Join_Success && !rescued)
 			PrintToChat(client, "\x03[SV] \x01当前没有可加入的队伍位置，可按 M 或输入 !join 重试。");
 		CancelJoin(client);
 	}
 	return Plugin_Stop;
 }
 
+/* ------------------------------------------------------------------------
+* 生还者队里是否有"已死亡但仍占着名额"的成员（真人 / AI Bot / 挂机托管身体统一计入）。
+* 有人躺着时，那几个席位要等下一回合复活，此刻把活人加进来就是超额，
+* 所以生还者侧不算"有可用的活人位置"。
+* 注意与 HasSurvivorDied(client) 区分：那个是"这名玩家本局死过"。
+* ---------------------------------------------------------------------- */
+bool HasDeadSurvivorSeat()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && GetClientTeam(i) == TEAM_SURVIVOR && !IsPlayerAlive(i))
+			return true;
+	}
+	return false;
+}
+
+/* ------------------------------------------------------------------------
+* 脱困处理：新玩家进服时引擎会先按默认把他放进生还者队；如果生还者队只剩死亡身体
+* 占位，SafeTakeOverSurvivor 拿不到活 Bot、SpawnFakeSurvivorClient 也因名额被占满
+* 而失败，玩家就一直停在"生还者队 + 已死亡"的槽位反复 Join_Wait。
+* 此时客户端会显示原生的"点击加入游戏"闲置提示，而对抗没有可用闲置键 → 点了没反应、
+* 卡死在那个界面。这里把他退回旁观并清掉残留的跟随观察态，让他能重新 !join / 按 M。
+*
+* 只处理"本次进服还没安置好"的新连接（NewConnection），
+* 本局正常阵亡、正在等救援/复活的生还者不受影响。
+* ---------------------------------------------------------------------- */
+bool RescueStuckDeadSurvivor(int client)
+{
+	if (!IsValidClient(client) || IsFakeClient(client) || !IsClientInGame(client)) return false;
+	if (!NewConnection[client]) return false;
+	if (GetClientTeam(client) != TEAM_SURVIVOR || IsPlayerAlive(client)) return false;
+	// 托管着自己 Bot 的玩家是正常的"死亡等复活"状态，不算卡住
+	if (GetBotOfIdle(client) > 0) return false;
+
+	ChangeClientTeam(client, TEAM_SPECTATOR);
+	if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SPECTATOR) return false;
+
+	// 伪闲置时代会在玩家身上留下 m_iObserverMode = 5（跟随观察），
+	// 那正是"点击加入游戏没反应"的元凶；只在残留时清回 0，不动正常旁观模式。
+	if (GetEntProp(client, Prop_Send, "m_iObserverMode") == 5)
+		SetEntProp(client, Prop_Send, "m_iObserverMode", 0);
+
+	PrintToChat(client, "\x03[SV] \x01当前没有可加入的位置，已退回旁观，可按 M 或输入 !join 重试。");
+	return true;
+}
+
 int SelectBalancedTeam(int client)
 {
-	if (!InfectedAllowed) return TEAM_SURVIVOR;
 	int survivors = GetTeamPlayers(TEAM_SURVIVOR, false);
 	int infected = GetTeamPlayers(TEAM_INFECTED, false);
 	// Compare everyone already admitted, excluding this new connection's default
@@ -862,9 +928,15 @@ int SelectBalancedTeam(int client)
 	int current = GetClientTeam(client);
 	if (current == TEAM_SURVIVOR) survivors--;
 	else if (current == TEAM_INFECTED) infected--;
-	if (survivors >= SurvivorLimit.IntValue && infected >= InfectedLimit.IntValue) return 0;
-	if (survivors >= SurvivorLimit.IntValue) return TEAM_INFECTED;
-	if (infected >= InfectedLimit.IntValue) return TEAM_SURVIVOR;
+
+	/* 生还者侧"可用"要同时满足：真人位置没满、且队里没有死亡生还者占着名额。
+	   有人躺着时只能去特感；两边都不可用就返回 0，让调用方保持旁观并提示。 */
+	bool survivorOpen = survivors < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+	bool infectedOpen = InfectedAllowed && infected < InfectedLimit.IntValue;
+
+	if (!survivorOpen && !infectedOpen) return 0;
+	if (!survivorOpen) return TEAM_INFECTED;
+	if (!infectedOpen) return TEAM_SURVIVOR;
 	if (survivors < infected) return TEAM_SURVIVOR;
 	if (infected < survivors) return TEAM_INFECTED;
 	return GetRandomInt(TEAM_SURVIVOR, TEAM_INFECTED);
@@ -876,6 +948,7 @@ void CancelJoin(int client)
 	JoinPending[client] = false;
 	JoinAutomatic[client] = false;
 	JoinAttempts[client] = 0;
+	LockWaitSeconds[client] = 0;
 }
 
 void QueueJoin(int client, int team, bool automatic, float delay)
@@ -888,74 +961,25 @@ void QueueJoin(int client, int team, bool automatic, float delay)
 }
 
 // *********************************************************************************
-// IDLE FIX
+// BOT REPLACED PLAYER
 // *********************************************************************************
 
 // ------------------------------------------------------------------------
-// If player goes AFK, activate idle bug check
-// ------------------------------------------------------------------------
-public Action Event_PlayerWentAFK(Event event, const char[] name, bool dontBroadcast)
-{
-	// Event is triggered when a player goes AFK
-	int client = GetClientOfUserId(event.GetInt("player"));
-	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Continue;
-	NewConnection[client] = false;
-	CancelJoin(client);
-	CheckIdle[client] = true;
-	return Plugin_Continue;
-}
-
-// ------------------------------------------------------------------------
-// When survivor bot replace player AND player went afk, trigger fix
+// Bot took over a player: only schedule the "no longer needed bot" cleanup.
+// 旧的伪闲置修复链与 AFK 事件监测已整块移除：
+// 那套 L4D_SetHumanSpec + m_iObserverMode=5 的写法是给战役模式修引擎 idle bug 的，
+// 在对抗里会把玩家置成跟随观察态，玩家只看到原生的"点击加入游戏"闲置提示，
+// 而对抗没有可用的闲置键 → 点了没反应、卡死。闲置交给专门的闲置插件处理。
 // ------------------------------------------------------------------------
 public Action Event_BotReplacedPlayer(Event event, const char[] name, bool dontBroadcast)
 {
 	// Event is triggered when a bot takes over a player
-	int player	= GetClientOfUserId(event.GetInt("player"));
 	int bot		= GetClientOfUserId(event.GetInt("bot"));
 
 	if (!IsValidClient(bot)) return Plugin_Continue;
 	if (GetClientTeam(bot) == TEAM_SURVIVOR) CreateTimer(DELAY_KICK_NONEEDBOT, Timer_KickNoNeededBot, GetClientUserId(bot), TIMER_FLAG_NO_MAPCHANGE);
-	
-	if (!IsValidClient(player) || IsFakeClient(player)) return Plugin_Continue;
 
-	// Create a datapack as we are moving 2+ pieces of data through a timer
-	if(player > 0 && IsClientInGame(player) && GetClientTeam(bot)==TEAM_SURVIVOR) 
-	{
-		Handle datapack = CreateDataPack();
-		WritePackCell(datapack, GetClientUserId(player));
-		WritePackCell(datapack, GetClientUserId(bot));
-		CreateTimer(0.2, Timer_ActivateFix, datapack, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
-	}
 	return Plugin_Continue;
-}
-
-// ------------------------------------------------------------------------
-// Fix the idle bug by setting pseudo idle mode
-// ------------------------------------------------------------------------
-public Action Timer_ActivateFix(Handle Timer, any datapack)
-{
-	// Reset the data pack
-	ResetPack(datapack);
-
-	// Retrieve values from datapack
-	int player = GetClientOfUserId(ReadPackCell(datapack));
-	int bot = GetClientOfUserId(ReadPackCell(datapack));
-	if (!IsValidClient(player) || IsFakeClient(player)) return Plugin_Stop;
-
-	// If  player left game, is not spectator, or is correctly idle, skip the fix
-	// If  bot is occupied (should not happen unless something happened in .2 sec) , try to get another
-	
-	if (!IsClientInGame(player) || GetClientTeam(player) != TEAM_SPECTATOR || GetBotOfIdle(player) ||  IsFakeClient(player)) CheckIdle[player] = false;	
-	if (!IsBotValid(bot) || GetClientTeam(bot) != TEAM_SURVIVOR) bot = GetAnyValidSurvivorBot(); if (bot < 1) CheckIdle[player] = false; 
-
-	// If the player went AFK and failed, continue on
-	if(CheckIdle[player])
-	{
-		CheckIdle[player] = false;
-		SetHumanIdle(bot, player);
-	}
-	return Plugin_Stop;
 }
 
 // ------------------------------------------------------------------------
@@ -1154,6 +1178,14 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		if (announce) PrintToChat(client, "\x03[SV] \x01生还者队伍的真人位置已满。");
 		return Join_Failed;
 	}
+	/* 生还者位置被死亡生还者占着时，不能把人塞进生还者队（否则他会变成一具死亡身体，
+	   客户端一直显示原生"点击加入游戏"却点不动）。
+	   例外：这名玩家托管着自己的生还者 Bot（从旁观回来接管原来的身体），那不是新增名额。 */
+	if (bot <= 0 && HasDeadSurvivorSeat())
+	{
+		if (announce) PrintToChat(client, "\x03[SV] \x01本回合生还者已无可用位置（有阵亡玩家占位），请等待下一回合或加入特感。");
+		return Join_Failed;
+	}
 	if (died && bot > 0 && IsPlayerAlive(bot))
 	{
 		if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，不能接管存活的 AI。");
@@ -1275,22 +1307,6 @@ public Action MultiStatus(int client, int args)
 		GetReadyHumanCount(), SvBotsAllowed(), EmptyServerTimer != null);
 	ReplyToCommand(client, "[Multi] survivor_models=%d/%d | map_ready=%d | takeover_blocked=%d | character_repairs=%d",
 		SurvivorModelsReady, L4D1 ? 4 : 8, SurvivorMapReady, TakeoverBlocked, SurvivorCharacterRepairs);
-	return Plugin_Handled;
-}
-
-
-public Action GO_AFK(int client, int args) {
-	if (Management.IntValue < 2) return Plugin_Continue;
-	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Handled;
-	NewConnection[client] = false;
-	CancelJoin(client);
-
-	if (GetClientTeam(client) == TEAM_SURVIVOR) // Infected can't go idle, they spectate instead
-	{
-		CheckIdle[client] = true; // Check for fix
-		FakeClientCommand(client, "go_away_from_keyboard");
-	}
-	if (GetClientTeam(client) != TEAM_SPECTATOR) FakeClientCommand(client, "sm_spectate");
 	return Plugin_Handled;
 }
 
@@ -1556,19 +1572,6 @@ bool IsBotValid(int client)
 	return false;
 }
 
-// ------------------------------------------------------------------------
-// Get any valid survivor bot (may be dead). Last bot created is found first
-// ------------------------------------------------------------------------
-int GetAnyValidSurvivorBot()
-{
-	for(int i = MaxClients ; i >= 1; i--)  // kick bots in reverse order they have been spawned
-	{
-		if (IsBotValid(i) && GetClientTeam(i) == TEAM_SURVIVOR && !SurvivorPlaceholder[i]
-			&& PrepareSurvivorModel(i))
-			return i;
-	}
-	return -1;
-}
 
 // ------------------------------------------------------------------------
 // Check if how many alive bots without an idle are available in a team
@@ -2199,12 +2202,6 @@ public Action L4D_OnTakeOverBot(int client)
 void Respawn(int client)
 {
 	L4D_RespawnPlayer(client);
-}
-
-void SetHumanIdle(int bot, int client)
-{
-	if (!IsTakeoverPairValid(client, bot) || !PrepareSurvivorModel(bot)) return;
-	if (L4D_SetHumanSpec(bot, client)) SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
 }
 
 // *********************************************************************************

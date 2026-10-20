@@ -16,20 +16,29 @@
 *	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define PLUGIN_VERSION 		"1.22-12v12"
+#define PLUGIN_VERSION 		"1.23-12v12"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark logic function.
 
 /*======================================================================================
 	Plugin Info:
 
 *	Name	:	[L4D & L4D2] Anti Rush
-*	Author	:	SilverShot
+*	Author	:	SilverShot, X光, apples1949
 *	Descrp	:	Slowdown or teleport rushers and slackers back to the group. Uses flow distance for accuracy.
 *	Link	:	https://forums.alliedmods.net/showthread.php?t=322392
 *	Plugins	:	https://sourcemod.net/plugins.php?exact=exact&sortby=title&search=1&author=Silvers
 
 ========================================================================================
 	Change Log:
+
+12v12 1.23 新增:
+	- 拦截跑图时新增"其他提示输出"，原聊天提示保留不改：屏幕中央提示文本(PrintHintText，
+	  含领先米数、需后退米数、已持续秒数)、提示音效 "ui/beep_error01.wav"、生还者全队简短聊天提示。
+	- 新增 cvar: l4d_anti_rush_hint / l4d_anti_rush_sound / l4d_anti_rush_notify_time /
+	  l4d_anti_rush_team_notify / l4d_anti_rush_team_notify_time，可分别关闭与调节节流。
+	- 节流: 同一玩家的屏幕提示+音效每 notify_time 秒最多一次(默认 2.0)；
+	  全队提示只在玩家"刚开始被拦"时发一次，且全局每 team_notify_time 秒最多一条(默认 5.0)。
+	- 拦截判定逻辑(距离/限速/传送)未改动。
 
 12v12 1.22 修复:
 	- 只在对抗模式运行；按全部有效存活身体的平均 flow 判定，治疗/救人不再改变统计样本。
@@ -177,15 +186,28 @@ float g_iBenchTicks;
 #define MINIMUM_RANGE		1500.0			// Minimum range for last and lead cvars.
 #define EVENTS_CONFIG		"data/l4d_anti_rush.cfg"
 #define LIMP_WALK_SPEED		85.0			// 黄血(瘸腿)移动速度 = 引擎 cvar "survivor_limp_walk_speed" 默认值 (survivor_limp_health = 40 以下进入瘸腿).
+#define SOUND_INTERCEPT		"ui/beep_error01.wav"	// 拦截提示音: 引擎自带 UI 音效, 与本仓库 l4d_votes_5_VS 使用的是同一个文件.
+#define METERS_PER_UNIT		0.0254			// flow 距离单位是 Hammer 单位(约 1 英寸), 乘此系数换算成米给玩家看.
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
+ConVar g_hCvarHint, g_hCvarSound, g_hCvarNotifyTime, g_hCvarTeamNotify, g_hCvarTeamNotifyTime;
 float g_fCvarRangeLast, g_fCvarRangeLead, g_fCvarSlow, g_fCvarWarnLast, g_fCvarWarnLead, g_fCvarWarnTime;
+float g_fCvarNotifyTime, g_fCvarTeamNotifyTime;
 int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
+int g_iCvarHint, g_iCvarSound, g_iCvarTeamNotify;
 bool g_bCvarAllow, bCvarAllow, g_bMapStarted, g_bLeft4Dead2;
 
 bool g_bInhibit[MAXPLAYERS+1];
 float g_fExecute[MAXPLAYERS+1], g_fHintWarn[MAXPLAYERS+1];
 Handle g_hTimer;
+
+// 12v12: 新增提示输出(屏幕文本/音效/全队聊天)的状态, 与原聊天提示的 g_fExecute 分开计时, 互不影响.
+float g_fNotify[MAXPLAYERS+1];		// 该玩家上次屏幕提示+音效的时间, 节流用
+float g_fRushSince[MAXPLAYERS+1];	// 该玩家本次被拦截的起始游戏时间(用于"已持续 N 秒")
+bool g_bRushState[MAXPLAYERS+1];	// 是否连续处于被拦截状态(用于识别"刚开始被拦"这一状态变化)
+bool g_bNotified[MAXPLAYERS+1];		// 本次拦截是否已发过"全队简短提示", 只在状态变化时发一次
+bool g_bIntercepted[MAXPLAYERS+1];	// 本 tick 是否被判为跑图拦截(用于 tick 末清理上面三个状态)
+float g_fTeamNotifyTime;			// 全队简短提示的全局上次发送时间(所有玩家共用, 防多人同时触发刷屏)
 
 char g_sMap[PLATFORM_MAX_PATH];
 bool g_bFoundMap;
@@ -200,8 +222,8 @@ ArrayList g_hElevators;
 public Plugin myinfo =
 {
 	name = "[L4D & L4D2] Anti Rush (12v12)",
-	author = "SilverShot, X光",
-	description = "Slowdown or teleport rushers and slackers back to the group. Uses flow distance for accuracy. 12v12 定制: 限速值取黄血瘸腿速度, 坦克存活时暂停.",
+	author = "SilverShot, X光, apples1949",
+	description = "Slowdown or teleport rushers and slackers back to the group. Uses flow distance for accuracy. 12v12 定制: 限速值取黄血瘸腿速度, 坦克存活时暂停, 拦截时增加屏幕/音效/全队提示. 基于 SilverShot 的 Anti Rush.",
 	version = PLUGIN_VERSION,
 	url = "https://forums.alliedmods.net/showthread.php?t=322392"
 }
@@ -243,7 +265,14 @@ public void OnPluginStart()
 	g_hCvarType =		CreateConVar("l4d_anti_rush_type",			"1",							"跑图处罚方式: 1=立即限速到 l4d_anti_rush_slow(默认), 2=传送回队伍. 两种都不影响落后判定.", CVAR_FLAGS);
 	g_hCvarWarnLast =	CreateConVar("l4d_anti_rush_warn_last",		"0.0",							"落后预提示距离: 落后超过该值但未达 range_last 时先发聊天提示. 0.0=关闭(默认); 由于 range_last 默认 0.0, 落后判定默认整体关闭, 本项也随之无效.", CVAR_FLAGS);
 	g_hCvarWarnLead =	CreateConVar("l4d_anti_rush_warn_lead",		"0.0",							"跑图预提示距离: 领先超过该值但未达 range_lead 时先发聊天提示. 0.0=关闭(默认); 若 range_lead 用默认 1500, 预提示区间不存在, 无提示.", CVAR_FLAGS);
-	g_hCvarWarnTime =	CreateConVar("l4d_anti_rush_warn_time",		"10.0",							"聊天提示的最小间隔(秒). 0.0=完全不发提示. 默认 10.0. 注意: 不影响限速/传送是否生效, 检测到即处罚.", CVAR_FLAGS);
+	g_hCvarWarnTime =	CreateConVar("l4d_anti_rush_warn_time",		"10.0",							"聊天提示的最小间隔(秒). 0.0=完全不发提示(同时关闭新增的屏幕/音效/全队提示). 默认 10.0. 注意: 不影响限速/传送是否生效, 检测到即处罚.", CVAR_FLAGS);
+
+	// 12v12 新增: 拦截时的其他提示输出(不替换原聊天提示).
+	g_hCvarHint =		CreateConVar("l4d_anti_rush_hint",			"1",							"拦截时是否显示屏幕中央提示文本(含领先米数/需后退米数/已持续秒数). 0=关闭, 1=开启. 默认 1.", CVAR_FLAGS);
+	g_hCvarSound =		CreateConVar("l4d_anti_rush_sound",			"1",							"拦截时是否播放提示音效(ui/beep_error01.wav). 0=关闭, 1=开启. 默认 1.", CVAR_FLAGS);
+	g_hCvarNotifyTime =	CreateConVar("l4d_anti_rush_notify_time",	"2.0",							"同一玩家的屏幕提示+音效最小间隔(秒), 防刷屏. 默认 2.0, 最小 1.0.", CVAR_FLAGS, true, 1.0);
+	g_hCvarTeamNotify =	CreateConVar("l4d_anti_rush_team_notify",	"1",							"拦截时是否给生还者全队发一条简短聊天提示(只在玩家刚开始被拦时发一次). 0=关闭, 1=开启. 默认 1.", CVAR_FLAGS);
+	g_hCvarTeamNotifyTime = CreateConVar("l4d_anti_rush_team_notify_time", "5.0",					"全队简短提示的全局最小间隔(秒), 防止多名玩家同时被拦时刷屏. 默认 5.0, 最小 1.0.", CVAR_FLAGS, true, 1.0);
 
 	//AutoExecConfig(true, "l4d_anti_rush");
 
@@ -265,6 +294,11 @@ public void OnPluginStart()
 	g_hCvarWarnLast.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarWarnLead.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarWarnTime.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarHint.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarSound.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarNotifyTime.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarTeamNotify.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarTeamNotifyTime.AddChangeHook(ConVarChanged_Cvars);
 
 	g_hElevators = new ArrayList();
 
@@ -313,6 +347,13 @@ void GetCvars()
 	g_fCvarWarnLast = g_hCvarWarnLast.FloatValue;
 	g_fCvarWarnLead = g_hCvarWarnLead.FloatValue;
 	g_fCvarWarnTime = g_hCvarWarnTime.FloatValue;
+
+	// 12v12 新增提示输出
+	g_iCvarHint = g_hCvarHint.IntValue;
+	g_iCvarSound = g_hCvarSound.IntValue;
+	g_iCvarTeamNotify = g_hCvarTeamNotify.IntValue;
+	g_fCvarNotifyTime = g_hCvarNotifyTime.FloatValue;
+	g_fCvarTeamNotifyTime = g_hCvarTeamNotifyTime.FloatValue;
 
 	// 12v12: 限速上限 = 黄血(瘸腿)速度 survivor_limp_walk_speed (引擎默认 85), 运行时同步, 防止 cfg 改过该值后不同步.
 	if (g_hCvarLimpSpeed == null)
@@ -642,6 +683,9 @@ public void OnMapStart()
 {
 	GetCurrentMap(g_sMap, sizeof(g_sMap));
 	g_bMapStarted = true;
+
+	// 12v12: 拦截提示音需要换图后重新预缓存, 否则 EmitSoundToClient 无声.
+	PrecacheSound(SOUND_INTERCEPT, true);
 }
 
 public void OnMapEnd()
@@ -676,6 +720,7 @@ void ResetPlugin()
 
 	g_fEventExtended = 0.0;
 	g_bEventStarted = false;
+	g_fTeamNotifyTime = 0.0;
 }
 
 void ResetClient(int i)
@@ -686,6 +731,25 @@ void ResetClient(int i)
 	g_bInhibit[i] = false;
 	g_fExecute[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
+	ResetNotifyState(i);
+}
+
+// 12v12: 清掉新增提示输出的状态(断线/换边/死亡/回合结束/本次未再跑图时调用).
+void ResetNotifyState(int i)
+{
+	g_fNotify[i] = 0.0;
+	g_fRushSince[i] = 0.0;
+	g_bRushState[i] = false;
+	g_bNotified[i] = false;
+	g_bIntercepted[i] = false;
+}
+
+void ResetNotifyStates()
+{
+	for (int i = 1; i <= MAXPLAYERS; i++)
+	{
+		ResetNotifyState(i);
+	}
 }
 
 void ResetSlowdown()
@@ -735,6 +799,7 @@ Action TimerTest(Handle timer)
 	if (!g_bMapStarted || !FlowJudgment() || (g_iCvarTank == 0 && L4D2_GetTankCount() > 0))
 	{
 		ResetSlowdown();
+		ResetNotifyStates();	// 12v12: 暂停判定期间清掉新增提示状态, 恢复后重新计时.
 		return Plugin_Continue;
 	}
 
@@ -789,6 +854,8 @@ Action TimerTest(Handle timer)
 						g_fExecute[client] = now + g_fCvarWarnTime;
 						PrintToChat(client, "\x04[提示]\x05你领先队伍平均位置太远，已限速，请回退队伍。");
 					}
+					// 12v12: 限速时的其他提示输出(屏幕文本/音效/全队简短提示), 不替换上面的聊天提示.
+					NotifyIntercept(client, lead, 1, now);
 				}
 				else if (g_iCvarType == 2)
 				{
@@ -817,6 +884,8 @@ Action TimerTest(Handle timer)
 							g_fExecute[client] = now + g_fCvarWarnTime;
 							PrintToChat(client, "\x04[提示]\x05你领先队伍太远，已传送回队伍。");
 						}
+						// 12v12: 传送时的其他提示输出(屏幕文本/音效/全队简短提示).
+						NotifyIntercept(client, lead, 2, now);
 					}
 				}
 			}
@@ -835,10 +904,21 @@ Action TimerTest(Handle timer)
 			}
 		}
 	}
+	else
+	{
+		// 12v12: 有效人数不足, 本 tick 没有任何拦截 → 清掉新增提示状态, 避免下次拦截时"已持续秒数"从旧值继续累加.
+		ResetNotifyStates();
+	}
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (g_bInhibit[client] && !rushing[client])
 			ResetClient(client);
+
+		// 12v12: 本 tick 没被判为跑图 → 清掉提示状态, 让下次被拦时重新计时并重新发全队提示.
+		if (!g_bIntercepted[client])
+			ResetNotifyState(client);
+
+		g_bIntercepted[client] = false;
 	}
 
 	#if DEBUG_BENCHMARK
@@ -863,6 +943,81 @@ void PreThinkPost(int client)
 	// A cap must not raise an engine/other-plugin speed that is already lower.
 	if (GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") > g_fCvarSlow)
 		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
+}
+
+// ====================================================================================================
+//					拦截时的其他提示输出 (12v12 新增)
+// ====================================================================================================
+// 调用时机: TimerTest 判定某人跑图并已执行限速(type=1)或传送(type=2)之后.
+// 输出三类与原聊天提示并存的提示: 本人屏幕提示文本 + 本人音效 + 生还者全队简短聊天.
+// 节流: 同一玩家 notify_time 秒一次; 全队提示只在"刚开始被拦"时发一次, 且全局 team_notify_time 秒一条.
+void NotifyIntercept(int client, float lead, int type, float now)
+{
+	// warn_time = 0 表示"完全不发提示", 新增提示也一并静默(与原有聊天提示保持同一总开关).
+	if (g_fCvarWarnTime <= 0.0)
+		return;
+
+	// 状态变化: 从"未被拦"变成"被拦" → 记录起点, 并把全队提示重新置为可发.
+	if (!g_bRushState[client])
+	{
+		g_bRushState[client] = true;
+		g_fRushSince[client] = now;
+		g_bNotified[client] = false;
+	}
+
+	// ---- 本人提示: 屏幕中央文本 + 音效, 受 notify_time 节流 ----
+	if ((g_iCvarHint || g_iCvarSound) && now >= g_fNotify[client])
+	{
+		g_fNotify[client] = now + g_fCvarNotifyTime;
+
+		if (g_iCvarHint)
+		{
+			// flow 距离单位是 Hammer 单位, 乘 0.0254 换算成米, 玩家才看得懂.
+			int meters = RoundToNearest(lead * METERS_PER_UNIT);
+			int elapsed = RoundToNearest(now - g_fRushSince[client]);
+
+			if (type == 1)
+			{
+				// 还需后退多少米才算回到阈值内(至少 1 米, 避免显示 0).
+				int need = RoundToNearest((lead - g_fCvarRangeLead) * METERS_PER_UNIT);
+				if (need < 1)
+					need = 1;
+
+				PrintHintText(client, "已被限速\n领先队伍约 %d 米, 已持续 %d 秒\n请后退约 %d 米等待队友", meters, elapsed, need);
+			}
+			else
+			{
+				PrintHintText(client, "已被传送回队伍\n领先队伍约 %d 米\n请与队友同行");
+			}
+		}
+
+		if (g_iCvarSound)
+			EmitSoundToClient(client, SOUND_INTERCEPT);
+	}
+
+	// ---- 全队简短提示: 仅状态变化时发一次, 且受全局间隔限制 ----
+	if (g_iCvarTeamNotify && !g_bNotified[client] && now >= g_fTeamNotifyTime)
+	{
+		g_bNotified[client] = true;
+		g_fTeamNotifyTime = now + g_fCvarTeamNotifyTime;
+
+		char sName[MAX_NAME_LENGTH], sAction[32];
+		GetClientName(client, sName, sizeof(sName));
+
+		if (type == 1)
+			strcopy(sAction, sizeof(sAction), "限速");
+		else
+			strcopy(sAction, sizeof(sAction), "传送回队伍");
+
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			// 只发生还者队伍(含被拦者本人), bot 不发; 避免全服广播刷屏.
+			if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == 2)
+				PrintToChat(i, "\x04[防跑图]\x05%s 领先队伍太远，已被%s。", sName, sAction);
+		}
+	}
+
+	g_bIntercepted[client] = true;
 }
 
 bool SurvivorsState(int client)

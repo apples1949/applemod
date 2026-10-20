@@ -242,16 +242,34 @@ void vStartSpawnMelee()
 			aRandomMelee.Sort(Sort_Random, Sort_String);
 		}
 
+		/* 下半场/同图重开时 aRandomMelee 是第一半场留下的克隆，
+		   而 g_aMeleeScripts 已在 OnMapStart 里按本图的 meleeweapons 字符串表重建 ——
+		   换图后两者长度可以不同（原来拿 g_aMeleeScripts 的长度去索引克隆表，
+		   会抛 "Invalid index 6 (count: 6)"）。
+		   下半场如果克隆表还没建（插件晚加载、直接从下半场开始），就用本图列表补建一次。 */
+		if(aRandomMelee == null)
+		{
+			aRandomMelee = g_aMeleeScripts.Clone();
+			aRandomMelee.Sort(Sort_Random, Sort_String);
+		}
+
+		int iRandomLength = aRandomMelee.Length;
+		if(iRandomLength < 1)
+			return;	// 本图没有可用的近战武器脚本，直接放弃
+
 		char sScriptName[64];
 		iLimit = g_hRandomAmount.IntValue;
 		for(int i; i < iLimit; i++)
 		{
-			aRandomMelee.GetString(i < iLength ? i : GetRandomInt(0, iLength - 1), sScriptName, sizeof sScriptName);
+			aRandomMelee.GetString(i < iRandomLength ? i : GetRandomInt(0, iRandomLength - 1), sScriptName, sizeof sScriptName);
 			vSpawnMelee(sScriptName, vOrigin, vAngles);
 		}
 	}
 	else if(g_hSpawnType.IntValue == 2)
 	{
+		if(iLength < 1)
+			return;	// 空列表时下面的取模会除零
+
 		char sScriptName[64];
 		iLimit = g_hMapBaseAmount.IntValue;
 		for(int i; i < iLimit; i++)
@@ -287,6 +305,9 @@ void vSpawnMelee(const char[] sClass, const float vPos[3], const float vAng[3])
 
 void vSpawnCustomList(const float vPos[3], const float vAng[3])
 {
+	if(g_aMeleeScripts.Length < 1)
+		return;	// 空列表时 GetRandomInt(0, -1) 会出错
+
 	char sScriptName[64];
 	int iLength = sizeof g_hMeleeItems;
 	for(int x; x < iLength; x++)

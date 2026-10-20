@@ -18,6 +18,24 @@
 		"chi"	"- 谁来玩Tank？-"
 	}
 
+	"Menu_Title_Paged"
+	{
+		"en"	"- Who shall be tank? (page %i/%i, %i candidates) -"
+		"chi"	"- 谁来玩Tank？(第 %i/%i 页, 共 %i 人) -"
+	}
+
+	"Page_Next"
+	{
+		"en"	"Next page »"
+		"chi"	"下一页 »"
+	}
+
+	"Page_Prev"
+	{
+		"en"	"« Previous page"
+		"chi"	"« 上一页"
+	}
+
 	"Stay_Me"
 	{
 		"en"	"I want to stay Tank!"

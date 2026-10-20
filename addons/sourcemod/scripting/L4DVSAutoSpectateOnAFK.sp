@@ -22,11 +22,13 @@ native bool L4D2_FixTeamShuffle_IsFixComplete();
 // For cvars
 ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
  	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, g_hAfkSafeRoomExitGrace,
-	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds, g_hImmuneSteamIds, g_hImmuneIps, g_hImmuneNames;
+	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds, g_hImmuneSteamIds, g_hImmuneIps, g_hImmuneNames,
+	g_hIgnoreDeadSurvivorSlot;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
 	afkKickTime, afkCheckInterval, afkSafeRoomExitGrace;
 bool afkKickEnabled, bAfkSaferoomIgnore, g_bSayResetTime, g_bSpecAfkMsgEnable;
+bool g_bIgnoreDeadSurvivorSlot;	// 生还者队有人躺着占名额时，不把生还者侧算作可补位
 
 
 // work variables
@@ -154,6 +156,7 @@ public void OnPluginStart()
 	g_hImmuneSteamIds 		= CreateConVar("l4d_specafk_immune_steamids", 	"76561198760610101", "这些 SteamID 玩家在旁观时不会被本插件警告/踢出（多个用逗号分隔；支持 SteamID64 / STEAM_1:0:x / [U:1:x] 三种写法，可直接照抄 auth 日志；默认值与 l4d_specafk_autospec_steamids 相同）", FCVAR_NOTIFY);
 	g_hImmuneIps 			= CreateConVar("l4d_specafk_immune_ips", 			"", "这些 IP（或 IP 前缀，如 192.168.1.）的玩家在旁观时不会被本插件警告/踢出（多个用逗号分隔；不使用 Steam 认证，用于 NoSteam 客户端兜底）", FCVAR_NOTIFY);
 	g_hImmuneNames 		= CreateConVar("l4d_specafk_immune_names", 		"", "这些显示名在旁观时不会被本插件警告/踢出（多个用逗号分隔；默认空 = 关闭）。注意：显示名由玩家自行修改，任何人改成同名即可绕过踢出，仅在 SteamID/IP 都取不到时（如 NoSteam 客户端）才建议填写", FCVAR_NOTIFY);
+	g_hIgnoreDeadSurvivorSlot = CreateConVar("l4d_specafk_ignore_dead_survivor_slot", "1", "1=生还者队里还有死亡生还者占着名额时，不把生还者侧算作可补位（默认）；0=沿用旧行为（只要 survivorHumans < survivor_limit 且有存活 AI Bot 就算可补位）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "L4D VS 自动AFK旁观插件的版本", FCVAR_DONTRECORD|FCVAR_NOTIFY);
 	
 
@@ -173,6 +176,7 @@ public void OnPluginStart()
 	g_hImmuneSteamIds.AddChangeHook(ConVarChanged);
 	g_hImmuneIps.AddChangeHook(ConVarChanged);
 	g_hImmuneNames.AddChangeHook(ConVarChanged);
+	g_hIgnoreDeadSurvivorSlot.AddChangeHook(ConVarChanged);
 
 	if(g_bLate)
 	{
@@ -208,6 +212,7 @@ void ReadCvars()
 
 	g_bSayResetTime = g_hSayResetTime.BoolValue;
 	g_bSpecAfkMsgEnable = g_hSpecAfkMsgEnable.BoolValue;
+	g_bIgnoreDeadSurvivorSlot = g_hIgnoreDeadSurvivorSlot.BoolValue;
 
 	g_hAutoSpecSteamIds.GetString(g_sAutoSpecSteamIds, sizeof(g_sAutoSpecSteamIds));
 	g_hImmuneSteamIds.GetString(g_sImmuneSteamIds, sizeof(g_sImmuneSteamIds));
@@ -405,11 +410,25 @@ bool TeamsHaveOpenSlots()
 {
 	// 生还者队伍有空位：存在"存活"的 AI 机器人（玩家加入可顶替）
 	// 已死亡的生还者 bot 席位（等下一回合复活）不算可补位，避免误警告/踢出旁观玩家
+	bool bFreeLivingBot = false;
+	int iDeadSurvivorSeats = 0;	// 生还者队里"已死亡但仍占着名额"的人数（真人 / AI Bot / 挂机托管身体统一计入）
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsClientInGame(i) && IsFakeClient(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
-			return true;
+		if (!IsClientInGame(i) || GetClientTeam(i) != 2)
+			continue;
+
+		// 死亡的身体同样占着生还者名额，不能当成"可以补位"的空位
+		if (!IsPlayerAlive(i))
+			iDeadSurvivorSeats++;
+
+		if (IsFakeClient(i) && IsPlayerAlive(i))
+			bFreeLivingBot = true;
 	}
+
+	// 有人躺着占名额时，那几个席位要等下一回合复活，此时拉人进来就是超额。
+	// 口径与 12v12 版 CanClientFillTeam() 一致：只有"没有死亡生还者"才算生还者侧可补位。
+	if (bFreeLivingBot && (!g_bIgnoreDeadSurvivorSlot || iDeadSurvivorSeats == 0))
+		return true;
 
 	// 感染者队伍有空位：可加入的插槽未满
 	ConVar hMaxInfected = FindConVar("z_max_player_zombies");
@@ -885,7 +904,14 @@ void afkKickClient (int client)
 {
 	if (IsFakeClient(client))
 		return;
-	
+
+	/* 从"警告完"到"踢人"之间局面可能已经变了（新回合复活了死亡生还者、有人补位、
+	   或反过来出现了死亡生还者占位），所以踢之前按同一口径再判一次空位。
+	   没有空位就不踢：本函数返回后计时保持 <= 0，下一个检测间隔会再试，
+	   等真的有空位时照样会被踢。 */
+	if (!TeamsHaveOpenSlots())
+		return;
+
 	// 踢出原因按被踢玩家的语言显示（KickClient 会以该玩家为翻译目标格式化）
 	KickClient(client, "%T", "kickplayer", client, afkKickTime);
 	

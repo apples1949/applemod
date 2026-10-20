@@ -14,6 +14,8 @@ enum struct CVSEntry
 	ConVar CVSE_cvar;
 	char CVSE_oldval[CVS_VALUE_MAXLEN];
 	char CVSE_newval[CVS_VALUE_MAXLEN];
+	// 该 cvar 是否已经提示过"重复登记", 用来保证每个 cvar 只报一次(见 AddCvar)
+	bool CVSE_dupWarned;
 }
 
 enum struct CVSPending
@@ -81,7 +83,10 @@ static Action CVS_SetCvars_Cmd(int args)
 	if (CvarSettingsArray.Length == 0 && PendingCvarsArray.Length == 0) {
 		// The engine's overflow recovery can deliver this command before the
 		// registrations. Keep the request, but never report an empty commit.
-		LogError("[%s] confogl_setcvars received before any settings. Commit remains pending; late registrations will be applied. Run sm_confoglstatus.", CVS_MODULE_NAME);
+		// 提示而非错误：bCommitRequested 已置位，之后每一次 AddCvar/PushTrackedCvar
+		// 都会自己把值写下去并打开跟踪（bTrackingStarted = true），
+		// CVS_OnConfigsExecuted 也会重放 SetEnforcedCvars()，所以这条不需要进 error log。
+		LogMessage("[%s] confogl_setcvars received before any settings. Commit remains pending; late registrations will be applied. Run sm_confoglstatus.", CVS_MODULE_NAME);
 		return Plugin_Handled;
 	}
 	SetEnforcedCvars();
@@ -303,7 +308,27 @@ static void AddCvar(const char[] cvar, const char[] newval)
 		(existingEntry.CVSE_cvar).GetName(cvarBuffer, CVS_CVAR_MAXLEN);
 
 		if (strcmp(cvar, cvarBuffer, false) == 0) {
-			Debug_LogError(CVS_MODULE_NAME, "Attempt to track ConVar %s, which is already being tracked.", cvar);
+			/* 同一 cvar 被重复登记是配置链的正常现象，不是每次都该报错的异常：
+			   confogl 每换一张图都会重新执行整条 confogl_addcvar 链（confogl.cfg ->
+			   shared_cvars.cfg -> applemod12v12.cfg -> shared_settings.cfg ->
+			   startup/shared_settings_02..08.cfg），而本跟踪表只在 CVS_OnModuleEnd()
+			   （插件卸载）和 confogl_resetcvars 时才清空，所以从第二张图起每个 cvar
+			   都会走到这里一次。旧代码在这里无条件 Debug_LogError()，等于每张图刷
+			   ~1254 行，一天（38 次配置执行）就把 errors_*.log 刷到 2MB。
+
+			   现在：
+			   · 每个 cvar 只提示一次（CVSE_dupWarned 标记，随表清空一起复位）；
+			   · 且只有"重复登记的值与首次登记的值不同"时才提示 —— 那才是真正会
+			     影响回落值(oldval/首次期望值)的情况；同值重复（跨图重跑）完全静默。 */
+			if (!existingEntry.CVSE_dupWarned) {
+				existingEntry.CVSE_dupWarned = true;
+				CvarSettingsArray.SetArray(i, existingEntry, sizeof(existingEntry));
+
+				if (strcmp(existingEntry.CVSE_newval, newval, false) != 0) {
+					LogMessage("[%s] ConVar %s is registered twice with different values; keeping the first one (first: %s, ignored: %s).",
+						CVS_MODULE_NAME, cvar, existingEntry.CVSE_newval, newval);
+				}
+			}
 			return;
 		}
 	}
@@ -315,7 +340,10 @@ static void AddCvar(const char[] cvar, const char[] newval)
 		PendingCvarsArray.GetArray(i, pendingEntry, sizeof(pendingEntry));
 
 		if (strcmp(cvar, pendingEntry.CVSP_name, false) == 0) {
-			Debug_LogError(CVS_MODULE_NAME, "Attempt to track ConVar %s, which is already pending late-bind.", cvar);
+			// 未解析的挂起项每次配置执行都会被重新登记一次，同属正常重跑，只在 debug 下提示
+			if (IsDebugEnabled()) {
+				Debug_LogError(CVS_MODULE_NAME, "Attempt to track ConVar %s, which is already pending late-bind.", cvar);
+			}
 			return;
 		}
 	}
@@ -349,6 +377,7 @@ static void PushTrackedCvar(ConVar cvar, const char[] newval)
 	newEntry.CVSE_cvar = cvar;
 	strcopy(newEntry.CVSE_oldval, CVS_VALUE_MAXLEN, cvarBuffer);
 	strcopy(newEntry.CVSE_newval, CVS_VALUE_MAXLEN, newval);
+	newEntry.CVSE_dupWarned = false;
 
 #if CVARS_DEBUG
 	char cvarName[CVS_CVAR_MAXLEN];

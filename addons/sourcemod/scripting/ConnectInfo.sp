@@ -201,7 +201,14 @@ public void Event_PlayerConnect(Event event, const char[] name, bool dontBroadca
     if (client <= 0 || client > MaxClients) {
         client = GetClientOfUserId(userid);
     }
-    if (client <= 0 || client > MaxClients || IsFakeClient(client)) {
+    // player_connect 在"客户端还没真正连上"时也会派发（例如 l4d_superversus 的
+    // CreateFakeClient / L4D2_SpawnSpecial 这条 SDKCall 调用链里同步触发的连接），
+    // 此时直接调 IsFakeClient 会抛 "Exception reported: Client N is not connected"。
+    // 必须先确认已连接，再问是不是 Bot；未连接的直接忽略（Bot 本来也不需要缓存 IP/geo）。
+    if (client <= 0 || client > MaxClients || !IsClientConnected(client)) {
+        return;
+    }
+    if (IsFakeClient(client)) {
         return;
     }
 

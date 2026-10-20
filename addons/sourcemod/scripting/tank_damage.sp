@@ -78,7 +78,15 @@ ConVar
 	g_hAllowPrintLiveTime,
 	g_hMissionFailedAnnounce,
 	g_hAllowPrintZeroDamage,
-	g_hAllowSound;
+	g_hAllowSound,
+	// 坦克的输出(拳/石/铁 次数 + 总伤害), 与存活时间合并输出
+	g_hAllowPrintTankOutput,
+	// 上一条里是否带上"拳/石/铁"分类次数(关闭时只输出总伤害)
+	g_hAllowPrintTankOutputDetail,
+	// 只输出有数据玩家里排名靠前的那部分(百分比, 0 = 全部输出)
+	g_hShowPercent,
+	// 输出时是否排除已不在服务器的玩家(中途退出的存档行)
+	g_hExcludeOffline;
 ConVar
 	g_hLogLevel;
 
@@ -170,6 +178,12 @@ public void OnPluginStart()
 	g_hMissionFailedAnnounce = CreateConVar("tank_damage_failed_announce", "1", "生还者团灭时在场还有 Tank 是否显示生还者对 Tank 的伤害统计", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowPrintZeroDamage = CreateConVar("tank_damage_print_zero", "1", "是否允许显示对 Tank 零伤的玩家", CVAR_FLAG, true, 0.0, true, 1.0);
 	g_hAllowSound = CreateConVar("tank_damage_allow_sound", "1", "Tank 生成时是否播放声音", CVAR_FLAG, true, 0.0, true, 1.0);
+	/* 坦克的输出: 与存活时间合并输出(拳/石/铁 次数 + 总输出伤害 + 打中人数) */
+	g_hAllowPrintTankOutput = CreateConVar("l4d2_tankdamage_print_tank_output", "1", "坦克死亡后是否输出坦克的输出(拳/石/铁 次数 + 总输出伤害 + 打中人数, 与存活时间合并成同一段输出)", CVAR_FLAG, true, 0.0, true, 1.0);
+	g_hAllowPrintTankOutputDetail = CreateConVar("l4d2_tankdamage_print_tank_output_detail", "1", "输出坦克的输出时是否带上拳/石/铁分类次数 (0: 只输出总伤害与打中人数, 用于避免行太长)", CVAR_FLAG, true, 0.0, true, 1.0);
+	/* 输出裁剪: 先按 exclude_offline 筛出"有数据玩家"集合, 再对该集合取前 show_percent%(上取整) */
+	g_hShowPercent = CreateConVar("l4d2_tankdamage_show_percent", "0", "伤害排名只输出有数据玩家里排名靠前的多少百分比 (上取整, 0 = 全部输出; 例: 18 条数据 50 -> 输出 9 条, 19 条 50 -> 输出 10 条)", CVAR_FLAG, true, 0.0, true, 100.0);
+	g_hExcludeOffline = CreateConVar("l4d2_tankdamage_exclude_offline", "0", "输出伤害排名时是否排除已不在服务器的玩家(中途退出的存档行) (0 = 不排除, 1 = 排除)", CVAR_FLAG, true, 0.0, true, 1.0);
 	// 日志记录（默认 62 = 全部级别: DEBUG+INFO+MESSAGE+SERVER+ERROR）
 	g_hLogLevel = CreateConVar("tank_damage_log_level", "1", "插件日志记录级别 (1: 禁用, 2: DEBUG, 4: INFO, 8: MESSAGE, 16: SERVER, 32: ERROR) 数字相加 (62: 全部)", CVAR_FLAG, true, 1.0);
 
@@ -942,6 +956,44 @@ void transferTankData(int oldTank, int newTank)
 	tankSkillCost[oldTank] = 0;
 }
 
+/* 排序用的固定尺寸表格(替代原来的 new int[index][2])。
+   运行时 new 出来的二维数组除了元素本身, 还要在同一个 stack/heap 共享区里
+   再分配一份每维的指针向量, 行数一多就会把共享区挤爆(见 doPrintTankDamage 注释)。 */
+static int g_iDamageSortRows[MAXPLAYERS + MAX_DEPARTED + 1][2];
+
+/* 显示行表(只存行号): 经过"零伤/排除离线"过滤并按 l4d2_tankdamage_show_percent 截断后的行。
+   统计位宽与逐行打印两遍都遍历它, 保证两遍的行集合完全一致 —— 列对齐的前提。
+   同样用固定尺寸全局表, 避免运行时堆分配。 */
+static int g_iDisplayRows[MAXPLAYERS + MAX_DEPARTED + 1];
+
+/* 取某统计行在这个 Tank 上的明细:
+   在场玩家取 playerHurts[client][survivor], 中途退出玩家取存档行(两者行列方向相反) */
+static PlayerHurt GetHurtRow(int client, int survivor)
+{
+	PlayerHurt hurts;
+	if (survivor > MaxClients)
+		hurts = departedHurts[survivor - MaxClients - 1][client];
+	else
+		hurts = playerHurts[client][survivor];
+	return hurts;
+}
+
+/* 把一行统计数据按列格式化进固定尺寸单元格缓冲(列号见 DATA_COLUMNS 定义)。
+   用一个可复用的本地/调用方缓冲, 不做任何运行时堆分配。 */
+static void FormatDamageCells(int rank, int survivor, int damage, const PlayerHurt hurts,
+	int iTotalHealth, int totalGotDamage, char cell[DATA_COLUMNS][DATA_CELL_SIZE])
+{
+	FormatEx(cell[0], DATA_CELL_SIZE, "%d", rank);
+	FormatEx(cell[1], DATA_CELL_SIZE, "%.1f", float(damage) / float(iTotalHealth) * 100.0);
+	FormatEx(cell[2], DATA_CELL_SIZE, "%d", damage);
+	GetRowName(survivor, cell[3], DATA_CELL_SIZE);
+	FormatEx(cell[4], DATA_CELL_SIZE, "%d", hurts.punch);
+	FormatEx(cell[5], DATA_CELL_SIZE, "%d", hurts.rock);
+	FormatEx(cell[6], DATA_CELL_SIZE, "%d", hurts.iron);
+	FormatEx(cell[7], DATA_CELL_SIZE, "%d", hurts.gotDamage);
+	FormatEx(cell[8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(hurts.gotDamage) / float(totalGotDamage) * 100.0));
+}
+
 /**
 * 打印 Tank 伤害报告(输出格式对齐 l4d2_tank_ranking v1.5.9: 标题含总血量/总伤害, 排名行居中排列)
 * @param client 需要打印的 Tank 客户端索引
@@ -988,70 +1040,71 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 		return;
 
 	// 收集每行的伤害数据: 0=统计行号, 1=对 Tank 的伤害
-	int[][] survivorDamage = new int[index][2];
+	// (用固定尺寸全局表, 不再 new int[index][2])
 	for (i = 0; i < index; i++) {
-		survivorDamage[i][0] = rowIds[i];
-		survivorDamage[i][1] = GetRowHurt(rowIds[i], client);
+		g_iDamageSortRows[i][0] = rowIds[i];
+		g_iDamageSortRows[i][1] = GetRowHurt(rowIds[i], client);
 	}
 	// 按照玩家对 Tank 的伤害降序排序
-	SortCustom2D(survivorDamage, index, sortByDamageDesc);
+	SortCustom2D(g_iDamageSortRows, index, sortByDamageDesc);
 
-	// 过滤不需要显示的行(零伤玩家由 ConVar 控制)
+	/* 过滤不需要显示的行(零伤玩家由 ConVar 控制), 再按"排除离线玩家"筛一遍, 最后截取前 N%。
+	   这里的先后顺序是硬要求:
+	     ① 先按 l4d2_tankdamage_exclude_offline 筛掉已不在服务器的玩家(中途退出的存档行/索引还在但人已走),
+	        得到"有数据玩家"的集合;
+	     ② 再对这个集合取 l4d2_tankdamage_show_percent(上取整)条。
+	   反过来做的话, 百分比的分母会把离线玩家算进去却又不输出, 条数就和设定对不上了。
+	   筛选结果存进 g_iDisplayRows, 下面统计位宽与逐行打印两遍都用它, 保证两遍的行集合完全一致(列对齐才有保证) */
 	int displayCount = 0;
-	for (i = 0; i < index; i++)
-		if (g_hAllowPrintZeroDamage.BoolValue || survivorDamage[i][1] > 0)
-			displayCount++;
+	for (i = 0; i < index; i++) {
+		int row = g_iDamageSortRows[i][0];
+		if (g_iDamageSortRows[i][1] < 1 && !g_hAllowPrintZeroDamage.BoolValue)
+			continue;
+		if (g_hExcludeOffline.BoolValue && IsRowOffline(row))
+			continue;
+		g_iDisplayRows[displayCount++] = row;
+	}
 	if (displayCount < 1)
 		return;
+	// 只输出排名靠前的上取整(条数 × 百分比 / 100)条; 百分比为 0 = 全部输出(排序之后才截断, 输出的确实是前 N 名)
+	int displayLimit = CalcDisplayLimit(displayCount, g_hShowPercent.IntValue);
 
-	/* 预格式化每行数据(列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列):
-	   列号见 DATA_COLUMNS 定义 */
-	char[][][] sData = new char[displayCount][DATA_COLUMNS][DATA_CELL_SIZE];
-	// 该行玩家现在是否还在服务器里(中途退出的记录行不在线 -> 名字用默认色)
-	bool[] rowOnline = new bool[displayCount];
+	/* 逐行输出(不再预先分配整张 char[displayCount][DATA_COLUMNS][DATA_CELL_SIZE] 表):
+	   列布局与参考插件 l4d2_tank_ranking 一致并扩展全部数据列, 列号见 DATA_COLUMNS 定义。
+
+	   为什么要改成"边格式化边打印":
+	   插件编译期的 stack/heap 共享区只有 18164 字节, 而这张表在三行以上数据时
+	   仅元素就 displayCount*9*32 字节, 再加上每个维度各自的指针向量(每行 4+9*4 字节),
+	   12v12 下 displayCount 上限是 MaxClients(24) + MAX_DEPARTED(32) = 56 行,
+	   峰值 ≈ 56*288 + 56*40 = 18368 字节 —— 已经超过整个共享区,
+	   于是要么在 new 这一行, 要么在紧接着 PrintToChatAll 的栈帧上
+	   报 "Not enough space on the heap"(日志里 halflife.inc::PrintToChatAll 那次
+	   就是 sData 还活着时连 254 字节的固定缓冲都拿不到)。
+	   改成复用同一份固定尺寸本地缓冲后, 本函数堆分配为 0 字节。 */
+	char cell[DATA_COLUMNS][DATA_CELL_SIZE];
 	// 百分比分母: 总伤害超过满血基准(含致死一击补偿)时用总伤害, 与参考插件一致
 	int iTotalHealth = totalDamage > tankHealth[client] ? totalDamage : tankHealth[client];
-	int x = 0;
-	for (i = 0; i < index; i++) {
-		int survivor = survivorDamage[i][0];
-		int damage = survivorDamage[i][1];
-		if (damage < 1 && !g_hAllowPrintZeroDamage.BoolValue)
-			continue;
-
-		// 明细: 在场玩家取索引上的数据, 中途退出玩家取存档行(两个数组的行列方向不同)
-		PlayerHurt hurts;
-		if (survivor > MaxClients)
-			hurts = departedHurts[survivor - MaxClients - 1][client];
-		else
-			hurts = playerHurts[client][survivor];
-
-		FormatEx(sData[x][0], DATA_CELL_SIZE, "%d", x + 1);
-		FormatEx(sData[x][1], DATA_CELL_SIZE, "%.1f", float(damage) / float(iTotalHealth) * 100.0);
-		FormatEx(sData[x][2], DATA_CELL_SIZE, "%d", damage);
-		GetRowName(survivor, sData[x][3], DATA_CELL_SIZE);
-		FormatEx(sData[x][4], DATA_CELL_SIZE, "%d", hurts.punch);
-		FormatEx(sData[x][5], DATA_CELL_SIZE, "%d", hurts.rock);
-		FormatEx(sData[x][6], DATA_CELL_SIZE, "%d", hurts.iron);
-		FormatEx(sData[x][7], DATA_CELL_SIZE, "%d", hurts.gotDamage);
-		FormatEx(sData[x][8], DATA_CELL_SIZE, "%d", totalGotDamage == 0 ? 0 : RoundToNearest(float(hurts.gotDamage) / float(totalGotDamage) * 100.0));
-		// 在线/离线决定名字颜色: 在线蓝色, 中途退出的记录行不显示颜色
-		rowOnline[x] = (survivor <= MaxClients) && IsClientInGame(survivor);
-
-		debugAndInfoLog("%s: %s 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, sData[x][3], client, damage, hurts.punch, hurts.rock, hurts.iron, hurts.gotDamage);
-		x++;
-	}
 
 	/* 每一列按"数字位数"对齐: 取本列最多的数字位数, 谁少几位就在左边补几个 '0'。
 	   '0' 与数字同宽, 每行在本列占用的宽度完全一致,
 	   不会再出现"数字位数不同(如 1500 与 95)时后面的列跟着左右偏移" */
 	int iDigits[DATA_COLUMNS];
-	for (int y = 0; y < DATA_COLUMNS; y++) {
+	for (int y = 0; y < DATA_COLUMNS; y++)
 		iDigits[y] = 0;
-		for (x = 0; x < displayCount; x++) {
-			int digits = CountDigits(sData[x][y]);
+
+	int x = 0;
+	for (i = 0; i < displayLimit; i++) {
+		int survivor = g_iDisplayRows[i];
+		int damage = GetRowHurt(survivor, client);
+
+		FormatDamageCells(x + 1, survivor, damage, GetHurtRow(client, survivor), iTotalHealth, totalGotDamage, cell);
+
+		for (int y = 0; y < DATA_COLUMNS; y++) {
+			int digits = CountDigits(cell[y]);
 			if (digits > iDigits[y])
 				iDigits[y] = digits;
 		}
+		x++;
 	}
 
 	// 坦克名字: AI 去掉名字里的 "Tank" 前缀, 人类玩家带队伍色, 与参考插件一致
@@ -1072,12 +1125,61 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 	ImplodeStrings(sTemp, sizeof(sTemp), "", sInfo, sizeof(sInfo));
 	PrintToChatAll("%s\x04坦克%s\x03%s\x04,%s\x05HP\x04.\n%s\x05显示伤害排名\x04:\x03(\x05总伤害\x04:\x05%d\x03)", CHAT_PREFIX_RAW, sIndex, reason, sInfo, CHAT_PREFIX_RAW, totalDamage);
 
-	// 显示 Tank 存活时间
-	if (g_hAllowPrintLiveTime.BoolValue) {
-		if (!IsFakeClient(client))
-			CPrintToChatAll("%s{green}%N {blue}存活时间：{green}%s", CHAT_PREFIX, client, getTime(tankLiveTime[client]));
+	/* ---------- Tank 存活时间 + 坦克的输出 (合并成同一段输出) ----------
+	   用户要求"坦克的输出与存活时间一起输出", 所以两者用同一个前缀 [坦克伤害] 打成**同一行**,
+	   不再拆成两条互不相邻的消息。
+
+	   坦克的输出统计的是"坦克打到玩家"那一侧(不是玩家打坦克):
+	     - playerHurts[tank][victim]       在场受害者的明细
+	     - departedHurts[存档行][tank]     同一份数据在受害者中途退出后的存档
+	   两侧都要算, 否则中途有人退出就会漏掉坦克对他的输出。
+	   口径与 spechud_appledmod 坦克面板的 " [拳 %i] [石 %i] [铁 %i] [伤害 %i] " 完全一致:
+	     拳 = tank_claw 命中次数、石 = tank_rock 命中次数、铁 = 坦克抛掷物(m_hasTankGlow)命中次数、
+	     伤害 = 各受害者 dmg_health 之和(即总输出伤害);
+	   另外附带"打中人数" = 承伤(gotDamage) > 0 的受害者个数(中途退出的存档行按 1 人计)。
+	   注意: 这是坦克实例的**完整输出**, 不受 exclude_offline / show_percent 这两个"显示裁剪"影响
+	   (否则和 spechud 面板上的数字对不上); 全为 0 时也照常打出该行(它与存活时间同一行, 不是空表)。 */
+	int outPunch, outRock, outIron, outDamage, outHitPlayers;
+	for (i = 1; i <= MaxClients; i++) {
+		outPunch += playerHurts[client][i].punch;
+		outRock += playerHurts[client][i].rock;
+		outIron += playerHurts[client][i].iron;
+		outDamage += playerHurts[client][i].gotDamage;
+		if (playerHurts[client][i].gotDamage > 0)
+			outHitPlayers++;
+	}
+	for (int d = 0; d < departedCount; d++) {
+		outPunch += departedHurts[d][client].punch;
+		outRock += departedHurts[d][client].rock;
+		outIron += departedHurts[d][client].iron;
+		outDamage += departedHurts[d][client].gotDamage;
+		if (departedHurts[d][client].gotDamage > 0)
+			outHitPlayers++;
+	}
+
+	// 存活时间片段: 关闭 tank_damage_print_livetime 时不带这一段(其余部分照旧)
+	char sLiveInfo[96] = "";
+	if (g_hAllowPrintLiveTime.BoolValue)
+		FormatEx(sLiveInfo, sizeof(sLiveInfo), "{blue}存活时间：{green}%s ", getTime(tankLiveTime[client]));
+
+	// 坦克名字片段: AI 只写 "Tank", 人类玩家带名字(与下面排名的标题行口径一致)
+	char sTankWho[64];
+	if (!IsFakeClient(client))
+		FormatEx(sTankWho, sizeof(sTankWho), "{green}%N ", client);
+	else
+		FormatEx(sTankWho, sizeof(sTankWho), "{green}Tank ");
+
+	if (g_hAllowPrintTankOutput.BoolValue) {
+		// 默认输出分类次数; l4d2_tankdamage_print_tank_output_detail = 0 时只输出总伤害(行太长时可关)
+		if (g_hAllowPrintTankOutputDetail.BoolValue)
+			CPrintToChatAll("%s%s%s{blue}输出：{green}拳 %d{default} {green}石 %d{default} {green}铁 %d{default} {green}伤害 %d{default}（{blue}打中 {green}%d{default} 人）",
+				CHAT_PREFIX, sTankWho, sLiveInfo, outPunch, outRock, outIron, outDamage, outHitPlayers);
 		else
-			CPrintToChatAll("%s{green}Tank {blue}存活时间：{green}%s", CHAT_PREFIX, getTime(tankLiveTime[client]));
+			CPrintToChatAll("%s%s%s{blue}输出：{green}%d{default}（{blue}打中 {green}%d{default} 人）",
+				CHAT_PREFIX, sTankWho, sLiveInfo, outDamage, outHitPlayers);
+	} else if (g_hAllowPrintLiveTime.BoolValue) {
+		// 只关掉了"坦克的输出": 退回原来那行纯存活时间, 保持旧行为
+		CPrintToChatAll("%s%s%s", CHAT_PREFIX, sTankWho, sLiveInfo);
 	}
 
 	/* Apex 跟踪石技能扣血(开启费 + 掷石净扣血): Apex 是"掷出预扣、命中生还者退还", 所以净扣血只算没打中的石头
@@ -1113,48 +1215,102 @@ void doPrintTankDamage(int client, const char[] reason = "死亡") {
 	   数字位用 '0' 左补到本列最大位数(见 AppendZeroPaddedCell): 同列宽度完全一致, 各列上下对齐;
 	   补位用的 '0' 不显示颜色(默认色), 真实数字是绿色, 一眼能分清补位与数据;
 	   不再套中括号, 列间用单个普通空格分隔(每行空格数固定, 不影响对齐);
-	   名字颜色: 在线玩家蓝色, 中途退出的记录行不显示颜色(默认色) */
+	   名字颜色: 在线玩家蓝色, 中途退出的记录行不显示颜色(默认色)。
+	   每行的列文本在这里按同一套规则重新生成一次(格式化是确定性的, 与上面统计位宽那一遍完全一致),
+	   因此不需要把整张表留在内存里。 */
 	char row[512];
-	for (x = 0; x < displayCount; x++) {
+	x = 0;
+	for (i = 0; i < displayLimit; i++) {
+		int survivor = g_iDisplayRows[i];
+		int damage = GetRowHurt(survivor, client);
+
+		PlayerHurt hurts;
+		hurts = GetHurtRow(client, survivor);
+		FormatDamageCells(x + 1, survivor, damage, hurts, iTotalHealth, totalGotDamage, cell);
+
+		debugAndInfoLog("%s: %s 对 Tank(%N) 的伤害报告: 总伤害 %d, 拳 %d, 石 %d, 铁 %d, 承伤 %d", PLUGIN_PREFIX, cell[3], client, damage, hurts.punch, hurts.rock, hurts.iron, hurts.gotDamage);
+
 		row[0] = '\0';
 
 		// 名次
 		StrCat(row, sizeof(row), "\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][0], iDigits[0]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[0], iDigits[0]);
 		// :伤害百分比%
 		StrCat(row, sizeof(row), "\x05:\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][1], iDigits[1]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[1], iDigits[1]);
 		StrCat(row, sizeof(row), "\x04%\x01 ");
 		// (伤害)
 		StrCat(row, sizeof(row), "\x03(\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][2], iDigits[2]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[2], iDigits[2]);
 		StrCat(row, sizeof(row), "\x03)\x01 ");
 		// 拳
 		StrCat(row, sizeof(row), "\x04拳\x03:\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][4], iDigits[4]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[4], iDigits[4]);
 		StrCat(row, sizeof(row), "\x01 ");
 		// 石
 		StrCat(row, sizeof(row), "\x04石\x03:\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][5], iDigits[5]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[5], iDigits[5]);
 		StrCat(row, sizeof(row), "\x01 ");
 		// 铁
 		StrCat(row, sizeof(row), "\x04铁\x03:\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][6], iDigits[6]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[6], iDigits[6]);
 		StrCat(row, sizeof(row), "\x01 ");
 		// 承伤
 		StrCat(row, sizeof(row), "\x04承伤\x03:\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][7], iDigits[7]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[7], iDigits[7]);
 		StrCat(row, sizeof(row), "\x01 ");
 		// (承伤百分比%)
 		StrCat(row, sizeof(row), "\x03(\x04");
-		AppendZeroPaddedCell(row, sizeof(row), sData[x][8], iDigits[8]);
+		AppendZeroPaddedCell(row, sizeof(row), cell[8], iDigits[8]);
 		StrCat(row, sizeof(row), "\x04%\x03)\x01 ");
 		// 名字: 在线蓝色, 不在线(中途退出)不显示颜色
-		StrCat(row, sizeof(row), rowOnline[x] ? "\x03" : "\x01");
-		StrCat(row, sizeof(row), sData[x][3]);
+		bool rowOnline = (survivor <= MaxClients) && IsClientInGame(survivor);
+		StrCat(row, sizeof(row), rowOnline ? "\x03" : "\x01");
+		StrCat(row, sizeof(row), cell[3]);
 
 		PrintToChatAll("%s", row);
+		x++;
 	}
+}
+
+/**
+* 该统计行对应的玩家是否已不在服务器里
+* 判定: 存档行(行号 > MaxClients 表示中途退出玩家的存档) 或 索引还在但玩家已退出。
+* 只用于 l4d2_tankdamage_exclude_offline 的输出裁剪, 不参与数据统计
+* @param row 统计行号
+* @return bool 不在服务器里返回 true
+**/
+bool IsRowOffline(int row)
+{
+	if (row > MaxClients)
+		return true;
+	return !IsClientInGame(row);
+}
+
+/**
+* 计算实际输出的条数: 上取整(条数 × 百分比 / 100)
+* 语义与 l4d2_tankdamage_show_percent / l4d2_mvp_show_percent 一致:
+*   - 百分比为 0(或 >= 100) = 全部输出, 向后兼容;
+*   - 百分比很小时至少输出 1 条(不会出现"设了百分比结果一条都不打");
+*   - 调用前必须已经排好序并做完"排除离线"筛选, 这样截断出来的确实是前 N 名。
+* 例: 18 条 × 50% = 9; 19 条 × 50% = 9.5 -> 10; 1 条 × 1% = 0.01 -> 1
+* @param count   过滤后剩余的条数(有数据玩家的条数)
+* @param percent 百分比(0..100)
+* @return int 需要输出的条数(0 表示无数据)
+**/
+int CalcDisplayLimit(int count, int percent)
+{
+	if (count < 1)
+		return 0;
+	if (percent <= 0 || percent >= 100)
+		return count;
+	// 整数上取整: ceil(count * percent / 100) = (count * percent + 99) / 100
+	int limit = (count * percent + 99) / 100;
+	if (limit < 1)
+		limit = 1;
+	if (limit > count)
+		limit = count;
+	return limit;
 }
 
 /**

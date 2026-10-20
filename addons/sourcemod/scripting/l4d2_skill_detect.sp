@@ -247,6 +247,11 @@ float g_fChargeVictimPos[MAXPLAYERS + 1][3];	// location of each survivor when i
 int	  g_iVictimCharger[MAXPLAYERS + 1];			// for a victim, by whom they got charge(impacted)
 int	  g_iVictimFlags[MAXPLAYERS + 1];			// flags stored per charge victim: VICFLAGS_
 int	  g_iVictimMapDmg[MAXPLAYERS + 1];			// for a victim, how much the cumulative map damage is so far (trigger hurt / drowning)
+Handle g_hChargeCheckTimer[MAXPLAYERS + 1];		// running charge check timer -- at most ONE per charge victim
+int	  g_iChargeCheckSerial[MAXPLAYERS + 1];		// round the charge check timer was started in (see ClearChargeCheckTimer)
+float g_fVictimDCReportTime[MAXPLAYERS + 1];	// when a deathcharge was last reported for this survivor
+int	  g_iVictimDCReportCharger[MAXPLAYERS + 1];	// .. and for which charger that report was
+int	  g_iChargeRoundSerial = 0;					// bumped every round; used to tell live timers from handles that a mapchange already destroyed
 
 // pops
 bool  g_bBoomerHitSomebody[MAXPLAYERS + 1];	   // false if boomer didn't puke/exploded on anybody
@@ -623,6 +628,10 @@ public void OnClientPutInServer(int client)
 public void OnClientDisconnect(int client)
 {
 	SDKUnhook(client, SDKHook_OnTakeDamage, OnTakeDamageByWitch);
+
+	// drop charge state (and the charge check timer) of the disconnecting client, so
+	// nothing is left behind when its index gets handed to the next player
+	ResetChargeState(client);
 }
 
 /*

@@ -7,9 +7,16 @@ Action Event_RoundStart(Handle event, const char[] name, bool dontBroadcast)
 {
 	g_iRocksBeingThrownCount = 0;
 
+	// everything that is not a timer created in this round is either already gone
+	// (mapchange) or about to stop on its own
+	g_iChargeRoundSerial++;
+
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		g_bIsHopping[i] = false;
+
+		// charge tracking (incl. its timers) never survives a round
+		ResetChargeState(i, false);
 
 		for (int j = 1; j <= MaxClients; j++)
 		{
@@ -269,6 +276,11 @@ Action Event_PlayerHurt(Handle event, const char[] name, bool dontBroadcast)
 Action Event_PlayerSpawn(Handle event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(GetEventInt(event, "userid"));
+
+	// new life: no charge state (or charge check timer) may survive from the previous one
+	if (IsValidClientIndex(client))
+		ResetChargeState(client);
+
 	if (!IsValidInfected(client))
 		return Plugin_Continue;
 	int zClass			  = GetEntProp(client, Prop_Send, "m_zombieClass");
@@ -835,8 +847,9 @@ Action Event_ChargeCarryStart(Handle event, const char[] name, bool dontBroadcas
 
 	GetClientAbsOrigin(victim, g_fChargeVictimPos[victim]);
 
-	// CreateTimer( CHARGE_CHECK_TIME, Timer_ChargeCheck, client, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE );
-	CreateTimer(CHARGE_CHECK_TIME, Timer_ChargeCheck, victim, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	// a carry is a full reset of the victim's charge state, so the state above is what
+	// the one check timer for this survivor has to work with from here on
+	StartChargeCheckTimer(victim);
 	return Plugin_Continue;
 }
 
@@ -852,11 +865,16 @@ Action Event_ChargeImpact(Handle event, const char[] name, bool dontBroadcast)
 	GetClientAbsOrigin(victim, g_fChargeVictimPos[victim]);
 
 	g_iVictimCharger[victim] = client;			 // store who we've bumped up
-	g_iVictimFlags[victim]	 = 0;				 // reset flags for checking later
+
+	// reset flags for checking later -- keep the 'carried' mark if this survivor is the
+	// one being carried (an impact on anybody else is a bowling charge, never a carry)
+	g_iVictimFlags[victim]	 = (g_iChargeVictim[client] == victim) ? VICFLG_CARRIED : 0;
 	g_fChargeTime[victim]	 = GetGameTime();	 // store time per victim, for impacts
 	g_iVictimMapDmg[victim]	 = 0;
 
-	CreateTimer(CHARGE_CHECK_TIME, Timer_ChargeCheck, victim, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	// a bowling charge hits several survivors, and can hit the same survivor more than
+	// once -- the state above is refreshed, but there must only ever be one check timer
+	StartChargeCheckTimer(victim);
 	return Plugin_Continue;
 }
 
@@ -892,11 +910,97 @@ Action Timer_ChargeCarryEnd(Handle timer, any client)
 	return Plugin_Continue;
 }
 
+/**
+ * Starts the charge check timer for a charge victim -- unless one is already running.
+ *
+ * A bowling charge can bump the same survivor several times, and a carry can be
+ * followed by an impact; every one of those used to start its own repeating timer,
+ * and each of those timers then reported the very same death. There is at most one
+ * charge check timer per survivor: the caller has just refreshed the victim's charge
+ * state, which is all the running timer needs.
+ *
+ * @param victim        survivor that got charged / impacted
+ */
+stock void StartChargeCheckTimer(int victim)
+{
+	if (!IsValidClientIndex(victim))
+		return;
+
+	// already checking this survivor; the state was just updated for this charge
+	if (g_hChargeCheckTimer[victim] != null)
+		return;
+
+	g_hChargeCheckTimer[victim] = CreateTimer(CHARGE_CHECK_TIME, Timer_ChargeCheck, victim, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+
+	if (g_hChargeCheckTimer[victim] == null)
+		return;
+
+	g_iChargeCheckSerial[victim] = g_iChargeRoundSerial;
+}
+
+/**
+ * Drops the reference to a survivor's charge check timer.
+ *
+ * @param victim        survivor that got charged / impacted
+ * @param bKill         whether the timer still has to be killed (false when the caller
+ *                      cannot know whether the timer still exists, e.g. on round start)
+ */
+stock void ClearChargeCheckTimer(int victim, bool bKill = true)
+{
+	if (!IsValidClientIndex(victim))
+		return;
+
+	if (g_hChargeCheckTimer[victim] == null)
+		return;
+
+	// a timer from an earlier round is either already destroyed by a mapchange (killing
+	// its handle would throw) or it stops on its own on the next tick because it is no
+	// longer the timer this survivor is checked with
+	if (bKill && g_iChargeCheckSerial[victim] == g_iChargeRoundSerial)
+		KillTimer(g_hChargeCheckTimer[victim]);
+
+	g_hChargeCheckTimer[victim] = null;
+}
+
+/**
+ * Forgets everything known about a charge victim: the charge check timer (which would
+ * otherwise keep checking a dead/stale charge), the charge flags and the last report.
+ *
+ * @param client        survivor (or charger) to clean up
+ * @param bKillTimer    see ClearChargeCheckTimer()
+ */
+stock void ResetChargeState(int client, bool bKillTimer = true)
+{
+	if (!IsValidClientIndex(client))
+		return;
+
+	ClearChargeCheckTimer(client, bKillTimer);
+
+	g_iChargeVictim[client]			 = 0;
+	g_iVictimCharger[client]		 = 0;
+	g_iVictimFlags[client]			 = 0;
+	g_iVictimMapDmg[client]			 = 0;
+	g_fChargeTime[client]			 = 0.0;
+	g_fChargeVictimPos[client][0]	 = 0.0;
+	g_fChargeVictimPos[client][1]	 = 0.0;
+	g_fChargeVictimPos[client][2]	 = 0.0;
+	g_fVictimDCReportTime[client]	 = 0.0;
+	g_iVictimDCReportCharger[client] = 0;
+}
+
 Action Timer_ChargeCheck(Handle timer, any client)
 {
+	// this timer was replaced or cleaned up in the meantime -- a charge victim must never
+	// be checked by more than one timer, so the stale one just dies here
+	if (!IsValidClientIndex(client) || timer != g_hChargeCheckTimer[client])
+		return Plugin_Stop;
+
 	// if something went wrong with the survivor or it was too long ago, forget about it
 	if (!IsValidSurvivor(client) || !g_iVictimCharger[client] || g_fChargeTime[client] == 0.0 || (GetGameTime() - g_fChargeTime[client]) > MAX_CHARGE_TIME)
+	{
+		g_hChargeCheckTimer[client] = null;
 		return Plugin_Stop;
+	}
 
 	// we're done checking if either the victim reached the ground, or died
 	if (!IsPlayerAlive(client))
@@ -905,6 +1009,7 @@ Action Timer_ChargeCheck(Handle timer, any client)
 		g_iVictimFlags[client] = g_iVictimFlags[client] | VICFLG_AIRDEATH;
 
 		// check conditions now
+		g_hChargeCheckTimer[client] = null;
 		CreateTimer(0.0, Timer_DeathChargeCheck, client, TIMER_FLAG_NO_MAPCHANGE);
 
 		return Plugin_Stop;
@@ -916,12 +1021,36 @@ Action Timer_ChargeCheck(Handle timer, any client)
 		//      (in which case it doesn't matter that they're on the ground)
 
 		// check conditions with small delay (to see if they still die soon)
+		g_hChargeCheckTimer[client] = null;
 		CreateTimer(CHARGE_END_CHECK, Timer_DeathChargeCheck, client, TIMER_FLAG_NO_MAPCHANGE);
 
 		return Plugin_Stop;
 	}
 
 	return Plugin_Continue;
+}
+
+/**
+ * Whether this deathcharge was already reported for the same charger during this charge.
+ *
+ * The timer consolidation above already keeps the queued checks down to one, but a
+ * death can still be looked at twice (e.g. a delayed onground check plus the death
+ * check of a following impact). A survivor can only die once per life, so anything
+ * reported for the same charger within MAX_CHARGE_TIME is the same deathcharge.
+ *
+ * @param victim        survivor that died
+ * @param charger       infected that charged the survivor
+ * @return              true if this deathcharge was already reported
+ */
+stock bool IsDuplicateDeathCharge(int victim, int charger)
+{
+	if (charger < 1 || g_iVictimDCReportCharger[victim] != charger)
+		return false;
+
+	if (g_fVictimDCReportTime[victim] == 0.0)
+		return false;
+
+	return ((GetGameTime() - g_fVictimDCReportTime[victim]) <= MAX_CHARGE_TIME);
 }
 
 Action Timer_DeathChargeCheck(Handle timer, any client)
@@ -952,7 +1081,16 @@ Action Timer_DeathChargeCheck(Handle timer, any client)
 				fHeight > g_cvarDeathChargeHeight.FloatValue
 		*/
 		if (((flags & VICFLG_DROWN || flags & VICFLG_FALL) && (flags & VICFLG_HURTLOTS || flags & VICFLG_AIRDEATH) || (flags & VICFLG_WEIRDFLOW && fHeight >= MIN_FLOWDROPHEIGHT) || g_iVictimMapDmg[client] >= MIN_DC_TRIGGER_DMG) && !(flags & VICFLG_KILLEDBYOTHER))
-			HandleDeathCharge(g_iVictimCharger[client], client, fHeight, GetVectorDistance(g_fChargeVictimPos[client], pos, false), view_as<bool>(flags & VICFLG_CARRIED));
+		{
+			// one deathcharge per death: never report the same one twice
+			if (!IsDuplicateDeathCharge(client, g_iVictimCharger[client]))
+			{
+				g_fVictimDCReportTime[client]	 = GetGameTime();
+				g_iVictimDCReportCharger[client] = g_iVictimCharger[client];
+
+				HandleDeathCharge(g_iVictimCharger[client], client, fHeight, GetVectorDistance(g_fChargeVictimPos[client], pos, false), view_as<bool>(flags & VICFLG_CARRIED));
+			}
+		}
 	}
 	else if ((flags & VICFLG_WEIRDFLOW || g_iVictimMapDmg[client] >= MIN_DC_RECHECK_DMG) && !(flags & VICFLG_WEIRDFLOWDONE)) {
 		// could be incapped and dying more slowly

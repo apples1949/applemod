@@ -187,6 +187,7 @@ if ( Director.IsSinglePlayerGame() )
 	NumCansNeeded <- 8
 }
 
+
 // duration of delay stage.
 DelayMin <- 10
 DelayMax <- 20
@@ -367,3 +368,20 @@ if ( Director.GetGameModeBase() == "versus" )
 	SharedOptions.ProhibitBosses = false
 }
 
+
+// ---------------------------------------------------------------------------
+// 12v12：19 桶。放在文件最末尾 —— Squirrel 只要报一次错就整份脚本作废，
+// 若这段放在前面，Convars 读失败会让 GasCanTouched / GasCanPoured 一起消失，
+// 表现就是"灌了桶不计数、不触发救援"。
+// 19 = stripper 让 relay_spawncans 抽 9 次（9 组全开 x 2 = 18）+ 电梯前那颗固定桶
+// 12v12 配置 survivor_limit=12，4v4 配置为 4，所以只影响 12v12。
+// 注意：L4D2 的 Convars 表只有 SetValue/GetStr/GetFloat/GetClientConvarValue，
+//       没有 GetInt（用 GetInt 会报 "the index 'GetInt' does not exist"）。
+// ---------------------------------------------------------------------------
+local sl = Convars.GetFloat( "survivor_limit" )
+
+if ( sl != null && sl >= 12 )
+{
+	NumCansNeeded <- 19
+	Msg( " 12v12: finale cans -> 19 " )
+}

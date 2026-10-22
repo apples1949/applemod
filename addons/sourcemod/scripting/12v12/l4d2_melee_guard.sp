@@ -1,65 +1,83 @@
 /**
  * l4d2_melee_guard.sp
  *
- * 目的：消除「换图/重开回合时服务器崩溃」的触发条件。
+ * 目的：消除「换图 / 重开场景时服务器崩溃」的触发条件。
  *
- * ============================ 崩溃链（反汇编验证） ============================
- * 调用栈（用户提供的真实崩溃栈）：
- *   #0 libc.so.6 + 0xad656                      ← strlen
- *   #1 KeyValues::SetString + 0x63
- *   #2 PlayerSaveData::PlayerSaveData + 0x105c
- *   #3 SurvivorBot::OnBeginChangeLevel
- *   #4 ForEachTerrorPlayer<PrepareChangelevel>
- *   #5 CTerrorGameRules::OnBeginChangeLevel
- *   #6 CDirector::Restart()  ← UpdateScenarioState ← Update ← GameFrame
+ * ======================== 崩溃链（server_srv.so 反汇编逐条验证） ========================
+ * 调用栈（真实崩溃报告 2.txt，SIGSEGV accessing 0xc50）：
+ *   #0 libc.so.6 + 0xad656                        ← _V_strlen
+ *   #1 KeyValues::SetString + 0x63                ← 0xb5f3c0 + 0x63
+ *   #2 PlayerSaveData::PlayerSaveData + 0x105c     ← 0x8e95b0 + 0x105c
+ *   #3 SurvivorBot::OnBeginChangeLevel + 0x131
+ *   #4 ForEachTerrorPlayer<PrepareChangelevel> + 0x6e
+ *   #5 CTerrorGameRules::OnBeginChangeLevel + 0x6c
+ *   #6 CDirector::Restart() + 0x431
+ *   #7 CDirector::UpdateScenarioState() + 0x2c0
+ *   #8 CDirector::Update() + 0xf3f
+ *   #9 CServerGameDLL::GameFrame(bool) + 0x61c
+ *   ...
  *
- * PlayerSaveData::PlayerSaveData @ 0x8e95b0（server_srv.so，带符号）逐条指令：
- *   0x8ea5fa  mov dword ptr [esp+4], 0xced10f   ; "restoreSecondaryWeaponName"
- *   0x8ea607  call KeyValues::SetString          ; 崩溃返回地址 0x8ea60c = 函数 +0x105c
- * 值(esi) 只有两个来源：
- *   A) 副武器 CSWeaponID != 0x13(19 = WEAPON_MELEE)：
- *        0x8ea5e7 call WeaponIDToClassname(id)  → 0x42f950 内是 switch/查表，
- *        表 0xc00ea0 的 0..55 项全是 .rodata 静态串，越界时返回 ""，**永远安全**
- *   B) 副武器 CSWeaponID == 19（近战）：
- *        0x8ea680 call CTerrorMeleeWeapon::GetMeleeWeaponInfo()   (0x558ce0)
- *        0x8ea685 lea  esi,[eax+0xc50]      ← eax 为 NULL 时 esi = 0x00000c50，无 NULL 检查
- *        KeyValues::SetString 内部其实对 NULL 有兜底（0xb5f418 cmove esi,""），
- *        但 0x00000c50 是"非空野指针"，于是 0xb5f41e call _V_strlen 读未映射地址 → SIGSEGV
+ * 崩溃点 0x8ea5cc ~ 0x8ea60c（PlayerSaveData 构造函数内）：
+ *   0x8ea5dc  call [edx+0x638]                       ; 取副武器 CSWeaponID → ebx
+ *   0x8ea5e7  call WeaponIDToClassname(ebx)          ; 0x42f950
+ *   0x8ea5ec  cmp  ebx, 0x13                         ; 19 = WEAPON_MELEE
+ *   0x8ea5f1  je   0x8ea61e                          ; 近战 → 走专用分支
+ *   0x8ea5fa  mov  [esp+4], 0xced10f                 ; "restoreSecondaryWeaponName"
+ *   0x8ea607  call KeyValues::SetString              ; 崩溃返回地址 0x8ea60c = +0x105c
  *
- * CTerrorMeleeWeapon::GetMeleeWeaponInfo @ 0x558ce0：
- *      mov eax,[this+0x17e0]
- *      call CMeleeWeaponInfoStore::GetMeleeWeaponInfo(g_MeleeWeaponInfoStore, eax)
- *   → 0x534a70 里 CUtlRBTree::Find(&key) 找不到就 `xor eax,eax` 返回 NULL。
- *   而 0x534ec0 RegisterMeleeWeaponType 的建表过程是：
- *      HandleForWeaponName(store, name, bAdd=true) → eax（近战名在 store 名表里的下标）
- *      Insert({key = 该下标, value = new CMeleeWeaponInfo(name, kv)})   ; 0xca0 字节
- *   ⇒ RB 树的 key 是"下标(handle)"，不是字符串。所以：
- *      · this+0x17E0 = 近战信息 handle（也就是 melee 脚本名在 store 名表里的下标）
- *      · handle == -1（或越界）⇒ Find 失败 ⇒ NULL ⇒ 换图时 strlen(0xc50) 崩服
+ * 近战专用分支（这就是 0xc50 的来源）：
+ *   0x8ea680  call CTerrorMeleeWeapon::GetMeleeWeaponInfo()   ; 0x558ce0，返回 CMeleeWeaponInfo*
+ *   0x8ea685  lea  esi, [eax + 0xc50]                ; ★ eax == NULL 时 esi = 0x00000c50
+ *   0x8ea68b  jmp  0x8ea5f3                          ; 带着这个野指针去 SetString
  *
- * ============================ v1.0.0 为什么没拦住 ============================
- * datamap 里 6112(0x17E0) = m_strMapSetScriptName（Key, melee_script_name, 4 字节），
- * netprop 里 6108(0x17DC) = m_hMeleeWeaponInfo（4 bit 无符号）。
- * v1.0.0 判的是 **m_hMeleeWeaponInfo == -1**：
- *   · 它是 4 bit 无符号量，网络读出来不可能等于 -1（-1 只会变成 0xF），
- *   · 而且引擎 GetMeleeWeaponInfo() 读的根本是 0x17E0 那个 4 字节 handle。
- * ⇒ 判定条件几乎永远不成立，插件等于空转，于是"装上了仍然崩"。
- * 本版直接读 4 字节字段 m_strMapSetScriptName（Prop_Data，能表示 -1），
- * 命中 -1 即引擎的"查表失败"状态，与崩溃条件一一对应。
+ *   KeyValues::SetString 只对 **NULL** 有兜底：
+ *     0xb5f40a  test esi,esi
+ *     0xb5f418  cmove esi, ""        ; 只有 NULL 才换成空串
+ *     0xb5f41e  call _V_strlen       ; 对 0x00000c50 这种"非空野指针"直接读未映射页
+ *   ⇒ SIGSEGV /SEGV_MAPERR accessing 0xc50
+ *
+ * GetMeleeWeaponInfo() 为什么会返回 NULL：
+ *   0x558ce6  mov eax,[ebp+8]
+ *   0x558ce9  mov eax,[eax+0x17e0]                    ; ← 读 datamap 字段（下详）
+ *   0x558cf6  mov [esp+4], eax
+ *   0x558cfa  call CMeleeWeaponInfoStore::GetMeleeWeaponInfo(int)   ; 0x534a70
+ *   0x534a8d  call CUtlMap<int, CMeleeWeaponInfo*, int>::Find
+ *   0x534a92  cmp eax,-1 / je 0x534ab0 → **xor eax,eax ⇒ return NULL**
+ *   CMeleeWeaponInfoStore::GetInvalidHandle() = -1（0x534120）
+ *
+ * HandleForWeaponName(name, bAdd) @0x534ac0：
+ *   0x534ad9  call AllocPooledString(name)            ; 名字池化成 string_t
+ *   0x534af3  cmp [ecx],esi / 0x534b00 cmp [ecx+eax*4],esi   ; 在 CUtlVector<string_t> 里线性查
+ *   0x534b21  CUtlVector<string_t>::InsertBefore      ; bAdd 且没找到 → 追加
+ *   0x534b3d  mov eax,-1                              ; 不追加且没找到 → -1
+ *   ⇒ 未注册的名字拿不到有效 key ⇒ Find 失败 ⇒ NULL ⇒ 换图保存 BOT 数据时崩服
+ *
+ * ============================== 两个字段，别搞混（关键） ==============================
+ *  · datamap `m_strMapSetScriptName`  Offset **6112 (0x17E0)**  (Save|Key)(4 Bytes)
+ *      —— 类型是 FIELD_STRING（string_t，4 字节）。引擎就是把这个 4 字节值直接当
+ *         int handle 传给 GetMeleeWeaponInfo(int) 当 RB 树的 key。
+ *      —— SourceMod 只能用 GetEntPropString() 把它解析成"名字字符串"；
+ *         用 GetEntProp() 当整数读会抛 "Data field ... is not an integer (2)"。
+ *  · netprop `m_hMeleeWeaponInfo`     Offset **6108 (0x17DC)**  (integer)(bits 4)(Unsigned)
+ *      —— 只有 4 bit！取值范围 0..15，**永远不可能等于 -1**。
+ *      —— 所以它不能当"未解析"的判据（v1.0 就是栽在这里，插件等于空转），
+ *         本插件只用它做日志 / strict 模式下的辅助越界信号。
  *
  * ================================ 本插件做的事 ================================
- *   1) weapon_melee 生成后（SpawnPost）立刻校验一次；
- *   2) 每秒扫描所有玩家（**含 BOT**）0~2 号武器槽 —— BOT 也走
- *      SurvivorBot::OnBeginChangeLevel，同样会触发崩溃；
- *   3) handle == -1 就把武器移除（先 RemovePlayerItem 再 Kill）并提示；
- *   4) 关掉 m_hMeleeWeaponInfo 之类的次要信号只做日志，不参与删除（避免误杀）；
- *   5) l4d2_melee_guard_strict 1 时把"handle 越界 / netprop 越界"也算危险（默认关，
- *      等你在服务器上用 sm_melee_guard_check 确认过字段含义再开）。
+ *   判据（等价于"引擎 Find 会失败"）：
+ *     脚本名为空  ⇒ handle = -1 ⇒ 危险
+ *     脚本名不在本图 "MeleeWeapons" 表里 ⇒ handle = -1 ⇒ 危险
+ *     （strict=1 时额外把 handle/info 越界也算危险；默认关，先用 sm_melee_guard_check 确认）
+ *   动作：
+ *     1) weapon_melee SpawnPost 立刻校验一次；
+ *     2) 每秒扫描所有客户端（**含 BOT**）0~2 号槽 —— 只有 SurvivorBot 会走
+ *        SurvivorBot::OnBeginChangeLevel，BOT 手里的坏近战才是崩服的那一把；
+ *     3) 命中就 RemovePlayerItem + Kill（dryrun=1 时只记录不删）；
+ *     4) 名字表用固定 256 条（旧版 32 条 + "超了整图放弃"是隐患）。
  *
  * 诊断：sm_melee_guard_check
  *   打印本图注册的近战脚本名表 + 每把近战武器的
- *   [handle(0x17E0 原始整数) / 名字字符串 / m_hMeleeWeaponInfo / 判定结果]，
- *   进服执行一条命令即可确认字段含义与是否命中。
+ *   [handle(名表下标) / 名字 / m_hMeleeWeaponInfo / 判定结果]。
  */
 
 #pragma semicolon 1
@@ -69,33 +87,37 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "2.1.0"
-#define MELEE_NAME_MAX    64
-#define MELEE_NAME_LIMIT  32   // 本插件最多记录的近战脚本名条数（表更大时放弃判定，绝不误删）
+#define PLUGIN_VERSION  "2.3.0"
+
+#define MELEE_NAME_MAX  64     // 单个脚本名长度上限
+#define MELEE_NAME_CAP  256    // 名表容量（旧版 32，实战里自定义近战一多就会整图放弃判定）
+
+ConVar  g_cvEnable;
+ConVar  g_cvStrict;
+ConVar  g_cvWarn;
+ConVar  g_cvDebug;
+ConVar  g_cvDryRun;
+
+char    g_sMeleeNames[MELEE_NAME_CAP][MELEE_NAME_MAX];
+int     g_iMeleeNameCount;
+bool    g_bTableWarned;
+int     g_iRemoved;
+int     g_iWouldRemove;
 
 public Plugin myinfo =
 {
 	name        = "L4D2 Melee Weapon Guard",
 	author      = "apples1949",
-	description = "移除近战信息 handle 未解析（m_strMapSetScriptName == -1，引擎查表会返回 NULL）的 weapon_melee，防止换图时服务器崩溃",
+	description = "移除近战信息解析不出来（GetMeleeWeaponInfo 返回 NULL）的 weapon_melee，防止换图时保存 BOT 数据崩溃",
 	version     = PLUGIN_VERSION,
 	url         = ""
 };
 
-ConVar g_cvEnable;
-ConVar g_cvDebug;
-ConVar g_cvWarn;
-ConVar g_cvStrict;
-
-char   g_sMeleeNames[MELEE_NAME_LIMIT][MELEE_NAME_MAX];
-int    g_iMeleeNameCount;
-bool   g_bTableWarned;
-int    g_iRemoved;
-
 public void OnPluginStart()
 {
 	g_cvEnable = CreateConVar("l4d2_melee_guard_enable", "1", "1=启用近战武器校验 0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_cvStrict = CreateConVar("l4d2_melee_guard_strict", "0", "1=额外把「handle 越界 / m_hMeleeWeaponInfo 越界」也判为危险（默认 0，只判 handle == -1；先用 sm_melee_guard_check 确认字段含义再考虑打开）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvStrict = CreateConVar("l4d2_melee_guard_strict", "0", "1=额外把 handle/info 越界也判为危险（默认 0，只判'解析不出来'；先用 sm_melee_guard_check 确认字段含义再考虑打开）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvDryRun = CreateConVar("l4d2_melee_guard_dryrun", "0", "1=只记录不删除（观察期用，确认不会误杀再改回 0）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_cvWarn   = CreateConVar("l4d2_melee_guard_warn",   "1", "1=移除武器时提示玩家", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvDebug  = CreateConVar("l4d2_melee_guard_debug",  "0", "1=输出调试信息", FCVAR_NONE, true, 0.0, true, 1.0);
 
@@ -107,12 +129,14 @@ public void OnPluginStart()
 
 	CreateTimer(1.0, Timer_ValidateClients, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-	LogMessage("[melee_guard] 已加载 v%s，本图已注册近战脚本 %d 个", PLUGIN_VERSION, g_iMeleeNameCount);
+	LogMessage("[melee_guard] 已加载 v%s，本图已注册近战脚本 %d 个（容量 %d）",
+		PLUGIN_VERSION, g_iMeleeNameCount, MELEE_NAME_CAP);
 }
 
 public void OnMapStart()
 {
 	g_iRemoved = 0;
+	g_iWouldRemove = 0;
 	g_bTableWarned = false;
 	BuildMeleeNameList();
 }
@@ -219,49 +243,53 @@ public Action Cmd_Check(int client, int args)
 			if (danger) bad++;
 
 			ReplyToCommand(client,
-				"[melee_guard] %N 槽%d handle(0x17E0)=%d name=\"%s\" info(6108)=%d => %s",
-				i, slot, handle, name, info, danger ? "危险(换图会崩)" : "正常");
+				"[melee_guard] %N%s 槽%d handle=%d name=\"%s\" info(4bit)=%d => %s",
+				i, IsFakeClient(i) ? "(BOT)" : "", slot, handle, name, info,
+				danger ? "危险(换图会崩)" : "正常");
 		}
 	}
 
-	ReplyToCommand(client, "[melee_guard] 扫描完成：近战 %d 把，危险 %d 把；本次运行已移除 %d 把；strict=%d",
-		total, bad, g_iRemoved, g_cvStrict.IntValue);
+	ReplyToCommand(client, "[melee_guard] 扫描完成：近战 %d 把，危险 %d 把；本次运行已移除 %d 把（dryrun 下应删 %d 把）；strict=%d dryrun=%d",
+		total, bad, g_iRemoved, g_iWouldRemove, g_cvStrict.IntValue, g_cvDryRun.IntValue);
 
 	return Plugin_Handled;
 }
 
 /**
- * 引擎的崩溃条件：CTerrorMeleeWeapon::GetMeleeWeaponInfo() 里
- * CMeleeWeaponInfoStore::GetMeleeWeaponInfo(handle) 返回 NULL（Find 失败）。
- * 主判据是 handle == -1（未解析）；strict 打开后再补"越界"两条。
+ * 判据：与引擎等价。
+ *
+ * 引擎路径：CTerrorMeleeWeapon::GetMeleeWeaponInfo()（0x558ce0）
+ *   → 拿 m_strMapSetScriptName(0x17E0) 当 int key
+ *   → CMeleeWeaponInfoStore::GetMeleeWeaponInfo(int)（0x534a70）里 CUtlMap::Find
+ *   → 未命中返回 NULL → 0x8ea685 lea esi,[eax+0xc50] → strlen(0xc50) → 崩
+ *
+ * 所以"名字解析不出来"才是真危险；handle 就是名字在本图注册表里的下标：
+ *   >= 0  正常
+ *   -1    脚本名为空，或不在本图表里 —— 与引擎 Find 失败等价
+ *
+ * info（m_hMeleeWeaponInfo）只有 4 bit（0..15），**不可能是 -1**，
+ * 只作日志 / strict 下的辅助信号。
  */
 bool IsDangerousMelee(int handle, int info)
 {
-	// 明确的"未解析"：引擎 Find 失败的那个值
-	if (handle == -1)
-		return true;
-
+	/* 表没建好时一律不判定（绝不能在这里返回 true）：
+	   否则换图早期 handle 必然读成 -1，会把所有合法近战全删了。 */
 	if (g_iMeleeNameCount <= 0)
 		return false;
 
-	// handle 可疑：负数 / 越界 / 0（近战武器不可能没有脚本名，空 handle 也是没解析出来）
-	bool handleBad = (handle <= 0 || handle >= g_iMeleeNameCount);
-
-	/* info 可疑：负数 / 越界 / 0xF。
-	   0xF 只在"本图注册的条数 < 16"时才当哨兵用 —— 条数正好 16 时 15 是合法下标。 */
-	bool infoBad = (info < 0 || info >= g_iMeleeNameCount)
-		|| (g_iMeleeNameCount < 16 && info == 0xF);
-
-	/* 默认（strict=0）：两个信号必须同时可疑才删。
-	   这样无论那 4 字节字段里存的到底是 handle 下标还是字符串池下标，
-	   都不会把合法近战误判 —— 合法武器的两个读数不可能同时越界；
-	   而真正没解析出来的武器，handle 是 -1/0、m_hMeleeWeaponInfo 是 0xF，必然同时命中。 */
-	if (handleBad && infoBad)
+	// 主判据：解析不出来 ⇒ 引擎必返 NULL ⇒ 换图必崩
+	if (handle < 0)
 		return true;
 
-	// strict=1：任一信号可疑就删（进服确认过字段含义后再开）
+	// 严格模式：越界也判危险（进服确认过字段含义后再开）
 	if (g_cvStrict.BoolValue)
-		return (handleBad || infoBad);
+	{
+		if (handle >= g_iMeleeNameCount)
+			return true;
+
+		if (info < 0 || info >= g_iMeleeNameCount)
+			return true;
+	}
 
 	return false;
 }
@@ -312,9 +340,17 @@ void CheckMeleeWeapon(int entity, const char[] source)
 	char script[MELEE_NAME_MAX];
 	ReadMeleeScriptName(entity, script, sizeof(script));
 
-	int owner = GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity");
+	int  owner      = GetEntPropEnt(entity, Prop_Send, "m_hOwnerEntity");
 	bool ownerValid = (owner > 0 && owner <= MaxClients && IsClientInGame(owner));
-	bool isBot = ownerValid && IsFakeClient(owner);
+	bool isBot      = ownerValid && IsFakeClient(owner);
+
+	if (g_cvDryRun.BoolValue)
+	{
+		g_iWouldRemove++;
+		LogMessage("[melee_guard][DRYRUN] 应删除未解析 melee：handle=%d name=\"%s\" info=%d owner=%d(%s,%s) 来源=%s",
+			handle, script, info, owner, ownerValid ? "有效" : "无主", isBot ? "BOT" : "玩家", source);
+		return;
+	}
 
 	LogMessage("[melee_guard] 拦截未解析 melee：handle=%d name=\"%s\" info=%d owner=%d(%s,%s) 来源=%s",
 		handle, script, info, owner, ownerValid ? "有效" : "无主", isBot ? "BOT" : "玩家", source);
@@ -334,20 +370,52 @@ void CheckMeleeWeapon(int entity, const char[] source)
 }
 
 /**
- * 读 0x17E0 处的 4 字节整数（datamap m_strMapSetScriptName，引擎当作近战信息 handle 用）。
- * 读不到返回 0（不会被判成危险）。
+ * 取这把武器在"近战脚本名注册表"里的下标 —— 这个下标就是引擎 Find 用的 handle。
+ *
+ * 为什么不用 GetEntProp 读 0x17E0：
+ *   datamap 里 `m_strMapSetScriptName` 的类型是 FIELD_STRING（string_t，4 字节），
+ *   SourceMod 报的 "Data field m_strMapSetScriptName is not an integer (2)" 里
+ *   (2) 就是 PropField_String。当整数读必抛异常、整个 CheckMeleeWeapon 被中断。
+ *
+ * 正确做法（与引擎一致）：
+ *   引擎注册近战时用 HandleForWeaponName() 把名字池化成 string_t 再取下标当 key；
+ *   我们在 BuildMeleeNameList() 里读同一张网络字符串表 "MeleeWeapons"，
+ *   "名字 -> 下标"即等价于引擎的 key。
+ *
+ * 返回值：
+ *   >= 0  正常下标
+ *   -1    读不到脚本名，或名字不在本图表里 —— 等同于引擎 Find 失败（换图会崩）
  */
 int ReadMeleeHandle(int entity)
 {
-	if (!HasEntProp(entity, Prop_Data, "m_strMapSetScriptName"))
-		return 0;
+	char script[MELEE_NAME_MAX];
+	ReadMeleeScriptName(entity, script, sizeof(script));
 
-	return GetEntProp(entity, Prop_Data, "m_strMapSetScriptName");
+	if (script[0] == '\0')
+		return -1;
+
+	return FindMeleeNameIndex(script);
 }
 
 /**
- * 读 m_hMeleeWeaponInfo（netprop，4 bit）。只做日志/strict 参考，
- * 它**不是**引擎查表用的字段（引擎读的是 0x17E0）。
+ * 在 g_sMeleeNames 里查脚本名下标，找不到返回 -1。
+ * 表还没建好（g_iMeleeNameCount <= 0）时也返回 -1，但调用方在此之前已经
+ * 用 g_iMeleeNameCount 做过守卫，不会因此误删。
+ */
+int FindMeleeNameIndex(const char[] script)
+{
+	for (int i = 0; i < g_iMeleeNameCount; i++)
+	{
+		if (StrEqual(g_sMeleeNames[i], script, false))
+			return i;
+	}
+
+	return -1;
+}
+
+/**
+ * 读 m_hMeleeWeaponInfo（netprop，4 bit 无符号，0x17DC）。**只做日志 / strict 参考**。
+ * 注意：4 bit 取值范围 0..15，读出来不可能是 -1，不能当"未解析"判据。
  */
 int ReadMeleeInfoHandle(int entity)
 {
@@ -358,9 +426,8 @@ int ReadMeleeInfoHandle(int entity)
 }
 
 /**
- * 把 handle 当字符串读出来（诊断用）。
- * 注意：若该字段实际存的是 handle 下标，这里读到的可能不是有意义的武器名，
- * 一切以 sm_melee_guard_check 打印的实际值为准。
+ * 读出该近战武器的脚本名（datamap m_strMapSetScriptName，类型 string）。
+ * 必须用 GetEntPropString；用 GetEntProp 当整数读会抛 "not an integer (2)"。
  */
 void ReadMeleeScriptName(int entity, char[] buffer, int maxlen)
 {
@@ -379,8 +446,8 @@ void EnsureMeleeNameList()
 }
 
 /**
- * 从网络字符串表 "MeleeWeapons" 读出本图注册的近战脚本名（引擎按 scripts/melee/<地图>.txt
- * 注册近战信息时同时填这张表，表内条数就是 handle 的合法范围 0..N-1）。
+ * 从网络字符串表 "MeleeWeapons" 读出本图注册的近战脚本名（引擎注册近战信息时
+ * 同时填这张表，表内条数就是 handle 的合法范围 0..N-1）。
  * 表不存在 / 条数 0 / 条数超容量时 g_iMeleeNameCount = 0（本图不判定）。
  */
 void BuildMeleeNameList()
@@ -402,12 +469,12 @@ void BuildMeleeNameList()
 	if (count <= 0)
 		return;
 
-	if (count > MELEE_NAME_LIMIT)
+	if (count > MELEE_NAME_CAP)
 	{
 		if (!g_bTableWarned)
 		{
 			g_bTableWarned = true;
-			LogError("[melee_guard] MeleeWeapons 表有 %d 条，超过插件容量 %d，本图放弃判定", count, MELEE_NAME_LIMIT);
+			LogError("[melee_guard] MeleeWeapons 表有 %d 条，超过插件容量 %d，本图放弃判定", count, MELEE_NAME_CAP);
 		}
 		return;
 	}
@@ -424,7 +491,7 @@ void BuildMeleeNameList()
 
 	if (g_cvDebug.BoolValue)
 	{
-		char buf[1024];
+		char buf[2048];
 		buf[0] = '\0';
 
 		for (int i = 0; i < count; i++)

@@ -38,6 +38,10 @@ public Plugin myinfo =
 #define HUD2                          1
 #define HUD_TICKER                    6
 
+// 「多人配置」门槛：survivor_limit 达到这个值才算多人局（12v12=12，原版/4v4=4）。
+// 人数行、!jg/!sur/!inf 指令提示只在这种配置下显示。
+#define MULTIPLAYER_SURVIVOR_LIMIT    12
+
 // ====================================================================================================
 // HUD flags (same bit values used by the L4D2 scripted HUD system)
 // ====================================================================================================
@@ -1348,15 +1352,28 @@ void GetHUD1_Text(char[] output, int size)
             Format(output, size, "%s    女巫: [ 固定 ]", output);
     }
 
-    // 第二行：队伍人数概览。无条件输出, 不依赖 l4d2_hybrid_scoremod 是否加载,
-    // 否则 12v12 这类未装 scoremod 的配置里 hud1 永远只有一行进度.
-    // 取数口径见 GetHUDRoundCounts() / GetTeamLimit() 的注释.
-    int survivorsAlive, survivorsUp, infectedCount, spectatorCount;
-    GetHUDRoundCounts(survivorsAlive, survivorsUp, infectedCount, spectatorCount);
-    int survivorLimit = GetTeamLimit("l4d_survivor_limit", "survivor_limit");
-    int infectedLimit = GetTeamLimit("l4d_infected_limit", "z_max_player_zombies");
-    Format(output, size, "%s\n生还者：%d/%d/%d；感染者：%d/%d；旁观者：%d",
-        output, survivorsAlive, survivorsUp, survivorLimit, infectedCount, infectedLimit, spectatorCount);
+    // 第二行：队伍人数概览 —— **只在多人（12v12 等 survivor_limit>=12）配置下显示**。
+    // 4 人配置（applemod 4v4）不显示人数行：那里是原版 4v4 语义，
+    // 人数、l4d_superversus 的 !jg/!sur/!inf 这些都不存在，打出来只会误导。
+    // 取数口径见 GetHUDRoundCounts() / GetTeamLimit() 的注释。
+    // 队伍上限: **优先读游戏自身的 cvar**（survivor_limit / z_max_player_zombies，
+    // 它们永远反映当前配置的真实人数：4v4=4、12v12=12），读不到才退回
+    // l4d_superversus 的别名（l4d_survivor_limit / l4d_infected_limit）。
+    // 顺序不能反：superversus 的 cvar 默认就是 12，而且插件被卸载后 cvar 仍可能
+    // 保留上一次的值 —— 先读它会导致 4v4 的 applemod 配置里 HUD 显示 /12。
+    if (IsMultiplayerMode())
+    {
+        int survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount;
+        GetHUDRoundCounts(survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount);
+        int survivorLimit = GetTeamLimit("survivor_limit", "l4d_survivor_limit");
+        int infectedLimit = GetTeamLimit("z_max_player_zombies", "l4d_infected_limit");
+        // 生还者段: 存活数/未倒地数/真人玩家数/上限
+        //   前两个含 bot(12v12 空位被 bot 填，bot 也是要清的目标)；
+        //   真人玩家数 = 生还者队里 !IsFakeClient 的数量(不要求存活)，
+        //   用来一眼看出「这队里几个是真人」。
+        Format(output, size, "%s\n生还者：%d/%d/%d/%d；感染者：%d/%d；旁观者：%d",
+            output, survivorsAlive, survivorsUp, survivorPlayers, survivorLimit, infectedCount, infectedLimit, spectatorCount);
+    }
 
     // 装了 scoremod 才有奖励分; 作为第三行追加, 不打乱上面的人数行格式.
     if (g_bhybridScoringAvailable)
@@ -1380,10 +1397,13 @@ void GetHUD1_Text(char[] output, int size)
 //     AI 特感 bot, 若服上装了会生成 SI bot 的插件, 那些也不算「玩家」.
 //   - 旁观者 = 在游戏但不在生还者/感染者两队的真人(含 caster_system 上的解说),
 //     与本插件其它地方「旁观/解说都算旁观者」的口径一致.
-void GetHUDRoundCounts(int &survivorsAlive, int &survivorsUp, int &infectedCount, int &spectatorCount)
+//   - 「生还者队伍的玩家数」= 在生还者队伍里的**真人**玩家(!IsFakeClient)数量,
+//     不要求存活(死了但仍在生还者队也算), 用来区分「9 个人里面几个是真人的」.
+void GetHUDRoundCounts(int &survivorsAlive, int &survivorsUp, int &survivorPlayers, int &infectedCount, int &spectatorCount)
 {
     survivorsAlive = 0;
     survivorsUp = 0;
+    survivorPlayers = 0;
     infectedCount = 0;
     spectatorCount = 0;
 
@@ -1395,6 +1415,10 @@ void GetHUDRoundCounts(int &survivorsAlive, int &survivorsUp, int &infectedCount
         int team = GetClientTeam(i);
         if (team == 2) // TEAM_SURVIVOR: 本文件没有该宏, 沿用文件里既有的字面量写法
         {
+            // 真人生还者: 不要求存活
+            if (!IsFakeClient(i))
+                survivorPlayers++;
+
             if (!IsPlayerAlive(i))
                 continue;
 
@@ -1415,8 +1439,10 @@ void GetHUDRoundCounts(int &survivorsAlive, int &survivorsUp, int &infectedCount
     }
 }
 
-// 队伍上限: 先读 primary(applemod 12v12 用的 l4d_*_limit), 再回退 fallback(游戏自带 cvar),
-// 都读不到才回退 12; 结果夹在 [1, MaxClients] 内, 避免 cvar 被改坏时打出荒谬的分母.
+// 队伍上限: 先读 primary(游戏自带 cvar: survivor_limit / z_max_player_zombies),
+// 再回退 fallback(l4d_superversus 的 l4d_*_limit 别名).
+// 都读不到才回退 4（L4D2 默认人数, **不是 12** —— 用 12 会让 4v4 模式打出 /12）;
+// 结果夹在 [1, MaxClients] 内, 避免 cvar 被改坏时打出荒谬的分母.
 int GetTeamLimit(const char[] primary, const char[] fallback)
 {
     ConVar cv = FindConVar(primary);
@@ -1429,7 +1455,7 @@ int GetTeamLimit(const char[] primary, const char[] fallback)
     }
 
     if (limit <= 0)
-        limit = 12;
+        limit = 4;
 
     if (limit > MaxClients)
         limit = MaxClients;
@@ -1505,6 +1531,17 @@ int GetConnectedNumber()
 }
 
 // ====================================================================================================
+// 是否"多人配置"（12v12 及其它 survivor_limit>=12 的模式）。
+// 判据用游戏自身的 survivor_limit：12v12 配置设 12，原版/4v4 是 4。
+// 不优先用 l4d_survivor_limit —— 那是 l4d_superversus 注册的 cvar，默认值就是 12，
+// 插件卸载后值还会留着，会把 4v4 误判成多人。
+bool IsMultiplayerMode()
+{
+    ConVar cv = FindConVar("survivor_limit");
+    return (cv != null && cv.IntValue >= MULTIPLAYER_SURVIVOR_LIMIT);
+}
+
+// ====================================================================================================
 void GetHUD2_Text(char[] output, int size)
 {
     FormatEx(output, size, "\0");
@@ -1513,7 +1550,19 @@ void GetHUD2_Text(char[] output, int size)
     char sTime[16];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
     FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
-    FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者", hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+
+    // !jg / !sur / !inf 是 l4d_superversus（多人插件）的指令，只有多人配置才有；
+    // 4 人配置里这些指令不存在，不能再提示，否则玩家敲了没反应。
+    if (IsMultiplayerMode())
+    {
+        FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者",
+            hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+    }
+    else
+    {
+        FormatEx(output, size, "%s(%d/%d/%d)\n%s",
+            hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+    }
 }
 
 // ====================================================================================================

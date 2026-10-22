@@ -60,6 +60,15 @@
  *      -> 该区域标记为已触发
  *    同一区域每回合只会触发一次；换图 / round_start / round_end 全部重置。
  *
+ *  1.2.0 修复「集合完就往前走」被传送回来（c5m2 之类机关集合点）：
+ *    - 倒计时期间每秒记录「到过集合点」的生还者（g_bSeen）。
+ *      倒计时结束时只传送「一次都没到过」的人；已经到过、随后离开继续推进
+ *      的生还者不再被传送回来（l4d2_cptele_skip_seen 1，默认）。
+ *    - 全员都到过集合点 = 集合完毕：倒计时立刻结束（不再空转到 0），
+ *      并且一个人都不传送（只把机关按钮解锁按下）。
+ *    旧行为（只按「倒计时结束时是否还在区域内」判定）可用
+ *    l4d2_cptele_skip_seen 0 还原。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -73,7 +82,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.1.0"
+#define PLUGIN_VERSION      "1.2.0"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -123,6 +132,7 @@ ConVar g_cvTime;                // 安全屋 / 救援点 倒计时
 ConVar g_cvCpPercent;           // 中途集合点 到齐比例
 ConVar g_cvCpTime;              // 中途集合点 倒计时
 ConVar g_cvResetOnLeave;
+ConVar g_cvSkipSeen;
 ConVar g_cvSound;
 ConVar g_cvChat;
 ConVar g_cvSaferoom;
@@ -169,6 +179,10 @@ Handle g_hCountdown;            // 1s 重复倒计时 timer
 bool   g_bCountingDown;
 int    g_iSecondsLeft;
 int    g_iActiveArea = -1;
+
+// 本次倒计时期间「到过该区域」的生还者。倒计时结束时只传送「一次都没到过」的人，
+// 已经到过、随后离开继续推进的人不再被传送回来（1.2.0 修复）。
+bool   g_bSeen[MAXPLAYERS+1];
 
 bool   g_bMapStarted;
 bool   g_bLateLoad;
@@ -257,6 +271,10 @@ public void OnPluginStart()
 	// ---- 通用行为 ---------------------------------------------------------
 	g_cvResetOnLeave = CreateConVar("l4d2_cptele_reset_on_leave", "0",
 		"0=倒计时开始后即使到达人数掉回比例以下也继续倒计时（默认）。1=掉回比例以下时取消本次倒计时，等人数再次达标后重新开始",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_cvSkipSeen = CreateConVar("l4d2_cptele_skip_seen", "1",
+		"1=倒计时期间已经到过集合点（哪怕随后离开、继续往前走）的生还者，倒计时结束时不再被传送回来；并且全员都到过时倒计时立即结束。0=旧行为（只看倒计时结束那一刻是否还在区域内）",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSound = CreateConVar("l4d2_cptele_sound", "1",
@@ -432,6 +450,27 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	ResetRound();
+}
+
+/**
+ * 槽位复用防御：g_bSeen 按客户端索引记录，掉线后新玩家复用同一槽位时
+ * 会被误当成「已经到过集合点」（该传不传，甚至提前判定全员到齐）。
+ * 连接 / 断线两个时机都清掉，确保标记只属于当前占用该槽位的人。
+ */
+public void OnClientConnected(int client)
+{
+	if (client > 0 && client <= MaxClients)
+	{
+		g_bSeen[client] = false;
+	}
+}
+
+public void OnClientDisconnect(int client)
+{
+	if (client > 0 && client <= MaxClients)
+	{
+		g_bSeen[client] = false;
+	}
 }
 
 /**
@@ -1286,6 +1325,13 @@ public Action Timer_Monitor(Handle timer)
 			continue;
 		}
 
+		// 中途集合点：倒计时开始前就要开始累积「到过」标记，
+		// 这样「倒计时期间已经走过集合点、跑到前面去」的人不会被传送回来。
+		if (g_cvSkipSeen.BoolValue && g_iAreaType[i] == AREA_CHECKPOINT)
+		{
+			MarkSeenInArea(i);
+		}
+
 		if (GetGameTime() < g_fAreaCooldown[i])
 		{
 			continue;
@@ -1351,6 +1397,19 @@ void StartCountdown(int index, int reached, int total)
 	g_iActiveArea = index;
 	g_iSecondsLeft = seconds;
 
+	// 新一轮倒计时：重新记录「到过区域」的人（开局就在区域里的人算已到过）
+	//
+	// 中途集合点不清零：倒计时「开始之前」就已经走过集合点的人同样算到过，
+	// 否则他们会在倒计时结束时被传送回集合点（正是要修的 bug）。
+	// 安全屋 / 救援点必须清零：那两类区域在 round_start 时全员可能都站在里面，
+	// 不清零会让「全员已到过」立刻成立、功能等于被废掉。
+	if (IsSafeAreaType(g_iAreaType[index]))
+	{
+		ClearSeenFlags();
+	}
+
+	MarkSeenInArea(index);
+
 	char sName[32];
 	char sHint[192];
 
@@ -1415,6 +1474,24 @@ public Action Timer_Countdown(Handle timer)
 	}
 
 	int type = g_iAreaType[index];
+
+	// 记录「本次倒计时期间到过集合点」的人：他们已完成集合这一步，
+	// 倒计时结束时不再被传送回来（c5m2 这类「集合完就往前走」地图的修复点）
+	MarkSeenInArea(index);
+
+	// 全员都到过集合点 = 集合完毕：倒计时立即结束，一个人都不传送。
+	// 否则会出现「人都走远了，倒计时还在空转，结束时把全队传回来」的问题。
+	if (g_cvSkipSeen.BoolValue)
+	{
+		int iAlive = CountAliveSurvivors();
+
+		if (iAlive > 0 && CountSeenSurvivors() >= iAlive)
+		{
+			FinishCountdownAllSeen(index);
+			g_hCountdown = null;
+			return Plugin_Stop;
+		}
+	}
 
 	// 掉回比例以下的处理策略
 	if (g_cvResetOnLeave.BoolValue)
@@ -1544,6 +1621,13 @@ void FinishCountdown(int index)
 				continue;
 			}
 
+			// 本次倒计时期间已经到过集合点的人：视为已集合完毕，
+			// 不再把人从前方传送回来（这就是「集合完就往前走」的修复点）
+			if (g_cvSkipSeen.BoolValue && g_bSeen[i])
+			{
+				continue;
+			}
+
 			// 固定传送点要「每人一份抖动」：12v12 最多 11 个掉队的
 			// 同时落地，全挤在一个坐标上会互相挤出去 / 卡进几何体。
 			float vClientDest[3];
@@ -1562,30 +1646,7 @@ void FinishCountdown(int index)
 	}
 
 	// ---- 开机关 ---------------------------------------------------------
-	if (type == AREA_CHECKPOINT)
-	{
-		int entity = GetAreaEntity(index);
-
-		if (entity != -1)
-		{
-			char sClass[64];
-
-			// 只对「按钮类」实体做 unlock+use。就算管理员误把门写进预设，
-			// 这里也不会去动任何门（尤其是安全门）的 lock 状态。
-			// 与 alasfourom "L4D Elevator Teleport" 一致：先解锁再按下。
-			if (GetEntityClassname(entity, sClass, sizeof(sClass)) && IsButtonClass(sClass))
-			{
-				AcceptEntityInput(entity, "unlock");
-				AcceptEntityInput(entity, "use");
-			}
-		}
-	}
-	else if (type == AREA_RESCUE && g_cvRescueForce.BoolValue && g_bNtvRescueVehicle)
-	{
-		// 默认关闭：救援车人齐由游戏自己触发
-		L4D2_SendInRescueVehicle();
-	}
-	// AREA_SAFEROOM：什么都不做。绝不触碰安全门的 spawnflags / lock 状态。
+	OpenAreaMechanism(index, type);
 
 	if (g_cvRemoveInfected.BoolValue && bHasDest)
 	{
@@ -1597,7 +1658,41 @@ void FinishCountdown(int index)
 
 	GetAreaTypeName(type, sName, sizeof(sName));
 
-	if (IsSafeAreaType(type))
+	if (moved <= 0)
+	{
+		// 一个都没传送：要么全员都到过，要么压根拿不到传送目标
+		if (!bHasDest)
+		{
+			// 区域实体在倒计时期间消失 / 拿不到 nav area：不能假装"无需传送"
+			LogError("[cptele] 区域 #%d (%s) 拿不到传送目标，本次未传送任何生还者", index, sName);
+
+			if (g_cvChat.BoolValue)
+			{
+				PrintToChatAll("\x05[集合点]\x01 倒计时结束，但找不到%s的传送位置，本次不传送。", sName);
+			}
+
+			Format(sMsg, sizeof(sMsg), "找不到%s的传送位置，本次不传送", sName);
+		}
+		else if (IsSafeAreaType(type))
+		{
+			if (g_cvChat.BoolValue)
+			{
+				PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已进入%s，无需传送。", sName);
+			}
+
+			Format(sMsg, sizeof(sMsg), "全员已进入%s，无需传送", sName);
+		}
+		else
+		{
+			if (g_cvChat.BoolValue)
+			{
+				PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已到达集合点，无需传送。");
+			}
+
+			Format(sMsg, sizeof(sMsg), "全员已到达集合点，无需传送");
+		}
+	}
+	else if (IsSafeAreaType(type))
 	{
 		if (g_cvChat.BoolValue)
 		{
@@ -1625,9 +1720,138 @@ void FinishCountdown(int index)
 	}
 }
 
+/**
+ * 全员都已经到过集合点：集合完毕，倒计时提前结束，一个人都不传送。
+ *
+ * 触发场景（用户报的 bug）：机关集合点（如 c5m2）倒计时开始后，玩家在倒计时
+ * 结束前就集合完毕并继续往前走，旧逻辑会一直空转到 0 秒，然后把「不在区域内」
+ * 的整队人传送回集合点。现在只要所有人都到过，就直接结束本次倒计时。
+ */
+void FinishCountdownAllSeen(int index)
+{
+	g_bCountingDown = false;
+	g_iSecondsLeft = 0;
+	g_iActiveArea = -1;
+	g_bAreaFired[index] = true;
+
+	int type = g_iAreaType[index];
+
+	// 集合完毕 = 该按的机关仍然要按下去（电梯 / 渡轮 / 桥等）
+	OpenAreaMechanism(index, type);
+
+	char sName[32];
+	char sMsg[192];
+
+	GetAreaTypeName(type, sName, sizeof(sName));
+
+	if (IsSafeAreaType(type))
+	{
+		if (g_cvChat.BoolValue)
+		{
+			PrintToChatAll("\x05[集合点]\x01 全员已进入%s，倒计时提前结束，无人需要传送。", sName);
+		}
+
+		Format(sMsg, sizeof(sMsg), "全员已进入%s，倒计时提前结束", sName);
+	}
+	else
+	{
+		if (g_cvChat.BoolValue)
+		{
+			PrintToChatAll("\x05[集合点]\x01 全员已到达集合点，倒计时提前结束，无人需要传送。");
+		}
+
+		Format(sMsg, sizeof(sMsg), "全员已到达集合点，倒计时提前结束");
+	}
+
+	PrintHintTextToAll("%s", sMsg);
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 区域 #%d 全员已到过集合点，提前结束 (type=%d source=%d)",
+			index, type, g_iAreaSource[index]);
+	}
+}
+
+/**
+ * 倒计时结束时要开的机关。
+ * 只对「按钮类」实体做 unlock+use：就算管理员误把门写进预设，
+ * 这里也不会去动任何门（尤其是安全门）的 lock 状态。
+ * 与 alasfourom "L4D Elevator Teleport" 一致：先解锁再按下。
+ */
+void OpenAreaMechanism(int index, int type)
+{
+	if (type == AREA_CHECKPOINT)
+	{
+		int entity = GetAreaEntity(index);
+
+		if (entity == -1)
+		{
+			return;
+		}
+
+		char sClass[64];
+
+		if (GetEntityClassname(entity, sClass, sizeof(sClass)) && IsButtonClass(sClass))
+		{
+			AcceptEntityInput(entity, "unlock");
+			AcceptEntityInput(entity, "use");
+		}
+	}
+	else if (type == AREA_RESCUE && g_cvRescueForce.BoolValue && g_bNtvRescueVehicle)
+	{
+		// 默认关闭：救援车人齐由游戏自己触发
+		L4D2_SendInRescueVehicle();
+	}
+
+	// AREA_SAFEROOM：什么都不做。绝不触碰安全门的 spawnflags / lock 状态。
+}
+
 // ===========================================================================
 //  计数
 // ===========================================================================
+
+void ClearSeenFlags()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_bSeen[i] = false;
+	}
+}
+
+/**
+ * 把当前站在区域里的存活生还者标记为「本次倒计时期间到过」。
+ * 每秒调用一次，标记后不会再被清掉（离开区域也算到过）。
+ */
+void MarkSeenInArea(int index)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_bSeen[i] || !IsAliveSurvivor(i))
+		{
+			continue;
+		}
+
+		if (IsClientInArea(i, index))
+		{
+			g_bSeen[i] = true;
+		}
+	}
+}
+
+int CountSeenSurvivors()
+{
+	int count = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_bSeen[i] && IsAliveSurvivor(i))
+		{
+			count++;
+		}
+	}
+
+	return count;
+}
 
 stock bool IsAliveSurvivor(int client)
 {
@@ -2257,6 +2481,8 @@ void ResetRound()
 	g_iActiveArea = -1;
 	g_bRescueReady = false;
 	g_bSiteAuthority = false;
+
+	ClearSeenFlags();
 
 	for (int i = 0; i < MAX_AREAS; i++)
 	{

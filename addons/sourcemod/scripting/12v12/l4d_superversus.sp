@@ -1136,7 +1136,13 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		}
 	}
 	if (current == team && (team != TEAM_SURVIVOR || IsPlayerAlive(client))
-		&& (team != TEAM_SPECTATOR || GetBotOfIdle(client) == 0)) return Join_Success;
+		&& (team != TEAM_SPECTATOR || GetBotOfIdle(client) == 0))
+	{
+		// 这条捷径不经过 SafeTakeOverSurvivor（引擎已把人放进生还者队且存活），
+		// 所以要在这里也排一次补枪检查。
+		if (team == TEAM_SURVIVOR) ScheduleLoadoutCheck(client);
+		return Join_Success;
+	}
 	if (team == TEAM_SPECTATOR)
 	{
 		if (!adminTransfer && !CanVoluntarilySpectate(client, announce)) return Join_Failed;
@@ -2185,7 +2191,14 @@ bool SafeTakeOverSurvivor(int client, int bot)
 	bool taken = L4D_TakeOverBot(client);
 	if (!taken && IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == 0)
 		ChangeClientTeam(client, TEAM_SPECTATOR);
-	return taken && IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == TEAM_SURVIVOR;
+
+	bool okay = taken && IsValidClient(client) && GetClientUserId(client) == clientUserid
+		&& GetClientTeam(client) == TEAM_SURVIVOR;
+
+	// 接管成功只代表拿到了这具身体，这具身体可能本来就没枪 → 延迟补枪
+	if (okay) ScheduleLoadoutCheck(client);
+
+	return okay;
 }
 
 // Also protects assigned survivor bots taken over by the engine or another plugin
@@ -2197,6 +2210,62 @@ public Action L4D_OnTakeOverBot(int client)
 	if (bot > 0 && (!IsTakeoverPairValid(client, bot) || !PrepareSurvivorModel(bot)))
 		return Plugin_Handled;
 	return Plugin_Continue;
+}
+
+// ------------------------------------------------------------------------
+// 中途加入 / 接管生还者后的补枪兜底
+//   加入与接管流程本身不发放任何武器（模型校验、SetHumanSpec/TakeOverBot 都不碰
+//   武器槽），所以这里在加入后延迟 1 秒检查主武器槽（槽 0），空手就补一把冲锋枪。
+//   缺省武器上限（l4d_weapon_limits）可能拦下 GivePlayerItem，失败时退回 cheat
+//   "give"；两次都拿不到就写错误日志，不静默失败。
+//   只处理真人：Bot 没枪不该由这里补，也不该因此动到 AI 的装备逻辑。
+// ------------------------------------------------------------------------
+void ScheduleLoadoutCheck(int client)
+{
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+
+	CreateTimer(1.0, Timer_LoadoutCheck, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_LoadoutCheck(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+
+	// 这一秒内可能已离开 / 被换边 / 阵亡
+	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Stop;
+	if (GetClientTeam(client) != TEAM_SURVIVOR || !IsPlayerAlive(client)) return Plugin_Stop;
+
+	// 已有主武器：不动
+	if (GetPlayerWeaponSlot(client, 0) != -1) return Plugin_Stop;
+
+	GivePlayerItem(client, "weapon_smg");
+
+	// 被武器上限拦住时退回 give 指令
+	if (GetPlayerWeaponSlot(client, 0) == -1)
+		CheatGiveWeapon(client, "weapon_smg");
+
+	// 仍然没有主武器 → 写日志，便于线上取证
+	if (GetPlayerWeaponSlot(client, 0) == -1)
+		LogError("[SV] 给 %L 补发 weapon_smg 失败（可能被武器上限/拾取拦截挡住）", client);
+
+	return Plugin_Stop;
+}
+
+// 临时去掉 give 的 cheat 标记并临时给 root 权限再执行（与 givewpn.sp 同款写法）
+void CheatGiveWeapon(int client, const char[] weapon)
+{
+	int flags = GetCommandFlags("give");
+	if (flags == -1) return;
+
+	int admin = GetUserFlagBits(client);
+
+	SetUserFlagBits(client, ADMFLAG_ROOT);
+	SetCommandFlags("give", flags & ~FCVAR_CHEAT);
+
+	FakeClientCommand(client, "give %s", weapon);
+
+	SetCommandFlags("give", flags);
+	SetUserFlagBits(client, admin);
 }
 
 void Respawn(int client)

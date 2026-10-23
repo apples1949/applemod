@@ -34,6 +34,7 @@ static ConVar
 	// RM_hAllowVoting = null,
 	RM_hReloaded		   = null,
 	RM_hChangeMap		   = null,
+	RM_hChangeMatch		   = null,
 	RM_hAutoLoad		   = null,
 	RM_hAutoCfg			   = null,
 	RM_hPersistentActive   = null,
@@ -84,6 +85,37 @@ void RM_OnModuleStart()
 		RM_hChangeMap = CreateConVarEx("match_map", "", "DONT TOUCH THIS CVAR! This is to store the map that we'll be changing to", FCVAR_DONTRECORD | FCVAR_UNLOGGED);
 	}
 
+	// chmatch（一步切换模式）：目标模式名写在这个 cvar 里。pm_unload_plugins 会把本插件一起卸掉，
+	// 靠它跨过“插件重载” 把切换意图带给新实例（与上游 2.6.0 的 match_change 同名同义）。
+	RM_hChangeMatch = FindConVarEx("match_change");
+	if (RM_hChangeMatch == null)
+	{
+		RM_hChangeMatch = CreateConVarEx("match_change", "", "DONT TOUCH THIS CVAR! This is to store the config that we'll be changing to", FCVAR_DONTRECORD | FCVAR_UNLOGGED);
+	}
+
+	// 上游 2.6.0 起，退出/切换模式改由 plugin_manager 的 pm_unload_plugins 负责（写在各模式 confogl_off.cfg 里）。
+	// 保护清单由 cfg/protectedplugins.cfg 决定，这里只做可用性检查（缺 plugin_manager 时留一条错误日志）。
+	RM_PluginManagerAvailable(true);
+}
+
+/*
+	plugin_manager.smx（上游 2.6.0 引入）负责按“后加载先卸载”的顺序卸插件，并跳过受保护插件。
+	没有它，confogl_off.cfg 里的 pm_unload_plugins 就是个空命令：模式能切，但旧模式的插件不会被卸掉，
+	于是新模式的插件清单和旧模式的混在一起（同名插件重复加载失败、cvar 残留）。
+*/
+static bool RM_PluginManagerAvailable(bool bPrint)
+{
+	if (CommandExists("pm_unload_plugins"))
+	{
+		return true;
+	}
+
+	if (bPrint)
+	{
+		LogError("[%s] plugin_manager.smx 未加载：confogl_off.cfg 里的 pm_unload_plugins 不会生效，模式切换时插件不会被卸载/重载。", RM_MODULE_NAME);
+	}
+
+	return false;
 }
 
 void RM_OnAllModulesStarted()
@@ -108,6 +140,36 @@ void RM_RestoreMatchAfterLoad()
 		return;
 	}
 	RM_bRestorePending = false;
+
+	// chmatch：旧模式的 off-cfg 已经执行，pm_unload_plugins 把我们连同旧模式插件一起卸掉了，
+	// 现在跑的是 sm plugins refresh 重载后的新实例。目标模式从 match_change 读回来，
+	// 按与“sm_fm off → sm_fm <mode>”等价的流程重走一遍完整加载链。
+	char sChange[128];
+	RM_hChangeMatch.GetString(sChange, sizeof(sChange));
+	if (sChange[0] != '\0')
+	{
+		RM_hChangeMatch.SetString("");
+
+		if (RM_bDebugEnabled || IsDebugEnabled())
+		{
+			LogMessage("[%s] chmatch resume: switching to '%s'", RM_MODULE_NAME, sChange);
+		}
+
+		// 旧模式插件已被卸干净，不能沿用“插件已加载”的假定。
+		RM_bIsPluginsLoaded = false;
+		RM_bIsMapRestarted = false;
+		RM_bIsChmatchRequest = false;
+
+		if (!SetCustomCfg(sChange))
+		{
+			LogError("[%s] chmatch target '%s' is unavailable; match stays unloaded", RM_MODULE_NAME, sChange);
+			RM_hPersistentActive.SetInt(0);
+			return;
+		}
+
+		RM_Match_Load();
+		return;
+	}
 
 	if (RM_hReloaded.BoolValue)
 	{
@@ -213,6 +275,10 @@ static void RM_Match_Load()
 		int	 iNumPieces = ExplodeString(sBuffer, ";", sPieces, sizeof(sPieces), sizeof(sPieces[]));
 
 		// Unlocking and Unloading Plugins.
+		// 这里必须保留同步的 unload_all，不要照抄上游改成 pm_unload_plugins：pm 的卸载是分批的，
+		// 且用 ServerCommand（追加语义）把卸载命令排到命令队列尾部；而下面的 ExecuteCfg 已经把
+		// 各模式插件清单的加载命令排进队列了，追加的卸载会排在加载之后执行，刚加载的模式插件会被
+		// 自己卸掉。pm 只用在 off-cfg（退出模式）里 —— 那里 cfg 其余行早已排队完毕，追加正好落在最后。
 		ServerCommand("sm plugins load_unlock");
 		ServerCommand("sm plugins unload_all");
 
@@ -353,10 +419,10 @@ static void RM_Match_Unload(bool bForced = false)
 	}
 	else
 	{
-		// if we are using chmatch, don't let predictable_unloader_edi unload confogl itself.
-		// all plugins will be unload and load when the new config excuted.
-		ServerCommand("sm plugins load_unlock");
-		ServerCommand("sm plugins unload optional/another/predictable_unloader_edi.smx");
+		// chmatch：off-cfg 末尾的 pm_unload_plugins 会把本插件一起卸掉（protectedplugins.cfg 只保护
+		// left4dhooks / command_buffer / l4d2_sv_tags）。这里的续载不靠插件自身存活：
+		// 目标模式已写进 match_change，sm plugins refresh 重载本插件后由 RM_RestoreMatchAfterLoad 接着加载。
+		RM_PluginManagerAvailable(true);
 		ExecuteCfg(sBuffer);
 	}
 
@@ -542,6 +608,7 @@ static Action RM_Cmd_ResetMatch(int client, int args)
 	}
 
 	RM_bIsChmatchRequest = false;
+	RM_hChangeMatch.SetString("");
 	RM_sPendingConfig[0] = 0;
 	RM_sPendingMap[0] = 0;
 	RM_Match_Unload(true);
@@ -612,15 +679,29 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 	}
 
 	RM_bIsChmatchRequest = true;
-	// Keep the old resolver until its off-config has been queued. The new
-	// target must not redirect cleanup or survive a failed map validation.
-	strcopy(RM_sPendingConfig, sizeof(RM_sPendingConfig), sBuffer);
-	strcopy(RM_sPendingMap, sizeof(RM_sPendingMap), sDisplayName);
+	// 目标模式先只放在 cvar 里：旧模式的 off-cfg 必须仍按旧路径解析（清理/复位都得用旧的），
+	// 等卸载真发生时（命令队列稍后执行），新实例会读到它。
+	RM_hChangeMatch.SetString(sBuffer);
+
+	bool bHasPluginManager = RM_PluginManagerAvailable(false);
 
 	RM_Match_Unload(true);
 
-	// give time to fully finish unloading.
-	CreateTimer(1.0, Timer_DelayToLoadMatchMode);
+	if (bHasPluginManager)
+	{
+		// off-cfg 末尾的 pm_unload_plugins 会把本插件一起卸掉（protectedplugins.cfg 不保护框架本体），
+		// 卸载还没执行到这里，先把“恢复”闸门重新武装；sm plugins refresh 重载后由
+		// RM_RestoreMatchAfterLoad 读 match_change 续载新模式。
+		RM_hPersistentActive.SetInt(1);
+	}
+	else
+	{
+		// 没有 plugin_manager 时不会发生卸载，框架还活着：退回 1 秒定时器续载。
+		RM_hChangeMatch.SetString("");
+		strcopy(RM_sPendingConfig, sizeof(RM_sPendingConfig), sBuffer);
+		strcopy(RM_sPendingMap, sizeof(RM_sPendingMap), sDisplayName);
+		CreateTimer(1.0, Timer_DelayToLoadMatchMode);
+	}
 
 	return Plugin_Handled;
 }

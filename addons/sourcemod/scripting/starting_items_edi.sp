@@ -317,13 +317,28 @@ void GiveStartingItems(StringMap &hItemsStringMap)
 						continue;
 					}
 				}
-				GivePlayerWeaponByName(i, sEntName);
-				int iGiven = GetPlayerWeaponSlot(i, iSlotIndex);
-				if (iGiven != -1) {
+				int iGiven = GivePlayerWeaponByName(i, sEntName);
+				if (GetPlayerWeaponSlot(i, iSlotIndex) == -1) {
+					/* 引擎的拾取链 GiveNamedItem -> Touch -> CanPlayerTouch / Weapon_CanUse 可能拒绝
+					   把物品装进槽位，此时实体已经建好、掉在玩家脚下（GivePlayerItem 仍返回有效实体）。
+					   先把它删掉，否则每次重试都会在地上再留一个同样的物品（最多 5 个）。
+					   依据：CTerrorWeapon::CanPlayerTouch 反编译（见 l4d_weapon_limits.sp 内引用），
+					   slot 被占用或 Weapon_CanUse 为假时直接 return，不装备。 */
+					if (iGiven > MaxClients && IsValidEntity(iGiven)) {
+						RemoveEntity(iGiven);
+					}
+					/* 再强制装备一次：绕开拾取链直接装进已确认为空的槽位，
+					   保证出门物资真的到手，而不是把"没装上"当成成功。 */
+					ForceEquipWeapon(i, sEntName, iSlotIndex);
+				}
+				// 唯一的判定标准是"槽位里到底有没有这件东西"
+				if (GetPlayerWeaponSlot(i, iSlotIndex) != -1) {
 					g_iGrantedFlags[i] |= iSlotFlag;
 					g_iGrantedItems++;
 				} else {
 					g_iFailedItems++;
+					// 只报总数的话下次还是无从下手，这里记到具体玩家与物品
+					LogError("[StartingItems] %N 的 %s 无法装备（槽位 %d，第 %d 次尝试）", i, sEntName, iSlotIndex, g_iAttempts + 1);
 				}
 			}
 		}
@@ -351,14 +366,14 @@ Action Cmd_Status(int iClient, int iArgs)
 	return Plugin_Handled;
 }
 
-void GivePlayerWeaponByName(int iClient, const char[] sWeaponName)
+int GivePlayerWeaponByName(int iClient, const char[] sWeaponName)
 {
 #if (SOURCEMOD_V_MINOR >= 12 || (SOURCEMOD_V_MINOR == 11 && SOURCEMOD_V_REV >= 6754))
-	GivePlayerItem(iClient, sWeaponName); // Was fixed in v1.11.6754 (https://github.com/alliedmodders/sourcemod/commit/59840685a49a4e85eeb0d7f6271e861)
+	return GivePlayerItem(iClient, sWeaponName); // 失败返回 -1，成功返回物品实体索引（不保证已装备）
 #else
 	int iEntity = CreateEntityByName(sWeaponName);
 	if (iEntity == -1) {
-		return;
+		return -1;
 	}
 
 	/*float fClientOrigin[3];
@@ -366,7 +381,40 @@ void GivePlayerWeaponByName(int iClient, const char[] sWeaponName)
 	TeleportEntity(iEntity, fClientOrigin, NULL_VECTOR, NULL_VECTOR);*/
 	DispatchSpawn(iEntity);
 	EquipPlayerWeapon(iClient, iEntity);
+	return iEntity;
 #endif
+}
+
+/**
+ * 强制把物品装进玩家指定槽位（绕开引擎拾取链），用于 GivePlayerItem 建了实体却没装备的情况。
+ * 只在调用方已确认该槽位为空时使用，不会顶掉玩家已有物品。
+ * @param iClient     目标玩家
+ * @param sWeaponName 物品类名
+ * @param iSlotIndex  期望槽位（L4D2WeaponSlot_*）
+ * @return int 装进槽位的物品实体索引；失败返回 -1（失败时不会把实体留在地上）
+ */
+int ForceEquipWeapon(int iClient, const char[] sWeaponName, int iSlotIndex)
+{
+	int iEntity = CreateEntityByName(sWeaponName);
+	if (iEntity == -1) {
+		return -1;
+	}
+
+	float fOrigin[3];
+	GetClientAbsOrigin(iClient, fOrigin);
+	TeleportEntity(iEntity, fOrigin, NULL_VECTOR, NULL_VECTOR);
+	DispatchSpawn(iEntity);
+	EquipPlayerWeapon(iClient, iEntity);
+
+	if (GetPlayerWeaponSlot(iClient, iSlotIndex) == iEntity) {
+		return iEntity;
+	}
+
+	// 没装进槽位就别把实体留在地上
+	if (IsValidEntity(iEntity)) {
+		RemoveEntity(iEntity);
+	}
+	return -1;
 }
 
 #if DEBUG

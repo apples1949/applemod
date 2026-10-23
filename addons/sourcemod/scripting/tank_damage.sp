@@ -304,6 +304,10 @@ public Action onTakeDamageHandler(int victim, int& attacker, int& inflictor, flo
 	// 存 userid 而非客户端索引: 回调时受害者可能已掉线且索引被复用, 用 userid 解析可避免记错对象
 	pack.WriteCell(GetClientUserId(attacker));
 	pack.WriteCell(GetClientUserId(victim));
+	/* 同时存下受害者索引本身: 回调时该玩家若已掉线, userid 会解析成 0,
+	   只靠 userid 就找不到应该清理的计时器槽位, 会留下一个已自动关闭的句柄,
+	   下次同一索引吃铁时 delete 它就会抛 "Handle ... is invalid (error 3)"(日志 tank_damage.sp:301)。 */
+	pack.WriteCell(victim);
 	ironCheckTimer[victim][0] = CreateTimer(IRON_CHECK_INTERVAL, checkIronHandler, pack);
 	ironCheckTimer[victim][1] = pack;
 	return Plugin_Continue;
@@ -315,18 +319,20 @@ public Action checkIronHandler(Handle timer, DataPack pack)
 		return Plugin_Continue;
 	pack.Reset();
 	int attacker = GetClientOfUserId(pack.ReadCell()), victim = GetClientOfUserId(pack.ReadCell());
+	int slot = pack.ReadCell();
 	delete pack;
-	if (!isTank(attacker) || !IsValidSurvivor(victim))
+	/* 只清理属于本次计时器的槽位:
+	   ① 受害者已掉线时 victim 解析为 0, 按 victim 清会漏掉真实槽位(残留已关闭句柄 -> 下次 delete 抛异常);
+	   ② 索引可能已被新玩家占用并创建了新的计时器, 不能误清别人的(以句柄身份判断)。 */
+	if (slot >= 0 && slot <= MaxClients && ironCheckTimer[slot][0] == timer)
 	{
-		// victim 已解析为 0 时(原受害者掉线), 只清理索引 0 的占位槽, 不影响新占用该索引的玩家
-		ironCheckTimer[victim][0] = null;
-		ironCheckTimer[victim][1] = null;
-		return Plugin_Stop;
+		ironCheckTimer[slot][0] = null;
+		ironCheckTimer[slot][1] = null;
 	}
+	if (!isTank(attacker) || !IsValidSurvivor(victim))
+		return Plugin_Stop;
 	playerHurts[attacker][victim].iron++;
 	RecordPlayerName(victim);
-	ironCheckTimer[victim][0] = null;
-	ironCheckTimer[victim][1] = null;
 	return Plugin_Stop;
 }
 

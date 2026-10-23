@@ -147,7 +147,6 @@ public void OnPluginStart()
 	SetConVarBounds(L4DInfectedLimit, ConVarBound_Upper, true, 24.0);
 	HookConVarChange(InfectedLimit, OnInfectedChanged);	HookConVarChange(L4DInfectedLimit, OnInfectedChanged);
 	HookConVarChange(SurvivorLimit, OnSurvivorChanged);	HookConVarChange(L4DSurvivorLimit, OnSurvivorChanged);
-	Initialize12v12Capacity();
 
 	KillRes = CreateConVar("l4d_killreservation","0","是否清除大厅预留（需要 Left4Downtown / Left4DHooks）", CVAR_FLAGS,true,0.0,true,1.0);
 	
@@ -217,6 +216,17 @@ public void OnPluginStart()
 
 	// Core settings are owned by the mode CFG. Do not execute a legacy
 	// l4d_superversus.cfg containing removed features or stale team limits.
+
+	/* 12v12 容量初始化必须放在本函数最末尾（所有 ConVar 都建好之后）：
+	   给 l4d_survivor_limit 赋值会同步触发 survivor_limit 的变更钩子
+	   （12v12/playermanagement.sp::survivor_limitChanged -> FixBotCount），
+	   而 FixBotCount 里的 CreateFakeClient() 会让引擎立刻回调本插件的
+	   OnClientPostAdminCheck；那一刻 KillRes / AutoJoin 等 ConVar 还没创建（句柄 0），
+	   直接读 .BoolValue 就抛 "Invalid convar handle 0 (error 4)"。
+	   日志证据：OnPluginStart:150 -> Initialize12v12Capacity:229 -> OnSurvivorChanged:223
+	   -> survivor_limitChanged:154 -> FixBotCount:531(CreateFakeClient)
+	   -> OnClientPostAdminCheck:755 (KillRes.BoolValue)。 */
+	Initialize12v12Capacity();
 }
 
 public void OnInfectedChanged (Handle c, const char[] o, const char[] n)  {L4DInfectedLimit.IntValue = InfectedLimit.IntValue;}
@@ -751,6 +761,12 @@ bool SpawnFakeSurvivorClient(const char[] botName = "SurvivorBot", bool manual =
 // ------------------------------------------------------------------------
 public void OnClientPostAdminCheck(int client)
 {
+	/* 兜底：OnPluginStart 期间（其它插件给 survivor_limit 赋值 -> FixBotCount ->
+	   CreateFakeClient）引擎会同步回调到这里，此时本插件靠后的 ConVar 可能还没创建，
+	   句柄为 0，读 .BoolValue/.IntValue 会抛 "Invalid convar handle 0 (error 4)"。
+	   等 ConVar 齐了以后的正常进服不受影响。 */
+	if (KillRes == null || AutoJoin == null) return;
+
 	// If lobby is full, KillRes is true and l4dt is present, unreserve lobby
 	if(KillRes.BoolValue && IsServerLobbyFull() && l4dt())
 	{

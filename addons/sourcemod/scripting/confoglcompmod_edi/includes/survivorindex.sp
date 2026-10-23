@@ -83,7 +83,19 @@ stock int GetSurvivorIndex(int index)
 		return 0;
 	}
 
-	return iSurvivorIndex[index];
+	int client = iSurvivorIndex[index];
+
+	/* 索引表只在事件里重建（SI_BuildIndex 在 !IsServerProcessing()/!IsPluginEnabled() 时直接返回），
+	   插件被禁用、换图或事件漏收期间会残留旧索引；那个客户端可能早已离服，
+	   调用方拿它去 IsPlayerAlive()/GetClientAbsOrigin() 就会抛
+	   "client is not in game"（日志：FinaleSpawn.sp:87 TooClose -> IsPlayerAlive）。
+	   这里统一过滤并顺手把失效项清掉，所有调用方都不再可能拿到失效索引。 */
+	if (client < 1 || client > MaxClients || !IsClientInGame(client)) {
+		iSurvivorIndex[index] = 0;
+		return 0;
+	}
+
+	return client;
 }
 
 stock bool IsAnySurvivorsAlive()

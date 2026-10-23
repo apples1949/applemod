@@ -18,6 +18,10 @@
 #define DL_SOUND_BREAK1			"physics/metal/metal_box_break1.wav"
 #define DL_SOUND_BREAK2			"physics/metal/metal_box_break2.wav"
 
+// 诊断跟踪日志（排查崩溃用）：写到 addons/sourcemod/logs/l4d2_dlock_trace.log
+// 崩溃是进程级 abort，最后一行就是"死前正在做什么"，因此每秒心跳 + 每次面板发送都记录。
+#define DL_TRACE_FILE			"l4d2_dlock_trace.log"
+
 // 中文文本（原 doorlock.phrases.txt 的 chi 行）
 #define DL_TXT_MOVEOUT			"已解锁，可以开始."
 #define DL_TXT_LOCKED			"安全门已锁定，请等待：%i秒."
@@ -70,7 +74,8 @@ ConVar
 	DL_g_cClientTimeOut,
 	DL_g_cDisplayMode,
 	DL_g_cDisplayPanel,
-	DL_g_cFreezeNodoor;
+	DL_g_cFreezeNodoor,
+	DL_g_cTrace;
 
 bool
 	DL_g_bCvarAllow,
@@ -92,6 +97,7 @@ int
 	DL_g_iClientTimeOut,
 	DL_g_iDisplayMode,
 	DL_g_iDisplayPanel,
+	DL_g_iTrace,
 	DL_g_iTimeout[MAXPLAYERS + 1];
 
 // ========================
@@ -146,6 +152,7 @@ void DL_OnPluginStart()
 	DL_g_cDisplayMode =	CreateConVar("l4d2_dlock_displaymode",	"1",	"设置倒计时的显示模式。(0-隐藏,1-游戏提示,2-屏幕中心,3-聊天框.任何其他数值都可以隐藏倒计时)", FCVAR_NOTIFY);
 	DL_g_cDisplayPanel =	CreateConVar("l4d2_dlock_displaypanel",	"2",	"玩家状态面板的显示模式,0-不显示，1-隐藏连接失败的玩家，2-完整显示", FCVAR_NOTIFY);
 	DL_g_cFreezeNodoor =	CreateConVar("l4d2_dlock_freezenodoor",	"1",	"如果没有启动安全室的门，则冻结生还者", FCVAR_NOTIFY);
+	DL_g_cTrace =		CreateConVar("l4d2_dlock_tracelog",		"1",	"诊断跟踪日志: 1=写入 logs/l4d2_dlock_trace.log (排查崩溃用, 每秒心跳+每次面板发送), 0=关闭", FCVAR_NOTIFY);
 
 	DL_g_cSbStop =		FindConVar("sb_stop");
 	DL_g_cNbStop =		FindConVar("nb_stop");
@@ -164,6 +171,7 @@ void DL_OnPluginStart()
 	DL_g_cDisplayMode.AddChangeHook(DL_CvarChanged);
 	DL_g_cDisplayPanel.AddChangeHook(DL_CvarChanged);
 	DL_g_cFreezeNodoor.AddChangeHook(DL_CvarChanged);
+	DL_g_cTrace.AddChangeHook(DL_CvarChanged);
 	// Observe round boundaries even while confogl has not committed the cvars.
 	DL_HookEvents(true);
 }
@@ -204,6 +212,7 @@ void DL_OnMapEnd()
 
 void DL_OnClientDisconnect(int client)
 {
+	DL_Trace("disconnect: client=%d name-check skip", client);
 	DL_g_iTimeout[client] = 0;
 	DL_g_bIsLoading[client] = false;
 	DL_g_iFrozenUserId[client] = 0;
@@ -232,6 +241,7 @@ void DL_GetCvars()
 	DL_g_iDisplayMode =		DL_g_cDisplayMode.IntValue;
 	DL_g_iDisplayPanel =	DL_g_cDisplayPanel.IntValue;
 	DL_g_bFreezeNodoor =	DL_g_cFreezeNodoor.BoolValue;
+	DL_g_iTrace =		DL_g_cTrace.IntValue;
 
 	if (last != DL_g_bBreakTheDoor)
 	{
@@ -616,6 +626,7 @@ Action DL_tmrImmediateLive(Handle timer)
 Action DL_tmrLoading(Handle timer)
 {
 	if (timer != DL_g_hTimer) return Plugin_Stop;
+	DL_Trace("tmr tick: countdown=%d panel=%d firstRound=%d", DL_g_iCountDown, DL_g_iDisplayPanel, DL_g_bFirstRound);
 	if (DL_IsPlayerFreezeActive()) DL_UpdatePlayerFreezes();
 	// The multiplayer plugin intentionally removes bots on empty servers.
 	// Never consume the preparation period before a human has actually joined.
@@ -667,6 +678,18 @@ Action DL_tmrLoading(Handle timer)
 		DL_LoadingPanel();
 
 	return Plugin_Continue;
+}
+
+// 诊断跟踪：独立文件 + 立即 flush，崩溃后能读到"最后一步"。
+// 不需要跟踪时把 l4d2_dlock_tracelog 设 0（几乎零开销）。
+void DL_Trace(const char[] fmt, any ...)
+{
+	if (DL_g_iTrace <= 0)
+		return;
+
+	char buf[512];
+	VFormat(buf, sizeof(buf), fmt, 2);
+	LogToFileEx(DL_TRACE_FILE, "[%9.3f] %s", GetGameTime(), buf);
 }
 
 void DL_LoadingPanel()
@@ -813,13 +836,20 @@ void DL_LoadingPanel()
 		FormatEx(text, sizeof(text), "另%d名玩家未展开", count - visible);
 		RU_DrawPanelText(panel, text);
 	}
+	DL_Trace("panel: begin count=%d", count);
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		// 显示时长 2 秒：面板每秒重发一次，2 秒足够无缝衔接；而准备阶段结束时
 		// 最后一次发送后最多 2 秒就自动消失，不会挡着开局的准星。
-		if (DL_CanSendPanel(client)) panel.Send(client, DL_PanelHandler, 2);
+		bool canSend = DL_CanSendPanel(client);
+		if (canSend)
+		{
+			int rc = panel.Send(client, DL_PanelHandler, 2);
+			DL_Trace("panel: send client=%d rc=%d", client, rc);
+		}
 	}
 	delete panel;
+	DL_Trace("panel: deleted");
 }
 
 // 会不会「抢掉」玩家正在用的投票面板。
@@ -856,6 +886,7 @@ int DL_PanelHandler(Menu menu, MenuAction action, int param1, int param2)
 
 void DL_LockDoor()
 {
+	DL_Trace("LockDoor: ref=%d idx=%d", DL_g_iStartDoor, DL_g_iStartDoor ? EntRefToEntIndex(DL_g_iStartDoor) : 0);
 	if (DL_g_iStartDoor && EntRefToEntIndex(DL_g_iStartDoor) != -1)
 		SetEntProp(DL_g_iStartDoor, Prop_Send, "m_spawnflags", DOOR_FLAG_SILENT|DOOR_FLAG_IGNORE_USE);
 }

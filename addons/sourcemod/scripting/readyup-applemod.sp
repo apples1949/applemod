@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.3"
+#define PLUGIN_VERSION "10.3.4"
 
 public Plugin myinfo =
 {

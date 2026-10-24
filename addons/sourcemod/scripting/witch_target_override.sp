@@ -1,8 +1,34 @@
 //Harry @ 2021~2022
+//原作者: xZk, BHaType, HarryPotter
+//
+// 1.9.0 (apples1949) 修复记录：
+//   1) 换目标时那记 0 伤害 DMG_BURN 假命中会被自己的 OnTakeDamageAlivePost 当成"真的着火"，
+//      从而建一个 z_witch_burn_time 计时器，到点用 point_hurt 99999 把女巫打死。
+//      现在用 g_bFakeBurnHit[] 标记自己发的那一记，只有真实燃烧伤害才会建计时器。
+//   2) witch_target_override_recalculate_burn_time 语义反了（默认 0 反而建计时器、设 1 却在
+//      女巫刷新时删计时器）。现在改为：0=保持原定燃烧死亡时间（不动计时器）；
+//      1=换目标时把燃烧时间重新计一遍。
+//   3) 跟随用的 TeleportEntity 原来只算水平方向、没有任何射线/贴地检查，会把女巫推进墙里、
+//      推进地板或让她悬空。现在先做 hull 射线，被挡住就转向，并用向下射线贴地。
+//   4) 燃烧计时器回调在 entref 失效时没有清句柄，槽位永久失效。现在用 DataPack 一起带
+//      实体号+entref，回调里无条件清槽位。
+//   5) m_iHealth < 0 的存活判断改成 <= 0（0 血即死）。
+//   6) GetRage() 原来按值传参，调用方的 m_rage/m_wanderrage 永远是 0，导致 "m_rage == 1.0"
+//      这条永远为假。现在改成单返回值，删掉死条件。
+//   7) 跟随几率 GetRandomInt(0,100) 的边界修正；并且 damage 钩子不再受几率控制
+//      （原来没中签的 return 会把后面 SDKHook 一起跳过，导致那类女巫既不能换目标也没有燃烧计时）。
+//   8) OnEntityCreated 里原来有 g_bConfigLoaded 门控，配置执行前刷出的女巫/特感不会被标记成
+//      "不参与视线检测"，那段时间 TraceFilter 会把它们当遮挡物 → 女巫"看不见人"。
+//      现在去掉门控，并在 OnConfigsExecuted 补扫一次已存在的实体。
+//   9) "被生还者打中就停止主动跟随"原来借用 EnemyTime>0 做标志，现在拆成显式 bWitchFollowing[]
+//      （行为不变，只是意图可读）。
+//  10) IsValidEntityIndex 改成显式 && 并加上 MAXENTITY 上限，ResetTimer 循环上限也 clamp。
+//  11) TraceFilter 原来把 entity 0（世界/刷子几何体）也排除掉了 ⇒ 视线检测形同虚设（隔墙也算
+//      看得见）。现在世界几何体会正常遮挡视线。
 
 #pragma semicolon 1
 #pragma newdecls required
-#define PLUGIN_VERSION "1.8"
+#define PLUGIN_VERSION "1.9.0"
 #define DEBUG 0
 
 #include <sourcemod>
@@ -17,8 +43,8 @@
 public Plugin myinfo = 
 {
 	name = "Witch Target Override",
-	author = "xZk, BHaType, HarryPotter",
-	description = "Change target when the witch incapacitates or kills victim + witchs auto follow survivors",
+	author = "apples1949",
+	description = "Change target when the witch incapacitates or kills victim + witchs auto follow survivors (原作者 xZk, BHaType, HarryPotter)",
 	version = PLUGIN_VERSION,
 	url = "https://steamcommunity.com/profiles/76561198026784913/"
 };
@@ -62,12 +88,13 @@ float witch_burn_time;
 int Enemy[MAXENTITY+1];
 float ActionTime[MAXENTITY+1], EnemyTime[MAXENTITY+1], StuckTime[MAXENTITY+1], PauseTime[MAXENTITY+1], LastTime[MAXENTITY+1], 
     TargetDir[MAXENTITY+1][3], LastPos[MAXENTITY+1][3], LastSetPos[MAXENTITY+1][3];
-bool bWitchScared[MAXENTITY+1], bWitchSit[MAXENTITY+1];
+bool bWitchScared[MAXENTITY+1], bWitchSit[MAXENTITY+1], bWitchFollowing[MAXENTITY+1];
 Handle BurnWitchTimer[MAXENTITY+1] = {null};
 bool ge_bInvalidTrace[MAXENTITY+1];
+bool g_bFakeBurnHit[MAXENTITY+1];   // 本插件自己发出去的那一记 0 伤害 DMG_BURN，不算真着火
 float  g_fVPlayerMins[3] = {-16.0, -16.0,  0.0};
 float  g_fVPlayerMaxs[3] = { 16.0,  16.0, 71.0};
-static bool   g_bConfigLoaded;
+static bool   g_bTracesMarked;
 
 public void OnPluginStart()
 {
@@ -122,12 +149,14 @@ public void OnPluginEnd()
 public void OnMapEnd()
 {
 	ResetTimer();
-	g_bConfigLoaded = false;
+	ResetWitchStates();
+	g_bTracesMarked = false;
 }
 
 public void OnConfigsExecuted()
 {
-    g_bConfigLoaded = true;
+	// 插件晚加载、或配置执行前就已经刷出来的实体不会走 OnEntityCreated，这里补扫一次
+	MarkExistingTraceEntities();
 }
 
 public void ConVarChanged_Cvars(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -200,7 +229,9 @@ public void Player_Death(Event event, const char[] event_name, bool dontBroadcas
 
 void WitchAttackTarget(int witch, int target, int addHealth)
 {
-	if(GetEntProp(witch, Prop_Data, "m_iHealth") < 0) return;
+	if (!IsWitch(witch)) return;
+	if (target <= 0 || target > MaxClients) return;
+	if (GetEntProp(witch, Prop_Data, "m_iHealth") <= 0) return;   // 0 血 = 已死，不要再动
 	#if DEBUG
 		PrintToChatAll("witch attacking new target %N, her max health: %d, now health: %d", target, GetEntProp(witch, Prop_Data, "m_iMaxHealth"), GetEntProp(witch, Prop_Data, "m_iHealth"));
 	#endif
@@ -210,9 +241,11 @@ void WitchAttackTarget(int witch, int target, int addHealth)
 		SetEntProp(witch, Prop_Data, "m_iHealth", GetEntProp(witch, Prop_Data, "m_iHealth") + addHealth);
 	}
 
-	if(GetEntityFlags(witch) & FL_ONFIRE )
+	// 真着火判定：火焰状态标记（引擎给女巫点火时会写 m_bIsBurning）
+	bool burning = (GetEntityFlags(witch) & FL_ONFIRE) != 0 || GetEntProp(witch, Prop_Send, "m_bIsBurning") != 0;
+
+	if(burning)
 	{
-		
 		ExtinguishEntity(witch);
 		int flame = GetEntPropEnt(witch, Prop_Send, "m_hEffectEntity");
 		if( flame != -1 )
@@ -220,15 +253,36 @@ void WitchAttackTarget(int witch, int target, int addHealth)
 			AcceptEntityInput(flame, "Kill");
 		}
 
+		// 这一记 0 伤害只是为了骗引擎把 target 认成攻击者（女巫才会改追他），
+		// 不是真的燃烧伤害；用标志位挡掉 OnTakeDamageWitchPost 里的"中弹着火"分支
+		g_bFakeBurnHit[witch] = true;
 		SDKHooks_TakeDamage(witch, target, target, 0.0, DMG_BURN);
+		g_bFakeBurnHit[witch] = false;
+
+		// recalculate_burn_time = 1：换目标时把烧伤时间重新计一遍（0 = 保持原定死亡时间）
+		if (g_bCvarReCalculateBurnOverride && IsWitch(witch))
+		{
+			delete BurnWitchTimer[witch];
+			BurnWitchTimer[witch] = null;
+			if (witch_burn_time > 0.0)
+			{
+				BurnWitchTimer[witch] = CreateTimer(witch_burn_time, BurnWitchDead_Timer, MakeBurnTimerData(witch), TIMER_DATA_HNDL_CLOSE);
+			}
+		}
 	}
 	else
 	{
 		int anim = GetEntProp(witch, Prop_Send, "m_nSequence");
+		g_bFakeBurnHit[witch] = true;
 		SDKHooks_TakeDamage(witch, target, target, 0.0, DMG_BURN);
-		SetEntProp(witch, Prop_Send, "m_nSequence", anim);
-		SetEntProp(witch, Prop_Send, "m_bIsBurning", 0);
-		SDKHook(witch, SDKHook_ThinkPost, PostThink);
+		g_bFakeBurnHit[witch] = false;
+
+		if (IsWitch(witch))   // 这一记万一把她打没了，后面的写入就别做了
+		{
+			SetEntProp(witch, Prop_Send, "m_nSequence", anim);
+			SetEntProp(witch, Prop_Send, "m_bIsBurning", 0);
+			SDKHook(witch, SDKHook_ThinkPost, PostThink);
+		}
 	}
 }
 
@@ -309,63 +363,94 @@ bool IsPlayerIncapOrHanging(int client)
 public void WitchHarasserSet_Event(Event event, const char[] name, bool dontBroadcast)
 {
 	int witchid = event.GetInt("witchid");
+	if (witchid <= MaxClients || !IsValidEntityIndex(witchid)) return;
+
 	bWitchScared[witchid] = true;
 }
 
 //witch follows survivor
 public void witch_spawn(Event event, const char[] event_name, bool dontBroadcast)
 {
-	if(g_bCvarAllow == false || GetRandomInt(0, 100) > g_iWitchChanceFollowsurvivor ) return;
+	if(g_bCvarAllow == false) return;
 
 	int witchid = event.GetInt("witchid");
+	if (witchid <= MaxClients || !IsValidEntityIndex(witchid)) return;
+
 	bWitchScared[witchid] = false;
 	bWitchSit[witchid] = false;
-	CreateTimer(0.5, DelayHookWitch, EntIndexToEntRef(witchid), TIMER_FLAG_NO_MAPCHANGE );
+	bWitchFollowing[witchid] = false;
+	g_bFakeBurnHit[witchid] = false;
 
-	SDKHook(witchid, SDKHook_OnTakeDamageAlivePost, OnTakeDamageWitchPost);	
+	// 实体号可能被复用：新刷出的女巫不该继承上一个实体的燃烧计时器
+	delete BurnWitchTimer[witchid];
+	BurnWitchTimer[witchid] = null;
 
-	if(g_bCvarReCalculateBurnOverride == false)
-	{
-		delete BurnWitchTimer[witchid];
-	}
+	// 跟随是否生效由几率决定；但 damage 钩子必须无条件挂上（换目标 / 燃烧计时都靠它）。
+	// 而且等实体就绪后再挂 —— witch_spawn 事件这一刻实体不一定已经完全建好。
+	bool bFollow = (GetRandomInt(1, 100) <= g_iWitchChanceFollowsurvivor);
+
+	DataPack dp = CreateDataPack();
+	WritePackCell(dp, EntIndexToEntRef(witchid));
+	WritePackCell(dp, bFollow ? 1 : 0);
+	CreateTimer(0.5, DelayHookWitch, dp, TIMER_FLAG_NO_MAPCHANGE | TIMER_DATA_HNDL_CLOSE);
 }
 
-public Action DelayHookWitch(Handle timer, int ref)
+public Action DelayHookWitch(Handle timer, DataPack dp)
 {
-	int witch;
-	if(g_bCvarAllow && ref && (witch = EntRefToEntIndex(ref)) != INVALID_ENT_REFERENCE)
-	{
-		StartHookWitch(witch);
-	}
+	ResetPack(dp);
+	int ref = ReadPackCell(dp);
+	bool bFollow = ReadPackCell(dp) != 0;
+
+	int witch = EntRefToEntIndex(ref);
+	if (witch == INVALID_ENT_REFERENCE || !IsWitch(witch)) return Plugin_Continue;
+
+	SDKHook(witch, SDKHook_OnTakeDamageAlivePost, OnTakeDamageWitchPost);
+
+	if (bFollow && g_bCvarAllow) StartHookWitch(witch);
 
 	return Plugin_Continue;
 }
 
 public void OnEntityCreated(int entity, const char[] classname)
 {
-    if (!g_bConfigLoaded)
-        return;
-
     if (!IsValidEntityIndex(entity))
         return;
 
+    // 不再受 g_bConfigLoaded 门控：配置执行前刷出的女巫/特感同样要参与视线过滤，
+    // 否则那段时间 TraceFilter 会把它们当遮挡物（女巫"看不见人"）。
     switch (classname[0])
     {
-        case 't':
+        case 't', 'i', 'w':
         {
-            if (StrEqual(classname, "tank_rock"))
+            if (IsTraceInvalidClass(classname))
                 ge_bInvalidTrace[entity] = true;
         }
-        case 'i':
-        {
-            if (StrEqual(classname, "infected"))
-                ge_bInvalidTrace[entity] = true;
-        }
-        case 'w':
-        {
-            if (StrEqual(classname, "witch"))
-                ge_bInvalidTrace[entity] = true;
-        }
+    }
+}
+
+static bool IsTraceInvalidClass(const char[] classname)
+{
+    return StrEqual(classname, "infected", false)
+        || StrEqual(classname, "witch", false)
+        || StrEqual(classname, "tank_rock", false);
+}
+
+void MarkExistingTraceEntities()
+{
+    // 配置执行（含插件晚加载）时补扫一次地图上已存在的实体
+    if (g_bTracesMarked) return;
+    g_bTracesMarked = true;
+
+    int maxents = GetMaxEntities();
+    if (maxents > MAXENTITY) maxents = MAXENTITY;
+
+    char classname[16];
+    for (int entity = MaxClients + 1; entity <= maxents; entity++)
+    {
+        if (!IsValidEntity(entity)) continue;
+        GetEdictClassname(entity, classname, sizeof(classname));
+        if (IsTraceInvalidClass(classname))
+            ge_bInvalidTrace[entity] = true;
     }
 }
 
@@ -378,7 +463,10 @@ public void OnEntityDestroyed(int entity)
 	StopHookWitch(entity);
 	bWitchScared[entity] = false;
 	bWitchSit[entity] = false;
+	bWitchFollowing[entity] = false;
+	g_bFakeBurnHit[entity] = false;
 	delete BurnWitchTimer[entity];
+	BurnWitchTimer[entity] = null;   // delete 之后槽位里仍残留旧句柄值，必须显式清掉
 
 	ge_bInvalidTrace[entity] = false;
 }
@@ -399,6 +487,7 @@ public void StartHookWitch(int witch)
 	SetVector(LastSetPos[witch], 0.0, 0.0, 0.0);
 	NormalizeVector(TargetDir[witch], TargetDir[witch]); 
 	SDKHook(witch, SDKHook_ThinkPost, ThinkWitch);
+	bWitchFollowing[witch] = true;
 
 	if(GetEntProp(witch, Prop_Send, "m_nSequence") == anim_ducking)
 	{
@@ -417,6 +506,7 @@ public void StopHookWitch(int witch)
 
 public void DeleteWitch(int witch)
 {
+    bWitchFollowing[witch] = false;
     Enemy[witch] = 0;
     EnemyTime[witch] = 0.0;
     LastTime[witch] = 0.0;
@@ -433,6 +523,7 @@ public Action ThinkWitch(int witch)
 	if(bWitchScared[witch])
 	{
 		SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
+		bWitchFollowing[witch] = false;
 		return Plugin_Continue;
 	}
 
@@ -454,10 +545,8 @@ public Action ThinkWitch(int witch)
 	
 	float witchAngle[3]; 
 	float witchPos[3];
-	float lastPos[3]; 
 	GetEntPropVector(witch, Prop_Send, "m_angRotation", witchAngle);
  	GetEntPropVector(witch, Prop_Send, "m_vecOrigin", witchPos);	
-	CopyVector(LastPos[witch], lastPos);
 	CopyVector(witchPos, LastPos[witch]);
 	int m_hOwnerEntity = GetEntProp(witch, Prop_Send, "m_hOwnerEntity"); 
 	#if DEBUG
@@ -469,6 +558,7 @@ public Action ThinkWitch(int witch)
 		if( m_nSequence == 39 || ( 44 <= m_nSequence && m_nSequence <= 51) )
 		{		
 			SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
+			bWitchFollowing[witch] = false;
 			return Plugin_Continue;
 		}
 	}
@@ -477,17 +567,16 @@ public Action ThinkWitch(int witch)
 		if( m_nSequence == 31 || ( 36 <= m_nSequence && m_nSequence <= 39) )
 		{		
 			SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
+			bWitchFollowing[witch] = false;
 			return Plugin_Continue;
 		}
 	}
 
-	float m_rage;
- 	float m_wanderrage;
-	float rage = GetRage(witch, m_rage, m_wanderrage);
+	float rage = GetRage(witch);
 	#if DEBUG
-		PrintToChatAll("rage: %.2f, m_rage: %.2f, m_wanderrage: %.2f ", rage, m_rage, m_wanderrage );
+		PrintToChatAll("rage: %.2f", rage);
 	#endif
-	if(rage > 0.5 || m_rage == 1.0)
+	if(rage > 0.5)
 	{
 		StuckTime[witch] = 0.0;
 		return Plugin_Continue;
@@ -576,8 +665,21 @@ public Action ThinkWitch(int witch)
 	CopyVector(moveDir,temp);
 	ScaleVector(temp, g_fWitchFollowSpeed*duration);
 	AddVectors(witchPos,temp,newWitchPos);
+
+	// 搬运前先确认这一步走得到：hull 射线防穿墙 + 向下射线贴地。
+	// 原来直接 TeleportEntity 会把女巫推进墙/地板里，或者让她悬空。
+	if (!ComputeSafeWitchPos(witch, witchPos, newWitchPos))
+	{
+		// 前方走不通：立刻换个方向，别贴着墙磨到永远
+		RotateVector(up, TargetDir[witch], GetRandomFloat(50.0, 310.0)*Pai/180.0, TargetDir[witch]);
+		TargetDir[witch][2] = 0.0;
+		NormalizeVector(TargetDir[witch], TargetDir[witch]);
+		PauseTime[witch] = 1.0;
+		StuckTime[witch] = 0.0;
+		return Plugin_Continue;
+	}
+
 	TeleportEntity(witch, newWitchPos, newWitchAngle,  NULL_VECTOR);
-	CopyVector(witchPos, lastPos);	
 	SetEntProp(witch, Prop_Send, "m_fFlags",newFlag);
 	 
 	if(m_nSequence != anim_walk)
@@ -610,7 +712,7 @@ int FindNextEnemy(float witchPos[3] )
 	float playerPos[3];
 	for(int i = 1; i <= MaxClients; i++)
 	{
-		if(IsClientInGame(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i) )
+		if(IsClientInGame(i) && GetClientTeam(i) == L4D_TEAM_SURVIVORS && IsPlayerAlive(i) )
 		{
 			GetClientEyePosition(i, playerPos);
 
@@ -644,22 +746,76 @@ void SetVector(float target[3], float x, float y, float z)
 	target[2] = z;
 }
 
-float GetRage(int witch, float rage, float wanderRage)
+// 计算这一步的安全落点：
+//   1) 水平方向做 hull 射线，被墙/道具挡住就返回 false（这一步不走，调用方转向）
+//   2) 起点与终点各贴一次地，用两者的地面高差修正 z
+//      （不直接把 z 设成地面高度 —— 女巫 origin 到底在脚底还是身体中心由模型决定，
+//        用"相对地面高度"平移才不会被抬高或埋进地里）
+bool ComputeSafeWitchPos(int witch, const float from[3], float to[3])
 {
-	rage = GetEntPropFloat(witch, Prop_Send, "m_rage");
+	float hullMins[3] = {-13.0, -13.0,  8.0};   // 底部抬高 8：小台阶/缓坡不算阻挡
+	float hullMaxs[3] = { 13.0,  13.0, 72.0};
+	float flatPos[3];
+
+	Handle trace = TR_TraceHullFilterEx(from, to, hullMins, hullMaxs, MASK_PLAYERSOLID, TraceFilter_WitchSelf, witch);
+	bool blocked = TR_DidHit(trace);
+	TR_GetEndPosition(flatPos, trace);
+	delete trace;
+
+	if (blocked) return false;   // 前方有墙/护栏/道具：这一步不走
+
+	float fromGround[3], toGround[3];
+	if (!TraceGroundZ(witch, from, fromGround)) return false;   // 现在脚下就没地面（异常）
+	if (!TraceGroundZ(witch, flatPos, toGround)) return false;   // 目的地脚下是空的（悬崖/地图外）
+
+	to[0] = flatPos[0];
+	to[1] = flatPos[1];
+	to[2] = from[2] + (toGround[2] - fromGround[2]);
+	return true;
+}
+
+// 在 pos 处向下找地面，返回地面高度（hull 底部 = 地面）
+bool TraceGroundZ(int witch, const float pos[3], float ground[3])
+{
+	float hullMins[3] = {-13.0, -13.0,  0.0};
+	float hullMaxs[3] = { 13.0,  13.0, 72.0};
+	float start[3], end[3];
+
+	start[0] = pos[0]; start[1] = pos[1]; start[2] = pos[2] + 18.0;
+	end[0]   = pos[0]; end[1]   = pos[1]; end[2]   = pos[2] - 96.0;
+
+	Handle trace = TR_TraceHullFilterEx(start, end, hullMins, hullMaxs, MASK_PLAYERSOLID, TraceFilter_WitchSelf, witch);
+	bool hit = TR_DidHit(trace);
+	TR_GetEndPosition(ground, trace);
+	delete trace;
+
+	return hit;
+}
+
+// 搬运用的射线过滤：忽略女巫自己和玩家，其它（世界几何体/道具/特感小怪）都算阻挡
+public bool TraceFilter_WitchSelf(int entity, int contentsMask, int witch)
+{
+	if (entity == witch)
+		return false;
+
+	if (IsValidClientIndex(entity))
+		return false;
+
+	return true;
+}
+
+// 返回 m_rage 与 m_wanderrage 的最大值
+// （原来是按值传参，调用方拿到的 m_rage/m_wanderrage 永远是 0，那条 "m_rage == 1.0" 永远是假）
+float GetRage(int witch)
+{
+	float rage = GetEntPropFloat(witch, Prop_Send, "m_rage");
+	float wanderRage = 0.0;
 	if(L4D2Version)
 	{
 		wanderRage = GetEntPropFloat(witch, Prop_Send, "m_wanderrage");
 	}
-	else
-	{
-		wanderRage = 0.0;
-	}
-	
-	if(rage>wanderRage)
-		return rage;
-	else 
-		return wanderRage;
+
+	return (rage > wanderRage) ? rage : wanderRage;
 }
 
 bool IsWitch(int entity)
@@ -700,23 +856,52 @@ void RotateVector(float direction[3], float vec[3], float alfa, float result[3])
 
 public void OnTakeDamageWitchPost(int witch, int attacker, int inflictor, float damage, int damagetype)
 {
-	if(EnemyTime[witch] > 0.0 && attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == 2)
+	// 被生还者打中 ⇒ 停掉"主动跟随"，把控制权交回引擎 AI
+	// （原来是借用 EnemyTime > 0 当"曾跟随"的标志，现在用显式状态位，意图明确）
+	if(bWitchFollowing[witch] && attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == L4D_TEAM_SURVIVORS)
 	{
 		StopHookWitch(witch);
 	}
 
-	if( damagetype & DMG_BURN && BurnWitchTimer[witch] == null && g_bCvarReCalculateBurnOverride == false)
+	// 本插件自己发的那记 0 伤害 DMG_BURN 只是为了让引擎把她换成 target 的攻击者，
+	// 不是真的着火 —— 不能再拿它来建燃烧计时器（否则换完目标 15 秒后她会被自己打死）
+	if(g_bFakeBurnHit[witch]) return;
+
+	if( (damagetype & DMG_BURN) && BurnWitchTimer[witch] == null && witch_burn_time > 0.0 )
 	{
-		BurnWitchTimer[witch] = CreateTimer(witch_burn_time, BurnWitchDead_Timer, EntIndexToEntRef(witch));
+		BurnWitchTimer[witch] = CreateTimer(witch_burn_time, BurnWitchDead_Timer, MakeBurnTimerData(witch), TIMER_DATA_HNDL_CLOSE);
 	}
 }
 
-public Action BurnWitchDead_Timer(Handle timer, int witch)
+// 计时器数据同时带上"创建时的实体号"和"entref"：
+// 这样回调里不管实体还在不在，都能把对应槽位的句柄清干净
+// （原来实体失效时干脆不清，槽位里留着旧句柄，之后 "== null" 永远为假）
+DataPack MakeBurnTimerData(int witch)
 {
-	if ( witch && ( witch = EntRefToEntIndex(witch) ) != INVALID_ENT_REFERENCE )
+	DataPack dp = CreateDataPack();
+	WritePackCell(dp, witch);
+	WritePackCell(dp, EntIndexToEntRef(witch));
+	return dp;
+}
+
+public Action BurnWitchDead_Timer(Handle timer, DataPack dp)
+{
+	ResetPack(dp);
+	int slot = ReadPackCell(dp);
+	int ref = ReadPackCell(dp);
+
+	if (slot < 0 || slot > MAXENTITY) return Plugin_Continue;
+
+	BurnWitchTimer[slot] = null;   // 句柄无条件清掉
+
+	// 只有"同一个实体实例"还在时才真的打死她（实体号可能已经被别的实体复用）
+	if (ref && witch_burn_time > 0.0 && EntIndexToEntRef(slot) == ref)
 	{
-		ForceDamageEntity(-1, 99999, witch);
-		BurnWitchTimer[witch] = null;
+		int witch = EntRefToEntIndex(ref);
+		if (witch != INVALID_ENT_REFERENCE && IsWitch(witch))
+		{
+			ForceDamageEntity(-1, 99999, witch);
+		}
 	}
 
 	return Plugin_Continue;	
@@ -750,15 +935,44 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 void ResetTimer()
 {
 	int maxents = GetMaxEntities();
+	if (maxents > MAXENTITY) maxents = MAXENTITY;
+
 	for (int entity = MaxClients + 1; entity <= maxents; entity++)
 	{
 		delete BurnWitchTimer[entity];
+		BurnWitchTimer[entity] = null;   // delete 之后要把槽位清干净，不能只 delete
+	}
+}
+
+// 换图时同步清状态：实体号会被复用，残留的跟随/静止/视线标记会套到新实体上
+void ResetWitchStates()
+{
+	int maxents = GetMaxEntities();
+	if (maxents > MAXENTITY) maxents = MAXENTITY;
+
+	for (int entity = MaxClients + 1; entity <= maxents; entity++)
+	{
+		if (bWitchFollowing[entity])
+			SDKUnhook(entity, SDKHook_ThinkPost, ThinkWitch);
+
+		bWitchScared[entity] = false;
+		bWitchSit[entity] = false;
+		bWitchFollowing[entity] = false;
+		g_bFakeBurnHit[entity] = false;
+		ge_bInvalidTrace[entity] = false;
+		Enemy[entity] = 0;
+		EnemyTime[entity] = 0.0;
+		LastTime[entity] = 0.0;
+		StuckTime[entity] = 0.0;
+		PauseTime[entity] = 0.0;
+		ActionTime[entity] = 0.0;
 	}
 }
 
 bool IsValidEntityIndex(int entity)
 {
-    return (MaxClients+1 <= entity <= GetMaxEntities());
+    // 显式 && ，并加上 MAXENTITY 上限（数组是按 MAXENTITY+1 开的）
+    return entity > MaxClients && entity <= MAXENTITY && entity <= GetMaxEntities();
 }
 
 float Absolute(float number)
@@ -803,6 +1017,11 @@ bool IsVisibleTo(float fWitchPos[3], float fPlayerPos[3], int player)
 public bool TraceFilter(int entity, int contentsMask, int client)
 {
     if (entity == client)
+        return true;
+
+    // 世界/刷子几何体（entity 0）必须参与遮挡。
+    // 原来这里把 0 也一起排掉了，导致 IsVisibleTo 隔墙也会认为"看得见"。
+    if (entity == 0)
         return true;
 
     if (IsValidClientIndex(entity))

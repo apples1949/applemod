@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.9.3-applefix"
+#define PLUGIN_VERSION 		"2.9.1"
 
 /*======================================================================================
 	Plugin Info:
@@ -91,10 +91,7 @@
 #include <dhooks>
 
 #define GAMEDATA			"command_buffer.games"
-#define ARGS_BUFFER_LENGTH	1024
-#define MAX_REPLAY_COMMAND  (ARGS_BUFFER_LENGTH - 3)
-#define RETRY_CELL          (ARGS_BUFFER_LENGTH / 4)
-#define MAX_REPLAY_ATTEMPTS 32
+#define ARGS_BUFFER_LENGTH	8192
 
 #define DEBUGGING			0
 #if DEBUGGING
@@ -103,9 +100,7 @@
 
 bool g_NextFrame;
 ArrayList g_aCommandList;
-int g_ReplayAttempt;
-int g_QueuedCommands;
-int g_FailedReplays;
+char g_sCurrentCommand[ARGS_BUFFER_LENGTH];
 
 public Plugin myinfo =
 {
@@ -118,11 +113,9 @@ public Plugin myinfo =
 
 public void OnPluginStart()
 {
-	ConVar version = CreateConVar("command_buffer_version", PLUGIN_VERSION, "Command and ConVar - Buffer Overflow Fixer plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	version.SetString(PLUGIN_VERSION);
-	RegAdminCmd("sm_bufferstatus", BufferStatus, ADMFLAG_CONFIG, "Show buffered command retry status");
+	CreateConVar("command_buffer_version", PLUGIN_VERSION, "Command and ConVar - Buffer Overflow Fixer plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
-	g_aCommandList = new ArrayList(RETRY_CELL + 1);
+	g_aCommandList = new ArrayList(ByteCountToCells(ARGS_BUFFER_LENGTH));
 
 	// ====================================================================================================
 	// Detour - Anytime convars are added to the buffer this will fire
@@ -139,6 +132,9 @@ public void OnPluginStart()
 
 	if( !hDetour )
 		SetFailState("Failed to find \"CCommandBuffer::InsertCommand\" signature.");
+
+	if( !DHookEnableDetour(hDetour, false, InsertCommand) )
+		SetFailState("Failed to detour \"CCommandBuffer::InsertCommand\".");
 
 	if( !DHookEnableDetour(hDetour, true, InsertCommandPost) )
 		SetFailState("Failed to detour post \"CCommandBuffer::InsertCommand\".");
@@ -170,7 +166,7 @@ Action sm_cvar_test(int client, int args)
 		cvar = FindConVar(temp);
 		if( cvar != null && cvar.IntValue != 1 ) cv++;
 	}
-	ReplyToCommand(client, "%d out of %d cvars are wrong.", cv, MAX_CVARS);
+	ReplyToCommand(c, "%d out of %d cvars are wrong.", cv, MAX_CVARS);
 	return Plugin_Handled;
 }
 #endif
@@ -178,11 +174,11 @@ Action sm_cvar_test(int client, int args)
 // ====================================================================================================
 // Detour
 // ====================================================================================================
-Action BufferStatus(int client, int args)
+MRESReturn InsertCommand(Handle hReturn, Handle hParams)
 {
-	ReplyToCommand(client, "[Buffer] v%s | pending=%d queued=%d exhausted=%d", PLUGIN_VERSION,
-		g_aCommandList.Length, g_QueuedCommands, g_FailedReplays);
-	return Plugin_Handled;
+	// Get command argument.
+	DHookGetParamString(hParams, 1, g_sCurrentCommand, sizeof(g_sCurrentCommand));
+	return MRES_Ignored;
 }
 
 MRESReturn InsertCommandPost(Handle hReturn, Handle hParams)
@@ -191,25 +187,6 @@ MRESReturn InsertCommandPost(Handle hReturn, Handle hParams)
 	bool bSuccess = DHookGetReturn(hReturn);
 	if( bSuccess )
 		return MRES_Ignored;
-
-	// pArgS points into the remaining CFG, NOT a null-terminated single command.
-	// Copy exactly nCommandSize bytes; copying the tail duplicates later loads and
-	// is then truncated by SourceMod's 1024-byte InsertServerCommand formatter.
-	int length = DHookGetParam(hParams, 2);
-	if (length <= 0 || length > MAX_REPLAY_COMMAND)
-	{
-		LogError("Cannot replay command of %d bytes (transport maximum %d); not treating an overlong command as buffer pressure.", length, MAX_REPLAY_COMMAND);
-		return MRES_Ignored;
-	}
-	if (g_ReplayAttempt >= MAX_REPLAY_ATTEMPTS)
-	{
-		g_FailedReplays++;
-		LogError("Command replay failed after %d attempts (%d bytes). Check sm_bufferstatus and startup logs.", g_ReplayAttempt, length);
-		return MRES_Ignored;
-	}
-	char command[ARGS_BUFFER_LENGTH];
-	DHookGetParamString(hParams, 1, command, length + 1);
-	command[length] = '\0';
 
 	// The command buffer overflowed. Add the commands again on the next frame.
 	if( !g_NextFrame )
@@ -220,12 +197,10 @@ MRESReturn InsertCommandPost(Handle hReturn, Handle hParams)
 
 	// Debug print
 	#if DEBUGGING
-		PrintToServer("Fix: [%s]", command);
+		PrintToServer("Fix: [%s]", g_sCurrentCommand);
 	#endif
 
-	int row = g_aCommandList.PushString(command);
-	g_aCommandList.Set(row, g_ReplayAttempt + 1, RETRY_CELL);
-	g_QueuedCommands++;
+	g_aCommandList.PushString(g_sCurrentCommand);
 
 	// Prevent "Cbuf_AddText: buffer overflow" message
 	DHookSetReturn(hReturn, true);
@@ -247,7 +222,7 @@ void OnNextFrame(any na)
 
 	// g_aCommandList.Clear(); // Does not free memory, delete and re-create.
 	delete g_aCommandList;
-	g_aCommandList = new ArrayList(RETRY_CELL + 1);
+	g_aCommandList = new ArrayList(ByteCountToCells(ARGS_BUFFER_LENGTH));
 
 	static char sCommand[ARGS_BUFFER_LENGTH];
 
@@ -260,29 +235,12 @@ void OnNextFrame(any na)
 			PrintToServer("Ins: %d %s", iCount++, sCommand);
 		#endif
 
-		// Insert only this command. Do not propagate its retry count to commands
-		// generated by the plugins/CFGs executed during ServerExecute below.
+		// Insert
 		aCmdList.GetString(i, sCommand, sizeof(sCommand));
-		g_ReplayAttempt = aCmdList.Get(i, RETRY_CELL);
 		InsertServerCommand("%s", sCommand);
-		g_ReplayAttempt = 0;
 
 		// Flush the command buffer now. Outside of loop doesn't work - the convars would remain incorrect.
 		ServerExecute();
-
-		// If this replay (or a command it executed) overflowed again, keep the
-		// rest behind it. Otherwise a consumer could run before its provider on
-		// the same frame, despite both originally being queued in the right order.
-		if (g_aCommandList.Length > 0)
-		{
-			for (int remaining = i + 1; remaining < length; remaining++)
-			{
-				aCmdList.GetString(remaining, sCommand, sizeof(sCommand));
-				int row = g_aCommandList.PushString(sCommand);
-				g_aCommandList.Set(row, aCmdList.Get(remaining, RETRY_CELL), RETRY_CELL);
-			}
-			break;
-		}
 	}
 
 	delete aCmdList;

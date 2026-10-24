@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.5.1",
+    version     = "1.5.2",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -1551,11 +1551,20 @@ void GetHUD2_Text(char[] output, int size)
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
     FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
 
-    // !jg / !sur / !inf 是 l4d_superversus（多人插件）的指令，只有多人配置才有；
-    // 4 人配置里这些指令不存在，不能再提示，否则玩家敲了没反应。
+    // 第二行按模式给对应的指令提示（第一行永远是 服务器名(玩家/在线/上限)）：
+    //   - 多人配置（12v12）：!jg / !sur / !inf 是 l4d_superversus（多人插件）的指令，只有这种配置才有；
+    //   - 其它配置（原版/4v4）：这些指令不存在，敲了没反应，改为提示本插件的开关 HUD 指令
+    //     （!onhud / !offhud 始终注册，任何模式都能用）；
+    //   - 若 SendProxy 扩展缺失，开关 HUD 指令会被拒绝执行（见 CheckHUDHookReady），
+    //     此时不能给无效提示，第二行只留时间。
     if (IsMultiplayerMode())
     {
         FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者",
+            hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
+    }
+    else if (g_bSendProxyAvailable)
+    {
+        FormatEx(output, size, "%s(%d/%d/%d)\n%s !onhud/!offhud开关HUD",
             hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
     }
     else

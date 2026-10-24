@@ -1,0 +1,97 @@
+// Witch Control - translation file
+// 原作者: 我是派蒙啊 (https://github.com/Paimon-Kawaii/L4D2-Plugins)
+// 本文件为补全的翻译（仓库里原本没有任何 phrases 文件，LoadTranslations 必定失败、所有 %T 都显示原始 key）
+// 语言代码: en = 英文, chi = 简体中文, zho = 繁体中文
+
+"Phrases"
+{
+	// ===== 女巫旁的世界提示（witch_spawn 后显示 10 秒）=====
+	"WitchControl"
+	{
+		"en"	"Press E on the Witch to take control"
+		"chi"	"对着女巫按 E 接管控制"
+		"zho"	"對著女巫按 E 接管控制"
+	}
+
+	// ===== 接管后的按键提示（gameinstructor）=====
+	"WitchAttack"
+	{
+		"en"	"Attack: enrage and pounce"
+		"chi"	"左键：激怒扑击"
+		"zho"	"左鍵：激怒撲擊"
+	}
+	"WitchSkill"
+	{
+		"en"	"Climb: aim at a ledge edge"
+		"chi"	"右键：攀爬边缘"
+		"zho"	"右鍵：攀爬邊緣"
+	}
+	"WitchDuck"
+	{
+		"en"	"Sit down / stand up"
+		"chi"	"Ctrl：坐下 / 起身"
+		"zho"	"Ctrl：坐下 / 起身"
+	}
+	"WitchLose"
+	{
+		"en"	"Release control"
+		"chi"	"再按 E 解除控制"
+		"zho"	"再按 E 解除控制"
+	}
+
+	// ===== 攀爬判定提示 =====
+	"NarrowSpace"
+	{
+		"en"	"Not enough headroom to climb"
+		"chi"	"头顶空间不足，无法攀爬"
+		"zho"	"頭頂空間不足，無法攀爬"
+	}
+	"TargetTooFar"
+	{
+		"en"	"Target is too far"
+		"chi"	"目标太远"
+		"zho"	"目標太遠"
+	}
+	"TargetTooHigh"
+	{
+		"en"	"Target height is invalid"
+		"chi"	"目标高度不合适"
+		"zho"	"目標高度不合適"
+	}
+	"TargetBlocked"
+	{
+		"en"	"Target position is blocked"
+		"chi"	"目标位置被阻挡"
+		"zho"	"目標位置被阻擋"
+	}
+	"ClimbSuccess"
+	{
+		"en"	"Climbing"
+		"chi"	"开始攀爬"
+		"zho"	"開始攀爬"
+	}
+
+	// ===== 聊天提示 =====
+	"WitchBeenTaken"
+	{
+		"#format"	"{1:s}"
+		"en"	"{1} is already controlling this Witch"
+		"chi"	"{1} 已经在控制这个女巫了"
+		"zho"	"{1} 已經在控制這個女巫了"
+	}
+
+	// ===== 选女巫菜单（当前源码里是注释掉的，保留备用）=====
+	"MenuTitle"
+	{
+		"en"	"Choose a Witch to control"
+		"chi"	"选择要控制的女巫"
+		"zho"	"選擇要控制的女巫"
+	}
+	"MenuHintDistance"
+	{
+		"#format"	"{1:.1f}"
+		"en"	"distance {1:.1f}"
+		"chi"	"距离 {1:.1f}"
+		"zho"	"距離 {1:.1f}"
+	}
+}

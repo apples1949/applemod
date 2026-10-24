@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.2.4"
+#define PLUGIN_VERSION "2.2.6"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -52,6 +52,7 @@ bool g_bFixStartLogged;             // 本次修复的"开始修复"表头是否
 bool g_bChecked[MAXPLAYERS + 1];      // 某玩家是否正在等待自己的还原计时器
 int g_iFailureCount[MAXPLAYERS + 1];  // 某玩家还原失败的次数
 bool g_bJoinTeamUsed[MAXPLAYERS + 1]; // 插件自己执行队伍转移期间临时放行 jointeam
+int g_iNoAuthTicks[MAXPLAYERS + 1];   // 连续拿不到 SteamID 的秒数（非 Steam 客户端/授权未完成）
 
 Handle g_hCheckTimer = INVALID_HANDLE;   // 5 秒检查计时器
 Handle g_hTimeoutTimer = INVALID_HANDLE; // 超时兜底计时器
@@ -73,6 +74,7 @@ ConVar g_cvFinalMapDisable;
 ConVar g_cvChangeMapDisable;
 ConVar g_cvIgnoreOffline;
 ConVar g_cvLog;
+ConVar g_cvNoAuthSpectate;
 ConVar g_hZMaxPlayerZombies;
 
 bool g_bCvarEnabled;
@@ -84,6 +86,7 @@ int g_iCvarFinalMapDisable;   // final_map_disable 的整数取值（0/1/2/3）
 bool g_bCvarChangeMapDisable;
 bool g_bCvarIgnoreOffline;
 bool g_bCvarLog;
+bool g_bCvarNoAuthSpectate;   // 拿不到 SteamID 的玩家是否让到旁观（默认 1）
 int g_iZMaxPlayerZombies;
 
 // ========== Plugin Info ==========
@@ -204,6 +207,10 @@ public void OnPluginStart()
 		"是否把队伍记录与修复过程写入独立日志 addons/sourcemod/logs/l4d2_fix_team_shuffle_edi.log（0=不写 1=写）",
 		FCVAR_NONE, true, 0.0, true, 1.0);
 
+	g_cvNoAuthSpectate = CreateConVar("l4d2_fix_team_shuffle_no_auth_spectate", "1",
+		"拿不到 SteamID 的玩家（非 Steam 客户端/授权未完成）是否让到旁观：1=让到旁观（默认，避免其占着队伍名额把该归位的人挤掉）；0=不处理，保持引擎分配的队伍",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
 	g_bCvarLog = g_cvLog.BoolValue;
 	InitFixLogFile();
 
@@ -219,6 +226,7 @@ public void OnPluginStart()
 	g_cvChangeMapDisable.AddChangeHook(OnCvarChange_ChangeMapDisable);
 	g_cvIgnoreOffline.AddChangeHook(OnCvarChange_IgnoreOffline);
 	g_cvLog.AddChangeHook(OnCvarChange_Log);
+	g_cvNoAuthSpectate.AddChangeHook(OnCvarChange_NoAuthSpectate);
 
 	// jointeam 与 changelevel 监听始终存在；总开关关闭时因无锁队/记录函数
 	// 直接返回而不产生效果。
@@ -241,6 +249,7 @@ void GetCvars()
 	g_bCvarChangeMapDisable = g_cvChangeMapDisable.BoolValue;
 	g_bCvarIgnoreOffline = g_cvIgnoreOffline.BoolValue;
 	g_bCvarLog = g_cvLog.BoolValue;
+	g_bCvarNoAuthSpectate = g_cvNoAuthSpectate.BoolValue;
 
 	if (g_hZMaxPlayerZombies != null)
 		g_iZMaxPlayerZombies = g_hZMaxPlayerZombies.IntValue;
@@ -320,6 +329,11 @@ public void OnCvarChange_IgnoreOffline(ConVar convar, const char[] oldValue, con
 public void OnCvarChange_Log(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	g_bCvarLog = convar.BoolValue;
+}
+
+public void OnCvarChange_NoAuthSpectate(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	g_bCvarNoAuthSpectate = convar.BoolValue;
 }
 
 public void OnCvarChange_ZMax(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -919,6 +933,7 @@ public void OnClientPutInServer(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
+	g_iNoAuthTicks[client] = 0;
 
 	if (!g_bTeamLock || IsFakeClient(client))
 		return;
@@ -935,6 +950,7 @@ public void OnClientDisconnect(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
+	g_iNoAuthTicks[client] = 0;
 }
 
 void StartClientRestore(int client)
@@ -992,7 +1008,58 @@ public Action Timer_RestoreClient(Handle timer, any data)
 
 	char auth[MAX_AUTHID_LENGTH];
 	if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+	{
+		/* 拿不到 SteamID（非 Steam 客户端 / 授权还没完成）⇒ 无法与记录表比对。
+		   以前这里直接返回 Plugin_Continue：这种玩家既不会被当成"换图后新加入"
+		   赶去旁观，也不会被腾位逻辑选中，却实实在在占着一个真人名额，
+		   满员时就把本该归位的人挤在旁观里
+		   （2026-10-24 23:06 c2m4_barns：无 SteamID 的 JOJO 占了生还者第 12 席，
+		   apples1949 一直回不去）。
+		   现在给 5 秒授权宽限，之后按"不在记录中"处理：先移到旁观腾出名额；
+		   计时器不结束，万一之后授权到位、能对上记录，再按正常流程归位。 */
+		g_iNoAuthTicks[client]++;
+
+		// 开关关闭（l4d2_fix_team_shuffle_no_auth_spectate 0）：不处理，
+		// 保持引擎分配的队伍（即修复前的旧行为）
+		if (!g_bCvarNoAuthSpectate)
+			return Plugin_Continue;
+
+		if (g_iNoAuthTicks[client] > 5)
+		{
+			// 旁观里挂机托管着生还者 Bot 同样占名额：先接管回来，再退回旁观
+			if (currentTeam == TEAM_SPECTATOR && IsClientIdle(client))
+			{
+				L4D_TakeOverBot(client);
+
+				if (g_bCvarLog)
+					FixLogClient(client, "修复：拿不到 SteamID 且正挂机托管 Bot，先接管解除托管");
+			}
+
+			if (GetClientTeam(client) != TEAM_SPECTATOR)
+			{
+				g_bJoinTeamUsed[client] = true;
+				ChangeClientTeam(client, TEAM_SPECTATOR);
+				g_bJoinTeamUsed[client] = false;
+
+				// 玩家视角的提示：突然被移出队伍必须给个原因
+				PrintToChat(client, "\x04[队伍修正]\x01 读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；解锁后可以自行选队。");
+
+				if (g_bCvarLog)
+				{
+					char sBefore[16], sAfter[16];
+					GetTeamLabel(currentTeam, sBefore, sizeof(sBefore));
+					GetTeamLabel(GetClientTeam(client), sAfter, sizeof(sAfter));
+
+					FixLogClient(client, "修复：拿不到 SteamID，无法核对记录，%s -> %s", sBefore, sAfter);
+				}
+			}
+		}
+
 		return Plugin_Continue;
+	}
+
+	// 授权已到位：清空宽限计数
+	g_iNoAuthTicks[client] = 0;
 
 	/* 目标在启动时已经冻结，这里只查表。
 	   旧实现在这里每秒重读 m_bAreTeamsFlipped 再算 IsTeamSwapped()：不同玩家的
@@ -1749,6 +1816,7 @@ void ResetClientFlags()
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
+		g_iNoAuthTicks[client] = 0;
 	}
 }
 
@@ -1972,6 +2040,70 @@ bool TryEvictFromTeam(int targetTeam, int excludeClient, int preferTeam)
 	return false;
 }
 
+// 客户端当前是否拿得到 SteamID（拿不到 = 非 Steam 客户端 / 授权还没完成，
+// 这种客户端无法与记录表比对，也就无法证明自己该站哪一边）
+bool HasSteamAuth(int client)
+{
+	char auth[MAX_AUTHID_LENGTH];
+	return GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth));
+}
+
+// 目标队伍里一个"拿不到 SteamID"的占位者（排除 excludeClient 与 AI Bot）
+int FindNoAuthTeamOccupant(int team, int excludeClient)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == excludeClient || !IsClientInGame(i) || IsFakeClient(i))
+			continue;
+
+		if (GetClientTeam(i) != team)
+			continue;
+
+		// 能核对记录的人不能动：他们要么本来就该在这边，要么由 TryEvictFromTeam 负责
+		if (HasSteamAuth(i))
+			continue;
+
+		return i;
+	}
+
+	return 0;
+}
+
+/* 满员时把"拿不到 SteamID"的占位者让到旁观，腾出一个真人名额。
+   这种人既不在记录里、也无法核对，按现有策略本来就不该占队伍名额；
+   记录里的玩家必须优先落位。返回 true 表示确实腾出了名额。 */
+bool MakeRoomByEvictingNoAuth(int team, int excludeClient)
+{
+	// 开关关闭时不做任何腾位
+	if (!g_bCvarNoAuthSpectate)
+		return false;
+
+	if (g_iEvictBudget <= 0)
+		return false;
+
+	int intruder = FindNoAuthTeamOccupant(team, excludeClient);
+	if (intruder == 0)
+		return false;
+
+	g_bJoinTeamUsed[intruder] = true;
+	ChangeClientTeam(intruder, TEAM_SPECTATOR);
+	g_bJoinTeamUsed[intruder] = false;
+	g_iEvictBudget--;
+
+	// 玩家视角的提示：被让出名额同样要说明原因
+	PrintToChat(intruder, "\x04[队伍修正]\x01 队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；解锁后可以自行选队。");
+
+	if (g_bCvarLog)
+	{
+		char sTeam[16];
+		GetTeamLabel(team, sTeam, sizeof(sTeam));
+
+		FixLogClient(intruder, "修复：%s 名额被无法核对记录（拿不到 SteamID）的玩家占用，先让出到旁观", sTeam);
+	}
+
+	return GetClientTeam(intruder) == TEAM_SPECTATOR;
+}
+
 bool TurnClientToSurvivors(int client, bool isIdle)
 {
 	if (isIdle)
@@ -1983,7 +2115,11 @@ bool TurnClientToSurvivors(int client, bool isIdle)
 	// 12v12（多人插件）下先确认生还者还有真人名额：
 	// 满员时硬抢会把人塞成第 13 个，或者直接失败、打乱后续交换
 	if (!HasRoomForTeam(TEAM_SURVIVOR))
-		return false;
+	{
+		// 满员：先看名额是不是被"拿不到 SteamID"的玩家占着（见 MakeRoomByEvictingNoAuth）
+		if (!MakeRoomByEvictingNoAuth(TEAM_SURVIVOR, client) || !HasRoomForTeam(TEAM_SURVIVOR))
+			return false;
+	}
 
 	int bot = FindBotToTakeOver(true);
 	if (bot == -1)
@@ -2060,9 +2196,14 @@ bool TurnClientToInfected(int client)
 		}
 	}
 
-	// 特感名额已满：返回，交给重试或超时
+	// 特感名额已满：先看名额是不是被"拿不到 SteamID"的玩家占着，
+	// 清不走再返回，交给重试或超时
 	if (maxZombies - humanInfected <= 0)
-		return false;
+	{
+		if (!MakeRoomByEvictingNoAuth(TEAM_INFECTED, client)
+			|| CountRestoreTeamHumans(TEAM_INFECTED) >= maxZombies)
+			return false;
+	}
 
 	ChangeClientTeam(client, TEAM_INFECTED);
 	return true;

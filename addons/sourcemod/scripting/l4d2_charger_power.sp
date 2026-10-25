@@ -15,7 +15,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.3.2.1"
+#define PLUGIN_VERSION "1.3.2.2"
 #define CVAR_FLAGS FCVAR_NOTIFY
 #define TEAM_INFECTED 3
 #define CLASS_CHARGER 6
@@ -240,7 +240,9 @@ Action Events(Event event, char[] name, bool dontBroadcast)
 
                     if (plugin.fRemoveObject > 0.0)
                     {
-                        CreateTimer(plugin.fRemoveObject, TimerRemoveEntity, EntIndexToEntRef(i_Target), TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+                        // 用一次性定时器自己续期: 原来的 TIMER_REPEAT 会一直挂着,
+                        // 坦克活着期间每推一次物体就多一个常驻重复定时器.
+                        CreateTimer(plugin.fRemoveObject, TimerRemoveEntity, EntIndexToEntRef(i_Target), TIMER_FLAG_NO_MAPCHANGE);
                     }
                 }
             }
@@ -252,14 +254,21 @@ Action Events(Event event, char[] name, bool dontBroadcast)
 
 Action TimerRemoveEntity(Handle h_Timer, any i_Ent)
 {
-	if (EntRefToEntIndex(i_Ent) != INVALID_ENT_REFERENCE)
-	{
-		if (HasAliveTank())
-			return Plugin_Continue;
-		else
-			RemoveEntity(i_Ent);
-	}
-	return Plugin_Stop;
+    int entity = EntRefToEntIndex(i_Ent);
+    if (entity == INVALID_ENT_REFERENCE || entity <= MaxClients)
+    {
+        return Plugin_Stop;
+    }
+
+    if (HasAliveTank() && plugin.fRemoveObject > 0.0)
+    {
+        // 坦克还活着就先不删, 交给下一个周期再看(一次性定时器自己续期, 不需要句柄)
+        CreateTimer(plugin.fRemoveObject, TimerRemoveEntity, i_Ent, TIMER_FLAG_NO_MAPCHANGE);
+        return Plugin_Stop;
+    }
+
+    RemoveEntity(entity);
+    return Plugin_Stop;
 }
 
 stock bool TraceFilterClients(int i_Entity, int i_Mask, any i_Data)

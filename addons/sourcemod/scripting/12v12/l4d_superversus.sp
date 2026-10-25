@@ -12,7 +12,7 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.10-12v12"
+#define PLUGIN_VERSION "2.5.11-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -1168,7 +1168,14 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		if (!adminTransfer && announce && !SuppressSpectate.BoolValue
 			&& GetGameTime() >= NextSpectateNotice[client])
 		{
-			PrintToChatAll("\x03[队伍] \x01%N 已加入旁观。使用 !join、!sur 或 !inf 返回游戏。", client);
+			// 按需求：这条提示不再全体广播，只发给已经处于旁观状态的玩家（刚转去旁观的人自己也包含在内）
+			for (int i = 1; i <= MaxClients; i++)
+			{
+				if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_SPECTATOR)
+				{
+					PrintToChat(i, "\x03[队伍] \x01%N 已加入旁观。使用 !join、!sur 或 !inf 返回游戏。", client);
+				}
+			}
 			NextSpectateNotice[client] = GetGameTime() + 7.0;
 		}
 		return Join_Success;

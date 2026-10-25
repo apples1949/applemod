@@ -103,6 +103,7 @@ public void Event_PlayerSpawn(Event hEvent, const char[] sEventName, bool bDontB
 			DestroyTimer(g_hBoomerShoveTimer);
 
 			BoomerKillTime     = 0.0;
+			DestroyTimer(g_hBoomerKillTimer);	// 不先杀掉旧的: 上个 boomer 没走死亡事件时旧定时器句柄被覆盖, 会变成永不停止的孤儿
 			g_hBoomerKillTimer = CreateTimer(0.1, Timer_KillBoomer, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 		}
 

@@ -10,6 +10,11 @@
  *    并开启对应的机关（电梯按钮 / 开关等）。
  *    —— 绝不改动安全门（safe room door）的 spawnflags / lock 状态，
  *       救援车人齐与否由游戏自己判定。
+ *    —— 1.2.1 起唯一的例外说明：过关判定本身在引擎里，安全门必须处于「已开启」
+ *       状态，引擎才会走「全员进屋 -> 关门 -> 换图」这条链。所以倒计时传送把
+ *       人送进关底安全屋之后，如果门是完全关闭的，就对该门发一次标准 Open
+ *       输入（等价于玩家自己开门）。仍然不改 spawnflags / lock，不解锁、不锁门，
+ *       也不做任何硬换图。可用 l4d2_cptele_saferoom_opendoor 0 关闭。
  *
  *  两类区域：倒计时、到齐比例、提示文案互相独立。 ---------------------------------
  *    A) 安全屋 + 救援点：l4d2_cptele_time              （默认 60 秒）
@@ -58,6 +63,8 @@
  *      -> 1s/次 监控 timer -> 某区域到达人数 >= ceil(该类型比例% × 存活生还者数)
  *      -> 开始该类型的倒计时 -> 倒计时结束 -> 传送未到者 + 开机关
  *      -> 该区域标记为已触发
+ *      -> [仅关底安全屋] 传送落位 0.2s 后复核安全门状态，门是完全关闭的
+ *         就补发一次标准 Open 输入（1.2.1，见 ScheduleSaferoomDoorFix）
  *    同一区域每回合只会触发一次；换图 / round_start / round_end 全部重置。
  *
  *  1.2.0 修复「集合完就往前走」被传送回来（c5m2 之类机关集合点）：
@@ -68,6 +75,35 @@
  *      并且一个人都不传送（只把机关按钮解锁按下）。
  *    旧行为（只按「倒计时结束时是否还在区域内」判定）可用
  *    l4d2_cptele_skip_seen 0 还原。
+ *
+ *  1.2.1 修复「安全门关着时传送后不过关」（需求 #7）：
+ *    - 现象：倒计时结束把人传送进关底安全屋，但安全门当时是「完全关闭」状态时，
+ *      人已经在屋里却永远不换图；门是开着的时候同样的传送就能正常过关。
+ *    - 根因：过关不是插件判定的，而是引擎 info_changelevel 实体的流程。
+ *      datamap 里 info_changelevel 带 CheckpointDoorOpened / CheckpointDoorClosed
+ *      两个实体输入（引擎 InfoChangelevel::OnCheckpointDoorClosed 里还会逐个
+ *      用 CBaseTrigger::IsTouching 判「谁还在安全屋外面」）。门一直处于关闭
+ *      状态 = 门没有任何状态变化 = 这两个输入一次都不会触发，引擎的过关链
+ *      没有起点，所以人进屋也不会换图。
+ *    - 修复：传送落位 0.2 秒后（等物理/触发体积稳定）复核安全屋里确实有人，
+ *      再看门 prop_door_rotating_checkpoint 的 m_eDoorState：
+ *      不是 DOOR_STATE_OPENED 就对该门发一次标准 Open 输入，把门恢复到
+ *      「玩家开门进屋」这个引擎认识的正常状态，后续关门 + 换图交回引擎。
+ *      只发 Open，不动 spawnflags / lock / 不解锁不锁门，不调用任何硬换图。
+ *    - 相关开关：l4d2_cptele_saferoom_opendoor（默认 1）。
+ *
+ *  1.2.2 需求 #7 的第二轮补强 + 安全屋区域选点修复：
+ *    - 开门不一定够：正常游戏里过关还要"门再关上"那一下（引擎靠
+ *      CheckpointDoorClosed 进来才做 IsTouching 逐人检查，然后 ChangelevelThink 换图）。
+ *      倒计时传送没人去关门，所以新增第二层：Open 之后 0.6 秒，若**全部存活生还者**
+ *      都在安全屋体积内，就把门物理关回去，并补发一次 CheckpointDoorClosed。
+ *      少一个人都不发（伪造事件没用，还会误导排查）。
+ *      开关：l4d2_cptele_saferoom_forcedoor（默认 1）。
+ *    - 安全屋区域原来取"第一个 changelevel"，实测官方图 10 张有 2 个候选、其中 7 张图
+ *      第一个是"往回走"那个（spawnflags=2，map 指向上一张图/本图/空），会让区域指到
+ *      开局安全屋（开局全员在屋里 -> 立刻算集合完毕 -> 关底传送静默失效）。
+ *      现在按 spawnflags & 2 剔回退项 -> m_mapName 指向下一张图 -> nav 最后检查点 ->
+ *      最后一个安全门 的顺序判定（见 FindLastChangelevel）。
  *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
@@ -82,7 +118,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.0"
+#define PLUGIN_VERSION      "1.2.2"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -97,6 +133,16 @@
 #define DEST_JITTER         32.0        // 固定传送点附近的散开抖动（HU）
 
 #define PRESET_DEFAULT_FILE "l4d2_cptele_presets.cfg"   // 预设文件名（相对 configs/）
+
+// 安全门修复：传送落位后等多久再去检查 / 动门（等一帧以上，让 TeleportEntity
+// 与 L4D_WarpToValidPositionIfStuck 的落点、以及引擎的触发体积 touching 状态稳定）
+#define SAFEROOM_DOOR_DELAY     0.2
+
+// 安全门修复：门到 info_changelevel 体积中心的最大距离（HU）。
+// 与 left4dhooks 里 L4D_GetCheckpointLast 判断「末尾那道门」用的是同一个量级
+// （DOOR_RANGE_TOLLERANCE = 2000）。超过这个距离说明找到的门不是这间安全屋的，
+// 宁可不开门也不能误开别处的门（例如起点安全屋的门）。
+#define SAFEROOM_DOOR_MAX_DIST  2000.0
 
 // 预设槽位解析结果：LoadPresetSlot 的返回值
 #define PRESET_SLOT_NONE        0       // 未登记（配置写错 / 实体找不到 / 区域已满）
@@ -136,6 +182,8 @@ ConVar g_cvSkipSeen;
 ConVar g_cvSound;
 ConVar g_cvChat;
 ConVar g_cvSaferoom;
+ConVar g_cvSaferoomDoor;        // 关底安全门关闭时，传送后发 Open 让引擎能过关（1.2.1）
+ConVar g_cvSaferoomForceDoor;   // 门开不了/开过之后仍不过关时，补发一次 CheckpointDoorClosed（1.2.2）
 ConVar g_cvRescue;
 ConVar g_cvMechanism;
 ConVar g_cvMechanismUnlocked;
@@ -180,6 +228,17 @@ bool   g_bCountingDown;
 int    g_iSecondsLeft;
 int    g_iActiveArea = -1;
 
+// 1.2.1 安全门复核的挂起状态。一张图最多一个关底安全屋区域，同一时刻也只会
+// 有一个倒计时在跑，所以用单槽即可；换图 / 换回合由 ResetRound 统一清掉。
+Handle g_hDoorFix;              // 0.2s 后复核安全门的计时器
+int    g_iDoorFixArea = -1;     // 挂起中的区域索引（-1 = 没有挂起）
+int    g_iDoorFixRef;           // 挂起中区域实体的 EntRef（防跨回合残影）
+
+// 1.2.2 补发关门事件的挂起状态（同上，单槽 + ResetRound 清理）
+Handle g_hDoorClose;            // Open 之后 0.6s，补发 CheckpointDoorClosed 的计时器
+int    g_iDoorCloseArea = -1;
+int    g_iDoorCloseRef;
+
 // 本次倒计时期间「到过该区域」的生还者。倒计时结束时只传送「一次都没到过」的人，
 // 已经到过、随后离开继续推进的人不再被传送回来（1.2.0 修复）。
 bool   g_bSeen[MAXPLAYERS+1];
@@ -202,6 +261,8 @@ bool g_bNtvWarp;                // L4D_WarpToValidPositionIfStuck
 bool g_bNtvDominating;          // L4D2_GetSpecialInfectedDominatingMe
 bool g_bNtvRelease;             // 4 个解控 native
 bool g_bNtvRescueVehicle;       // L4D2_SendInRescueVehicle
+bool g_bNtvDoorLast;            // L4D_GetCheckpointLast（找关底安全门）
+bool g_bNtvLastCp;              // L4D_IsPositionInLastCheckpoint（挑关底那个 info_changelevel）
 
 bool g_bReady;                  // 关键 native 齐全
 
@@ -289,6 +350,18 @@ public void OnPluginStart()
 		"1=启用关底安全屋（info_changelevel / trigger_changelevel）的集合传送。0=不处理安全屋。注意：本插件永远不会改动安全门本身",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+	// 需求 #7：安全门关着时，倒计时传送把人送进屋也不会过关（引擎侧要门先「已开启」）。
+	// 这里默认 1，传送后只对「完全关闭」的安全门发一次标准 Open 输入。
+	g_cvSaferoomDoor = CreateConVar("l4d2_cptele_saferoom_opendoor", "1",
+		"1=倒计时传送把生还者送进关底安全屋后，若安全门处于完全关闭状态，对该门发送标准 Open 输入（等价玩家开门，不改 spawnflags/lock），让引擎的过关判定能触发。0=完全不碰安全门",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.2.2：光开门不一定够（有的图门开完没人去关，引擎的 CheckpointDoorClosed 就不会来），
+	// 所以再补一层「所有存活生还者都在屋内时，补发一次引擎自己的 CheckpointDoorClosed」。
+	g_cvSaferoomForceDoor = CreateConVar("l4d2_cptele_saferoom_forcedoor", "1",
+		"1=断电补救：安全门原本是关闭状态（说明过关链没起来）时，在全员都进到安全屋体积后，向 info_changelevel 补发一次 CheckpointDoorClosed 输入（就是引擎在门关闭时自己发的那个输入），并把门物理关回去。0=只做 Open，不补发关门事件",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	g_cvRescue = CreateConVar("l4d2_cptele_rescue", "1",
 		"1=启用救援关（终局图 m_iEntireTeam==2 的 trigger_multiple）的集合传送。0=不处理救援关",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -367,6 +440,8 @@ public void OnAllPluginsLoaded()
 	g_bNtvWarp          = NtvAvailable("L4D_WarpToValidPositionIfStuck");
 	g_bNtvDominating    = NtvAvailable("L4D2_GetSpecialInfectedDominatingMe");
 	g_bNtvRescueVehicle = NtvAvailable("L4D2_SendInRescueVehicle");
+	g_bNtvDoorLast      = NtvAvailable("L4D_GetCheckpointLast");
+	g_bNtvLastCp        = NtvAvailable("L4D_IsPositionInLastCheckpoint");
 
 	g_bNtvNav = NtvAvailable("L4D_GetNearestNavArea") && NtvAvailable("L4D_FindRandomSpot");
 
@@ -386,9 +461,9 @@ public void OnAllPluginsLoaded()
 	}
 	else if (g_cvVerbose.BoolValue)
 	{
-		PrintToServer("[cptele] native 检查通过: touch=%d finalmap=%d nav=%d revive=%d warp=%d dom=%d release=%d rescue=%d",
+		PrintToServer("[cptele] native 检查通过: touch=%d finalmap=%d nav=%d revive=%d warp=%d dom=%d release=%d rescue=%d doorlast=%d",
 			g_bNtvTouch, g_bNtvFinalMap, g_bNtvNav, g_bNtvRevive,
-			g_bNtvWarp, g_bNtvDominating, g_bNtvRelease, g_bNtvRescueVehicle);
+			g_bNtvWarp, g_bNtvDominating, g_bNtvRelease, g_bNtvRescueVehicle, g_bNtvDoorLast);
 	}
 }
 
@@ -581,12 +656,9 @@ void DetectAreas()
 	// ---- 3a) 关底安全屋 --------------------------------------------------
 	if (g_cvSaferoom.BoolValue)
 	{
-		int entity = FindEntityByClassname(-1, "info_changelevel");
-
-		if (entity == -1)
-		{
-			entity = FindEntityByClassname(-1, "trigger_changelevel");
-		}
+		// 1.2.2：不能只取第一个 changelevel —— 官方图里有 7 张图第一个 changelevel 是
+		// 「起点」安全屋体积，取第一个会让安全屋区域指到开局那间屋（见 FindLastChangelevel 注释）
+		int entity = FindLastChangelevel();
 
 		if (entity != -1)
 		{
@@ -594,7 +666,9 @@ void DetectAreas()
 
 			if (g_cvVerbose.BoolValue)
 			{
-				PrintToServer("[cptele] 安全屋区域: entity #%d", entity);
+				char sClass[64];
+				GetEntityClassname(entity, sClass, sizeof(sClass));
+				PrintToServer("[cptele] 安全屋区域: entity #%d (%s)", entity, sClass);
 			}
 		}
 		else if (g_cvVerbose.BoolValue)
@@ -1648,6 +1722,14 @@ void FinishCountdown(int index)
 	// ---- 开机关 ---------------------------------------------------------
 	OpenAreaMechanism(index, type);
 
+	// ---- 关底安全屋：门关着时传送后不会过关（1.2.1 / 需求 #7）----------
+	// 只有真的传送了人（moved > 0）才需要复核门状态；门开着的时候引擎本来
+	// 就能走完过关链，不需要任何额外动作。
+	if (moved > 0)
+	{
+		ScheduleSaferoomDoorFix(index);
+	}
+
 	if (g_cvRemoveInfected.BoolValue && bHasDest)
 	{
 		RemoveInfectedAround(vDest);
@@ -1804,6 +1886,587 @@ void OpenAreaMechanism(int index, int type)
 	}
 
 	// AREA_SAFEROOM：什么都不做。绝不触碰安全门的 spawnflags / lock 状态。
+	// 1.2.1：安全门「关着导致不过关」的问题不在这里处理，而是传送全部落位后
+	// 由 ScheduleSaferoomDoorFix 复核一次安全门状态（只发标准 Open 输入，
+	// 同样不改 spawnflags / lock，不解锁、不锁门）。
+}
+
+// ===========================================================================
+//  关底安全门状态修复（1.2.1 / 需求 #7）
+// ===========================================================================
+
+/**
+ * 倒计时传送结束后，安排一次「安全门是不是关着」的复核。
+ *
+ * 只有两种情况会走到这里：区域类型是关底安全屋，并且这次倒计时真的传送了人。
+ * 其余类型（救援点 / 中途集合点）一律不碰门。
+ *
+ * @param index 区域索引（计时器里会再次校验，防止跨回合残留）
+ */
+void ScheduleSaferoomDoorFix(int index)
+{
+	if (!g_cvEnable.BoolValue || !g_cvSaferoomDoor.BoolValue)
+	{
+		return;
+	}
+
+	if (index < 0 || index >= g_iAreaCount || g_iAreaType[index] != AREA_SAFEROOM)
+	{
+		return;
+	}
+
+	// 纯坐标区域没有实体，也就没有 info_changelevel 可对照，直接跳过
+	if (g_iAreaRef[index] == 0)
+	{
+		return;
+	}
+
+	// 已经在排队：不重复创建 timer（同一区域 FinishCountdown 只会走一次，
+	// 这里再挡一层，避免任何异常路径下叠加两次开门）
+	if (g_hDoorFix != null)
+	{
+		return;
+	}
+
+	g_iDoorFixArea = index;
+	g_iDoorFixRef = g_iAreaRef[index];
+
+	g_hDoorFix = CreateTimer(SAFEROOM_DOOR_DELAY, Timer_SaferoomDoorFix, 0,
+		TIMER_FLAG_NO_MAPCHANGE);
+}
+
+/**
+ * 传送落位后复核安全门。
+ *
+ * 为什么必须做（需求 #7 的根因）：
+ *   过关是引擎的流程，不是插件的流程。datamap 里 info_changelevel（CBaseTrigger）
+ *   带 CheckpointDoorOpened / CheckpointDoorClosed 两个实体输入，对应的引擎函数
+ *   InfoChangelevel::OnCheckpointDoorClosed 会逐个用 CBaseTrigger::IsTouching
+ *   判断「谁还在安全屋外面」。也就是说引擎的过关链是由「安全门的状态变化」
+ *   驱动的：门一直处于完全关闭状态 -> 没有任何状态变化 -> 这两个输入不会触发
+ *   -> 人虽然被传送进屋，引擎根本不会开始过关判定。
+ *
+ *   正常游戏里生还者是开门进屋的，门处于「已开启」，引擎能接上后续的
+ *   关门 + 换图流程；倒计时传送是直接 TeleportEntity 进屋，门从来没被开过，
+ *   于是卡死。修复方式就是把门恢复到「已开启」这个引擎认识的状态。
+ *
+ * 安全边界（逐条都有守卫）：
+ *   - 区域索引 / EntRef 双重校验：换回合、换图后 ResetRound 会清空区域表，
+ *     timer 残留时索引对不上就直接放弃；
+ *   - GetAreaEntity 返回 -1（实体已删除）直接放弃，不做任何空指针访问；
+ *   - 门实体存在且必须是门类 classname 才发输入；
+ *   - 安全屋里一个存活生还者都没有（传送其实没落地）时不动门；
+ *   - 门已经是 DOOR_STATE_OPENED 时不动门；
+ *   - 只发 Open，不改 spawnflags / lock，不解锁、不锁门、不硬换图。
+ */
+public Action Timer_SaferoomDoorFix(Handle timer)
+{
+	// 先把这个 timer 从挂起槽里摘掉（一次性 timer 自己会被引擎回收，
+	// 这里只是丢掉引用，不能 delete 正在执行的 timer）
+	g_hDoorFix = null;
+
+	int index = g_iDoorFixArea;
+	int ref = g_iDoorFixRef;
+
+	g_iDoorFixArea = -1;
+	g_iDoorFixRef = 0;
+
+	if (!g_bMapStarted || !g_cvEnable.BoolValue || !g_bReady)
+	{
+		return Plugin_Stop;
+	}
+
+	// 索引与 EntRef 必须同时对上，否则说明已经换回合 / 换图
+	if (index < 0 || index >= g_iAreaCount)
+	{
+		return Plugin_Stop;
+	}
+
+	if (g_iAreaRef[index] != ref || g_iAreaType[index] != AREA_SAFEROOM)
+	{
+		return Plugin_Stop;
+	}
+
+	int changelevel = GetAreaEntity(index);
+
+	if (changelevel == -1)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全门复核跳过：区域 #%d 的区域实体已删除", index);
+		}
+
+		return Plugin_Stop;
+	}
+
+	int arrived = CountArrivedSurvivors(index);
+
+	if (arrived <= 0)
+	{
+		// 传送明明送过人，落位 0.2s 后安全屋里却一个人都没有：说明落点被
+		// 引擎的 WarpToValidPositionIfStuck / 几何体挤到了体积外，这种情况
+		// 开门也没用，直接报错留证据，不假装处理了。
+		LogError("[cptele] 安全门复核：区域 #%d 传送后安全屋内没有任何存活生还者，落点可能不在安全屋触发体积内", index);
+
+		return Plugin_Stop;
+	}
+
+	int door = FindSaferoomDoor(changelevel);
+
+	if (door == -1)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全门复核跳过：找不到本图的安全门实体（区域 #%d）", index);
+		}
+
+		return Plugin_Stop;
+	}
+
+	char sClass[64];
+
+	if (!GetEntityClassname(door, sClass, sizeof(sClass)) || !IsSafeDoorClass(sClass))
+	{
+		LogError("[cptele] 安全门复核：实体 #%d 的 classname 是 \"%s\"，不是门类实体，忽略", door, sClass);
+
+		return Plugin_Stop;
+	}
+
+	// m_eDoorState 取值见 left4dhooks_silver.inc 的 DOOR_STATE_* 枚举
+	// （0=完全关闭 1=正在开 2=已开启 3=正在关），这里是 Save 型 datamap 字段，
+	// 必须用 Prop_Data 读。
+	int state = GetEntProp(door, Prop_Data, "m_eDoorState");
+
+	// 门已经是「已开启」：这正是玩家开门进屋后引擎能正常过关的状态，不动它
+	if (state == DOOR_STATE_OPENED)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全门 #%d 已经是开启状态，无需处理（区域 #%d，屋内 %d 人）",
+				door, index, arrived);
+		}
+
+		return Plugin_Stop;
+	}
+
+	// 仅作诊断用：被锁住的门 Open 输入无效，这里记录下来方便排错，
+	// 但绝不去解锁（插件原则：不改安全门的 lock 状态）。
+	bool bLocked = view_as<bool>(GetEntProp(door, Prop_Data, "m_bLocked"));
+
+	AcceptEntityInput(door, "Open");
+
+	// 发完输入再看一次门状态：仍是完全关闭说明输入被忽略（门被锁 / 不是门）
+	int after = GetEntProp(door, Prop_Data, "m_eDoorState");
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 安全门 #%d 已发送 Open：state %d -> %d，locked=%d，屋内 %d 人（区域 #%d）",
+			door, state, after, bLocked, arrived, index);
+	}
+
+	if (after == DOOR_STATE_CLOSED)
+	{
+		LogError("[cptele] 安全门 #%d 收到 Open 输入后仍然完全关闭（locked=%d），本回合可能无法过关；请确认该地图安全门是否被锁住",
+			door, bLocked);
+	}
+
+	// 1.2.2：只开门不一定够。引擎的过关链还要一次「门关闭」事件
+	// （CheckpointDoorClosed -> 逐个 IsTouching 判「谁还在屋外」）。正常游戏里这一下是
+	// 玩家进屋后门自己关上来提供的；倒计时传送没人去关门，所以 0.6s 后补一发。
+	if (g_cvSaferoomForceDoor.BoolValue && g_hDoorClose == null)
+	{
+		g_iDoorCloseArea = index;
+		g_iDoorCloseRef = ref;
+		g_hDoorClose = CreateTimer(0.6, Timer_SaferoomForceClose, 0, TIMER_FLAG_NO_MAPCHANGE);
+	}
+
+	return Plugin_Stop;
+}
+
+/**
+ * 1.2.2 补发「门关闭」事件（需求 #7 的第二层保险）。
+ *
+ * 触发条件（缺一不可）：
+ *   - 这是关底安全屋区域，且区域实体（info_changelevel）仍然有效；
+ *   - 本回合所有存活生还者都已经在安全屋体积内（CountArrivedSurvivors == CountAliveSurvivors）。
+ *     只要还有人在屋外就不发 —— 引擎的 OnCheckpointDoorClosed 会查出「谁还在屋外」
+ *     （PlayerOutsideCheckpoint），伪造这个事件既没用也会误导排查。
+ *
+ * 动作：先物理关门（让画面/状态与真实过关一致），再向 info_changelevel 发引擎自己那个
+ * 输入 CheckpointDoorClosed（datamap: CBaseTrigger-info_changelevel 的 Input）。
+ * 不硬换图、不改 spawnflags/lock。
+ */
+public Action Timer_SaferoomForceClose(Handle timer)
+{
+	g_hDoorClose = null;
+
+	int index = g_iDoorCloseArea;
+	int ref = g_iDoorCloseRef;
+
+	g_iDoorCloseArea = -1;
+	g_iDoorCloseRef = 0;
+
+	if (!g_bMapStarted || !g_cvEnable.BoolValue || !g_bReady)
+	{
+		return Plugin_Stop;
+	}
+
+	if (index < 0 || index >= g_iAreaCount)
+	{
+		return Plugin_Stop;
+	}
+
+	if (g_iAreaRef[index] != ref || g_iAreaType[index] != AREA_SAFEROOM)
+	{
+		return Plugin_Stop;
+	}
+
+	int changelevel = GetAreaEntity(index);
+
+	if (changelevel == -1)
+	{
+		return Plugin_Stop;
+	}
+
+	int alive = CountAliveSurvivors();
+	int arrived = CountArrivedSurvivors(index);
+
+	if (alive <= 0 || arrived < alive)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 补发关门事件跳过：屋内 %d 人 / 存活 %d 人（区域 #%d）", arrived, alive, index);
+		}
+
+		return Plugin_Stop;
+	}
+
+	int door = FindSaferoomDoor(changelevel);
+
+	if (door != -1)
+	{
+		// 物理关门：这是最"正统"的触发源（门自己的 OnClose 只会在关门完成时把事件送给
+		// info_changelevel），引擎认这个。
+		AcceptEntityInput(door, "Close");
+	}
+
+	// 再补一次引擎自己的输入。datamap 里 CBaseTrigger-info_changelevel 那两条 Input 的
+	// 名字在 dump 里写成 "OnCheckpointDoorOpened / OnCheckpointDoorClosed"（同一份 dump 里
+	// 其它 Input 都带 "Input" 前缀，这两条没有），所以两种拼法都发一遍：
+	// 未知输入会被引擎静默忽略，不会报错，也不会重复触发过关（引擎侧有 ChangelevelThink 去重）。
+	AcceptEntityInput(changelevel, "OnCheckpointDoorClosed");
+	AcceptEntityInput(changelevel, "CheckpointDoorClosed");
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 已关门并补发 CheckpointDoorClosed：门 #%d，info_changelevel #%d，屋内 %d 人",
+			door, changelevel, arrived);
+	}
+
+	return Plugin_Stop;
+}
+
+/**
+ * 找出「关底」那一个 changelevel 实体（作为安全屋区域）。
+ *
+ * 为什么不能只取第一个（1.2.1 及以前的做法）：
+ *   直接遍历 .bsp 的实体 lump 扫了全部官方图，10 张图有 2 个 changelevel 候选，
+ *   其中 7 张图的**第一个**是「起点 / 往回走」那个（spawnflags=2，map 指向上一张图、
+ *   本图自己或空）：
+ *     c1m2_streets     info map=c1m2_streets  flags=2   <- 第一个是回退
+ *     c2m4_barns       info map=c2m3_coaster  flags=2   <- 第一个是回退
+ *     c3m2_swamp       info map=c3m1_plankcountry flags=2
+ *     c3m3_shantytown  info map=c3m2_shantytown flags=2
+ *     c5m3_cemetery    info map=c5m3_cemetery flags=2
+ *     c5m2_park / c5m4_quarter / c2m3_coaster 同样是 flags=2 的回退项在前
+ *   取第一个会让「安全屋区域」指到开局那间屋：开局全员本来就在里面 -> 计数立刻达标
+ *   -> 倒计时被立刻结束 -> 关底安全屋传送静默失效（这就是"以为是插件没生效"的真因）。
+ *
+ * 选择顺序（都基于上表实测出来的特征，有唯一解就早退，绝不靠猜）：
+ *   1) 只保留 spawnflags & 2 == 0 的候选（剔掉"往回走"的那个）；
+ *   2) 仍多于一个时，用 m_mapName 再筛：关底那个指向"下一张图"，回退项指向本图 / 空
+ *      （c1m3_mall 是唯一两张都是 flags=0 的图，就靠这一条区分）；
+ *   3) 还多于一个时，用 nav 的「最后一个检查点」判中心点（L4D_IsPositionInLastCheckpoint）；
+ *   4) 再不行用「离最后一个安全门最近」（L4D_GetCheckpointLast，2000 HU 内）；
+ *   5) 全都不成立才回落到第一个，并打 verbose 提示。
+ *
+ * @return changelevel 实体索引；一个都没有返回 -1
+ */
+int FindLastChangelevel()
+{
+	int aCand[16];
+	int iCand = 0;
+	int entity = -1;
+
+	while ((entity = FindEntityByClassname(entity, "info_changelevel")) != -1)
+	{
+		if (iCand < sizeof(aCand))
+		{
+			aCand[iCand++] = entity;
+		}
+	}
+
+	// 没有 info_changelevel 才回落到老的 trigger_changelevel
+	if (iCand == 0)
+	{
+		entity = -1;
+
+		while ((entity = FindEntityByClassname(entity, "trigger_changelevel")) != -1)
+		{
+			if (iCand < sizeof(aCand))
+			{
+				aCand[iCand++] = entity;
+			}
+		}
+	}
+
+	if (iCand <= 0)
+	{
+		return -1;
+	}
+
+	if (iCand == 1)
+	{
+		return aCand[0];
+	}
+
+	// ---- 1) 剔掉"往回走"的候选（spawnflags & 2）--------------------------
+	int aPool[16];
+	int iPool = 0;
+
+	for (int i = 0; i < iCand; i++)
+	{
+		if ((GetEntProp(aCand[i], Prop_Data, "m_spawnflags") & 2) == 0)
+		{
+			aPool[iPool++] = aCand[i];
+		}
+	}
+
+	// 整张图都被标成回退（罕见的三方图写法）：退化成原候选全集，别把功能直接关死
+	if (iPool <= 0)
+	{
+		iPool = iCand;
+
+		for (int i = 0; i < iCand; i++)
+		{
+			aPool[i] = aCand[i];
+		}
+	}
+
+	if (iPool == 1)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 关底 changelevel 判定: entity #%d（按 spawnflags 剔掉回退项，候选 %d 个）",
+				aPool[0], iCand);
+		}
+
+		return aPool[0];
+	}
+
+	// ---- 2) 用 m_mapName 再筛：关底那个指向"下一张图" --------------------
+	char sCurrent[64];
+	GetCurrentMap(sCurrent, sizeof(sCurrent));
+
+	int aNext[16];
+	int iNext = 0;
+
+	for (int i = 0; i < iPool; i++)
+	{
+		// m_mapName 是 datamap 字段（char[32]），老版本引擎读不到时跳过，走后面的兜底
+		if (!HasEntProp(aPool[i], Prop_Data, "m_mapName"))
+		{
+			continue;
+		}
+
+		char sTarget[64];
+
+		if (GetEntPropString(aPool[i], Prop_Data, "m_mapName", sTarget, sizeof(sTarget)) <= 0)
+		{
+			continue;
+		}
+
+		if (sTarget[0] == '\0' || StrEqual(sTarget, sCurrent, false))
+		{
+			continue;
+		}
+
+		aNext[iNext++] = aPool[i];
+	}
+
+	if (iNext == 1)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 关底 changelevel 判定: entity #%d（按 m_mapName 命中下一张图，候选 %d 个）",
+				aNext[0], iPool);
+		}
+
+		return aNext[0];
+	}
+
+	// 后面两步在"m_mapName 筛过之后仍有多个"时，优先在筛过的集合里挑
+	if (iNext > 1)
+	{
+		iPool = iNext;
+
+		for (int i = 0; i < iNext; i++)
+		{
+			aPool[i] = aNext[i];
+		}
+	}
+
+	// ---- 3) 中心点是否在「最后一个检查点」体积内 --------------------------
+	if (g_bNtvLastCp)
+	{
+		for (int i = 0; i < iPool; i++)
+		{
+			float vCenter[3];
+			GetEntityCenter(aPool[i], vCenter);
+
+			if (L4D_IsPositionInLastCheckpoint(vCenter))
+			{
+				if (g_cvVerbose.BoolValue)
+				{
+					PrintToServer("[cptele] 关底 changelevel 判定: entity #%d 落在最后一个检查点内",
+						aPool[i]);
+				}
+
+				return aPool[i];
+			}
+		}
+	}
+
+	// ---- 4) 离「最后一个安全门」最近 --------------------------------------
+	if (g_bNtvDoorLast)
+	{
+		int door = L4D_GetCheckpointLast();
+
+		if (door > 0 && IsValidEntity(door))
+		{
+			float vDoor[3];
+			GetEntPropVector(door, Prop_Send, "m_vecOrigin", vDoor);
+
+			int best = -1;
+			float fBest = 0.0;
+
+			for (int i = 0; i < iPool; i++)
+			{
+				float vCenter[3];
+				GetEntityCenter(aPool[i], vCenter);
+
+				float fDist = GetVectorDistance(vDoor, vCenter);
+
+				if (best == -1 || fDist < fBest)
+				{
+					best = aPool[i];
+					fBest = fDist;
+				}
+			}
+
+			if (best != -1 && fBest <= SAFEROOM_DOOR_MAX_DIST)
+			{
+				if (g_cvVerbose.BoolValue)
+				{
+					PrintToServer("[cptele] 关底 changelevel 判定: entity #%d 距最后一个安全门 %.0f HU",
+						best, fBest);
+				}
+
+				return best;
+			}
+		}
+	}
+
+	// ---- 5) 回落 ---------------------------------------------------------
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 无法判定关底 changelevel（候选 %d 个，剩余 %d 个），回落到 entity #%d；若本图安全屋传送无效请先查这里",
+			iCand, iPool, aPool[0]);
+	}
+
+	return aPool[0];
+}
+
+/**
+ * 找关底安全屋对应的那道安全门。
+ *
+ * 1) left4dhooks 的 L4D_GetCheckpointLast()：按流量距离挑「接近地图末尾」的
+ *    安全门（DOOR_RANGE_TOLLERANCE = 2000 HU），官方图 / 三方图通用；
+ * 2) 回落：离 info_changelevel 体积中心最近的 prop_door_rotating_checkpoint。
+ *
+ * @return 安全门实体索引；找不到返回 -1
+ */
+int FindSaferoomDoor(int changelevel)
+{
+	float vCenter[3];
+
+	GetEntityCenter(changelevel, vCenter);
+
+	if (g_bNtvDoorLast)
+	{
+		int door = L4D_GetCheckpointLast();
+
+		if (door > 0 && IsValidEntity(door))
+		{
+			// 距离校验：这道门必须就在 info_changelevel 这间安全屋旁边。
+			// L4D_GetCheckpointLast 用的是「离地图末尾最近」的粗略判定，
+			// 万一判错（三方图常见），宁可回落到下一层，也不去开别处的门。
+			float vDoor[3];
+
+			GetEntPropVector(door, Prop_Send, "m_vecOrigin", vDoor);
+
+			if (GetVectorDistance(vDoor, vCenter) <= SAFEROOM_DOOR_MAX_DIST)
+			{
+				return door;
+			}
+
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] L4D_GetCheckpointLast 返回的门 #%d 离安全屋 %.0f HU，超出 %.0f，改用最近门判定",
+					door, GetVectorDistance(vDoor, vCenter), SAFEROOM_DOOR_MAX_DIST);
+			}
+		}
+	}
+
+	int best = -1;
+	float fBest = 0.0;
+	int entity = -1;
+
+	while ((entity = FindEntityByClassname(entity, "prop_door_rotating_checkpoint")) != -1)
+	{
+		float vOrigin[3];
+
+		GetEntPropVector(entity, Prop_Send, "m_vecOrigin", vOrigin);
+
+		float fDist = GetVectorDistance(vOrigin, vCenter);
+
+		if (best == -1 || fDist < fBest)
+		{
+			best = entity;
+			fBest = fDist;
+		}
+	}
+
+	// 最近的那道门也离得太远：说明这间安全屋压根没有 prop_door_rotating_checkpoint
+	// （部分三方图用普通门 / func_door），交回调用方只记日志，不乱发输入。
+	if (best != -1 && fBest > SAFEROOM_DOOR_MAX_DIST)
+	{
+		return -1;
+	}
+
+	return best;
+}
+
+/**
+ * 门类实体白名单。「Open」是 CBasePropDoor / CBaseDoor 的标准输入，
+ * 只有这几类 classname 接受它；不对其它实体乱发输入。
+ */
+stock bool IsSafeDoorClass(const char[] sClass)
+{
+	return StrEqual(sClass, "prop_door_rotating_checkpoint", false)
+	    || StrEqual(sClass, "prop_door_rotating", false)
+	    || StrEqual(sClass, "func_door", false)
+	    || StrEqual(sClass, "func_door_rotating", false);
 }
 
 // ===========================================================================
@@ -2475,6 +3138,18 @@ void ResetRound()
 
 	delete g_hMonitor;
 	g_hMonitor = null;
+
+	// 1.2.1：安全门复核 timer 也要一起清，避免换图 / 换回合后还在旧区域上动作
+	delete g_hDoorFix;
+	g_hDoorFix = null;
+	g_iDoorFixArea = -1;
+	g_iDoorFixRef = 0;
+
+	// 1.2.2：补发关门事件的 timer 同理
+	delete g_hDoorClose;
+	g_hDoorClose = null;
+	g_iDoorCloseArea = -1;
+	g_iDoorCloseRef = 0;
 
 	g_bCountingDown = false;
 	g_iSecondsLeft = 0;

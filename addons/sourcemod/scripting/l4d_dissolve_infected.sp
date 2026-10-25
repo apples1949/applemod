@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.17"
+#define PLUGIN_VERSION 		"1.18"
 
 /*======================================================================================
 	Plugin Info:
@@ -709,6 +709,12 @@ int AttachFakeRagdoll(int target)
 		AcceptEntityInput(entity, "SetParent", target);
 		SetVariantString("!activator");
 		AcceptEntityInput(entity, "SetAttached", target);
+
+		// 这个替身正常由 DissolveTarget 建 dissolver 时一并溶解掉; 但 SDKCall 失败时
+		// 分支里没有任何删除动作, 会留下一个隐形(RENDER_NONE)孤儿实体 —— 加超时兜底.
+		SetVariantString("OnUser1 !self:Kill::15.0:-1");
+		AcceptEntityInput(entity, "AddOutput");
+		AcceptEntityInput(entity, "FireUser1");
 	}
 
 	return entity;

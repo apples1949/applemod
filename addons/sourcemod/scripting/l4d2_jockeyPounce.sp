@@ -14,8 +14,8 @@
    这段时间内仍然沿用落地前的高度; 超出即判定为普通(地面)突袭, 高度按 0 计 */
 #define POUNCE_LAND_GRACE           0.3
 
-/* 参考 Hunter 高扑机制: 落差不足 300u 不产生高扑伤害, 1300u 达到伤害曲线峰值(= cap, 默认 25) */
-#define POUNCE_MIN_HEIGHT           300.0
+/* 参考 Hunter 高扑机制: 落差不足 300u 不产生高扑伤害, 1300u 达到伤害曲线峰值(= cap, 默认 25)
+   起算高度现由 cvar l4d2_JockeyPounce_minheight 控制(默认 300), 峰值高度固定 1300 */
 #define POUNCE_MAX_HEIGHT           1300.0
 
 ConVar g_hEnabled;
@@ -24,8 +24,10 @@ ConVar g_hPounceScale;
 ConVar g_hPounceCap;
 ConVar g_hPounceMinShow;
 ConVar g_hPounceDisplay;
+ConVar g_hPounceDisplayAI;
 ConVar g_hPounceDisplayMax;
 ConVar g_hPounceShowHeight;
+ConVar g_hPounceMinHeight;
 
 /* 高扑高度基准: 只在"离地 → 落地"这一段连续滞空期内有效,
    落地(或不再是可以取扑的 Jockey: 阵亡/变回幽灵/换阵营)立即作废, 防止沿用旧高度 */
@@ -40,7 +42,7 @@ public Plugin myinfo =
 	name = "L4D2 Jockey Pounce Damage Confogl Edition",
 	author = "apples1949",
 	description = "Inflicts distance bonus damage to the jockey's victim if the latter has been pounced from a great height.",
-	version = "1.3"
+	version = "1.4"
 };
 
 public void OnPluginStart()
@@ -51,8 +53,10 @@ public void OnPluginStart()
 	g_hPounceCap		= CreateConVar("l4d2_JockeyPounce_cap", "25", "高扑伤害上限 (同时是 1300u 落差时的曲线峰值)");
 	g_hPounceMinShow	= CreateConVar("l4d2_JockeyPounce_minshow", "1", "至少造成多少突袭伤害才会显示相关提示信息");
 	g_hPounceDisplay	= CreateConVar("l4d2_JockeyPounce_display", "1", "如何显示相关提示信息, 0 - 关闭, 1 - 聊天框, 2 - 屏幕中心");
+	g_hPounceDisplayAI	= CreateConVar("l4d2_JockeyPounce_display_ai", "1", "AI(非玩家操控)猴子的高扑是否也显示提示信息. 0=只在真人猴子时提示, 1=AI 也提示(默认)");
 	g_hPounceDisplayMax	= CreateConVar("l4d2_JockeyPounce_display_max", "0", "是否显示突袭伤害上限");
 	g_hPounceShowHeight	= CreateConVar("l4d2_JockeyPounce_display_height", "1", "是否显示高扑高度");
+	g_hPounceMinHeight	= CreateConVar("l4d2_JockeyPounce_minheight", "300.0", "起算高扑伤害的最小落差(游戏单位), 默认 300 = 参考 Hunter 高扑", FCVAR_NOTIFY, true, 0.0, true, 3000.0);
 
 	HookEvent("jockey_ride", Event_JockeyRide);
 	HookEvent("jockey_ride_end", Event_JockeyRideEnd);
@@ -200,13 +204,21 @@ void DistanceJumped(int client, int victim)
 	/* 高扑高度(游戏单位): 只认本次连续滞空期内的落差 */
 	float pounceHeight = GetPounceHeight(client);
 
-	/* 参考 Hunter 高扑机制: 落差不足 300u 没有高扑伤害;
-	   300u → 1300u 线性涨到曲线峰值(cap, 默认 25), 落差再大也只取峰值;
+	/* 参考 Hunter 高扑机制: 落差不足 minheight(默认 300u) 没有高扑伤害;
+	   minheight → 1300u 线性涨到曲线峰值(cap, 默认 25), 落差再大也只取峰值;
 	   最后乘 scale 得到实际伤害(默认 0.5 = 减半) */
-	float actualDamage = 0.0;
-	if (pounceHeight >= POUNCE_MIN_HEIGHT)
+	float minHeight = g_hPounceMinHeight.FloatValue;
+	float maxHeight = POUNCE_MAX_HEIGHT;
+	/* minheight 被配到接近/超过峰值时, 让曲线退化为"够了就给满伤害" */
+	if (maxHeight <= minHeight)
 	{
-		float ratio = (pounceHeight - POUNCE_MIN_HEIGHT) / (POUNCE_MAX_HEIGHT - POUNCE_MIN_HEIGHT);
+		maxHeight = minHeight + 1.0;
+	}
+
+	float actualDamage = 0.0;
+	if (pounceHeight >= minHeight)
+	{
+		float ratio = (pounceHeight - minHeight) / (maxHeight - minHeight);
 		if (ratio > 1.0)
 		{
 			ratio = 1.0;
@@ -251,7 +263,9 @@ void DistanceJumped(int client, int victim)
 			StrCat(extra, sizeof(extra), heightInfo);
 		}
 
-		if (!IsFakeClient(client))
+		/* AI(非玩家操控)猴子的高扑默认也提示: 12v12 里特感大多是 bot,
+		   原来只在真人猴子时提示, 导致"感觉插件没触发过" */
+		if (!IsFakeClient(client) || g_hPounceDisplayAI.BoolValue)
 		{
 			if (g_hPounceDisplay.IntValue == 1)
 			{

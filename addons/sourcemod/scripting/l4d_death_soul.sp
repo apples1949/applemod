@@ -1,4 +1,4 @@
-#define PLUGIN_VERSION 		"1.2h-2025/2/21"
+#define PLUGIN_VERSION 		"1.2i-2026/10/25"
 
 /*=======================================================================================
 =========================================================================================
@@ -321,6 +321,11 @@ int CreateRagdollReplacement(int client, float vecOrigin[3])
 		DispatchKeyValueVector(entity, "origin", vecOrigin);
 		DispatchSpawn(entity);
 		AcceptEntityInput(entity, "TurnOn");
+
+		// 这个替身是隐形(RENDER_NONE)的, 正常由 DissolveTarget 解散时一并删除;
+		// 一旦 SDKCall(CEntityDissolve_Create) 返回无效 dissolver, 就没人删它 —— 加个超时兜底.
+		SetEntityKillTimer(entity, SOUL_TIMEOUT);
+
 		return entity;
 	}
 	return -1;

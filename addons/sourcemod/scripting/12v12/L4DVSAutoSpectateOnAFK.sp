@@ -10,9 +10,12 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.12-12v12"
+#define PLUGIN_VERSION "2.14-12v12"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
+// 聊天框同步节流间隔（秒）：中央 Hint 每秒刷新无所谓，聊天框每秒都刷就是刷屏
+#define AFK_COUNTDOWN_CHAT_INTERVAL 10.0	// 秒级倒计时提示（"还剩 N 秒"）同步到聊天框的最小间隔
+#define AFK_JOIN_HINT_CHAT_INTERVAL 20.0	// 强制旁观后"你正在旁观"循环提示同步到聊天框的最小间隔
 
 // 可选依赖 l4d2_fix_team_shuffle_edi：正在锁队还原队伍时，跳过对旁观玩家的闲置警告与踢出
 //（修正期间 jointeam 被拦截，旁观玩家无法自行补位）。该插件未加载时本插件照常运行。
@@ -26,7 +29,8 @@ ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
 	g_hIgnoreDeadSurvivorSlot;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
-	afkKickTime, afkCheckInterval, afkSafeRoomExitGrace;
+	afkKickTime, afkCheckInterval;
+float afkSafeRoomExitGrace;	// 有人离开安全区域后，闲置玩家还要等多少秒才强制旁观（l4d_specafk_saferoom_exit_grace）
 bool afkKickEnabled, bAfkSaferoomIgnore, g_bSayResetTime, g_bSpecAfkMsgEnable;
 bool g_bIgnoreDeadSurvivorSlot;	// 生还者队有人躺着占名额时，不把生还者侧算作可补位
 
@@ -36,9 +40,16 @@ int afkPlayerTimeLeftWarn[MAXPLAYERS + 1];
 int afkPlayerTimeLeftAction[MAXPLAYERS + 1];
 float afkPlayerLastPos[MAXPLAYERS + 1][3];
 float afkPlayerLastEyes[MAXPLAYERS + 1][3];
-bool afkPlayerPendingSafeRoomExit[MAXPLAYERS + 1];	// 在安全屋內就走完倒计时、等待他人离开安全区域的闲置玩家
-int afkPlayerSafeRoomExitGrace[MAXPLAYERS + 1];		// 离开安全区域后的最后行动宽限：-1 = 未在宽限中，>=0 = 剩余秒数
+bool afkPlayerPendingSafeRoomExit[MAXPLAYERS + 1];	// 已判定闲置、正在等"离开安全区域 + 延迟秒数"走完的玩家（原意：在安全屋內就走完倒计时、等待他人离开安全区域的闲置玩家）
+int afkPlayerSafeRoomExitGrace[MAXPLAYERS + 1];		// 离开安全区域后的最后行动宽限：-1 = 未在宽限中，>=0 = 当前提示给玩家的剩余秒数
 bool g_bLeftSafeRoom;
+// 本回合第一个生还者离开安全区域的时刻（GetGameTime 基准）。-1 = 还没有人离开安全区域。
+// 强制旁观一律以这个时刻 + l4d_specafk_saferoom_exit_grace 为时间闸门，而不是靠每次检测做秒数递减：
+// 递减会受到 l4d_specafk_checkinteral 的影响（间隔 2 秒时 5 秒会被拖成 8 秒），也不覆盖
+// "在安全屋内就开始倒计时、倒计时还没走完人就已经离开安全区域"的玩家。
+float g_fSafeRoomExitTime = -1.0;
+float g_fLastChatWarn[MAXPLAYERS + 1];		// 秒级倒计时提示"同步到聊天框"的节流计时
+float g_fLastChatJoinHint[MAXPLAYERS + 1];	// 旁观循环提示"同步到聊天框"的节流计时
 bool L4D2Version;
 bool g_bFixTeamShuffleLoaded;	// 可选依赖 l4d2_fix_team_shuffle_edi 是否已加载
 bool g_bFixTeamShuffleRunning;	// 队伍修正插件是否正处于锁队还原期间（每次闲置检测时缓存，供旁观检测判断）
@@ -50,6 +61,7 @@ char g_sImmuneNames[AUTOSPEC_IDS_MAX];
 bool g_bRoundActive;
 Handle PlayerLeftStartTimer, afkCheckThreadTimer;
 Handle g_hStartTimer;
+Handle g_hAfkHint[MAXPLAYERS + 1];	// 强制旁观后的提示定时器（原来句柄不保存，旁客观看期间永不回收）
 StringMap g_hDeadSurvivors, g_hReplacedBots;
 bool g_bSurvivorDied[MAXPLAYERS + 1];
 
@@ -161,7 +173,7 @@ public void OnPluginStart()
 	g_hAfkCheckInterval.SetBounds(ConVarBound_Upper, true, 60.0);
 	g_hAfkKickEnabled 		= CreateConVar("l4d_specafk_kickenabled", 			"1", "设为1时，当队伍有空位时，旁观状态下的AFK玩家将被踢出", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hAfkSaferoomIgnore 	= CreateConVar("l4d_specafk_saferoom_ignore", 		"0", "设为1时，无论幸存者是否离开安全屋，AFK玩家都会被强制旁观（不影响旁观踢出判定）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hAfkSafeRoomExitGrace = CreateConVar("l4d_specafk_saferoom_exit_grace", 	"5", "在安全屋内就被判定闲置的玩家，其他人离开安全区域后给予的最后行动秒数（每秒提示，超时才强制旁观；0 = 离开安全区域后立即强制旁观）", FCVAR_NOTIFY, true, 0.0);
+	g_hAfkSafeRoomExitGrace = CreateConVar("l4d_specafk_saferoom_exit_grace", 	"5.0", "本回合第一个生还者离开安全区域后，仍处于闲置状态的玩家再等多少秒才被强制旁观（默认 5.0，精确到秒；0.0 = 离开安全区域后立即判定）", FCVAR_NOTIFY, true, 0.0);
 	g_hImmuneAccess 		= CreateConVar("l4d_specafk_immune_access_flag", 	"-1", "拥有这些权限标志的玩家在旁观时不会被踢出（默认 -1 = 不按权限免疫，所有玩家都会被警告/踢出；填权限标志如 z = 拥有该标志的玩家免疫；留空 = 所有人免疫，会关闭旁观踢人功能）", FCVAR_NOTIFY);
 	g_hSayResetTime 		= CreateConVar("l4d_specafk_say_reset", 			"1", "设为1时，玩家在聊天框发言将重置计时", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hSpecAfkMsgEnable 	= CreateConVar("l4d_specafk_join_hint_msg", 		"0", "设为1时，向AFK旁观者显示\"你正在旁观，加入任何队伍开始游戏\"的提示", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -219,7 +231,7 @@ void ReadCvars()
 	afkKickTime = g_hAfkKickTime.IntValue;
 	afkCheckInterval = g_hAfkCheckInterval.IntValue;
 	if (afkCheckInterval < 1) afkCheckInterval = 1;
-	afkSafeRoomExitGrace = g_hAfkSafeRoomExitGrace.IntValue;
+	afkSafeRoomExitGrace = g_hAfkSafeRoomExitGrace.FloatValue;
 	afkKickEnabled = g_hAfkKickEnabled.BoolValue;
 	bAfkSaferoomIgnore = g_hAfkSaferoomIgnore.BoolValue;
 
@@ -253,6 +265,43 @@ void ResetSafeRoomExitState(int client)
 	afkPlayerSafeRoomExitGrace[client] = -1;
 }
 
+// 记录"本回合第一个生还者已经离开安全区域"，并开始计算强制旁观的延迟闸门。
+// 两个触发源调用它，谁先到算谁：
+//   1) left4dhooks 的 L4D_OnFirstSurvivorLeftSafeArea_Post（正常情况，离开的瞬间就记录，没有轮询延迟）
+//   2) PlayerLeftStart 每秒轮询 L4D_HasAnySurvivorLeftSafeArea()（兜底：forward 被别的插件拦截、
+//      或 left4dhooks 版本不支持该 forward 时仍能工作）
+void MarkSafeRoomExited()
+{
+	if (g_bLeftSafeRoom)
+		return;
+
+	g_bLeftSafeRoom = true;
+	g_fSafeRoomExitTime = GetGameTime();
+}
+
+// 距离"允许把闲置玩家转到旁观"还剩多少秒：
+//   -1.0 = 本回合还没有生还者离开安全区域（无限等待，不做强制旁观）
+//   >0.0 = 还要再等这么多秒
+//    0.0 = 延迟已满足，可以立刻强制旁观
+float GetSafeRoomExitDelayRemain()
+{
+	if (!g_bLeftSafeRoom)
+		return -1.0;
+
+	// 有离开记录但没有起算时刻（理论上不会发生）：按"延迟已满足"处理，保持旧行为
+	if (g_fSafeRoomExitTime < 0.0)
+		return 0.0;
+
+	// 时钟回退（换图/回合重置本该清掉起算时刻，这里是兜底）：按"延迟已满足"处理，
+	// 否则会算出一个巨大的剩余秒数，玩家反而永远等不到强制旁观
+	float fElapsed = GetGameTime() - g_fSafeRoomExitTime;
+	if (fElapsed < 0.0)
+		return 0.0;
+
+	float fRemain = afkSafeRoomExitGrace - fElapsed;
+	return fRemain > 0.0 ? fRemain : 0.0;
+}
+
 public void OnMapEnd()
 {
 	ResetPlugin();
@@ -264,6 +313,9 @@ public void OnMapEnd()
 public void OnClientPutInServer(int client)
 {
 	g_bSurvivorDied[client] = false;
+	// 新连线玩家：聊天框同步节流从零开始（否则会继承上一个占用这个槽位的玩家的时间戳）
+	g_fLastChatWarn[client] = 0.0;
+	g_fLastChatJoinHint[client] = 0.0;
 	if(IsFakeClient(client)) return;
 
 	afkPlayerTimeLeftWarn[client] = afkWarnKickTime;
@@ -587,6 +639,7 @@ void Event_RoundStart (Event event, const char[] name, bool dontBroadcast)
 	ResetTimer();
 	g_bRoundActive = true;
 	g_bLeftSafeRoom = false;
+	g_fSafeRoomExitTime = -1.0;	// 新回合重新起算"离开安全区域"计时
 	g_hDeadSurvivors.Clear();
 	g_hReplacedBots.Clear();
 	for (int i = 1; i <= MaxClients; i++) g_bSurvivorDied[i] = false;
@@ -618,10 +671,18 @@ Action tmrStart(Handle timer)
 	g_hStartTimer = null;
 	if (!g_bRoundActive || !L4D_IsVersusMode()) return Plugin_Stop;
 	g_bLeftSafeRoom = L4D_HasAnySurvivorLeftSafeArea();
+	// 晚加载 / 回合中途接管：已经有生还者离开安全区域时，以"现在"作为延迟的起算点
+	//（真实的离开时刻已经过去，玩家最多也只该等满这个延迟，不能因为插件接管就被立刻转旁观）；
+	// 如果 forward 已经记下了真实的离开时刻，则保留它，不被这次轮询覆盖。
+	if (g_bLeftSafeRoom) MarkSafeRoomExited();
+	else g_fSafeRoomExitTime = -1.0;
 
 	for (int client=1;client<=MaxClients;client++)
 	{
 		ResetSafeRoomExitState(client);
+		// 新回合：聊天框同步节流清零，保证第一次提示能进聊天框
+		g_fLastChatWarn[client] = 0.0;
+		g_fLastChatJoinHint[client] = 0.0;
 		if (IsClientInGame(client) && GetClientTeam(client) == 2)
 		{
 			int owner = IsFakeClient(client) ? GetIdleOwner(client) : client;
@@ -724,7 +785,12 @@ Action ClientReallyChangeTeam(Handle timer, int victim)
 
 Action afkJoinHint (Handle Timer, int client)
 {
-	if(!g_bSpecAfkMsgEnable) return Plugin_Stop;
+	if(!g_bSpecAfkMsgEnable)
+	{
+		ClearAfkHintTimer(Timer);
+		return Plugin_Stop;
+	}
+
 	if (!g_bRoundActive || IsFixTeamShuffleRunning()) return Plugin_Continue;
 
 	client = GetClientOfUserId(client);
@@ -738,12 +804,34 @@ Action afkJoinHint (Handle Timer, int client)
 		{
 			// We send him a hint text ...
 			PrintHintText(client, "%T", "You're spectating. Join any team to play.", client);
+			// 聊天框同步：这条提示每 5 秒循环一次，聊天框按 AFK_JOIN_HINT_CHAT_INTERVAL 节流后才输出，
+			// 否则旁观期间聊天框会被同一句话刷屏（只发给该玩家本人）
+			if (ChatMirrorAllowed(g_fLastChatJoinHint[client], AFK_JOIN_HINT_CHAT_INTERVAL))
+				CPrintToChat(client, "%T", "You're spectating. Join any team to play.", client);
 			
 			return Plugin_Continue;
 		}
 	}
-	
+
+	ClearAfkHintTimer(Timer);
 	return Plugin_Stop;
+}
+
+// 定时器自毁时把数组里对应的句柄清空，避免留下失效句柄（也供 ResetTimer/换边时复用）
+void ClearAfkHintTimer (Handle Timer)
+{
+	if (Timer == null)
+	{
+		return;
+	}
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_hAfkHint[i] == Timer)
+		{
+			g_hAfkHint[i] = null;
+		}
+	}
 }
 
 void afkResetTimers (int client)
@@ -756,6 +844,10 @@ void afkResetTimers (int client)
 	{
 		afkPlayerTimeLeftWarn[client] = afkWarnSpecTime;
 		afkPlayerTimeLeftAction[client] = afkSpecTime;
+
+		// 已经进队：把"你还在旁观"的重复提示停掉
+		delete g_hAfkHint[client];
+		g_hAfkHint[client] = null;
 	}
 	else // if player is on spectators
 	{
@@ -765,6 +857,41 @@ void afkResetTimers (int client)
 	
 	GetClientAbsOrigin(client, afkPlayerLastPos[client]);
 	GetClientEyeAngles(client, afkPlayerLastEyes[client]);
+
+	// 玩家已行动：倒计时会重新开始，聊天框同步也重新从"立刻可输出"起算
+	g_fLastChatWarn[client] = 0.0;
+}
+
+// 聊天框同步的节流判断：同一玩家同一类提示，聊天框最多每 fInterval 秒输出一次。
+// 中央 Hint 每秒刷新不影响观感，聊天框每秒复制同一句话就是刷屏，所以秒级提示在聊天框要节流。
+bool ChatMirrorAllowed(float &fLastTime, float fInterval)
+{
+	float fNow = GetGameTime();
+	if (fLastTime > 0.0 && fNow - fLastTime < fInterval)
+		return false;
+
+	fLastTime = fNow;
+	return true;
+}
+
+// 把一条"只走过 PrintHintText"的翻译提示原样再输出到聊天框（目标人群由调用方决定，
+// 单播就用 CPrintToChat 发给该玩家，全服播报就用 CPrintToChatAll，保持与中央 Hint 一致）。
+// 内容与原 Hint 完全同源（同一个 phrase），只是把翻译里可能带的换行折叠成空格，
+// 避免聊天框里被换行截成两截。颜色标签交由 multicolors 处理。
+void AFKChatMirror(int client, const char[] phrase, int seconds, bool bHasSeconds)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
+		return;
+
+	char sBuffer[256];
+	SetGlobalTransTarget(client);
+	if (bHasSeconds)
+		Format(sBuffer, sizeof(sBuffer), "%T", phrase, client, seconds);
+	else
+		Format(sBuffer, sizeof(sBuffer), "%T", phrase, client);
+
+	ReplaceString(sBuffer, sizeof(sBuffer), "\n", " ");
+	CPrintToChat(client, "%s", sBuffer);
 }
 
 void AFKPlayBlipSound(int client)
@@ -777,6 +904,10 @@ void AFKCountdownWarn(int client, const char[] phrase, int seconds)
 {
 	// 倒计时提示：Hint 文本 + 提示音
 	PrintHintText(client, "%T", phrase, client, seconds);
+	// 聊天框同步：这类倒计时是按检测间隔（默认每秒）刷新的，若聊天框也逐秒输出就是刷屏，
+	// 因此按 AFK_COUNTDOWN_CHAT_INTERVAL 节流；只发给被倒计时的这个玩家，不打扰其他人
+	if (ChatMirrorAllowed(g_fLastChatWarn[client], AFK_COUNTDOWN_CHAT_INTERVAL))
+		AFKChatMirror(client, phrase, seconds, true);
 	AFKPlayBlipSound(client);
 }
 
@@ -883,19 +1014,19 @@ Action afkCheckThread(Handle timer)
 							}
 							else // player warn timeout reached ...
 							{
-								// 在安全屋内就被判定闲置、倒计时走完的玩家：其他人离开安全区域后
-								// 再给他 afkSafeRoomExitGrace 秒最后行动时间（每秒提示），仍不行动才强制旁观
+								// 离开安全区域前就被判定闲置、倒计时已经走完的玩家：本回合有人离开安全区域后，
+								// 还要再等满 l4d_specafk_saferoom_exit_grace 秒（默认 5 秒），期间每秒提示，
+								// 仍不行动才强制旁观。等待期间玩家一有行动就会走 afkResetTimers 清掉待旁观状态。
 								if (afkPlayerPendingSafeRoomExit[i] && g_bLeftSafeRoom && !bAfkSaferoomIgnore)
 								{
-									// 首次进入宽限
-									if (afkPlayerSafeRoomExitGrace[i] < 0)
-										afkPlayerSafeRoomExitGrace[i] = afkSafeRoomExitGrace;
-
-									if (afkPlayerSafeRoomExitGrace[i] > 0)
+									// 距离可以强制旁观还剩多少秒：以"第一个离开安全区域的生还者"那一瞬间起算，
+									// 不再靠每次检测减秒数，避免 l4d_specafk_checkinteral 把 5 秒拖成 6~8 秒
+									float fRemain = GetSafeRoomExitDelayRemain();
+									if (fRemain > 0.0)
 									{
 										// 离开安全区域后每秒提示剩余行动时间
+										afkPlayerSafeRoomExitGrace[i] = RoundToCeil(fRemain);
 										AFKCountdownWarn(i, "[AFK] Inactivity detected! 6", afkPlayerSafeRoomExitGrace[i]);
-										afkPlayerSafeRoomExitGrace[i] = afkPlayerSafeRoomExitGrace[i] - afkCheckInterval;
 									}
 									else // 宽限时间用尽 ... 强制旁观
 									{
@@ -910,8 +1041,20 @@ Action afkCheckThread(Handle timer)
 									// if his action time reached 0 ...
 									if (afkPlayerTimeLeftAction[i] <= 0)
 									{
+										// 设了 l4d_specafk_saferoom_ignore 1 时保持旧语义：不看安全区域，直接强制旁观
+										if (bAfkSaferoomIgnore)
+										{
+											afkForceSpectate(i, true);
+										}
+										// 已经有人离开安全区域，但距离"离开安全区域 + 延迟秒数"还差一点：
+										// 同样记为待旁观，交给上面的宽限分支按剩余秒数提示，绝不在这个窗口内转旁观。
+										// 这一条覆盖了玩家在安全屋内就已开始倒计时、倒计时还没走完人就已经离开的情况。
+										else if (GetSafeRoomExitDelayRemain() > 0.0)
+										{
+											afkPlayerPendingSafeRoomExit[i] = true;
+										}
 										// If players leaved safe room we force him to spectate
-										if (g_bLeftSafeRoom || bAfkSaferoomIgnore)
+										else if (g_bLeftSafeRoom)
 										{
 											afkForceSpectate(i, true);
 										}
@@ -922,10 +1065,18 @@ Action afkCheckThread(Handle timer)
 
 											// 提示里的秒数取自 l4d_specafk_saferoom_exit_grace；
 											// 该 cvar 为 0 时没有宽限（离开安全区域即强制旁观），改用无秒数的提示
-											if (afkSafeRoomExitGrace > 0)
-												PrintHintText(i, "%T", "[AFK] Inactivity detected! 2", i, afkSafeRoomExitGrace);
+											if (afkSafeRoomExitGrace > 0.0)
+											{
+												PrintHintText(i, "%T", "[AFK] Inactivity detected! 2", i, RoundToNearest(afkSafeRoomExitGrace));
+												// 同一提示同步进聊天框（只发给该玩家，不打扰其他人）
+												AFKChatMirror(i, "[AFK] Inactivity detected! 2", RoundToNearest(afkSafeRoomExitGrace), true);
+											}
 											else
+											{
 												PrintHintText(i, "%T", "[AFK] Inactivity detected! 7", i);
+												// 同一提示同步进聊天框（只发给该玩家，不打扰其他人）
+												AFKChatMirror(i, "[AFK] Inactivity detected! 7", 0, false);
+											}
 										}
 									}
 									else // we just warn him ...
@@ -998,6 +1149,8 @@ Action afkCheckThread(Handle timer)
 }
 
 
+// 单播中央 Hint。注意：它唯一被调用的地方（afkForceSpectate）已经先做过一次同语义的
+// CPrintToChat，聊天框的双通道已经存在，这里不再重复镜像，避免同一句话在聊天框出现两次。
 void AFKPrintHint(int client, const char[] phrase)
 {
 	char sBuffer[256];
@@ -1007,6 +1160,8 @@ void AFKPrintHint(int client, const char[] phrase)
 	PrintHintText(client, "%s", sBuffer);
 }
 
+// 全服中央 Hint。同上：调用点 afkForceSpectate 已经用 CPrintToChatAll 输出过同一句，
+// 因此这里不重复镜像，避免刷屏。
 void AFKPrintHintToAll(const char[] phrase, const char[] name)
 {
 	char sBuffer[256];
@@ -1032,7 +1187,9 @@ void afkForceSpectate (int client, bool advertise)
 	ChangeClientTeam(client, 1);
 	
 	// We send him a hint message 5 seconds later, in case he hasn't joined any team
-	CreateTimer(5.0, afkJoinHint, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	// 先杀掉上一个提示定时器再建，避免同一客户端叠出多个常驻重复定时器
+	delete g_hAfkHint[client];
+	g_hAfkHint[client] = CreateTimer(5.0, afkJoinHint, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 	
 	// Print forced info
 	if (advertise)
@@ -1064,11 +1221,18 @@ void afkKickClient (int client)
 	CPrintToChatAll("%t", "have been kicked from server due to inactivity", sName, afkKickTime);
 }
 
+// 本回合第一个生还者离开安全区域的瞬间（left4dhooks 前挂钩，精度高于每秒轮询）
+public void L4D_OnFirstSurvivorLeftSafeArea_Post(int client)
+{
+	MarkSafeRoomExited();
+}
+
 Action PlayerLeftStart(Handle Timer)
 {
 	if (L4D_HasAnySurvivorLeftSafeArea())
 	{
-		g_bLeftSafeRoom = true;
+		// 兼容旧路径：轮询发现已有人离开安全区域时，记下起算时刻（forward 没触发时的兜底）
+		MarkSafeRoomExited();
 		PlayerLeftStartTimer = null;
 		return Plugin_Stop;
 	}
@@ -1123,6 +1287,8 @@ void ResetPlugin()
 {
 	g_bRoundActive = false;
 	g_bLeftSafeRoom = false;
+	// 回合结束 / 换图：清掉"离开安全区域"起算时刻，避免下一回合沿用上一回合的时间导致延迟被跳过
+	g_fSafeRoomExitTime = -1.0;
 }
 
 void ResetTimer()
@@ -1130,4 +1296,10 @@ void ResetTimer()
 	delete g_hStartTimer;
 	delete PlayerLeftStartTimer;
 	delete afkCheckThreadTimer;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		delete g_hAfkHint[i];
+		g_hAfkHint[i] = null;
+	}
 }

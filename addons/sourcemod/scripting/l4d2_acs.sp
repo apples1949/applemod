@@ -79,6 +79,8 @@
 #include <sourcemod>
 #include <sdktools>
 #include <l4d2_mission_manager>
+// 换图投票改用游戏原生投票界面 (与 votes_applemod.sp 使用同一套 builtinvotes 写法)
+#include <builtinvotes>
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -106,6 +108,9 @@
 #define SOUND_NEW_VOTE_START	"ui/Beep_SynthTone01.wav"
 #define SOUND_NEW_VOTE_WINNER	"ui/alert_clink.wav"
 
+//换图投票(!chmap / !chmap2)原生投票的持续时间(秒), 与旧实现的菜单投票 20 秒保持一致
+#define CHMAP_VOTE_TIME			20
+
 
 //Global Variables
 LMM_GAMEMODE g_iGameMode;			//Integer to store the gamemode
@@ -126,6 +131,12 @@ int g_iClientVote[MAXPLAYERS + 1];						//The value of the clients vote
 int g_iWinningMapIndices[MAXPLAYERS + 1];				//Winning map/campaigns' indices
 int g_iWinningMapIndices_Len;
 int g_iWinningMapVotes;									//Winning map/campaign's number of votes, 0 = no one voted yet
+
+//换图投票(!chmap / !chmap2)的状态: 改用游戏原生投票(builtinvotes)后,
+//投票目标不再能挂在菜单 item 的 info 字符串上, 用全局变量保存(同一时间只允许一个投票)
+Handle g_hChmapVote;									//正在进行的原生换图投票句柄, null = 没有投票
+int g_iChmapVoteMission = -1;							//本次投票的目标 missionIndex, -1 = 无
+int g_iChmapVoteMap = -1;								//本次投票的目标 mapIndex, -1 = 整个战役(换到该战役第一张图)
 
 //Console Variables (CVars)
 ConVar g_hCVar_VotingEnabled;			//Tells if the voting system is on
@@ -659,7 +670,7 @@ public int MissionChooserMenuHandler(Menu menu, MenuAction action, int client, i
 				// A mission is chosen
 				menu.GetItem(item, menuInfo, sizeof(menuInfo), _, menuName, sizeof(menuName));
 				int cycleIndex = StringToInt(menuName);
-				ShowChmapVoteToAll(ACS_GetMissionIndex(g_iGameMode, cycleIndex), -1);
+				ShowChmapVoteToAll(client, ACS_GetMissionIndex(g_iGameMode, cycleIndex), -1);
 			}
 		}
 		
@@ -770,140 +781,279 @@ public int MapChooserMenuHandler(Menu menu, MenuAction action, int client, int i
 			VoteMenuHandler(client, false, missionIndex, mapIndex);
 		} else {
 			// Chmap mode
-			ShowChmapVoteToAll(missionIndex, mapIndex);
+			ShowChmapVoteToAll(client, missionIndex, mapIndex);
 		}
 	}
 	return 0;
 }
 
-void ShowChmapVoteToAll(int missionIndex, int mapIndex) {
-	Menu menuVote = CreateMenu(ChampVoteHandler, 
-						MenuAction_Display|MenuAction_DisplayItem|MenuAction_VoteCancel|MenuAction_VoteEnd|MenuAction_End);
-	
-	menuVote.SetTitle("To be translated");
-	char menuInfo[MMC_ITEM_LEN_INFO];
-	IntToString(missionIndex, menuInfo, sizeof(menuInfo));
-	menuVote.AddItem(menuInfo, "Yes");
-	IntToString(mapIndex, menuInfo, sizeof(menuInfo));	
-	menuVote.AddItem(menuInfo, "No");
-	menuVote.ExitButton = false;
-	menuVote.DisplayVoteToAll(20);
-}
+/*------------------------------------------------------------------
+ 换图投票 (!chmap / !chmap2): 改用 L4D2 游戏原生投票界面 (builtinvotes)
 
-public int ChampVoteHandler(Menu menu, MenuAction action, int param1, int param2) {
-	if (action == MenuAction_Display) {
-		// Localize title
-		char localizedName[LEN_LOCALIZED_NAME];
-		char menuInfo[MMC_ITEM_LEN_INFO];
-		menu.GetItem(0, menuInfo, sizeof(menuInfo));
-		int missionIndex = StringToInt(menuInfo);
-		menu.GetItem(1, menuInfo, sizeof(menuInfo));
-		int mapIndex = StringToInt(menuInfo);
+ 旧实现是 SourceMod 自绘的菜单投票:
+   CreateMenu(ChampVoteHandler) + MenuAction_VoteEnd + GetMenuVoteInfo 手工计票,
+ 玩家看到的是 SM 的投票列表界面, 不是游戏自带那个"是/否"投票框。
+ 现改为 builtinvotes 的原生投票, 写法对照 votes_applemod.sp:
+   CreateBuiltinVote -> SetBuiltinVoteArgument -> SetBuiltinVoteInitiator
+   -> SetBuiltinVoteResultCallback -> DisplayBuiltinVote,
+ 票型用 BuiltinVoteType_ChgCampaign = 游戏自带的"更换战役/更换地图"投票。
 
-		if (mapIndex < 0) {
-			LMM_GetMissionLocalizedName(g_iGameMode, missionIndex, localizedName, sizeof(localizedName), param1);
-		} else {
-			LMM_GetMapLocalizedName(g_iGameMode, missionIndex, mapIndex, localizedName, sizeof(localizedName), param1);
-		}
-		
-	 	char buffer[255];
-		Format(buffer, sizeof(buffer), "%T", "Change Map To", param1, localizedName);
-		Panel panel = view_as<Panel>(param2);
-		panel.SetTitle(buffer);
-	} else if (action == MenuAction_DisplayItem) {
-		char menuName[MMC_ITEM_LEN_NAME];
-		char buffer[MMC_ITEM_LEN_NAME];
-		menu.GetItem(param2, "", 0, _, menuName, sizeof(menuName));
-		Format(buffer, sizeof(buffer), "%T", menuName, param1);	// param1 = clientIndex
-	 	RedrawMenuItem(buffer);
-	} else if (action == MenuAction_VoteCancel && param1 == VoteCancel_NoVotes) {
+ 计票口径 (与旧实现完全等价):
+   有资格投票人数 playerCount = 结果回调的 num_clients
+		= 发起投票时传入的玩家列表长度 = 所有在游戏内的真人玩家(含旁观者),
+		  与旧实现里 playerCount 的统计口径相同;
+   实际投票人数 totalVotes   = 结果回调的 num_votes;
+   弃权人数 abstention       = playerCount - totalVotes
+		← 原生投票没有"弃权"这个选项, 只能按"服务器内真人玩家数 - 实际投票人数"折算,
+		  语义与旧实现 GetMenuVoteInfo 得到的 totalVotes 一致。
+------------------------------------------------------------------*/
+bool ShowChmapVoteToAll(int iClient, int missionIndex, int mapIndex) {
+	// 同一时间只允许一个投票: IsBuiltinVoteInProgress 同时覆盖 builtinvotes 投票和游戏自带投票
+	if (IsBuiltinVoteInProgress()) {
+		if (iClient > 0 && iClient <= MaxClients && IsClientInGame(iClient) && !IsFakeClient(iClient))
+			PrintToChat(iClient, "\x04[提示]\x05%t", "Vote in Progress");
+		return false;
+	}
+
+	// 已经有一个换图定时器在等待执行 (自动换图, 或上一轮投票已经通过):
+	// 这时再通过一个投票也不会真的换图, 直接拒绝, 免得玩家白投一次
+	if (g_hTimer_ChangeMap != null) {
+		if (iClient > 0 && iClient <= MaxClients && IsClientInGame(iClient) && !IsFakeClient(iClient))
+			PrintToChat(iClient, "\x04[提示]\x05正在换图中, 请稍后再发起投票.");
+		return false;
+	}
+
+	// 收集有资格投票的玩家: 与旧实现 playerCount 一致 = 所有在游戏内的真人玩家(含旁观者)
+	int[] iPlayers = new int[MaxClients];
+	int iNumPlayers = 0;
+	for (int i = 1; i <= MaxClients; i++) {
+		if (!IsClientInGame(i) || IsFakeClient(i))
+			continue;
+		iPlayers[iNumPlayers++] = i;
+	}
+
+	// 服务器里没有真人玩家 (只剩 bot): 没有人能投票, 播报与旧实现无票时相同
+	if (iNumPlayers == 0) {
 		PrintToChatAll("\x04[提示]\x05%t", "No Votes Cast");
-	} else if (action == MenuAction_VoteEnd) {
-		// param1: The winning item, param2: vote result
-		int votes, totalVotes;	// totalVotes != numOfPlayers
-		GetMenuVoteInfo(param2, votes, totalVotes);
-		
-		int playerCount = 0;
-		for(int iPlayer = 1; iPlayer <= MaxClients; iPlayer++)
-			if(IsClientInGame(iPlayer) && !IsFakeClient(iPlayer))
-				playerCount++;
-		
-		int abstention = playerCount - totalVotes;
-		int yesVotes, noVotes;
-		if (param1 == 1) {	// "No" is winning
-			yesVotes = totalVotes - votes; // Reverse the votes to be in relation to the Yes option.
-			noVotes = votes;
-		} else {	// "Yes" is winning
-			yesVotes = votes;
-			noVotes = totalVotes - votes;
-		}
-
-		float percent, limit;
-		if (g_hCVar_ChMapPolicy.IntValue == 1) {
-			// Treat abstention as NO
-			percent = float(yesVotes) / float(playerCount);
-		} else if (g_hCVar_ChMapPolicy.IntValue == 2) {
-			// Treat abstention as YES, highly not recommended
-			percent = float(yesVotes + abstention) / float(playerCount);
-		} else {
-			// Disabled
-			return 0;
-		}
-		
-		ConVar limitConVar = FindConVar("sm_vote_map");
-		if (limitConVar == null) {
-			limit = 0.6;
-		} else {
-			limit = limitConVar.FloatValue;
-		}
-
-		// A multi-argument vote is "always successful", but have to check if its a Yes/No vote.
-		if (percent < limit) {
-			LogAction(-1, -1, "Vote failed.");
-			PrintToChatAll("\x04[提示]\x05%t\x04[\x03%d\x04,\x03%d\x04,\x03%d\x04]", "Vote Failed", RoundToNearest(100.0*limit), RoundToNearest(100.0*percent), playerCount, yesVotes, noVotes, abstention);
-		} else {
-			PrintToChatAll("\x04[提示]\x05%t\x0[\x03%d\x04,\x03%d\x04,\x03%d\x04]", "Vote Successful", RoundToNearest(100.0*percent), playerCount, yesVotes, noVotes, abstention);
-			
-			char menuInfo[MMC_ITEM_LEN_INFO];
-			menu.GetItem(0, menuInfo, sizeof(menuInfo));
-			int missionIndex = StringToInt(menuInfo);
-			menu.GetItem(1, menuInfo, sizeof(menuInfo));
-			int mapIndex = StringToInt(menuInfo);
-
-			char colorizedName[LEN_MISSION_NAME];
-			char localizedName[LEN_MISSION_NAME];
-			char mapName[LEN_MAP_FILENAME];
-			if (mapIndex < 0) {
-				// Vote for mission, switch to its first map
-				LMM_GetMapName(g_iGameMode, missionIndex, 0, mapName, sizeof(mapName));
-				for (int client = 1; client <= MaxClients; client++) {
-					if (IsClientInGame(client)) {
-						LMM_GetMissionLocalizedName(g_iGameMode, missionIndex, localizedName, sizeof(localizedName), client);
-						Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", localizedName);
-						PrintToChat(client,"\x04[提示]%t", "Mission is now winning the vote", colorizedName);
-					}
-				}			
-			} else {
-				// Vote for a map, switch to that map
-				LMM_GetMapName(g_iGameMode, missionIndex, mapIndex, mapName, sizeof(mapName));
-				for (int client = 1; client <= MaxClients; client++) {
-					if (IsClientInGame(client)) {
-						LMM_GetMapLocalizedName(g_iGameMode, missionIndex, mapIndex, localizedName, sizeof(localizedName), client);
-						Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", localizedName);
-						PrintToChat(client,"\x04[提示]%t", "Map is now winning the vote", colorizedName);
-					}
-				}
-			}
-			
-			Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", mapName);
-			PrintToChatAll("\x04[提示]%t", "Changing map", colorizedName);
-			CreateChangeMapTimer(mapName);
-		}
-	} else if (action == MenuAction_End) {
-		delete menu;
+		return false;
 	}
-	
-	return 0;
+
+	// 投票文案参数: 原生投票的文案是广播给所有人的单一字符串, 无法按客户端本地化,
+	// 统一用 client 0 (服务器语言) 取一次地图/战役的本地化显示名
+	char localizedName[LEN_LOCALIZED_NAME];
+	if (mapIndex < 0) {
+		LMM_GetMissionLocalizedName(g_iGameMode, missionIndex, localizedName, sizeof(localizedName), 0);
+	} else {
+		LMM_GetMapLocalizedName(g_iGameMode, missionIndex, mapIndex, localizedName, sizeof(localizedName), 0);
+	}
+
+	// builtinvotes 会把 argument 再当成格式串解析一次, 文本里的 % 必须转义成 %%, 否则运行时刷格式错误
+	char argument[128];
+	strcopy(argument, sizeof(argument), localizedName);
+	ReplaceString(argument, sizeof(argument), "%", "%%");
+
+	// 记录本次投票的目标: 原生投票没法像菜单那样把数据挂在 item 的 info 串上,
+	// 而同一时间只允许一个投票, 所以直接用全局变量, 供结果回调读取
+	g_iChmapVoteMission = missionIndex;
+	g_iChmapVoteMap = mapIndex;
+
+	g_hChmapVote = CreateBuiltinVote(ChmapVoteActionHandler, BuiltinVoteType_ChgCampaign,
+						BuiltinVoteAction_Cancel|BuiltinVoteAction_End);
+	if (g_hChmapVote == null) {
+		// builtinvotes 扩展没加载时 CreateBuiltinVote 会返回 null
+		PrintToChatAll("\x04[提示]\x05无法创建原生投票(builtinvotes 扩展未加载?), 换图投票未发起.");
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		return false;
+	}
+
+	SetBuiltinVoteArgument(g_hChmapVote, argument);
+	if (iClient > 0 && iClient <= MaxClients && IsClientInGame(iClient) && !IsFakeClient(iClient))
+		SetBuiltinVoteInitiator(g_hChmapVote, iClient);
+	SetBuiltinVoteResultCallback(g_hChmapVote, ChmapVoteResultHandler);
+
+	if (!DisplayBuiltinVote(g_hChmapVote, iPlayers, iNumPlayers, CHMAP_VOTE_TIME)) {
+		// 显示失败: 句柄在这里自己 delete 并归零, 不能再让 End 回调 delete 第二次
+		delete g_hChmapVote;
+		g_hChmapVote = null;
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		PrintToChatAll("\x04[提示]\x05换图投票发起失败.");
+		return false;
+	}
+
+	// 发起者不自动投同意票: 旧实现的菜单投票也没有自动投票, 这里保持语义不变
+	return true;
+}
+
+//builtinvotes 的 pump 回调: 只处理 cancel / end 两个生命周期动作
+//- Cancel: 投票序列被取消(超时无票, 或被换图/其它插件打断), 必须调用一次
+//          DisplayBuiltinVoteFail, 否则没投票的玩家会一直停在投票界面上;
+//- End:    投票显示彻底结束, 句柄只在这里 delete 一次, 并先把全局句柄归零。
+public void ChmapVoteActionHandler(Handle vote, BuiltinVoteAction action, int param1, int param2) {
+	switch (action) {
+		case BuiltinVoteAction_Cancel: {
+			// 只处理自己发起的那个投票, 避免误伤其它插件或游戏自带的投票
+			if (vote != g_hChmapVote)
+				return;
+
+			BuiltinVoteFailReason reason = view_as<BuiltinVoteFailReason>(param1);
+			// 票数不足导致的取消: 对应旧实现 MenuAction_VoteCancel + VoteCancel_NoVotes 的"没有人投票"播报
+			if (reason == BuiltinVoteFail_NotEnoughVotes)
+				PrintToChatAll("\x04[提示]\x05%t", "No Votes Cast");
+
+			DisplayBuiltinVoteFail(vote, reason);
+			g_iChmapVoteMission = -1;
+			g_iChmapVoteMap = -1;
+		}
+		case BuiltinVoteAction_End: {
+			// 句柄生命周期终点: 先归零再 delete, 防止重复 delete 和悬空句柄
+			if (g_hChmapVote == vote) {
+				g_hChmapVote = null;
+				g_iChmapVoteMission = -1;
+				g_iChmapVoteMap = -1;
+			}
+			delete vote;
+		}
+	}
+}
+
+//builtinvotes 的结果回调: 计票, 播报, 通过后走原来的 CreateChangeMapTimer 换图逻辑
+public void ChmapVoteResultHandler(Handle vote, int num_votes, int num_clients, const int[][] client_info, int num_items, const int[][] item_info) {
+	// 只处理自己发起的投票; 句柄已被清理/换成别的投票时直接忽略 (防并发与重入)
+	if (vote != g_hChmapVote)
+		return;
+
+	// policy = 0 (禁用) 时不做任何处理 (与旧实现一致)
+	if (g_hCVar_ChMapPolicy.IntValue < 1) {
+		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Generic);
+		return;
+	}
+
+	// 统计同意票 / 反对票
+	int yesVotes = 0;
+	int noVotes = 0;
+	for (int i = 0; i < num_items; i++) {
+		if (item_info[i][BUILTINVOTEINFO_ITEM_INDEX] == BUILTINVOTES_VOTE_YES) {
+			yesVotes = item_info[i][BUILTINVOTEINFO_ITEM_VOTES];
+		} else if (item_info[i][BUILTINVOTEINFO_ITEM_INDEX] == BUILTINVOTES_VOTE_NO) {
+			noVotes = item_info[i][BUILTINVOTEINFO_ITEM_VOTES];
+		}
+	}
+
+	// totalVotes != numOfPlayers: num_clients 是"有资格投票的人数"(服务器内真人玩家数, 含旁观者),
+	// num_votes 是"实际投票的人数", 差额就是弃权人数
+	int playerCount = (num_clients > 0) ? num_clients : 0;
+	int totalVotes = (num_votes > 0) ? num_votes : 0;
+	int abstention = playerCount - totalVotes;
+	if (abstention < 0)
+		abstention = 0;
+	// 投票期间可能有玩家断线, 用实际投票人数校正反对票, 保证 同意 + 反对 + 弃权 = 有资格投票人数
+	if (yesVotes + noVotes != totalVotes) {
+		noVotes = totalVotes - yesVotes;
+		if (noVotes < 0)
+			noVotes = 0;
+	}
+
+	// 一个票都没有: 对应旧实现的 MenuAction_VoteCancel + VoteCancel_NoVotes 播报
+	if (playerCount <= 0 || totalVotes <= 0) {
+		PrintToChatAll("\x04[提示]\x05%t", "No Votes Cast");
+		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_NotEnoughVotes);
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		return;
+	}
+
+	float percent, limit;
+	if (g_hCVar_ChMapPolicy.IntValue == 1) {
+		// Treat abstention as NO
+		percent = float(yesVotes) / float(playerCount);
+	} else if (g_hCVar_ChMapPolicy.IntValue == 2) {
+		// Treat abstention as YES, highly not recommended
+		percent = float(yesVotes + abstention) / float(playerCount);
+	} else {
+		// Disabled
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		return;
+	}
+
+	ConVar limitConVar = FindConVar("sm_vote_map");
+	if (limitConVar == null) {
+		limit = 0.6;
+	} else {
+		limit = limitConVar.FloatValue;
+	}
+
+	// A multi-argument vote is "always successful", but have to check if its a Yes/No vote.
+	if (percent < limit) {
+		LogAction(-1, -1, "Vote failed.");
+		PrintToChatAll("\x04[提示]\x05%t\x04[\x03%d\x04,\x03%d\x04,\x03%d\x04]", "Vote Failed", RoundToNearest(100.0*limit), RoundToNearest(100.0*percent), playerCount, yesVotes, noVotes, abstention);
+		// 原生投票的失败界面
+		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Loses);
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		return;
+	}
+
+	int missionIndex = g_iChmapVoteMission;
+	int mapIndex = g_iChmapVoteMap;
+	// 目标数据已失效 (理论上不会发生): 不做换图, 保守按失败处理
+	if (missionIndex < 0) {
+		LogError("Chmap vote target lost. missionIndex=%d, mapIndex=%d", missionIndex, mapIndex);
+		DisplayBuiltinVoteFail(vote, BuiltinVoteFail_Generic);
+		g_iChmapVoteMission = -1;
+		g_iChmapVoteMap = -1;
+		return;
+	}
+
+	char colorizedName[LEN_MISSION_NAME];
+	char localizedName[LEN_MISSION_NAME];
+	char mapName[LEN_MAP_FILENAME];
+	char passText[128];
+	if (mapIndex < 0) {
+		// Vote for mission, switch to its first map
+		LMM_GetMapName(g_iGameMode, missionIndex, 0, mapName, sizeof(mapName));
+		LMM_GetMissionLocalizedName(g_iGameMode, missionIndex, localizedName, sizeof(localizedName), 0);
+	} else {
+		// Vote for a map, switch to that map
+		LMM_GetMapName(g_iGameMode, missionIndex, mapIndex, mapName, sizeof(mapName));
+		LMM_GetMapLocalizedName(g_iGameMode, missionIndex, mapIndex, localizedName, sizeof(localizedName), 0);
+	}
+
+	// 原生投票的通过界面: 显示名里的 % 同样要转义 (builtinvotes 会再当格式串解析一次)
+	strcopy(passText, sizeof(passText), localizedName);
+	ReplaceString(passText, sizeof(passText), "%", "%%");
+	// 先收掉投票界面 (会触发 End 回调, 之后不能再碰 vote 句柄), 再播报换图
+	DisplayBuiltinVotePass(vote, passText);
+
+	PrintToChatAll("\x04[提示]\x05%t\x0[\x03%d\x04,\x03%d\x04,\x03%d\x04]", "Vote Successful", RoundToNearest(100.0*percent), playerCount, yesVotes, noVotes, abstention);
+
+	if (mapIndex < 0) {
+		for (int client = 1; client <= MaxClients; client++) {
+			if (IsClientInGame(client)) {
+				LMM_GetMissionLocalizedName(g_iGameMode, missionIndex, localizedName, sizeof(localizedName), client);
+				Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", localizedName);
+				PrintToChat(client,"\x04[提示]%t", "Mission is now winning the vote", colorizedName);
+			}
+		}
+	} else {
+		for (int client = 1; client <= MaxClients; client++) {
+			if (IsClientInGame(client)) {
+				LMM_GetMapLocalizedName(g_iGameMode, missionIndex, mapIndex, localizedName, sizeof(localizedName), client);
+				Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", localizedName);
+				PrintToChat(client,"\x04[提示]%t", "Map is now winning the vote", colorizedName);
+			}
+		}
+	}
+
+	Format(colorizedName, sizeof(colorizedName), "\x03%s\x05", mapName);
+	PrintToChatAll("\x04[提示]%t", "Changing map", colorizedName);
+	CreateChangeMapTimer(mapName);
+
+	// 目标用完即清空, 防止后续回调/重入时复用旧目标再换一次图
+	g_iChmapVoteMission = -1;
+	g_iChmapVoteMap = -1;
 }
 
 void CreateChangeMapTimer(const char[] mapName) {

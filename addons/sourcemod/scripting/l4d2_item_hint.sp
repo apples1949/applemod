@@ -22,7 +22,7 @@ public Plugin myinfo =
 	name        = "L4D2 Item hint",
 	author      = "BHaType, fdxx, HarryPotter",
 	description = "When using 'Look' in vocalize menu, print corresponding item to chat area and make item glow or create spot marker/infeced maker like back 4 blood.",
-	version     = "4.6-2026/7/9",
+	version     = "4.7-2026/10/25",
 	url         = "https://github.com/fbef0102/L4D1_2-Plugins/tree/master/l4d2_item_hint"
 };
 
@@ -1049,13 +1049,15 @@ void RemoveAllGlow_Timer()
 void RemoveAllSpotMark()
 {
     int entity;
-    char targetname[16];
+    char targetname[32];
 
+    // 创建时 targetname 是 "l4d_mark_hint-%02i"(带客户端号)，这里必须按前缀匹配，
+    // 原来用 StrEqual 精确比较 "l4d_mark_hint" 永远匹配不到，兜底清理等于空转。
     entity = INVALID_ENT_REFERENCE;
     while ((entity = FindEntityByClassname(entity, CLASSNAME_INFO_TARGET)) != INVALID_ENT_REFERENCE)
     {
         GetEntPropString(entity, Prop_Data, "m_iName", targetname, sizeof(targetname));
-        if (StrEqual(targetname, "l4d_mark_hint"))
+        if (StrContains(targetname, "l4d_mark_hint", false) == 0)
             AcceptEntityInput(entity, "Kill");
     }
 
@@ -1063,7 +1065,7 @@ void RemoveAllSpotMark()
     while ((entity = FindEntityByClassname(entity, CLASSNAME_ENV_SPRITE)) != INVALID_ENT_REFERENCE)
     {
         GetEntPropString(entity, Prop_Data, "m_iName", targetname, sizeof(targetname));
-        if (StrEqual(targetname, "l4d_mark_hint"))
+        if (StrContains(targetname, "l4d_mark_hint", false) == 0)
             AcceptEntityInput(entity, "Kill");
     }
 }

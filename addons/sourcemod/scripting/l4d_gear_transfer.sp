@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION		"2.37"
+#define PLUGIN_VERSION		"2.38"
 
 /*======================================================================================
 	Plugin Info:
@@ -2824,10 +2824,28 @@ void VocalizeGive(int client)
 void VocalizeScene(int client, const char[] scenefile)
 {
 	int entity = CreateEntityByName("instanced_scripted_scene");
+	if( entity <= MaxClients )	// 创建失败, 别把 -1 当实体用
+	{
+		return;
+	}
+
 	DispatchKeyValue(entity, "SceneFile", scenefile);
 	DispatchSpawn(entity);
 	SetEntPropEnt(entity, Prop_Data, "m_hOwner", client);
 	ActivateEntity(entity);
+
+	// instanced_scripted_scene 播完不会由引擎回收, 每次给/取装备都建一个会一直堆 edict.
+	// 播完(OnCompletion)自毁, 另加 %0.2f 秒兜底, 防止场景文件缺失时永远不触发完成输出.
+	char sKill[64];
+	FormatEx(sKill, sizeof(sKill), "OnCompletion !self:Kill::0.1:-1");
+	SetVariantString(sKill);
+	AcceptEntityInput(entity, "AddOutput");
+
+	FormatEx(sKill, sizeof(sKill), "OnUser1 !self:Kill::%.2f:-1", 10.0);
+	SetVariantString(sKill);
+	AcceptEntityInput(entity, "AddOutput");
+	AcceptEntityInput(entity, "FireUser1");
+
 	AcceptEntityInput(entity, "Start", client, client);
 }
 

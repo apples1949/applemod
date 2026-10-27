@@ -587,11 +587,11 @@ void TankHint_Send(int client, int line)
 		case 2:
 			CPrintToChat(client, "%sR 键 -> 双手抛石(过高墙)", TAG);
 		case 3:
-			CPrintToChat(client, "%s指令{lightgreen}!lt/!bhop{darkred}开启自动连跳(开启扣%d血)", TAG, Apex[3].IntValue);
+			CPrintToChat(client, "%s指令{lightgreen}!lt{darkred}开启自动连跳(扣%d)", TAG, Apex[3].IntValue);
 		case 4:
-			CPrintToChat(client, "%s指令{lightgreen}!gz/!trac{darkred}开启跟踪石头(开启扣%d血, 未命中扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
+			CPrintToChat(client, "%s指令{lightgreen}!gz{darkred}开启跟踪石头(扣%d, 未命中扣%d)", TAG, Apex[4].IntValue, Apex[5].IntValue);
 		case 5:
-			CPrintToChat(client, "%s指令{lightgreen}!yc/!pred{darkred}开启石头轨迹预测(开启扣%d血)", TAG, Apex[11].IntValue);
+			CPrintToChat(client, "%s指令{lightgreen}!yc{darkred}开启石头轨迹预测(扣%d)", TAG, Apex[11].IntValue);
 	}
 }
 

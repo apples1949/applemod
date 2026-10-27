@@ -8,7 +8,7 @@
 
 native int LMC_GetClientOverlayModel(int iClient);
 
-#define PLUGIN_VERSION "2.0.2"
+#define PLUGIN_VERSION "2.0.3"
 
 static ConVar hCvar_Enabled;
 static ConVar hCvar_GlowEnabled;
@@ -992,7 +992,7 @@ char[] GetTrueName(int client)
 	int Bot = IsClientIdle(client);
 	
 	if(Bot != 0)
-		Format(g_sName, sizeof(g_sName), "闲置:%N", Bot);
+		Format(g_sName, sizeof(g_sName), "AI:%N", Bot);
 	else
 		GetClientName(client, g_sName, sizeof(g_sName));
 	return g_sName;

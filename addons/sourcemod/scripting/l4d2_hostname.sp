@@ -6,7 +6,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION	"1.2.0"
+#define PLUGIN_VERSION	"1.2.1"
 
 ConVar g_hHostName, g_hCfgName;
 char g_sPath[PLATFORM_MAX_PATH], g_sFileLine[PLATFORM_MAX_PATH];
@@ -136,7 +136,7 @@ void ComputeServerName(char[] buffer, int maxlen)
 		strcopy(buffer, maxlen, g_sFileLine);
 }
 
-//配置标识→显示名映射: applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod (大小写不敏感).
+//配置标识→显示名映射: applemod12v12→多人包抗, applemod→进阶包抗, zonemod→zonemod, nextmod→nextmod (大小写不敏感).
 //匹配来源: ①confogl当前配置文件夹名(如 applemod/zonemod/nextmod2v2, 中文配置名被引擎从cfg剥掉时仍可识别)
 //         ②l4d_ready_cfg_name变量值(如 "ZoneMod v2.9.1b" / "2v2 NextMod v1.0.5").
 void GetDisplayCfgName(char[] sCfgName, int maxlen)
@@ -160,6 +160,13 @@ void GetDisplayCfgName(char[] sCfgName, int maxlen)
 //大小写不敏感关键词映射, 命中返回true并写入显示名.
 bool ApplyCfgNameMapping(const char[] source, char[] buffer, int maxlen)
 {
+	//applemod 的 12v12 子配置必须先判, 否则会被下面的 "applemod" 规则吃掉显示成"进阶包抗".
+	//匹配来源同时覆盖两种: confogl 配置文件夹名 "applemod12v12" 与 l4d_ready_cfg_name 里的 "... 12v12".
+	if(StrContains(source, "12v12", false) != -1)
+	{
+		strcopy(buffer, maxlen, "多人包抗");
+		return true;
+	}
 	if(StrContains(source, "applemod", false) != -1)
 	{
 		strcopy(buffer, maxlen, "进阶包抗");

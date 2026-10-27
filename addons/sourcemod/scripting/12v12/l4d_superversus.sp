@@ -12,7 +12,7 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.11-12v12"
+#define PLUGIN_VERSION "2.5.14-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -109,6 +109,20 @@ enum JoinResult
 
 bool RoundStarted = false;
 
+// ---------------------------------------------------------------------------
+// 自动补位（2.5.14）：队伍修复完成 / 开门解禁后，把旁观玩家随机补进队伍
+// ---------------------------------------------------------------------------
+ConVar Autofill;				// 总开关
+ConVar AutofillInfected;		// 生还者满员时是否补进特感
+ConVar AutofillMinIdle;			// 旁观多少秒后才参与补位
+ConVar AutofillDelay;			// 触发后延迟执行
+ConVar AutofillDebug;			// 只在日志里打印细节
+bool g_bAutofillFixDone = false;	// 本回合"队伍修复完成"这个触发点是否已经用掉
+bool g_bAutofillDoorDone = false;	// 本回合"开门解禁"这个触发点是否已经用掉
+bool g_bAutofillPending = false;	// 已排队一次补位（避免同一时刻叠多个 timer）
+bool g_bFixWasRunning = false;		// 上一 tick 队伍修复是否还在进行中
+float g_fSpecSince[MAXPLAYERS+1];	// 进入旁观队的时刻（0 = 不在旁观）
+
 float SiTimes[MAXPLAYERS+1] = {0.0, ...};
 
 
@@ -180,6 +194,12 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_spec", Join_Spectator, "Join Spectator Team");
 	RegConsoleCmd("sm_s", Join_Spectator, "Join Spectator Team");
 	AllowSpectate = CreateConVar("sm_allow_spectate_command", "1", "Allow !spectate/!spec/!s");
+	// 自动补位（队伍修复完成 / 开门解禁后把旁观玩家随机拉进队伍）
+	Autofill = CreateConVar("l4d_superversus_autofill", "1", "队伍修复完成或开局门锁解禁后，自动把旁观玩家随机补进队伍. 0=关闭.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	AutofillInfected = CreateConVar("l4d_superversus_autofill_infected", "0", "生还者名额补满后，剩余名额是否继续补进感染者队. 0=只补生还者(默认).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	AutofillMinIdle = CreateConVar("l4d_superversus_autofill_min_idle", "5.0", "旁观时长达到多少秒的玩家才参与补位（避免刚被转去旁观的人立刻被拉回）.", FCVAR_NOTIFY, true, 0.0, true, 120.0);
+	AutofillDelay = CreateConVar("l4d_superversus_autofill_delay", "1.0", "触发后延迟多少秒执行补位.", FCVAR_NOTIFY, true, 0.0, true, 30.0);
+	AutofillDebug = CreateConVar("l4d_superversus_autofill_debug", "0", "1=只在服务端日志里打印补位细节（默认不输出任何东西）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	BlockSpecInTank = CreateConVar("sm_blockspecintank", "0", "Block survivor spectating during a Tank", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	SuppressSpectate = CreateConVar("l4d_pm_supress_spectate", "0", "Don't announce spectator moves");
 	GameData teamData = new GameData("l4d2_si_ability");
@@ -199,6 +219,10 @@ public void OnPluginStart()
 	HookEvent("round_start", Event_RoundStart, EventHookMode_Post);
 	HookEvent("round_end", Event_RoundEnd, EventHookMode_Pre);
 	HookEvent("finale_vehicle_leaving", Event_FinaleVehicleLeaving);
+	// 自动补位：记录每个玩家进入旁观队的时刻，供"旁观够久才补位"判断
+	HookEvent("player_team", Event_PlayerTeamSpecSince, EventHookMode_Post);
+	// 常驻轮询用来观察"队伍修复完成"的跳变；句柄不保存（SourceMod 卸载插件时自动回收）
+	CreateTimer(0.5, Timer_AutofillWatch, _, TIMER_REPEAT);
 
 	AddCommandListener(Cmd_spec_next, "spec_next");
 	AddCommandListener(Cmd_JoinTeam, "jointeam");
@@ -264,6 +288,7 @@ public void OnConfigsExecuted()
 public void OnClientPutInServer(int client)
 {
 	NextSpectateNotice[client] = 0.0;
+	g_fSpecSince[client] = (GetClientTeam(client) == TEAM_SPECTATOR) ? GetGameTime() : 0.0;
 	CancelJoin(client);
 	SurvivorPlaceholder[client] = false;
 	if (!IsFakeClient(client)) ResumeBotPopulation();
@@ -308,6 +333,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	CreateNative("SV12_GetHumanTeam", Native_GetHumanTeam);
 	CreateNative("SV12_ReconcileSurvivors", Native_ReconcileSurvivors);
 	MarkNativeAsOptional("L4D_LobbyUnreserve");
+	// 传送后的"卡住就推到有效位置"兜底。这是较新的 Left4DHooks native，
+	// 旧版插件库没有它；标成 optional 才不会让本插件整体加载失败（调用处还会再探一次状态）。
+	MarkNativeAsOptional("L4D_WarpToValidPositionIfStuck");
 	return APLRes_Success;
 }
 
@@ -504,6 +532,12 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	for (int client = 1; client <= MaxClients; client++) SurvivorDied[client] = false;
 	for (int i = 0; i < sizeof(SiTimes); i++) SiTimes[i] = 0.0;
 	delete SubDirector;
+
+	// 自动补位：新回合重置两个触发点，并记下当前是否还在队伍修复中
+	g_bAutofillFixDone = false;
+	g_bAutofillDoorDone = false;
+	g_bFixWasRunning = TeamChangesLocked();
+
 	StartRoundTimers();
 }
 
@@ -1135,7 +1169,17 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		return Join_Failed;
 	if (team == 0)
 	{
-		if (GetBotOfIdle(client) || current == TEAM_SURVIVOR || !InfectedAllowed) team = TEAM_SURVIVOR;
+		// 本回合已阵亡（身体还在生还者队里躺着/或已在旁观）、身上也没有托管身体，
+		// 且特感还有真人空位时：!join 直接进特感。
+		// 以前这种情况会被下面的"本回合已阵亡"挡住，只能靠 !inf 才能进游戏。
+		bool bDeadNoBody = HasSurvivorDied(client) && !IsPlayerAlive(client) && GetBotOfIdle(client) <= 0;
+		int iInfectedHumans = GetTeamPlayers(TEAM_INFECTED, false);
+
+		if (bDeadNoBody && InfectedAllowed && iInfectedHumans < InfectedLimit.IntValue)
+		{
+			team = TEAM_INFECTED;
+		}
+		else if (GetBotOfIdle(client) || current == TEAM_SURVIVOR || !InfectedAllowed) team = TEAM_SURVIVOR;
 		else if (current == TEAM_INFECTED) team = TEAM_INFECTED;
 		else
 		{
@@ -1849,6 +1893,158 @@ int GetClientRealHealth(int client)
 public void Event_PlayerLeftStartArea(Event event, const char[] name, bool dontBroadcast)
 {
 	StartInfectedCounter();
+
+	// 有人离开起点安全区域 = readyup/doorlock 已经解禁、可以自由入队。
+	// 这个事件每名生还者都会触发一次，所以只用第一次（每回合一次）。
+	if (!g_bAutofillDoorDone)
+	{
+		g_bAutofillDoorDone = true;
+		QueueAutofill();
+	}
+}
+
+// ------------------------------------------------------------------------
+// 自动补位
+// ------------------------------------------------------------------------
+
+// 记录旁观起始时刻（player_team 事件）
+public void Event_PlayerTeamSpecSince(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
+		return;
+
+	if (event.GetInt("team") == TEAM_SPECTATOR)
+		g_fSpecSince[client] = GetGameTime();
+	else
+		g_fSpecSince[client] = 0.0;
+}
+
+// 轮询"队伍修复完成"：从"修复进行中"变为"已完成"的那一下触发补位
+public Action Timer_AutofillWatch(Handle timer)
+{
+	if (!Autofill.BoolValue)
+	{
+		g_bFixWasRunning = TeamChangesLocked();
+		return Plugin_Continue;
+	}
+
+	bool bRunning = TeamChangesLocked();
+
+	// 从"修复进行中"变为"已完成"的那一下 = 队伍修复完成，触发一次补位
+	if (g_bFixWasRunning && !bRunning && !g_bAutofillFixDone)
+	{
+		g_bAutofillFixDone = true;
+		QueueAutofill();
+	}
+
+	g_bFixWasRunning = bRunning;
+	return Plugin_Continue;
+}
+
+// 触发一次补位（两个触发点各自每回合最多一次；延迟执行，避开开门/换队的引擎状态抖动）
+void QueueAutofill()
+{
+	if (!Autofill.BoolValue || g_bAutofillPending)
+		return;
+
+	g_bAutofillPending = true;
+
+	float fDelay = AutofillDelay.FloatValue;
+	if (fDelay < 0.1)
+		fDelay = 0.1;
+
+	CreateTimer(fDelay, Timer_Autofill, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_Autofill(Handle timer)
+{
+	g_bAutofillPending = false;
+	RunAutofill();
+	return Plugin_Stop;
+}
+
+// 把旁观玩家随机补进队伍：人数 = min(队伍空位, 旁观候选人数)
+void RunAutofill()
+{
+	if (!Management.BoolValue || !RoundStarted || TeamChangesLocked())
+		return;
+
+	int aCand[MAXPLAYERS+1];
+	int iCount = 0;
+	float fNow = GetGameTime();
+	float fMinIdle = AutofillMinIdle.FloatValue;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsValidClient(i) || IsFakeClient(i))
+			continue;
+
+		if (GetClientTeam(i) != TEAM_SPECTATOR)
+			continue;
+
+		// 正在入队流程里的不动
+		if (NewConnection[i])
+			continue;
+
+		// 本回合已阵亡的人不自动拉回生还者队（他们可以自己 !inf 进特感）
+		if (HasSurvivorDied(i))
+			continue;
+
+		// 旁观时间不够的不动（避免把刚被 AFK 插件转旁观的人立刻拉回来）
+		float fSince = g_fSpecSince[i];
+		if (fSince > 0.0 && fNow - fSince < fMinIdle)
+			continue;
+
+		aCand[iCount++] = i;
+	}
+
+	if (iCount <= 0)
+		return;
+
+	// 洗牌（Fisher-Yates），再按空位截断
+	for (int i = iCount - 1; i > 0; i--)
+	{
+		int j = GetRandomInt(0, i);
+		int iTemp = aCand[i];
+		aCand[i] = aCand[j];
+		aCand[j] = iTemp;
+	}
+
+	int iSurvFree = SurvivorLimit.IntValue - GetTeamPlayers(TEAM_SURVIVOR, false);
+	int iInfFree = InfectedLimit.IntValue - GetTeamPlayers(TEAM_INFECTED, false);
+
+	if (iSurvFree < 0)
+		iSurvFree = 0;
+	if (iInfFree < 0)
+		iInfFree = 0;
+
+	int iIdx = 0;
+
+	while (iIdx < iCount && iSurvFree > 0)
+	{
+		if (TryJoinTeam(aCand[iIdx], TEAM_SURVIVOR, false) == Join_Success)
+			iSurvFree--;
+
+		iIdx++;
+	}
+
+	if (AutofillInfected.BoolValue)
+	{
+		while (iIdx < iCount && iInfFree > 0)
+		{
+			if (TryJoinTeam(aCand[iIdx], TEAM_INFECTED, false) == Join_Success)
+				iInfFree--;
+
+			iIdx++;
+		}
+	}
+
+	if (AutofillDebug.BoolValue)
+	{
+		LogMessage("[SV autofill] 候选=%d 生还者空位=%d 特感空位=%d 已处理=%d",
+			iCount, iSurvFree, iInfFree, iIdx);
+	}
 }
 
 void StartInfectedCounter()
@@ -2212,6 +2408,13 @@ bool SafeTakeOverSurvivor(int client, int bot)
 		return false;
 	}
 	bool taken = L4D_TakeOverBot(client);
+
+	// 接管失败时必须清掉"该 bot 被该玩家托管"的链接（m_humanSpectatorUserID）：
+	// 链接留着的话引擎会把这个玩家判定成闲置（挂机托管），牌子上带闲置、又控制不到身体。
+	// 对抗里没有主动闲置键，所以这条链接一旦残留就只能是 bug，直接清掉。
+	if (!taken)
+		ClearIdleLink(bot, client);
+
 	if (!taken && IsValidClient(client) && GetClientUserId(client) == clientUserid && GetClientTeam(client) == 0)
 		ChangeClientTeam(client, TEAM_SPECTATOR);
 
@@ -2222,6 +2425,22 @@ bool SafeTakeOverSurvivor(int client, int bot)
 	if (okay) ScheduleLoadoutCheck(client);
 
 	return okay;
+}
+
+// 清掉"bot 被 client 托管"的挂机链接（m_humanSpectatorUserID）。不写日志。
+// 只在链接确实指向该 client 时才写，避免误清别人正在用的托管。
+void ClearIdleLink(int bot, int client)
+{
+	if (bot <= 0 || bot > MaxClients || !IsClientInGame(bot))
+		return;
+
+	if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
+		return;
+
+	if (GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) != client)
+		return;
+
+	SetEntProp(bot, Prop_Send, "m_humanSpectatorUserID", 0);
 }
 
 // Also protects assigned survivor bots taken over by the engine or another plugin
@@ -2318,19 +2537,89 @@ stock void PrintConsoleToAll(const char[] format, any ...)
 // ------------------------------------------------------------------------
 // Teleport client to survivor
 // ------------------------------------------------------------------------
+
+// 落点的横向偏移量（HU）。直接压在队友 AbsOrigin 上会和队友身体重叠互相顶住（尤其是 Bot），
+// 所以统一偏移一点点再传；落点正好压在墙角/栏杆里时，由函数末尾的 Warp 兜底把人推出来。
+#define TELEPORT_ANCHOR_OFFSET 20.0
+
+/* 在指定优先级里找传送落点。
+ * 优先级由 TeleportToSurvivor 分两轮决定：先只找真人（allowBots=false），再回落到 AI 生还者（allowBots=true）。
+ *
+ * 同一优先级内挑"离 Bot 最近"的那个，而不是循环里第一个撞见的队员，依据：
+ *   1) 按索引取第一个 → 多个占位 Bot / 连续加入的真人会全部叠在同一名队友身上，模型互相卡住，
+ *      而那一名队友被反复当作落点，其他存活队友旁边永远是空的；
+ *   2) 取最近的落点 → 队友分散时后到的人各贴最近的一个人（自然分散），传送距离最短，
+ *      穿墙/掉出地图的概率也最低；同一名队友不会被无脑反复占用。
+ *
+ * 返回 0 表示本优先级没有可用落点（调用方据此进入下一优先级或直接放弃）。
+ */
+int FindTeleportAnchor(int Bot, bool allowBots)
+{
+	float botOrigin[3];
+	GetClientAbsOrigin(Bot, botOrigin);
+
+	int best = 0;
+	float bestDist = 0.0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (i == Bot) continue;
+		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR) continue;
+		// 存活判定沿用插件自己的 IsAlive（m_lifeState == 0，与 IsPlayerAlive 等价）
+		if (!IsAlive(i) || IsClientInKickQueue(i)) continue;
+		// 生成中/待踢的占位假客户端（SpawnFakeSurvivorClient 造出来的那种）不能当落点：
+		// 它 0.1 秒后就被踢掉，它站的位置也不代表任何真实队友的位置。
+		if (SurvivorPlaceholder[i]) continue;
+		if (IsFakeClient(i) != allowBots) continue;
+		// 幽灵状态（m_isGhost）的生还者是不可见/无碰撞的残影，不能当落点
+		if (GetEntProp(i, Prop_Send, "m_isGhost")) continue;
+
+		float origin[3];
+		GetClientAbsOrigin(i, origin);
+		float dist = GetVectorDistance(botOrigin, origin);
+		if (best == 0 || dist < bestDist)
+		{
+			best = i;
+			bestDist = dist;
+		}
+	}
+	return best;
+}
+
+/* 把 Bot（占位生还者 Bot 或刚复活的真人）传送到队友身边。
+ * 只在两处明确需要的地方调用：SpawnFakeSurvivorClient 占位 bot 出生、TryJoinTeam 真人中途加入复活。
+ * 不做任何"定期把人传送"的轮询。 */
 void TeleportToSurvivor(int Bot) 
 {
-				for (int i = 1; i <= MaxClients; i++)
-				{
-					if (IsClientInGame(i) && (GetClientTeam(i) == TEAM_SURVIVOR) && !IsFakeClient(i) && IsAlive(i) && i != Bot)
-					{						
-						// get the position coordinates of any active alive player
-						float teleportOrigin[3];
-						GetClientAbsOrigin(i, teleportOrigin);			
-						TeleportEntity(Bot, teleportOrigin, NULL_VECTOR, NULL_VECTOR);					
-						break;
-					}
-				}
+	if (!IsValidClient(Bot)) return;
+
+	/* 落点优先级：
+	   1) 活着的真人（team 2、存活、非 bot、不是自己）—— 玩家最直接的期望是"就在队友旁边"；
+	   2) 没有活着的真人时，回落到活着的 AI 生还者（team 2、存活、非自己、不是幽灵/占位）。
+	      旧写法只找真人，找不到就 break 掉、什么都不做 → 全场只剩他一个真人（或其余真人都在旁观/阵亡）时，
+	      刚复活出来的人就永远留在起点安全区。这就是"有的时候会被传送到起点安全区"的根因；
+	   3) 两类都没有才放弃：无处可传，不硬造坐标（乱造坐标会把人塞进墙里甚至传送到地图外）。 */
+	int Anchor = FindTeleportAnchor(Bot, false);
+	if (Anchor <= 0) Anchor = FindTeleportAnchor(Bot, true);
+	if (Anchor <= 0) return;
+
+	float origin[3];
+	// get the position coordinates of any active alive player（原注释保留；落点坐标取自存活队友）
+	GetClientAbsOrigin(Anchor, origin);
+
+	// 按 Bot 索引取一个固定方位做偏移：同一个落点上挤多个 Bot 时会散向不同方向，进一步避免叠人
+	float rad = DegToRad(float(Bot % 8) * 45.0);
+	float dest[3];
+	dest[0] = origin[0] + Cosine(rad) * TELEPORT_ANCHOR_OFFSET;
+	dest[1] = origin[1] + Sine(rad) * TELEPORT_ANCHOR_OFFSET;
+	dest[2] = origin[2];
+
+	TeleportEntity(Bot, dest, NULL_VECTOR, NULL_VECTOR);
+
+	// 偏移后的落点可能正好压在墙角/栏杆里：让引擎把人推到最近的有效可行走位置。
+	// 该 native 属于较新的 Left4DHooks，服务器上的旧版可能没有；AskPluginLoad2 已 MarkNativeAsOptional，
+	// 这里再探一次特性状态，缺失就只跳过这层兜底，不影响传送本身。
+	if (GetFeatureStatus(FeatureType_Native, "L4D_WarpToValidPositionIfStuck") == FeatureStatus_Available)
+		L4D_WarpToValidPositionIfStuck(Bot);
 }
 
 

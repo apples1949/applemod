@@ -10,7 +10,7 @@
 #include <sdktools>
 #include <left4dhooks>
 #include <multicolors>
-#define PLUGIN_VERSION "2.11-2026/10/16"
+#define PLUGIN_VERSION "2.12-2026/10/27"
 #define AUTOSPEC_IDS_MAX 512
 #define AFK_BLIP_SOUND "buttons/blip1.wav"
 
@@ -636,6 +636,12 @@ void afkResetTimers (int client)
 
 void AFKPlayBlipSound(int client)
 {
+	// 生还者还没离开过安全区域：只出文字、不出声。
+	// 开局准备阶段/还在安全屋里时闲置检测与补位提示会反复触发，一直响很吵；
+	// 一旦有生还者离开安全区域，提示音恢复成原来的行为。
+	if (!g_bLeftSafeRoom)
+		return;
+
 	if (client > 0 && client <= MaxClients && IsClientInGame(client))
 		EmitSoundToClient(client, AFK_BLIP_SOUND);
 }

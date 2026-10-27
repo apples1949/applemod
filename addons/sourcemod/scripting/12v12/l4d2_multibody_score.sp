@@ -21,6 +21,10 @@ native void G14_PrepareTankScoreSettlement();
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int errMax)
 {
     MarkNativeAsOptional("G14_PrepareTankScoreSettlement");
+    // flow 距离 native 在 left4dhooks 里是 optional：标可选 + 运行期复核，
+    // 老版本 left4dhooks 缺这两个 native 时插件仍能加载（自动退回引擎原生刻度）。
+    MarkNativeAsOptional("L4D2Direct_GetFlowDistance");
+    MarkNativeAsOptional("L4D2Direct_GetMapMaxFlowDistance");
     return APLRes_Success;
 }
 
@@ -34,6 +38,9 @@ int g_Side, g_Epoch, g_VehicleEscapes;
 int g_EngineMax;                     // last vs_max_completion_score sample
 char g_Map[64];
 ConVar g_hRawCap;                    // 0 = derive per-survivor full scale from the engine
+ConVar g_hFlowRoute;                 // 1 = 用真实 flow 距离采样每人路程（默认），0 = 用引擎完成度原生值
+bool   g_bFlowOK;                    // 两个 flow native 是否可用
+float  g_fMapMaxFlow;                // 当前地图最大 flow（惰性缓存，换图清零）
 
 public Plugin myinfo =
 {
@@ -48,6 +55,14 @@ public void OnPluginStart()
     g_hRawCap = CreateConVar("l4d2_multibody_raw_cap", "0",
         "单人完成度满额刻度。0=从引擎推导(vs_max_completion_score/4)；>0=强制指定，用于排查原生返回 0-100 的情况。",
         FCVAR_NOTIFY, true, 0.0, true, 100000.0);
+
+    // 2.1：每人路程分改为直接跟踪真实 flow 距离（不再依赖引擎原生完成度）。
+    g_hFlowRoute = CreateConVar("l4d2_multibody_flow_route", "1",
+        "1=每个生还者的路程分按真实 flow 距离采样（L4D2Direct_GetFlowDistance / GetMapMaxFlowDistance，默认）；0=退回引擎完成度原生值。",
+        FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+    g_bFlowOK = GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetFlowDistance") == FeatureStatus_Available
+        && GetFeatureStatus(FeatureType_Native, "L4D2Direct_GetMapMaxFlowDistance") == FeatureStatus_Available;
     GameData data = new GameData("l4d2_multibody_score");
     if (!data)
     {
@@ -97,6 +112,7 @@ public void OnMapStart()
     GetCurrentMap(g_Map, sizeof(g_Map));
     g_Prepared = false;
     g_InMap = true;
+    g_fMapMaxFlow = 0.0;   // 换图后重新采样全图最大 flow
 }
 public void OnMapEnd() { g_InMap = false; g_Prepared = false; }
 
@@ -185,14 +201,28 @@ void UpdateRoute()
         if (Survivor(client)) GetClientName(client, g_BodyName[g_Side][body], sizeof(g_BodyName[][]));
         if (Survivor(client) && IsPlayerAlive(client))
         {
-            // The native yields points in the engine's four-survivor scale.
-            // Retain those raw units per body, then normalize the team sum to
-            // the unchanged map maximum. Replacement keeps the same body ID.
-            // Samples are converted into "one survivor's share" units
-            // (bodyCap = mapinfo max_distance / 4). rawCap follows the CURRENT
-            // engine value so a late mapinfo write rescales instead of mixing
-            // two scales inside one body's high-water mark.
-            int score = G14_ConvertSample(L4D2_GetVersusCompletionPlayer(client), rawCap, bodyCap);
+            // 2.1：优先用"真实 flow 距离"采样这名生还者自己的路程。
+            // 引擎原生完成度（L4D2_GetVersusCompletionPlayer）是按队伍槽位算的，
+            // 中途团灭/掉线换人时会飘，玩家反馈分数不对就是这个原因；
+            // flow 距离是这名生还者当前所在导航区的真实进度，团灭前最后一刻的值
+            // 会被 high-water 记住，所以团灭也按"走到多远"结算。
+            // 采不到 flow（native 缺失/返回 0）时才退回原生刻度。
+            int score;
+            if (g_hFlowRoute.BoolValue && g_bFlowOK)
+                score = FlowRouteScore(client, bodyCap);
+
+            if (!(g_hFlowRoute.BoolValue && g_bFlowOK) || score <= 0)
+            {
+                // The native yields points in the engine's four-survivor scale.
+                // Retain those raw units per body, then normalize the team sum to
+                // the unchanged map maximum. Replacement keeps the same body ID.
+                // Samples are converted into "one survivor's share" units
+                // (bodyCap = mapinfo max_distance / 4). rawCap follows the CURRENT
+                // engine value so a late mapinfo write rescales instead of mixing
+                // two scales inside one body's high-water mark.
+                score = G14_ConvertSample(L4D2_GetVersusCompletionPlayer(client), rawCap, bodyCap);
+            }
+
             g_BodyPoints[g_Side][body] = G14_RouteHighWater(g_BodyPoints[g_Side][body], score, bodyCap);
         }
     }
@@ -200,9 +230,30 @@ void UpdateRoute()
     if (total > g_Route[g_Side]) g_Route[g_Side] = total;
 }
 
-// mapinfo.txt's max_distance for the current map; engine value as the fallback.
-int MapBaseScore(int engineMax)
+// 2.1：用真实 flow 距离换算"这一名生还者"的路程分
+//   单位与 bodyCap 一致（bodyCap = 地图基础分 / 4 = 单人满额路程分）。
+//   全图最大 flow 惰性缓存一次（OnMapStart 清零）；native 不可用/取不到时返回 0，
+//   调用方会自动退回引擎原生完成度。
+int FlowRouteScore(int client, int bodyCap)
 {
+    if (bodyCap <= 0) return 0;
+
+    if (g_fMapMaxFlow <= 0.0)
+        g_fMapMaxFlow = L4D2Direct_GetMapMaxFlowDistance();
+
+    if (g_fMapMaxFlow <= 0.0) return 0;
+
+    float fFlow = L4D2Direct_GetFlowDistance(client);
+    if (fFlow <= 0.0) return 0;
+
+    float fRatio = fFlow / g_fMapMaxFlow;
+    if (fRatio > 1.0) fRatio = 1.0;
+
+    return RoundToNearest(fRatio * float(bodyCap));
+}
+
+// mapinfo.txt's max_distance for the current map; engine value as the fallback.
+int MapBaseScore(int engineMax){
     if (GetFeatureStatus(FeatureType_Native, "L4D2_GetMapValueInt") == FeatureStatus_Available)
     {
         int base = L4D2_GetMapValueInt("max_distance", 0);

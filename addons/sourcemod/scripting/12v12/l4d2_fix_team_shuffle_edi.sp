@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.3.7-12v12"
+#define PLUGIN_VERSION "2.3.9-12v12"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -844,14 +844,15 @@ bool Start()
 		g_bTeamLock = true;
 
 		CancelProcessTimers();
-		g_hCheckTimer = CreateTimer(5.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+		// 2.3.9：完成检查 5s -> 1s，配合 0.2s 的换队重试，整批归位能在开打前收尾
+		g_hCheckTimer = CreateTimer(1.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 		g_hTimeoutTimer = CreateTimer(g_fCvarTime, Timer_AllowTeamChanges, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
 	else
 	{
 		// 已经锁队（例如管理员连续调用 Start）：只补建换图时被销毁的计时器
 		if (g_hCheckTimer == INVALID_HANDLE)
-			g_hCheckTimer = CreateTimer(5.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+			g_hCheckTimer = CreateTimer(1.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
 		if (g_hTimeoutTimer == INVALID_HANDLE)
 			g_hTimeoutTimer = CreateTimer(g_fCvarTime, Timer_AllowTeamChanges, _, TIMER_FLAG_NO_MAPCHANGE);
@@ -927,7 +928,10 @@ void StartClientRestore(int client)
 	g_bChecked[client] = true;
 	g_iFailureCount[client] = 0;
 
-	Handle timer = CreateTimer(1.0, Timer_RestoreClient, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	// 2.3.9：重试间隔 1.0s -> 0.2s。
+	// 12v12 满员时换队要靠"腾位→下一个 tick 落位"，1 秒一次会让整队 swap 拖成几十秒，
+	// 玩家观感就是"开打半天了才被换走"。0.2s 一次后整批人 1~3 秒内就能归位。
+	Handle timer = CreateTimer(0.2, Timer_RestoreClient, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 	if (timer == INVALID_HANDLE)
 	{
 		// 计时器创建失败：不要留下永远为真的 checked 标记
@@ -1986,9 +1990,32 @@ bool TurnClientToSurvivors(int client, bool isIdle)
 
 	// 对抗模式：直接设置人类观察者并接管，绕过原生四人入队路径。
 	L4D_SetHumanSpec(bot, client);
-	L4D_TakeOverBot(client);
+
+	// 接管失败要检查：SetHumanSpec 已经把 bot 的 m_humanSpectatorUserID 指到这个玩家，
+	// 不接管成功又不清理的话，引擎会把他判定成闲置（挂机托管）。
+	if (!L4D_TakeOverBot(client))
+	{
+		ClearIdleLink(bot, client);
+		return false;
+	}
 
 	return true;
+}
+
+// 清掉"bot 被 client 托管"的挂机链接（m_humanSpectatorUserID）。不写日志。
+// 只在链接确实指向该 client 时才写，避免误清别人正在用的托管。
+void ClearIdleLink(int bot, int client)
+{
+	if (bot <= 0 || bot > MaxClients || !IsClientInGame(bot))
+		return;
+
+	if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
+		return;
+
+	if (GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) != client)
+		return;
+
+	SetEntProp(bot, Prop_Send, "m_humanSpectatorUserID", 0);
 }
 
 // ========== 腾位：满员死锁破局 ==========

@@ -85,7 +85,9 @@ public Action IsTextMsg(UserMsg msg_id, BfRead msg, const int[] players, int pla
 	static char sMsg[254];
 	msg.ReadString(sMsg, sizeof sMsg);
 
-	if (strcmp(sMsg, "\x03#L4D_idle_spectator") == 0) //聊天栏提示：XXX 现已闲置.
+	// 兼容写法：不同版本/语言下这条 TextMsg 可能带颜色前缀（\x03）也可能不带，
+	// 用子串匹配，避免精确比较因前缀差异而静默失效
+	if (StrContains(sMsg, "L4D_idle_spectator", false) != -1) //聊天栏提示：XXX 现已闲置.
 		return Plugin_Handled;
 	return Plugin_Continue;
 }

@@ -16,7 +16,7 @@
 *	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define PLUGIN_VERSION 		"1.23-12v12"
+#define PLUGIN_VERSION 		"1.23.1-12v12"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark logic function.
 
 /*======================================================================================
@@ -30,6 +30,18 @@
 
 ========================================================================================
 	Change Log:
+
+12v12 1.23.1 新增:
+	- 新增"AI 生还者离队自动传送": team 2 且 IsFakeClient(没被玩家接管)的生还者, 与"队伍参考点"(采样里除它
+	  自己以外全体存活生还者的平均 flow 距离)相差超过 l4d2_anti_rush_bot_range 时, 直接传送到离它最近的
+	  存活队友身边. 不管落在队伍后面还是跑在队伍前面都算. 原有 rusher/slacker 判定与处罚(l4d_anti_rush_type)
+	  一律不动, 只是多了一条并行规则.
+	- 新增 cvar: l4d2_anti_rush_bot_teleport(默认 1, 开关) / l4d2_anti_rush_bot_range(默认 1500.0 Hammer
+	  单位, 约 38 米) / l4d2_anti_rush_bot_interval(默认 1.0 秒, 检测节流, 最小 1.0).
+	- 倒地/挂边/死亡/被控/救人中/电梯内/在安全屋内的 AI 生还者一律跳过; l4d_anti_rush_tanks = 0 时坦克
+	  在场同样暂停这条新规则(沿用 TimerTest 开头的整体暂停).
+	- 安全屋判定依赖 left4dhooks 的 L4D_IsInFirstCheckpoint / L4D_IsInLastCheckpoint, 运行期缺失时自动停用
+	  该规则并写日志(不会崩服), 详见 OnAllPluginsLoaded.
 
 12v12 1.23 新增:
 	- 拦截跑图时新增"其他提示输出"，原聊天提示保留不改：屏幕中央提示文本(PrintHintText，
@@ -188,13 +200,21 @@ float g_iBenchTicks;
 #define LIMP_WALK_SPEED		85.0			// 黄血(瘸腿)移动速度 = 引擎 cvar "survivor_limp_walk_speed" 默认值 (survivor_limp_health = 40 以下进入瘸腿).
 #define SOUND_INTERCEPT		"ui/beep_error01.wav"	// 拦截提示音: 引擎自带 UI 音效, 与本仓库 l4d_votes_5_VS 使用的是同一个文件.
 #define METERS_PER_UNIT		0.0254			// flow 距离单位是 Hammer 单位(约 1 英寸), 乘此系数换算成米给玩家看.
+#define BOT_TELEPORT_OFFSET	20.0		// AI 生还者传送落点相对队友的小偏移(Hammer 单位, 20 约 0.5 米), 避免与队友完全同点互相推挤.
+#define BOT_MIN_SAMPLES		2			// AI 传送规则最少采样人数(含该 bot 自己): 少于 2 人说明没有队友可传, 规则不动作.
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
 ConVar g_hCvarHint, g_hCvarSound, g_hCvarNotifyTime, g_hCvarTeamNotify, g_hCvarTeamNotifyTime;
+// 12v12 新增: AI 生还者(没被玩家接管)离队自动传送的 cvar.
+ConVar g_hCvarBotTeleport, g_hCvarBotRange, g_hCvarBotInterval;
 float g_fCvarRangeLast, g_fCvarRangeLead, g_fCvarSlow, g_fCvarWarnLast, g_fCvarWarnLead, g_fCvarWarnTime;
 float g_fCvarNotifyTime, g_fCvarTeamNotifyTime;
 int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
 int g_iCvarHint, g_iCvarSound, g_iCvarTeamNotify;
+// 12v12 新增: AI 生还者离队传送规则的 cvar 缓存值与运行期 native 可用性.
+int g_iCvarBotTeleport;
+float g_fCvarBotRange, g_fCvarBotInterval;
+bool g_bNtvCheckpoint, g_bNtvWarp;
 bool g_bCvarAllow, bCvarAllow, g_bMapStarted, g_bLeft4Dead2;
 
 bool g_bInhibit[MAXPLAYERS+1];
@@ -208,6 +228,9 @@ bool g_bRushState[MAXPLAYERS+1];	// 是否连续处于被拦截状态(用于识�
 bool g_bNotified[MAXPLAYERS+1];		// 本次拦截是否已发过"全队简短提示", 只在状态变化时发一次
 bool g_bIntercepted[MAXPLAYERS+1];	// 本 tick 是否被判为跑图拦截(用于 tick 末清理上面三个状态)
 float g_fTeamNotifyTime;			// 全队简短提示的全局上次发送时间(所有玩家共用, 防多人同时触发刷屏)
+// 12v12 新增: AI 生还者离队传送的状态.
+float g_fBotNextCheck[MAXPLAYERS+1];	// 该 AI 生还者下次允许检测的游戏时间(按 l4d2_anti_rush_bot_interval 节流)
+float g_fBotNotifyTime;				// AI 传送提示的全局上次发送时间(与全队提示分开计时, 但共用同一个间隔 cvar)
 
 char g_sMap[PLATFORM_MAX_PATH];
 bool g_bFoundMap;
@@ -274,6 +297,11 @@ public void OnPluginStart()
 	g_hCvarTeamNotify =	CreateConVar("l4d_anti_rush_team_notify",	"1",							"拦截时是否给生还者全队发一条简短聊天提示(只在玩家刚开始被拦时发一次). 0=关闭, 1=开启. 默认 1.", CVAR_FLAGS);
 	g_hCvarTeamNotifyTime = CreateConVar("l4d_anti_rush_team_notify_time", "5.0",					"全队简短提示的全局最小间隔(秒), 防止多名玩家同时被拦时刷屏. 默认 5.0, 最小 1.0.", CVAR_FLAGS, true, 1.0);
 
+	// 12v12 新增: AI 生还者(没被玩家接管的 bot)离队伍过远 → 直接传送回队伍. 与前面 rusher/slacker 规则完全独立.
+	g_hCvarBotTeleport =	CreateConVar("l4d2_anti_rush_bot_teleport", "1",				"AI 生还者离队自动传送开关: 0=关闭, 1=开启(默认). 这里的 AI 生还者指 team 2 且 IsFakeClient 的身体, 即没被玩家接管的那种.", CVAR_FLAGS);
+	g_hCvarBotRange =		CreateConVar("l4d2_anti_rush_bot_range", "1500.0",			"AI 生还者离队传送距离(流距离, Hammer 单位, 1500 约 38 米): 该 AI 生还者与队伍参考点(除它以外全体存活生还者的平均 flow 距离)相差超过该值就传送回队伍, 不分领先还是落后. 0.0=关闭. 默认 1500.0.", CVAR_FLAGS);
+	g_hCvarBotInterval =	CreateConVar("l4d2_anti_rush_bot_interval", "1.0",			"AI 生还者离队检测节流(秒): 同一个 AI 生还者最短多久重新检测一次. 检测本身跑在 TimerTest 的 1 秒节拍上, 所以最小 1.0. 默认 1.0.", CVAR_FLAGS, true, 1.0);
+
 	//AutoExecConfig(true, "l4d_anti_rush");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
@@ -299,6 +327,10 @@ public void OnPluginStart()
 	g_hCvarNotifyTime.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarTeamNotify.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarTeamNotifyTime.AddChangeHook(ConVarChanged_Cvars);
+	// 12v12 新增: AI 生还者离队传送 cvar 变更钩子
+	g_hCvarBotTeleport.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarBotRange.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarBotInterval.AddChangeHook(ConVarChanged_Cvars);
 
 	g_hElevators = new ArrayList();
 
@@ -354,6 +386,11 @@ void GetCvars()
 	g_iCvarTeamNotify = g_hCvarTeamNotify.IntValue;
 	g_fCvarNotifyTime = g_hCvarNotifyTime.FloatValue;
 	g_fCvarTeamNotifyTime = g_hCvarTeamNotifyTime.FloatValue;
+
+	// 12v12 新增: AI 生还者离队传送规则
+	g_iCvarBotTeleport = g_hCvarBotTeleport.IntValue;
+	g_fCvarBotRange = g_hCvarBotRange.FloatValue;
+	g_fCvarBotInterval = g_hCvarBotInterval.FloatValue;
 
 	// 12v12: 限速上限 = 黄血(瘸腿)速度 survivor_limp_walk_speed (引擎默认 85), 运行时同步, 防止 cfg 改过该值后不同步.
 	if (g_hCvarLimpSpeed == null)
@@ -477,6 +514,28 @@ Action CmdAntiRush(int client, int args)
 	ReplyToCommand(client, "[防跑图] 功能已%s。", bCvarAllow ? "开启" : "关闭");
 
 	return Plugin_Handled;
+}
+
+// ====================================================================================================
+//					AI 传送规则的运行期依赖复核 (12v12 新增)
+// ====================================================================================================
+public void OnAllPluginsLoaded()
+{
+	// left4dhooks 的部分 native 在 include 里被 MarkNativeAsOptional: 若服务器装的 left4dhooks 比
+	// include 更旧, 调用它们在运行期会直接报错(在 TimerTest 里报错会打断整轮检测), 所以这里先复核一遍.
+	g_bNtvWarp = NtvAvailable("L4D_WarpToValidPositionIfStuck");
+
+	// 安全屋判定要"开局屋 + 关底屋"两个 native 配合, 缺一个就当作缺失, 整条 AI 传送规则停用.
+	g_bNtvCheckpoint = NtvAvailable("L4D_IsInFirstCheckpoint") && NtvAvailable("L4D_IsInLastCheckpoint");
+
+	if (g_hCvarBotTeleport != null && g_hCvarBotTeleport.BoolValue && !g_bNtvCheckpoint)
+		LogMessage("[防跑图] 缺少 L4D_IsInFirstCheckpoint / L4D_IsInLastCheckpoint, AI 生还者离队自动传送已停用(无法判定安全屋区域, 以免把安全屋里的 bot 传走). 请升级 left4dhooks.");
+}
+
+// native 是否真的绑定: include 里 MarkNativeAsOptional 的符号必须这样在运行期复核, 不能指望编译期.
+stock bool NtvAvailable(const char[] name)
+{
+	return GetFeatureStatus(FeatureType_Native, name) == FeatureStatus_Available;
 }
 
 // ====================================================================================================
@@ -721,6 +780,8 @@ void ResetPlugin()
 	g_fEventExtended = 0.0;
 	g_bEventStarted = false;
 	g_fTeamNotifyTime = 0.0;
+	// 12v12 新增: AI 传送提示同样按回合重置, 免得上回合的计时拖到本回合(g_fBotNextCheck 由上面的 ResetClient 清).
+	g_fBotNotifyTime = 0.0;
 }
 
 void ResetClient(int i)
@@ -730,6 +791,8 @@ void ResetClient(int i)
 
 	g_bInhibit[i] = false;
 	g_fExecute[i] = 0.0;
+	// 12v12 新增: 客户端状态被整体重置时, 一并清掉 AI 传送检测的节流时间, 免得上一条命的计时拖累新状态.
+	g_fBotNextCheck[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
 	ResetNotifyState(i);
 }
@@ -825,6 +888,11 @@ Action TimerTest(Handle timer)
 		totalFlow += flow;
 		punishable[client] = !immune && CanPunishSurvivor(client);
 	}
+
+	// 12v12 新增: AI 生还者(没被玩家接管)离队伍过远 → 直接传送回队伍.
+	// 放在这里是为了复用上面已经算好的一份采样(clients/flows/count/totalFlow), 不再单独扫一遍 flow;
+	// 它独立于下面的 count >= g_iCvarPlayers 门槛(只要求 count >= 2, 即至少有 1 个队友), 也独立于 l4d_anti_rush_type.
+	CheckBotsTeleport(clients, flows, count, totalFlow);
 
 	if (count >= g_iCvarPlayers)
 	{
@@ -1040,4 +1108,150 @@ bool SurvivorsUnderControl(int client)
 		return true;
 
 	return false;
+}
+
+// ====================================================================================================
+//					AI 生还者离队自动传送 (12v12 新增)
+// ====================================================================================================
+// 需求: 没被玩家接管的 AI 生还者(team 2 且 IsFakeClient)离队伍太远时, 直接传送回队伍 —— 不先限速、不等警告.
+// 与原有 rusher/slacker 逻辑完全独立: 不改 averageFlow, 不改 l4d_anti_rush_type 的语义, 只是复用 TimerTest
+// 已经算好的那份采样(clients/flows/count/totalFlow), 不再单独扫一遍 flow.
+//
+// "队伍参考点"用流量距离定义: 采样里除该 bot 以外全体存活生还者的平均 flow 距离 —— 和上面跑图判定用的
+// averageFlow 是同一套算法(平均值)与同一份样本, 只是把 bot 自己剔除; 否则 bot 自己会把参考点拉向自己,
+// 无论跑多远都判不出来.
+//
+// 触发只看距离, 不分领先/落后: |该 bot flow - 参考点| > l4d2_anti_rush_bot_range 就传送, 所以它落在队伍
+// 后面还是跑在队伍前面都会被拉回. 该阈值独立于 range_last / range_lead / warn_*, 也不叠加 crescendo 事件
+// 的扩展距离(g_fEventExtended).
+//
+// 已跳过的情况(见 CheckBotsTeleport / CanPunishSurvivor / CanBeTeleportAnchor):
+//   - 真人玩家(IsFakeClient == false) —— 他们走原有 rusher/slacker 规则;
+//   - 倒地 / 挂边 / 死亡 / 被控 / 救人中 / 电梯内 / 在安全屋内;
+//   - 采样里没有别的存活生还者(没有队友), 或没有可用落点 → 不传送(绝不硬造坐标);
+//   - 坦克存活且 l4d_anti_rush_tanks = 0 → TimerTest 开头已整体暂停, 本函数根本不会被调用.
+void CheckBotsTeleport(const int[] clients, const float[] flows, int count, float totalFlow)
+{
+	if (!g_iCvarBotTeleport || !g_bNtvCheckpoint || g_fCvarBotRange <= 0.0 || count < BOT_MIN_SAMPLES)
+		return;
+
+	float now = GetGameTime();
+
+	for (int i = 0; i < count; i++)
+	{
+		int client = clients[i];
+
+		// 只管 AI 生还者: 被真人接管的身体由玩家自己负责, 交给原有规则.
+		if (!IsFakeClient(client))
+			continue;
+
+		// 倒地 / 挂边 / 死亡 / 被控 / 救人中 / 电梯内 一律跳过(与原有处罚条件同一套判定).
+		if (!CanPunishSurvivor(client))
+			continue;
+
+		// 安全屋内的 bot 跳过: 开局屋 / 关底屋里本身就可能离队伍平均位置很远, 传送只会打乱阵形.
+		if (L4D_IsInFirstCheckpoint(client) || L4D_IsInLastCheckpoint(client))
+			continue;
+
+		// 检测节流: 同一个 bot 每 l4d2_anti_rush_bot_interval 秒最多检测一次.
+		if (now < g_fBotNextCheck[client])
+			continue;
+
+		g_fBotNextCheck[client] = now + g_fCvarBotInterval;
+
+		// 队伍参考点: 除该 bot 以外的平均值(采样里只剩 count-1 个样本).
+		float refFlow = (totalFlow - flows[i]) / float(count - 1);
+
+		// 没超出阈值就什么都不做 —— 正常跟队的 bot 不会被动到.
+		if (FloatAbs(flows[i] - refFlow) <= g_fCvarBotRange)
+			continue;
+
+		// 落点: 采样里 flow 距离该 bot 最近的存活队友(真人或 bot 都行, 不含自己).
+		int target;
+		float nearest;
+		for (int x = 0; x < count; x++)
+		{
+			if (clients[x] == client || !CanBeTeleportAnchor(clients[x]))
+				continue;
+
+			float delta = FloatAbs(flows[x] - flows[i]);
+			if (target == 0 || delta < nearest)
+			{
+				target = clients[x];
+				nearest = delta;
+			}
+		}
+
+		// 没有可用的队友就放弃, 绝不自己算一个坐标出来.
+		if (target == 0)
+			continue;
+
+		float pos[3];
+		GetClientAbsOrigin(target, pos);
+		pos[0] += BOT_TELEPORT_OFFSET;		// 小偏移, 免得和队友站在同一点互相推挤
+		TeleportEntity(client, pos, NULL_VECTOR, NULL_VECTOR);
+
+		// 传送后若卡在墙里/半空, 交给 left4dhooks 推到最近的合法位置(native 缺失时跳过, 只做原地点传送).
+		if (g_bNtvWarp)
+			L4D_WarpToValidPositionIfStuck(client);
+
+		NotifyBotTeleport(client, now);
+	}
+}
+
+// AI 生还者传送落点候选: 活着的生还者, 且位置稳定可站.
+// 排除挂边(落点悬空)、被 charger 扛走 / 被 pummel 拖住(位置每帧都在动, 传过去立刻失效);
+// 倒地或正被拖/扑住的队友仍然算可选 —— bot 落在旁边正好救人.
+bool CanBeTeleportAnchor(int client)
+{
+	if (!IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client))
+		return false;
+
+	if (GetEntProp(client, Prop_Send, "m_isHangingFromLedge"))
+		return false;
+
+	if (GetEntPropEnt(client, Prop_Send, "m_carryAttacker") > 0 || GetEntPropEnt(client, Prop_Send, "m_pummelAttacker") > 0)
+		return false;
+
+	return true;
+}
+
+// AI 生还者传送后的简短提示, 一行, 不刷屏:
+//   - 有真人属主(idle 玩家 / 正在旁观这个身体的人)就只发给他: player 实体的 m_humanSpectatorUserID
+//     存的正是"正在看/控制这个身体"的客户端 userid;
+//   - 没有真人属主就发一行给生还者全队的真人(bot 不发).
+// 节流沿用现有提示 cvar: warn_time = 0 或 team_notify = 0 时不发; 间隔取 team_notify_time,
+// 但用独立的全局计时 g_fBotNotifyTime, 不会把原有"全队提示"的发送档期吃掉.
+void NotifyBotTeleport(int bot, float now)
+{
+	if (g_fCvarWarnTime <= 0.0 || !g_iCvarTeamNotify)
+		return;
+
+	if (now < g_fBotNotifyTime)
+		return;
+
+	g_fBotNotifyTime = now + g_fCvarTeamNotifyTime;
+
+	int owner = GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID"));
+
+	if (owner > 0 && owner <= MaxClients && IsClientInGame(owner) && !IsFakeClient(owner))
+	{
+		PrintToChat(owner, "\x04[防跑图]\x05你接管/旁观的 AI 生还者离队伍太远，已被传送回队伍。");
+		return;
+	}
+
+	char sName[MAX_NAME_LENGTH], sMsg[128];
+	GetClientName(bot, sName, sizeof(sName));
+
+	if (sName[0])
+		Format(sMsg, sizeof(sMsg), "%s(AI) 离队伍太远，已被传送回队伍。", sName);
+	else
+		strcopy(sMsg, sizeof(sMsg), "有 AI 生还者离队伍太远，已被传送回队伍。");
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		// 只发真人, 且只发生还者队伍; 不刷全服.
+		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == 2)
+			PrintToChat(i, "\x04[防跑图]\x05%s", sMsg);
+	}
 }

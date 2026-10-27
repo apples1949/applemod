@@ -8,7 +8,7 @@
 #include <l4d2_GetWitchNumber>//女巫自定义编号插件.
 #define REQUIRE_PLUGIN	//标记为可选结束.
 
-#define PLUGIN_VERSION	"1.4.9"
+#define PLUGIN_VERSION	"1.4.10"
 
 char g_sZombieClass[][] = 
 {
@@ -252,7 +252,7 @@ char[] GetTrueName(int client)
 	int Bot = IsClientIdle(client);
 	
 	if(Bot != 0)
-		Format(g_sName, sizeof(g_sName), "闲置:%N", Bot);
+		Format(g_sName, sizeof(g_sName), "AI:%N", Bot);
 	else
 		GetClientName(client, g_sName, sizeof(g_sName));
 	return g_sName;

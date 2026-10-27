@@ -298,7 +298,7 @@ void GetTrueName(int bot, char[] savename)
 	
 	if(tbot != 0)
 	{
-		Format(savename, 32, "★闲置:%N★", tbot);
+		Format(savename, 32, "★AI:%N★", tbot);
 	}
 	else
 	{

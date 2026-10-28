@@ -24,6 +24,7 @@ $RECYCLE.BIN/
 
 # Visual Studio Code files
 /.vscode
-l4d2_sv_tags
 私人文件/
 addons/sourcemod/scripting/compile.dat
+addons/sourcemod/gamedata/l4d2_sv_tags.txt
+addons/sourcemod/plugins/l4d2_sv_tags.smx

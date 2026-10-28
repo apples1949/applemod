@@ -69,4 +69,24 @@
         "#format"   "{1:N},{2:d},{3:d}"
         "en"        "{green}[{olive}!{green}]{default}The server is temporarily moving player{olive} {1} {default}to spec. Please wait until the playtime is got before joining the game.Request count: {2}/{3}"
     }
+    "kickplayerRequireMinHours"
+    {
+        "#format"   "{1:.2f}"
+        "en"        "You were auto kicked: this server requires more than {1} hours of Left 4 Dead 2 playtime."
+        "chi"       "你已被自动踢出：本服要求求生之路2游戏时长大于 {1} 小时。"
+        "zho"       "你已被自動踢出：本服要求求生之路2遊戲時長大於 {1} 小時。"
+    }
+    "gateplayerPending"
+    {
+        "#format"   "{1:.2f}"
+        "en"        "{green}[{olive}!{green}]{default}You need more than{olive} {1} {default}hours of playtime to join this server. Checking your playtime, please stay in spectators for a moment."
+        "chi"       "{green}[{olive}!{green}]{default}本服要求游戏时长大于{olive} {1} {default}小时才能进服。正在核对你的时长，请先在旁观稍候。"
+        "zho"       "{green}[{olive}!{green}]{default}本服要求遊戲時長大於{olive} {1} {default}小時才能進服。正在核對你的時長，請先在旁觀稍候。"
+    }
+    "gateplayerPassed"
+    {
+        "en"        "{green}[{olive}!{green}]{default}Playtime verified, you can join a team and play now!"
+        "chi"       "{green}[{olive}!{green}]{default}时长核对通过，现在可以选择队伍开始游戏了！"
+        "zho"       "{green}[{olive}!{green}]{default}時長核對通過，現在可以選擇隊伍開始遊戲了！"
+    }
 }

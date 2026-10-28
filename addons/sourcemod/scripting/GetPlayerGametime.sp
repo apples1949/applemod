@@ -13,6 +13,12 @@
 #define SECONDS_PER_HOUR	 3600
 #define SECONDS_PER_MINUTE	 60
 
+// 准入下限的看门狗超时估算参数(秒): 单次 HTTP 请求超时 + 两次重试之间的间隔
+#define GATE_HTTP_TIMEOUT	10.0
+#define GATE_RETRY_STEP		1.0
+#define GATE_TIMEOUT_MIN	60.0
+#define GATE_TIMEOUT_MAX	120.0
+
 // Steam Web API: 玩家主页(Steam 个人资料)游戏时长
 #define PROFILE_GAMETIME_URL "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?format=json&appids_filter[0]=550"
 
@@ -61,6 +67,26 @@ bool   b_ConfigsExecuted = false;
 bool   b_SteamCheck;
 bool   b_ClientAuthorized[MAXPLAYERS + 1];	// 已经过 OnClientAuthorized(SteamID 验证成功)
 bool   b_ClientPostAdminCheck[MAXPLAYERS + 1];	// 已经过 OnClientPostAdminCheck
+// "准入下限"模式的待判定标记: 时长还没到手时, 该玩家处于"待判定"状态,
+// 在结论出来前不允许上生还者(2)/特感(3)队; 数据到手后按结论踢出或放行并清除标记.
+bool   b_PendingGate[MAXPLAYERS + 1];
+// 待判定期间是否真的被压过旁观(只为在放行时给玩家一句"现在可以进队了"的提示)
+bool   b_GateForcedSpec[MAXPLAYERS + 1];
+// 压旁观的独立重入标记: ChangeClientToSpec -> ChangeClientTeam 会同步再触发 player_team,
+// 用它挡住自己这条链, 不去改动原有 b_IsProcessingLimitPlayer 的语义
+bool   b_IsHoldingPending[MAXPLAYERS + 1];
+// 该连接是否已因"时长不足"被踢(踢出到真正断线之间别再重复踢/重复压旁观)
+bool   b_GateKicked[MAXPLAYERS + 1];
+// 该连接是否已经得出结论(达标放行/已踢/超时放行)。
+// 必须有这个标记: ConVarChanged 会把全服玩家重新走一遍 OnClientPostAdminCheck 重新查时长,
+// 若没有它, 已经放行、正在玩的玩家会被重新置成"待判定"然后被压回旁观。
+bool   b_GateResolved[MAXPLAYERS + 1];
+// 待判定期间是否已经给玩家发过"正在核对时长"的提示(避免刷屏)
+bool   b_GateHoldAnnounced[MAXPLAYERS + 1];
+// 玩家主页接口明确返回了 playtime_forever=0(确实拥有该游戏但一分钟都没玩过)。
+// 必须和"取不到数据"区分开: 0 小时正是本功能要拦的人, 不能因为值等于 0 就当成失败放行。
+// 只采信主页接口: 成就 stat cell 读到 0 有可能是"未同步"的假 0, 据此判定会误踢老玩家。
+bool   b_KnownZero[MAXPLAYERS + 1];
 int	   i_LastSourceState = 0;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
@@ -75,6 +101,11 @@ bool   b_ShowPlayerLerp;
 bool   b_LPWRequesting;
 bool   b_LPLateload;
 int	   i_LPMWFailureGet;
+// 准入下限(小时)的 cvar 原值; 0=关闭该功能
+float  f_LimitPlayerRequireMinHours;
+// 准入下限换算成秒后的比较阈值, 以及"不足该时长即拦截"的标志
+int	   i_LimitPlayerRequireMinGametime;
+bool   b_LimitPlayerRequireEnabled;
 bool   b_SPLMode;
 bool   b_IfNeedLogKickMsg;
 bool   hasTranslations;
@@ -95,6 +126,7 @@ ConVar c_QueryMode;
 ConVar c_CheckPlayerProfileCount;
 ConVar c_SteamCheck;
 ConVar c_APIKey;
+ConVar c_LimitPlayerRequireMinHours;
 
 char   chatFile[128];
 char   s_APIKey[128];
@@ -120,12 +152,31 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	return APLRes_Success;
 }
 
+// 连接刚进服就进入"待判定"。
+// 为什么要在 OnClientPostAdminCheck 之外再加这一个: OnClientPostAdminCheck 之前理论上有很短一段时间,
+// 玩家可能已经能触发 player_team 去占生还者位; 提前置标记可以把这个窗口也堵上,
+// 这样才能保证"数据到手前不允许上 2/3 队"是严格的。
+public void OnClientPutInServer(int client)
+{
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+	StartPendingGate(client);
+}
+
 public void OnClientDisconnect(int client)
 {
 	if (client > 0 && client <= MaxClients)
 	{
 		b_ClientAuthorized[client]	   = false;
 		b_ClientPostAdminCheck[client] = false;
+		// 断线必须把准入下限的所有状态清干净, 否则 index 复用给下一个玩家时会带着
+		// "待判定/已被压旁观/正在压旁观"的残留标记 —— 那会把正常玩家永久压在旁观
+		b_PendingGate[client]		= false;
+		b_GateForcedSpec[client]	= false;
+		b_IsHoldingPending[client]	= false;
+		b_GateKicked[client]		= false;
+		b_GateResolved[client]		= false;	// 下一个占用该 index 的玩家重新从"未判定"开始
+		b_GateHoldAnnounced[client] = false;
+		b_KnownZero[client]			= false;
 	}
 }
 
@@ -215,6 +266,9 @@ public void OnPluginStart()
 	c_CheckPlayerProfileCount = CreateConVar("CheckPlayerProfileCount", "3", "查询玩家主页游戏时长的次数？0=禁用玩家主页查询", FCVAR_NOTIFY, true, 0.0);
 	c_SteamCheck				 = CreateConVar("GetPlayerGametimeSteamCheck", "1", "开启后检测玩家 SteamID 是否验证成功：必须经过 OnClientAuthorized 和 OnClientPostAdminCheck 两个验证流程，否则不返回获取的玩家游戏时长。0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_APIKey				 = CreateConVar("GetPlayerGametimeAPIKey", "", "Steam Web API Key(查询玩家主页游戏时长用)，留空则禁用玩家主页查询，申请: https://steamcommunity.com/dev/apikey", FCVAR_NOTIFY);
+	// 准入下限: 与 LimitPlayerMinGametime/MaxGametime 的"禁止区间"语义互不影响, 这是"最低准入时长"语义。
+	// 处理方式固定为踢出(用户已确认不做旁观), 所以不再提供 Mode cvar。0=关闭该功能。
+	c_LimitPlayerRequireMinHours = CreateConVar("LimitPlayerRequireMinHours", "10.0", "准入下限(单位:小时): 游戏时长不足该小时数的玩家不允许进入服务器(固定为踢出, 1=踢出)。判定为 time <= 该值*3600 即拦下。0=关闭该功能", FCVAR_NOTIFY, true, 0.0);
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
 	g_cvMaxUpdateRate		 = FindConVar("sv_maxupdaterate");
@@ -239,6 +293,7 @@ public void OnPluginStart()
 	c_CheckPlayerProfileCount.AddChangeHook(ConVarChanged);
 	c_SteamCheck.AddChangeHook(ConVarChanged);
 	c_APIKey.AddChangeHook(ConVarChanged);
+	c_LimitPlayerRequireMinHours.AddChangeHook(ConVarChanged);
 
 	HookEvent("player_team", Event_PlayerTeam);
 
@@ -287,6 +342,13 @@ void GetCvars()
 	i_CheckPlayerProfileCount = c_CheckPlayerProfileCount.IntValue;
 	b_SteamCheck			  = c_SteamCheck.BoolValue;
 	c_APIKey.GetString(s_APIKey, sizeof(s_APIKey));
+
+	// 准入下限换算成秒: 用 float 秒数四舍五入成整数秒, 避免 cvar 填 9.5 这类值时被截断成 9 小时。
+	// 边界语义(用户口径"不超过 10 小时"): i_PlayerTime <= 阈值 即拦下, 阈值 = 10.0 * 3600 = 36000 秒(正好 10 小时整)。
+	// 也就是说"时长恰好 10.00 小时"算不足、会被踢; 必须 > 36000 秒才放行。
+	f_LimitPlayerRequireMinHours	 = c_LimitPlayerRequireMinHours.FloatValue;
+	i_LimitPlayerRequireMinGametime	 = RoundToNearest(f_LimitPlayerRequireMinHours * SECONDS_PER_HOUR);
+	b_LimitPlayerRequireEnabled		 = (f_LimitPlayerRequireMinHours > 0.0) && (i_LimitPlayerRequireMinGametime > 0);
 
 	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0);
 	b_ProfileSourceEnabled = b_SteamWorksAvailable && ((i_QueryMode & QUERY_PROFILE) != 0) && (i_CheckPlayerProfileCount > 0) && (s_APIKey[0] != '\0');
@@ -343,6 +405,42 @@ public void OnConfigsExecuted()
 {
 	b_ConfigsExecuted = true;
 	GetCvars();
+
+	// 运行期证据: 把准入下限到底有没有真的生效打到日志里。
+	// 排查"为什么没人被踢"时先看这一行: 若 gate=禁用, 原因就在 enabled 后面括号里的那一条。
+	LogMessage("[GetPlayerGametime] 准入下限 LimitPlayerRequireMinHours=%.2f h (阈值 %d 秒, time <= 阈值即踢) | gate=%s (%s) | SteamWorks=%s | 数据源 主页=%s 成就=%s | CheckPluginLate=%s LPLateload=%s",
+			   f_LimitPlayerRequireMinHours,
+			   i_LimitPlayerRequireMinGametime,
+			   IsRequireGateEnabled() ? "启用" : "禁用",
+			   IsRequireGateEnabled() ? "正常" :
+				   (!b_Enable ? "GetPlayerGametimeEnable=0" :
+					!b_LimitPlayerRequireEnabled ? "LimitPlayerRequireMinHours<=0" :
+					!b_SteamWorksAvailable ? "SteamWorks 不可用" :
+					(!b_StatsSourceEnabled && !b_ProfileSourceEnabled) ? "没有可用数据源" : "晚加载保护生效"),
+			   b_SteamWorksAvailable ? "可用" : "不可用",
+			   b_ProfileSourceEnabled ? "开" : "关",
+			   b_StatsSourceEnabled ? "开" : "关",
+			   CheckPluginLate ? "true" : "false",
+			   b_LPLateload ? "1" : "0");
+}
+
+// 换图时把准入下限的待判定状态全部清掉。
+// 必须清的理由: 看门狗定时器带了 TIMER_FLAG_NO_MAPCHANGE, 换图时会被销毁;
+// 若此时还留着 b_PendingGate=true, 那个玩家在新图里就再也没人去给结论 —— 会被永久卡在旁观。
+// 换图本身就是一次重置, 已在线玩家不重新走 OnClientPostAdminCheck, 所以直接按"放行"处理最安全。
+public void OnMapEnd()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		// 还挂着待判定的玩家: 看门狗已被换图销毁, 这里直接按"放行"结案。
+		// 同时置 b_GateResolved, 否则之后任何 cvar 变更都会让他重新进待判定并被压回旁观,
+		// 而玩家此时正在新图里玩 —— 那属于严重误伤。
+		if (b_PendingGate[i] && IsClientInGame(i) && !IsFakeClient(i)) b_GateResolved[i] = true;
+		b_PendingGate[i]		= false;
+		b_GateForcedSpec[i]		= false;
+		b_IsHoldingPending[i]	= false;
+		b_GateHoldAnnounced[i]	= false;
+	}
 }
 
 // SteamID 验证开关: 开启时只有 SteamID 验证成功且经过 OnClientAuthorized + OnClientPostAdminCheck
@@ -381,7 +479,12 @@ public void OnClientPostAdminCheck(int client)
 	i_StatState[client]		 = SOURCE_PENDING;
 	i_ProfileState[client]	 = SOURCE_PENDING;
 	b_Announced[client]		 = false;
+	b_KnownZero[client] = false;
 	// 注意: i_StatsUserID / i_ProfileUserID 不要在这里清, 它们用于防止"同一条连接重复发起请求"
+
+	// 准入下限: 在发起任何异步查询之前就先把玩家置为"待判定", 否则数据先到、标记后设,
+	// 会出现"已经放行/已经踢了又补一次判定"的竞态
+	StartPendingGate(client);
 
 	// 两个数据源都是异步的: 成就统计需要等待 Steam 回调, 主页需要等待 HTTP 响应
 	if (b_StatsSourceEnabled) StartStatsQuery(client);
@@ -397,6 +500,10 @@ void OnSourceUpdate(int client, bool bNewData = false)
 
 	UpdatePlayerTimeState(client);
 
+	// 准入判定必须放在"SteamID 未验证就直接 return"之前:
+	// ResolvePendingGate 内部自己会判断验证状态, 但放在这里能保证数据一到就立刻给结论
+	ResolvePendingGate(client);
+
 	// SteamID 未通过两个验证流程的玩家: 不播报时长, 也不做任何限制
 	if (!IsClientSteamVerified(client)) return;
 
@@ -409,11 +516,15 @@ void OnSourceUpdate(int client, bool bNewData = false)
 }
 
 // 汇总两个数据源, 刷新用于限制/native 的生效时长: >0 成功, -1 获取中, -2 获取失败
+// 补充一种情况: 所有数据源都查完了, 而主页接口明确返回了 0 分钟(新号从没玩过)时保持 0, 不降级成 -2。
+// 原因: -2 表示"查不到", 而 0 是"查到了, 就是 0 小时" —— 后者恰恰是准入下限要拦的人,
+// 若混成 -2 就会按"查不到不误踢"的逻辑被放行, 等于功能对 0 小时新号完全失效。
 void UpdatePlayerTimeState(int client)
 {
 	if (i_StatTime[client] > 0) i_PlayerTime[client] = i_StatTime[client];
 	else if (i_ProfileTime[client] > 0) i_PlayerTime[client] = i_ProfileTime[client];
 	else if (!AllSourcesFinished(client)) i_PlayerTime[client] = -1;
+	else if (b_KnownZero[client]) i_PlayerTime[client] = 0;	// 查到了, 确实 0 小时
 	else i_PlayerTime[client] = -2;
 }
 
@@ -465,6 +576,8 @@ void StartStatsQuery(int client)
 		i_StatState[client] = SOURCE_OK;
 		return;
 	}
+	// 注意: 刚发起 RequestStats 就立刻读 cell 的结果不可信(stat 可能还没同步),
+	// 所以这里只把 >0 当成成功, 读到 0 一律按"还没拿到"处理, 等重试链。
 
 	i_StatTime[client] = 0;
 
@@ -508,6 +621,10 @@ Action MoreGetPlayerGameTime(Handle timer, any userid)
 		OnSourceUpdate(client, true);
 		return Plugin_Stop;
 	}
+	// 这里刻意不把"成就 cell 读到 0"记成 b_KnownZero:
+	// Steam 的 stat cell 在某些情况下会返回 0 而玩家其实有上千小时(stat 未同步/被重置),
+	// 若据此判定就会把老玩家误踢 —— 误踢的代价远大于放进一个新号。
+	// 所以"确实 0 小时"只采信主页接口 playtime_forever=0(见 OnProfileHTTPCompleted), 那里有明确字段。
 
 	i_StatTime[client] = 0;
 	SteamWorks_RequestStats(client, APPID_L4D2);
@@ -582,6 +699,8 @@ public void OnProfileHTTPCompleted(Handle hRequest, bool bFailure, bool bRequest
 				if (ParseProfilePlaytime(sBody, iMinutes))
 				{
 					i_ProfileTime[client]  = iMinutes * SECONDS_PER_MINUTE;
+					// 记下"明确读到 0 分钟", 供准入判定区分"真的没玩过"和"取不到数据"
+					b_KnownZero[client] = (iMinutes <= 0);
 					i_ProfileState[client] = SOURCE_OK;
 					bHandled = true;
 					OnSourceUpdate(client, true);
@@ -620,7 +739,9 @@ bool ParseProfilePlaytime(const char[] sData, int &iMinutes)
 	if (sData[iPos] < '0' || sData[iPos] > '9') return false;
 
 	iMinutes = StringToInt(sData[iPos]);
-	return (iMinutes > 0);
+	// 返回 true 表示"确实读到了 playtime_forever 字段", 值可能是 0.
+	// 0 和"读取失败"必须区分: 0 小时的玩家正是准入下限要拦的人.
+	return true;
 }
 
 void OnProfileQueryFailed(int client)
@@ -711,8 +832,17 @@ Action cmdplayertime(int client, int args)
 
 void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
-	if (!b_Enable || !b_LimitPlayer) return;
 	int client	= GetClientOfUserId(event.GetInt("userid"));
+
+	// 准入下限的时序处理放在最前面: 这套判定与 LimitPlayer(禁止区间) 是两套独立语义,
+	// 即使 LimitPlayer=0 也必须能压住"待判定"玩家, 所以不能放到下面的 b_LimitPlayer 早退之后。
+	// 玩家试图上生还者(2)/特感(3)队时, 若时长还没到手就把她压回旁观。
+	if (IsValidClient(client) && !IsFakeClient(client))
+	{
+		HoldPendingClient(client);
+	}
+
+	if (!b_Enable || !b_LimitPlayer) return;
 	int oldteam = event.GetInt("oldteam");
 	int iTeam	= event.GetInt("team");
 
@@ -725,6 +855,260 @@ void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 bool IsValidClient(int client)
 {
 	return client > 0 && client <= MaxClients && IsClientInGame(client);
+}
+
+/* ============================ 准入下限 (LimitPlayerRequireMinHours) ============================
+ *
+ * 与上面的 LimitPlayer(禁止区间: Min < time < Max) 是两套独立语义, 互不覆盖:
+ *   LimitPlayer             = "落在区间里就限制"
+ *   LimitPlayerRequireMinHours = "低于这个小时数就踢", 即"准入下限"
+ *
+ * 为什么需要单独一套: 原来的判定是区间内才限制, 表达不了"不足 X 小时一律不许进";
+ * 而且它用严格 >, 0 小时/恰好 X 小时的边界会歪, 也无法表达"没有下限、只有下限"。
+ *
+ * 时序为什么这么绕(核心难点): 游戏时长是异步请求(SteamWorks 向 Steam Web API 要)完成的,
+ * 玩家连接瞬间拿不到时长, 所以不能在连接时立刻判定。做法是:
+ *   1) 玩家连接后立刻进入"待判定"状态 b_PendingGate=true;
+ *   2) 数据到手前, 每次 player_team 试图上 2/3 队都压回旁观(HoldPendingClient);
+ *      玩家没试图上队就什么都不用做, 不会打扰她;
+ *   3) 有一个看门狗计时器(GateWatchdog)兜底, 防止响应丢失导致永远卡在待判定;
+ *   4) 数据到手后 ResolvePendingGate: 不达标 -> 踢出 + 日志; 达标 -> 清标记放行。
+ * 任何一条路径都会清掉待判定标记, 所以不会出现"永远卡在旁观", 也不会重复踢。
+ * ====================================================================================== */
+
+// 把一个"待判定"玩家压回旁观。重入保护用独立标记 b_IsHoldingPending,
+// 不去改 b_IsProcessingLimitPlayer 的语义(那个是给原 LimitPlayer 用的)。
+void HoldPendingClient(int client)
+{
+	if (!b_PendingGate[client]) return;
+	if (b_IsHoldingPending[client]) return;
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+	if (!IsClientConnected(client)) return;
+
+	// 运行期把功能关掉/SteamWorks 掉了: 立刻停止拦截并释放标记, 不能继续压着玩家
+	if (!IsRequireGateEnabled())
+	{
+		// 功能被关掉属于"管理员决定不限制", 不是"你通过验证", 所以不发通过提示
+		ReleasePendingGate(client, false);
+		return;
+	}
+
+	// 玩家本来就在旁观队: 不需要动她。这同时覆盖了"玩家一直没自动上队就无需动作"的情况
+	int iTeam = GetClientTeam(client);
+	if (iTeam != 2 && iTeam != 3) return;
+
+	b_IsHoldingPending[client] = true;
+	// ChangeClientTeam 会同步再触发一次 player_team 事件, 靠上面的 b_IsHoldingPending 挡住递归
+	ChangeClientToSpec(client);
+	b_IsHoldingPending[client] = false;
+
+	// ChangeClientToSpec 在玩家已断线时会直接 return, 所以只有真的回到 1 队才算"压过"
+	if (IsValidClient(client) && IsClientConnected(client) && GetClientTeam(client) == 1)
+	{
+		b_GateForcedSpec[client] = true;
+		if (!b_GateHoldAnnounced[client])
+		{
+			b_GateHoldAnnounced[client] = true;
+			CPrintToChat(client, "%t", "gateplayerPending", float(i_LimitPlayerRequireMinGametime) / SECONDS_PER_HOUR);
+		}
+	}
+}
+
+// 数据到手(或确认失败)后给结论: 不达标踢出, 达标放行。每条连接只走一次。
+void ResolvePendingGate(int client)
+{
+	if (!b_PendingGate[client]) return;
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+	// KickClient 在玩家 IsClientConnected=false 时会静默失败(踢不出去却以为踢了),
+	// 所以判定前必须确认连接还在; 连接已断就不用再判, 标记由 OnClientDisconnect 清理
+	if (!IsClientConnected(client)) return;
+	// SteamID 还没验证完就不下结论(否则会把"等待验证"误判成"取不到时长")
+	if (!IsClientSteamVerified(client)) return;
+	// -1 = 时长仍在请求中: 既不能下结论也不能踢, 交给看门狗或下一次 OnSourceUpdate
+	if (i_PlayerTime[client] == -1) return;
+
+	// "明确读到 0 小时"是有效数据, 不是"还没查完":
+	// UpdatePlayerTimeState 会把 0 秒存成 i_PlayerTime=0, 而 0 同时也是"尚未查询"的初值,
+	// 所以必须靠 AllSourcesFinished + b_KnownZero 两个条件一起才认。
+	// 新号(0 小时)正是本功能要拦的人, 若把它当成"取不到数据"就会直接放行, 等于没生效。
+	bool bKnownZero = (i_PlayerTime[client] == 0) && AllSourcesFinished(client) && b_KnownZero[client];
+	if (i_PlayerTime[client] == 0 && !bKnownZero) return;	// 还没查完, 等下次
+
+	b_PendingGate[client] = false;
+	b_GateResolved[client] = true;	// 结论已出: 之后 ConVar 变更重查时长不会再把该玩家压回旁观
+
+	if (bKnownZero)
+	{
+		// 0 秒 <= 阈值(阈值恒 > 0), 必然不达标: 按"时长不足"踢出
+		b_GateKicked[client] = true;
+		KickClient(client, "%t", "kickplayerRequireMinHours", float(i_LimitPlayerRequireMinGametime) / SECONDS_PER_HOUR);
+		LogKickPlayer(client, 3);
+		return;
+	}
+
+	if (i_PlayerTime[client] > 0)
+	{
+		// 边界语义(用户口径"游戏时长不超过 10 小时不许进"):
+		//   i_PlayerTime <= 阈值 一律拦下, 阈值 = round(10.0 * 3600) = 36000 秒。
+		// 即"恰好 10.00 小时"也算不足、会被踢; 必须严格大于 36000 秒才放行。
+		if (i_PlayerTime[client] <= i_LimitPlayerRequireMinGametime)
+		{
+			b_GateKicked[client] = true;
+			// KickClient 内部会把翻译目标设为该玩家, 所以直接用 %t 就是玩家自己的语言
+			KickClient(client, "%t", "kickplayerRequireMinHours", float(i_LimitPlayerRequireMinGametime) / SECONDS_PER_HOUR);
+			LogKickPlayer(client, 3);
+			return;
+		}
+
+		// 达标: 放行。之前被压过旁观的给一句提示, 告诉她现在可以进队了
+		if (b_GateForcedSpec[client] && IsClientConnected(client))
+		{
+			CPrintToChat(client, "%t", "gateplayerPassed");
+		}
+		b_GateForcedSpec[client] = false;
+		return;
+	}
+
+	// 走到这里说明 i_PlayerTime == -2: 所有已启用的数据源都失败了, 手里没有任何时长可比。
+	// 这里必须显式守住: 默认(LPMWFailureGet=0)一律不踢! 否则 Steam Web API 一挂,
+	// 全服玩家都会变成"取不到时长"然后被批量踢掉 —— 这是本功能最危险的误伤路径。
+	// 宁可放进一个时长不够的玩家, 也不能因为查不到就把所有人踢了。
+	// 需要"查不到也踢"的服务器可以显式把 LPMWFailureGet 设成 1(沿用原有语义与文案)。
+	b_GateForcedSpec[client] = false;
+	if (i_LPMWFailureGet == 1)
+	{
+		b_GateKicked[client] = true;
+		KickClient(client, "%t", "kickplayerFailureGet");
+		LogKickPlayer(client, 1);
+	}
+}
+
+// 清掉待判定状态并标记本连接已得出结论(放行语义)。所有"不下结论就放弃拦截"的路径都走这里,
+// 保证标记一定被清掉 —— 这是"不会永远卡在旁观"的关键。
+void ReleasePendingGate(int client, bool bAnnounce = true)
+{
+	bool bWasHeld = b_GateForcedSpec[client];
+
+	b_PendingGate[client]	 = false;
+	b_GateForcedSpec[client] = false;
+	b_GateResolved[client]	 = true;
+
+	// 只有真的被压过旁观才需要提示, 否则会打扰正常进队的玩家
+	if (bAnnounce && bWasHeld && IsValidClient(client) && IsClientConnected(client))
+	{
+		CPrintToChat(client, "%t", "gateplayerPassed");
+	}
+}
+
+// 看门狗: 兜底处理"一直等不到结论"的待判定玩家。
+// 没有它的话, 万一 SteamWorks 回调丢失(玩家断网/Steam 抽风/重试链被 early return 掉),
+// 玩家会永远带着待判定标记被压在旁观 —— 这正是"不能永远卡在旁观"要求的兜底。
+// 超时后按"取不到数据"处理, 与 LPMWFailureGet 语义完全一致(默认放行), 绝不误踢。
+void GateWatchdog(int client)
+{
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+	if (!IsClientConnected(client)) return;	// 连接已断: 不再判定, 标记交给 OnClientDisconnect
+	if (!b_PendingGate[client]) return;
+	// 功能在等待期间被关掉了: 释放标记, 不要留下残余的"待判定"
+	if (!IsRequireGateEnabled())
+	{
+		ReleasePendingGate(client, false);
+		return;
+	}
+
+	// SteamID 一直没通过验证(玩家卡在连接阶段 / 验证失败): 绝不下结论也绝不踢,
+	// 直接清标记放行 —— 没有时长数据时唯一安全的处理就是"不拦"。
+	if (!IsClientSteamVerified(client))
+	{
+		LogMessage("[GetPlayerGametime] %N 的准入判定超时: SteamID 始终未通过验证, 已放行(不做限制).", client);
+		ReleasePendingGate(client);
+		return;
+	}
+
+	// 数据其实已经到手, 只是没触发到判定: 补一次结论。
+	// 判据与 ResolvePendingGate 完全一致(含"明确读到 0 小时"的情况), 否则会出现
+	// "看门狗以为没数据就放行, 而实际数据是 0 小时本该踢"的不一致
+	if (i_PlayerTime[client] > 0 || i_PlayerTime[client] == -2
+		|| (i_PlayerTime[client] == 0 && b_KnownZero[client] && AllSourcesFinished(client)))
+	{
+		ResolvePendingGate(client);
+		return;
+	}
+
+	LogMessage("[GetPlayerGametime] %N 的准入判定超时(时长仍在请求中), 按取不到数据处理, 避免永久卡在旁观.", client);
+
+	// 注意顺序: 先踢后放行。ReleasePendingGate 只负责清标记和"可以进队"提示,
+	// 而"查不到是否踢人"由 LPMWFailureGet 决定(默认 0 = 不踢)。
+	if (i_LPMWFailureGet == 1)
+	{
+		b_PendingGate[client]	 = false;
+		b_GateForcedSpec[client] = false;
+		b_GateResolved[client]	 = true;
+		b_GateKicked[client]	 = true;
+		KickClient(client, "%t", "kickplayerFailureGet");
+		LogKickPlayer(client, 1);
+		return;
+	}
+
+	ReleasePendingGate(client);
+}
+
+// 准入下限功能当前是否真的可用。任一前提不成立都不启用, 全部为了防误伤:
+//  - cvar <= 0(功能关闭)
+//  - 插件总开关关闭
+//  - SteamWorks 扩展不可用: 此时根本查不到任何时长, 全员都会变成"取不到", 绝不能据此踢人
+//  - 没有任何可用数据源: 同上
+//  - 插件晚加载 && LPLateload=1: 沿用原有"晚加载不限制"的保护
+bool IsRequireGateEnabled()
+{
+	if (!b_Enable) return false;
+	if (!b_LimitPlayerRequireEnabled) return false;
+	if (!b_SteamWorksAvailable) return false;
+	if (!b_StatsSourceEnabled && !b_ProfileSourceEnabled) return false;
+	if (b_LPLateload && CheckPluginLate) return false;
+	return true;
+}
+
+// 看门狗超时秒数: 单次请求约 10s(HTTP timeout) / 重试间隔 1s, 按最大重试次数估算并留余量。
+// 只用已启用的数据源算, 与 GetRequestMaxCount() 口径一致。
+float GetGateTimeout()
+{
+	int iMaxCount = GetRequestMaxCount();
+	if (iMaxCount < 1) iMaxCount = 1;
+	float fTimeout = float(iMaxCount) * (GATE_RETRY_STEP + GATE_HTTP_TIMEOUT);
+	if (fTimeout < GATE_TIMEOUT_MIN) fTimeout = GATE_TIMEOUT_MIN;
+	if (fTimeout > GATE_TIMEOUT_MAX) fTimeout = GATE_TIMEOUT_MAX;
+	return fTimeout;
+}
+
+// 玩家验证完成 / 开始查询时长时进入"待判定"状态, 并起一个看门狗
+void StartPendingGate(int client)
+{
+	if (!IsValidClient(client) || IsFakeClient(client)) return;
+	if (!IsRequireGateEnabled()) return;
+	// 本连接已经得出结论就不再重复: ConVarChanged 会把全服玩家重新走一遍 OnClientPostAdminCheck,
+	// 没有这个判断的话, 已经放行、正在玩的玩家会被重新置成"待判定"并压回旁观(严重误伤)
+	if (b_GateResolved[client]) return;
+	if (b_PendingGate[client]) return;
+	if (b_GateKicked[client]) return;
+
+	b_PendingGate[client]	  = true;
+	b_GateForcedSpec[client]  = false;
+	b_GateHoldAnnounced[client] = false;
+
+	// 兜住"标记设好之前就已经在 2/3 队"的情况(例如玩家验证很快、直接占了生还者位):
+	// 光靠 player_team 事件是接不住的, 因为那次事件已经过去了
+	HoldPendingClient(client);
+
+	CreateTimer(GetGateTimeout(), TimerGateWatchdog, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action TimerGateWatchdog(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (!client) return Plugin_Stop;	// 玩家已离开: userid 不匹配, 新连接不会被误伤
+	GateWatchdog(client);
+	return Plugin_Stop;
 }
 
 bool CheckPlayerGametime(int client)
@@ -935,6 +1319,10 @@ void lateload()
 	{
 		// 晚加载时 OnClientAuthorized 不会再触发, 已验证 SteamID 的在线玩家直接补记状态, 否则他们的时长会一直不返回
 		if (IsClientAuthorized(i) && IsClientInGame(i) && !IsFakeClient(i)) b_ClientAuthorized[i] = true;
+		// 晚加载时已经在服里的玩家不进入"待判定": 他们已经在玩了, 突然压回旁观会打断对局。
+		// 这也是 IsRequireGateEnabled() 里 "b_LPLateload && CheckPluginLate 直接返回 false" 的同一保护;
+		// 这里再显式标记一次, 防止之后 cvar 变更重查时长时把他们压回旁观。
+		if (IsClientInGame(i) && !IsFakeClient(i)) b_GateResolved[i] = true;
 		if (IsClientAuthorized(i) && IsClientInGame(i)) OnClientPostAdminCheck(i);
 	}
 }
@@ -979,6 +1367,7 @@ float clamp(float inc, float low, float high)
 	return (inc > high) ? high : ((inc < low) ? low : inc);
 }
 
+// 准入下限的踢出日志(Mode=3), 复用同样的日志文件
 void LogKickPlayer(int client, int Mode)
 {
 	if (b_IfNeedLogKickMsg)
@@ -988,6 +1377,12 @@ void LogKickPlayer(int client, int Mode)
 		FormatTime(Time, sizeof(Time), "%Y-%m-%d %H:%M:%S", -1);
 		char KickMsg[220];
 		if (Mode == 1) Format(KickMsg, sizeof(KickMsg), "%N were auto kicked because failed to get playtime!", client);
+		else if (Mode == 3)
+		{
+			// 准入下限踢出: 记录实际时长和门槛, 便于事后申诉/核对
+			float gametime = float(i_PlayerTime[client]) / SECONDS_PER_HOUR;
+			Format(KickMsg, sizeof(KickMsg), "%N kicked by gate : %.2fh (require > %.2f h)!", client, gametime, f_LimitPlayerRequireMinHours);
+		}
 		else
 		{
 			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
@@ -1020,6 +1415,7 @@ void ChangeClientToSpec(int client)
 {
 	// 客户端可能在定时器/事件延迟期间进入断线状态(IsClientInGame 仍为 true 但连接已断),此时 ChangeClientTeam 会报 "Client X is not connected"
 	if (!IsClientConnected(client) || !IsClientInGame(client)) return;
+	// 已经在旁观队就不用再动(降少无意义的事件); 但仍要把空闲玩家身上的 bot 接管回来
 	if (GetClientTeam(client) == 1 && GetBotOfIdlePlayer(client)) L4D_TakeOverBot(client);
 	if (!IsClientConnected(client) || !IsClientInGame(client)) return;
 	ChangeClientTeam(client, 1);

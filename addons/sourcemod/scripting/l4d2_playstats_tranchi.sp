@@ -7459,6 +7459,24 @@ int GetPlayerIndexForSteamId(const char[] steamId, int client = -1)
 		return pIndex;
 	}
 
+	// safeguard
+	// 索引空间用完时, 必须把 steamid -> index 的映射一起清掉, 且必须在取新 index 之前清:
+	// 原来只把 g_iPlayers 拨回 FIRST_NON_BOT, g_hTriePlayers 里的旧记录一条都不删:
+	// 索引 4..63 之后会被新玩家覆盖, 于是既留下"每个唯一 steamid 一条"的无限增长
+	// (20 小时约 +36KB, 呈 Trie 哈希桶翻倍的阶梯), 又让旧玩家查到已被别人占用的索引.
+	// 清表放在下面"add it"之前, 是为了不把本轮刚刚 SetTrieValue 写进去的这条也清掉.
+	if (g_iPlayers >= MAXTRACKED) {
+		ClearTrie(g_hTriePlayers);
+
+		// 清表后把 bot 的固定映射补回来(与 OnPluginStart 里一致), 免得 bot 去占用 4..63 的真人槽位.
+		SetTrieValue(g_hTriePlayers, "BOT_0", 0);
+		SetTrieValue(g_hTriePlayers, "BOT_1", 1);
+		SetTrieValue(g_hTriePlayers, "BOT_2", 2);
+		SetTrieValue(g_hTriePlayers, "BOT_3", 3);
+
+		g_iPlayers = FIRST_NON_BOT;
+	}
+
 	// add it
 	pIndex = g_iPlayers;
 	SetTrieValue(g_hTriePlayers, steamId, pIndex);
@@ -7474,11 +7492,6 @@ int GetPlayerIndexForSteamId(const char[] steamId, int client = -1)
 	}
 
 	g_iPlayers++;
-
-	// safeguard
-	if (g_iPlayers >= MAXTRACKED) {
-		g_iPlayers = FIRST_NON_BOT;
-	}
 
 	return pIndex;
 }

@@ -132,7 +132,9 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 			return;
 		else if(StrEqual(weapon,"trigger_hurt_g"))//跳樓 跳海 地圖火 都有可能
 			FormatEx(kill_weapon, sizeof(kill_weapon), "%s","killed himself");
-		else if(strncmp(kill_weapon, "prop_physics", 12, false) == 0 || strncmp(kill_weapon, "prop_car_alarm", 14, false) == 0)//玩車殺死自己
+		// 修正：原本误用 kill_weapon（此时还是未赋值的脏值）做比较，永远命中不了，
+		// 导致被 prop 砸死的特感都被说成「被伺服器處死」。这里改为比较真正的武器名 weapon。
+		else if(strncmp(weapon, "prop_physics", 12, false) == 0 || strncmp(weapon, "prop_car_alarm", 14, false) == 0)//玩車殺死自己
 			FormatEx(kill_weapon, sizeof(kill_weapon), "%s","killed by toy");
 		else if(StrEqual(weapon,"pipe_bomb")||StrEqual(weapon,"prop_fuel_barr"))//自然的爆炸(土製炸彈 砲彈 瓦斯罐)
 			FormatEx(kill_weapon, sizeof(kill_weapon), "%s","killed by boom");
@@ -144,9 +146,9 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 		if(GetEntProp(victim, Prop_Send, "m_zombieClass") == ZC_TANK)//Tank suicide
 		{
 			if(!IsFakeClient(victim))//真人SI player
-				CPrintToChatAll("%t", "Tank is killed by something", kill_weapon);
+				PrintAllSubPhrase("Tank is killed by something", kill_weapon);
 			else
-				CPrintToChatAll("%t", "Tank is killed by something", kill_weapon);
+				PrintAllSubPhrase("Tank is killed by something", kill_weapon);
 		}
 		else if(GetEntProp(victim, Prop_Send, "m_zombieClass") == ZC_BOOMER)
 		{
@@ -157,7 +159,7 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 		}
 		else
 		{
-			CPrintToChatAll("%t", "Player is killed by something", victim, kill_weapon);
+			PrintAllSubPhraseWithClient("Player is killed by something", victim, kill_weapon);
 		}
 		return;
 	}
@@ -177,9 +179,11 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 			FormatEx(Tank_weapon, sizeof(Tank_weapon), "Toy");
 		else if(strncmp(weapon, "prop_car_alarm", 14, false) == 0)
 			FormatEx(Tank_weapon, sizeof(Tank_weapon), "Alarm-Car");
+		else
+			FormatEx(Tank_weapon, sizeof(Tank_weapon), "unknown weapon");//补上默认值，避免脏值当短语名用
 			
-		CPrintToChatAll("%t", "Tank Kill Witch", Tank_weapon);
-
+		// 【多语言修复】Tank_weapon 是短语名，改由辅助函数逐客户端解析后再拼外层
+		PrintAllSubPhrase("Tank Kill Witch", Tank_weapon);
 		return;
 	}
 	
@@ -209,6 +213,8 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 					FormatEx(Tank_weapon, sizeof(Tank_weapon), "plays toy to kill");
 				else if(strncmp(weapon, "prop_car_alarm", 14, false) == 0)
 					FormatEx(Tank_weapon, sizeof(Tank_weapon), "plays alarm car to kill");
+				else
+					FormatEx(Tank_weapon, sizeof(Tank_weapon), "unknown weapon");//补默认值，避免脏值当短语名用
 					
 				//Tank kill boomer
 				if(victimzombieclass == ZC_BOOMER)
@@ -225,24 +231,25 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 				|| victimzombieclass == ZC_SPITTER
 				|| victimzombieclass == ZC_JOCKEY ) //Tank kills teammates S.I. (Hunter,Smoker,....)	
 				{
+					// 【多语言修复】拆成真人/AI 两个 key，参数只剩武器子短语，逐客户端解析
 					if(!IsFakeClient(victim))//真人SI player
 					{	
-						CPrintToChatAll("%t", "Tank kill teammate", Tank_weapon, "");
+						PrintAllSubPhrase("Tank kill teammate", Tank_weapon);
 					}
 					else
 					{
-						CPrintToChatAll("%t", "Tank kill teammate", Tank_weapon, "AI");
+						PrintAllSubPhrase("Tank kill teammate AI", Tank_weapon);
 					}
 				}
 				else if(victimzombieclass == ZC_TANK ) //Tank kills Tank
 				{
 					if(!IsFakeClient(victim))//真人SI player
 					{	
-						CPrintToChatAll("%t", "Tank kill Tank", Tank_weapon);
+						PrintAllSubPhrase("Tank kill Tank", Tank_weapon);
 					}
 					else
 					{
-						CPrintToChatAll("%t", "Tank kill Tank", Tank_weapon);
+						PrintAllSubPhrase("Tank kill Tank", Tank_weapon);
 					}
 				}
 			}
@@ -251,6 +258,46 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 }
 
 //Left4Dhooks API Forward-------------------------------
+
+// 【多语言修复】把「子短语」先按每个接收者自己的语言解析，再拼进外层短语。
+//
+// 原来的写法是 CPrintToChatAll("%t", "Tank is killed by something", kill_weapon)，
+// 而 kill_weapon 本身是一个短语名（如 "killed by fire"），靠 phrases 里的
+// "#format" "{1:t}" 做嵌套翻译。这条嵌套路径不跟随 SetGlobalTransTarget 的
+// 每客户端语言，会回落到服务端语言（通常是 en），于是中文客户端看到
+// 「外层中文 + 内层英文」的混排。
+//
+// 现在 phrases 里外层短语改成 {1:s}，由下面两个辅助函数对每个客户端：
+//   1) SetGlobalTransTarget(i)
+//   2) FormatEx("%t", 子短语)   → 用该客户端语言解析出已本地化的字符串
+//   3) CPrintToChat(i, "%t", 外层短语, 已本地化字符串)
+// 必须逐个客户端 VFormat，不能先拼好再广播（否则又会退回单语言）。
+void PrintAllSubPhrase(const char[] sOuter, const char[] sSubPhrase)
+{
+	char sSub[MAX_MESSAGE_LENGTH];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || IsFakeClient(i)) continue;
+
+		SetGlobalTransTarget(i);
+		FormatEx(sSub, sizeof(sSub), "%t", sSubPhrase);
+		CPrintToChat(i, "%t", sOuter, sSub);
+	}
+}
+
+// 同上，但外层短语的第 1 个参数是客户端（{1:N}），第 2 个参数是子短语（{2:s}）。
+void PrintAllSubPhraseWithClient(const char[] sOuter, int client, const char[] sSubPhrase)
+{
+	char sSub[MAX_MESSAGE_LENGTH];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || IsFakeClient(i)) continue;
+
+		SetGlobalTransTarget(i);
+		FormatEx(sSub, sizeof(sSub), "%t", sSubPhrase);
+		CPrintToChat(i, "%t", sOuter, client, sSub);
+	}
+}
 
 public void L4D2_OnStagger_Post(int tank, int source)
 {
@@ -288,13 +335,14 @@ public void L4D2_OnStagger_Post(int tank, int source)
 				}
 				case eDeath_TankKill:
 				{
+					// 【多语言修复】sWeapon 是武器子短语名，第 1 参为客户端，交给带 client 的辅助函数
 					if(!IsFakeClient(source))//真人SI player
 					{	
-						CPrintToChatAll("%t", "l4d_pig_infected7", g_cBoomerDeath[source].sWeapon, source);
+						PrintAllSubPhraseWithClient("l4d_pig_infected7", source, g_cBoomerDeath[source].sWeapon);
 					}
 					else	
 					{
-						CPrintToChatAll("%t", "l4d_pig_infected8", g_cBoomerDeath[source].sWeapon);
+						PrintAllSubPhrase("l4d_pig_infected8", g_cBoomerDeath[source].sWeapon);
 					}
 				}
 
@@ -326,11 +374,11 @@ Action Timer_TankKillBoomerCheck(Handle timer, int client)
 
 	if(!IsFakeClient(client))//真人SI player
 	{
-		CPrintToChatAll("%t", "l4d_pig_infected9", g_cBoomerDeath[client].sWeapon, client);
+		PrintAllSubPhraseWithClient("l4d_pig_infected9", client, g_cBoomerDeath[client].sWeapon);
 	}
 	else
 	{
-		CPrintToChatAll("%t", "l4d_pig_infected10", g_cBoomerDeath[client].sWeapon);
+		PrintAllSubPhrase("l4d_pig_infected10", g_cBoomerDeath[client].sWeapon);
 	}
 	
 	return Plugin_Continue;

@@ -17,6 +17,9 @@
         forward Apex_OnTracRockHit(tank, victim) 通知本插件(不需要 include, 无依赖);
      3. 控制权相关参数就是本插件自己的 cvar: tankcontrol_trac_base / _step / _debug
         (不额外生成 cfg 文件, 要改就在控制台或 confogl 的 cfg 里 confogl_addcvar 设置)。
+     4. 每格怒气的"有效幅度"由三条规则取最大值决定(不叠加): 基线 5% / 坦克存活满
+        tankcontrol_trac_longlife_time 秒后 6% / 跟踪石命中状态 7%。两个条件同时成立
+        仍然取 7%(取最大), 不是 8%。
 
    命名口径提醒: 原版的"控制权/frustration"是 GetTankFrustration = 100 - m_frustration,
    而下面跟踪石那套逻辑直接操作引擎原始值 m_frustration(与引擎以及 l4d2_tankrage /
@@ -38,9 +41,11 @@ ArrayList h_tankQueue;
 ConVar 
     hTankPrint,
     hTankWindow, 
-    hTracCtrlBase,      /* 跟踪石: 游戏日常的怒气步进幅度(%) */
-    hTracCtrlStep,      /* 跟踪石: 命中后每格怒气的扣除幅度(%) */
-    hTracCtrlAfter;     /* 跟踪石: 命中后持续按 step% 扣的时长(秒, 0=直到坦克死亡/换控) */
+    hTracCtrlBase,          /* 基线: 引擎日常的怒气步进幅度(%), 只用于换算比例 */
+    hTracCtrlStep,          /* 跟踪石命中状态: 每格怒气的扣除幅度(%) */
+    hTracCtrlAfter,         /* 跟踪石: 命中后持续按 step% 扣的时长(秒, 0=直到坦克死亡/换控) */
+    hTracCtrlLongLifeTime,  /* 长存活门限(秒): 坦克从拿到控制权起存活满这么久仍未死亡 */
+    hTracCtrlLongLifeStep;  /* 长存活状态: 满门限后每格怒气的扣除幅度(%) */
 
 GlobalForward
     hForwardOnTryOfferingTankBot,
@@ -64,6 +69,16 @@ int   g_iTracEngineMeter[MAXPLAYERS + 1]; /* 引擎最后一次自己写入的 m
 int   g_iTracPushBacks[MAXPLAYERS + 1];   /* 本轮补正被写回后压回去的次数(防止和引擎每帧对拉) */
 bool  g_bTracAfter[MAXPLAYERS + 1];       /* 是否处于"跟踪石命中后每格怒气按 step% 扣"的状态 */
 float g_fTracAfterUntil[MAXPLAYERS + 1];  /* 持续状态截止(0 = 直到坦克死亡/控制权交接) */
+bool  g_bTracTracking[MAXPLAYERS + 1];    /* 是否已进入补正状态机(跟踪石 或 长存活, 任一成立即需要) */
+
+/* ---------------- 坦克"长存活"状态(存活满 N 秒后每格怒气幅度加大) ----------------
+   gotTankAt 是原版给"强制窗口(tankcontrol_force_window)"用的单值全局变量, 只记"最后一个
+   拿到坦克的人", 12v12 同时存在多辆坦克时不够用; 而且强制窗口那套语义不能动, 所以长存活
+   规则另外开一份按客户端索引的记录, 与 gotTankAt 互不影响:
+     g_fTankGotAt  —— 这辆坦克"真正拿到控制权"的 GetGameTime 时刻(0 = 当前没在跟踪);
+     g_bTankLongLife —— 是否已经存满门限(闩锁: 一旦成立就保持到死亡/交接/换回合)。 */
+float g_fTankGotAt[MAXPLAYERS + 1];
+bool  g_bTankLongLife[MAXPLAYERS + 1];
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -101,6 +116,9 @@ public void OnPluginStart()
     HookEvent("round_end", RoundEnd_Event, EventHookMode_PostNoCopy);
     HookEvent("player_team", PlayerTeam_Event, EventHookMode_Post);
     HookEvent("player_death", PlayerDeath_Event, EventHookMode_Post);
+    /* tank_spawn: 坦克本体出现的时刻。L4D2_OnTankPassControl 只在"换控"时触发, 回合里第一辆
+       坦克拿到控制权不会走那条 forward, 靠这个事件补上长存活的计时起点。 */
+    HookEvent("tank_spawn", TankSpawn_Event, EventHookMode_Post);
     
     // Initialise the tank arrays/data values
     h_whosHadTank = new ArrayList(ByteCountToCells(64));
@@ -121,10 +139,20 @@ public void OnPluginStart()
 
     /* 跟踪石命中生还者后的控制权调整(自 Apex.sp 迁入; 直接操作引擎原始 m_frustration)
        注: 按需求不生成 cfg 文件, 参数用本组 cvar 的默认值; 要临时改就在控制台设,
-           或在 confogl 的 cfg 里 confogl_addcvar tankcontrol_trac_step 6 这样覆盖 */
-    hTracCtrlBase  = CreateConVar("tankcontrol_trac_base", "5.0", "游戏日常的怒气步进幅度(%). 只用于换算比例, 不会写进游戏");
-    hTracCtrlStep  = CreateConVar("tankcontrol_trac_step", "6.0", "跟踪石命中后, 每格怒气的扣除幅度(%%): 引擎每落一格怒气(日常 base%%)就补成 step%%. 命中本身不扣任何东西. 等于 base 则不调整");
+           或在 confogl 的 cfg 里 confogl_addcvar tankcontrol_trac_step 6 这样覆盖。
+
+       每格怒气的"有效幅度"取以下三者的最大值(不叠加):
+         基线 base(5%) / 长存活 longlife_step(6%) / 跟踪石命中状态 step(7%)
+       两个条件同时成立时仍然是 max = 7%, 不是 8%。 */
+    hTracCtrlBase  = CreateConVar("tankcontrol_trac_base", "5.0", "基线: 引擎日常的怒气步进幅度(%%). 只用于换算比例(max 语义的基准), 不会写进游戏");
+    hTracCtrlStep  = CreateConVar("tankcontrol_trac_step", "7.0", "跟踪石命中后, 每格怒气的扣除幅度(%%): 引擎每落一格怒气就补成该幅度. 命中本身不扣任何东西. 该值也是每格幅度的上限");
     hTracCtrlAfter = CreateConVar("tankcontrol_trac_after", "0.0", "跟踪石命中后, 持续按 step%% 扣的时长(秒). 0 = 直到坦克死亡或控制权交接");
+
+    /* 长存活规则: 坦克从"真正拿到控制权"起存活满 longlife_time 秒仍未死亡, 之后每格怒气
+       幅度提升到 longlife_step%. longlife_time <= 0 关闭这条规则(不影响跟踪石那条)。
+       与跟踪石状态取 max, 不叠加。 */
+    hTracCtrlLongLifeTime = CreateConVar("tankcontrol_trac_longlife_time", "240.0", "坦克拿到控制权后存活满这么多秒仍未死亡, 该坦克每格怒气幅度提升到 longlife_step%%. <=0 关闭这条规则");
+    hTracCtrlLongLifeStep = CreateConVar("tankcontrol_trac_longlife_step", "6.0", "存活满 longlife_time 秒后, 每格怒气的扣除幅度(%%)");
 }
 
 
@@ -152,6 +180,11 @@ public void L4D2_OnTankPassControl(int iOldTank, int iNewTank, int iPassCount)
     ResetTracCtrl(iNewTank);
 
     gotTankAt = GetGameTime();
+
+    /* 长存活计时: 交接时旧坦克的计时作废, 从这一刻重新给新坦克起算
+       (新坦克是"刚拿到控制权", 不该继承旧坦克已经存活的时长) */
+    ResetTankLongLife(iOldTank);
+    MarkTankGotControl(iNewTank);
 }
 
 /**
@@ -178,6 +211,12 @@ public Action L4D_OnTryOfferingTankBot(int tank_index, bool &enterStatis)
         L4D2Direct_SetTankPassedCount(L4D2Direct_GetTankPassedCount() + 1);
 
         ResetTracCtrl(tank_index);      /* 怒气被重置为满, 旧的观察/钉值状态作废 */
+
+        /* 怒气回满只是"补正基准"要重来, 不重置长存活的存活计时: 引擎这次只是回填怒气,
+           坦克并没有死也没有换人, 把它当成新的存活起点会让"存活满 N 秒"这条规则
+           因为反复回填怒气而永远到不了。仅在没有起点的兜底情况下补一个起点。 */
+        if (g_fTankGotAt[tank_index] <= 0.0)
+            g_fTankGotAt[tank_index] = GetGameTime();
 
         return Plugin_Handled;
     }
@@ -255,8 +294,9 @@ void RoundStart_Event(Event hEvent, const char[] eName, bool dontBroadcast)
     gotTankAt = 0.0;
     tankInitiallyChosen = "";
 
-    /* 新回合不继承跟踪石的控制权观察/钉值状态 */
+    /* 新回合不继承跟踪石的控制权观察/钉值状态, 也不继承上一回合的存活计时 */
     ResetAllTracCtrl();
+    ResetAllTankLongLife();
 }
 
 Action newGame(Handle timer)
@@ -285,6 +325,7 @@ void RoundEnd_Event(Event hEvent, const char[] eName, bool dontBroadcast)
     tankInitiallyChosen = "";
 
     ResetAllTracCtrl();
+    ResetAllTankLongLife();
 }
 
 /**
@@ -410,6 +451,27 @@ void ReplaceTank(int deservingTank)
 }
 
 /**
+ * 坦克本体出现的时刻: 长存活规则的计时起点。
+ * 为什么需要它: L4D2_OnTankPassControl 只在"控制权从一个人交给另一个人"时触发,
+ *   回合里第一辆坦克拿到控制权不走那条 forward, 只用它会漏掉第一辆坦克。
+ * tank_spawn 的 tankid 是实体 index, userid 才是玩家(userid 转 client 后校验)。
+ */
+void TankSpawn_Event(Event hEvent, const char[] eName, bool dontBroadcast)
+{
+    int tank = GetClientOfUserId(hEvent.GetInt("userid"));
+
+    if (!IsTankClient(tank))
+        return;
+
+    /* 同一辆坦克在"AI 坦克 -> 人类接管"时可能再次触发 tank_spawn, 已有计时就不要重置,
+       否则计时会被无限推后("存活满 4 分钟"永远到不了) */
+    if (g_fTankGotAt[tank] > 0.0)
+        return;
+
+    MarkTankGotControl(tank);
+}
+
+/**
  * When the tank dies, requeue a player to become tank (for finales)
  */
 void PlayerDeath_Event(Event hEvent, const char[] eName, bool dontBroadcast)
@@ -422,6 +484,7 @@ void PlayerDeath_Event(Event hEvent, const char[] eName, bool dontBroadcast)
         if (zombieClass == ZOMBIECLASS_TANK) 
         {
             ResetTracCtrl(victim);      /* 坦克死了, 丢掉它没走完的控制权观察/钉值 */
+            ResetTankLongLife(victim);  /* 长存活计时也一并作废(下一辆坦克重新起算) */
             tankInitiallyChosen = "";
             chooseTank(0);
             gotTankAt = 0.0;
@@ -695,6 +758,17 @@ CountdownTimer GetFrustrationTimer(int client)
 |    4. 引擎把怒气又写回它自己那个值(覆盖我们的补正) -> 压回我们的值, 单轮最多 CTRL_PUSH_BACK_MAX 次;
 |    5. 怒气计时器一律不动也不写回 —— 引擎对它是"赋值", 我们插不上手;
 |    6. 坦克死亡 / 控制权交接 / 回合结束都会清掉持续状态(ResetTracCtrl)。
+
+  长存活规则(存活满 tankcontrol_trac_longlife_time 秒后幅度提升):
+    7. 计时起点是"坦克真正拿到控制权"的时刻, 由 tank_spawn 事件 +
+       L4D2_OnTankPassControl + 怒气回满 三处共同打点, 并在 OnGameFrame 里兜底
+       (看到人类坦克却没有起点就以当前时刻起算); 每辆坦克各自记录(g_fTankGotAt 按 client 索引),
+       12v12 同时存在多辆坦克互不影响;
+    8. 满门限后闩锁(g_bTankLongLife 保持为 true), 直到坦克死亡 / 交接 / 换回合才清;
+    9. 生效那一刻只是"取当前怒气作为新基准", 从下一格怒气开始才按新幅度补正
+       (即: 不追溯、不补扣满门限之前已经落过的怒气);
+   10. 两个条件都成立时取最大幅度(7%), 不叠加成 8%; 有效幅度被 clamp 在
+       [base, max(base, step, longlife_step)], 配置写反也不会扣得比引擎少。
 =========================================================================*/
 
 /* Apex 的通知: 跟踪石命中了一名生还者(tank = 掷石坦克, victim = 被命中的生还者, 本插件只用 tank) */
@@ -718,40 +792,163 @@ void StartTracCtrlAfter(int tank)
     g_fTracAfterUntil[tank] = (hTracCtrlAfter.FloatValue > 0.0) ? now + hTracCtrlAfter.FloatValue : 0.0;
 
     /* 检测基准: 命中瞬间的怒气值(引擎这次命中之后的写入都会被当成"引擎改动") */
-    g_iTracKnownMeter[tank]  = GetEntProp(tank, Prop_Send, "m_frustration");
-    g_iTracEngineMeter[tank] = -1;
-    g_iTracWantMeter[tank]   = g_iTracKnownMeter[tank];
-    g_iTracPushBacks[tank]   = 0;
+    ArmTracCtrl(tank, GetEntProp(tank, Prop_Send, "m_frustration"));
 }
 
+/* 进入补正状态机: 以 baseMeter 这一刻的原始 m_frustration 作为检测基准。
+   关键点 —— 进入生效状态之前的怒气变化一律不追溯(不补扣), 只从这一刻往后算。 */
+void ArmTracCtrl(int tank, int baseMeter)
+{
+    g_iTracKnownMeter[tank]   = baseMeter;
+    g_iTracEngineMeter[tank]  = -1;
+    g_iTracWantMeter[tank]    = baseMeter;
+    g_iTracPushBacks[tank]    = 0;
+    g_bTracTracking[tank]     = true;
+}
+
+/* 是否具备补正能力: 只需要基线 > 0(其它幅度 <= 基线时, 每辆坦克算出来的 ratio 会是 0,
+   OnGameFrame 里自然就不写值了, 不必在这里提前判断) */
 bool TracCtrlAdjustEnabled()
 {
-    float base = hTracCtrlBase.FloatValue;
-    float step = hTracCtrlStep.FloatValue;
-
-    return (base > 0.0 && step > 0.0 && step != base);
+    return (hTracCtrlBase.FloatValue > 0.0);
 }
 
-/* 每帧: 处于持续状态的坦克, 把引擎落的每一格怒气补成 step%(命中本身不扣任何东西, 也不输出信息) */
+/* 长存活门限是否开启(time <= 0 关闭这条规则) */
+bool TracLongLifeEnabled()
+{
+    return (hTracCtrlLongLifeTime.FloatValue > 0.0);
+}
+
+/* 该坦克当前"每格怒气"的有效幅度 = 三个候选值取最大(不叠加):
+     基线 base / 长存活 longlife_step(已存满门限) / 跟踪石 step(处于命中持续状态)
+   结果天然落在 [base, max(base, step, longlife_step)] 内; 再显式 clamp 一次, 是为了在
+   配置写反(比如 longlife_step < base)时也不会出现"扣得比引擎还少"的反向补正。 */
+float TracEffectiveStep(int client)
+{
+    float base     = hTracCtrlBase.FloatValue;
+    float eff      = base;
+    float llStep   = hTracCtrlLongLifeStep.FloatValue;
+    float tracStep = hTracCtrlStep.FloatValue;
+
+    if (g_bTankLongLife[client] && llStep > eff)
+        eff = llStep;
+
+    if (g_bTracAfter[client] && tracStep > eff)
+        eff = tracStep;
+
+    float hi = base;
+    if (llStep > hi)
+        hi = llStep;
+    if (tracStep > hi)
+        hi = tracStep;
+
+    if (eff < base)
+        eff = base;
+    if (eff > hi)
+        eff = hi;
+
+    return eff;
+}
+
+/* 每帧: 对每个坦克算"有效每格幅度 eff", 只有 eff > 基线时才去补正
+   (命中本身不扣任何东西, 也不输出信息; 未生效的坦克直接跳过, 不做任何属性读写) */
 public void OnGameFrame()
 {
-    float now   = GetGameTime();
-    float base  = hTracCtrlBase.FloatValue;
-    float step  = hTracCtrlStep.FloatValue;
-    float ratio = (step / base) - 1.0;   /* 需要额外补的比例(5->6 即 +20%) */
+    /* 没有补正能力(基线被设成 0/负)时什么都不做, 也避免除零 */
+    if (!TracCtrlAdjustEnabled())
+        return;
+
+    float now     = GetGameTime();
+    float base    = hTracCtrlBase.FloatValue;
+    float llTime  = hTracCtrlLongLifeTime.FloatValue;
+    bool  llOn    = TracLongLifeEnabled();
 
     for (int i = 1; i <= MaxClients; i++)
     {
-        if (!IsTankClient(i))
-            continue;
+        /* IsTankClient 只看"是不是人类 + 特感坦克职业", 尸体会一直是坦克职业, 所以这里还要
+           判 IsPlayerAlive —— 否则死掉的那辆坦克会一直在计时里, 同一个人下次当坦克时会被
+           直接判成"已存活满 4 分钟"(12v12 的 finale 连续坦克很容易撞上)。 */
+        if (!IsTankClient(i) || !IsPlayerAlive(i))
+        {
+            /* 这一格已经不再是(人类)坦克: 死亡 / 变成别的特感 / 掉线 / 换图残留,
+               立刻丢弃它的存活起点与补正状态 —— 否则同一个人下次当坦克时会带着上一段的
+               存活时间直接被判成"已存活满 4 分钟" */
+            if (g_fTankGotAt[i] > 0.0 || g_bTankLongLife[i] || g_bTracTracking[i])
+                ResetTankLongLife(i);
 
+            continue;
+        }
+
+        /* 长存活判定: 只对"有拿到控制权时刻"的坦克生效; 满门限后闩锁住,
+           之后不会因为 now 变化再反复计算(也不会自己解除, 直到死亡/交接/换回合) */
+        if (g_fTankGotAt[i] <= 0.0)
+        {
+            /* 兜底: 看到"是人类坦克但没有起点"就把这一刻当起点(晚加载插件、没收到 tank_spawn /
+               pass control、或某条清理路径把它清成 0 的情况)。
+               宁可晚起算(少扣), 也绝不能凭空认为它已经存活满门限。 */
+            g_fTankGotAt[i]    = now;
+            g_bTankLongLife[i] = false;
+        }
+
+        if (!llOn)
+        {
+            g_bTankLongLife[i] = false;
+        }
+        else if (!g_bTankLongLife[i] && g_fTankGotAt[i] > 0.0 && (now - g_fTankGotAt[i]) >= llTime)
+        {
+            g_bTankLongLife[i] = true;
+        }
+
+        /* 跟踪石持续状态(限时的那种)到点作废 */
         if (g_bTracAfter[i] && g_fTracAfterUntil[i] > 0.0 && now >= g_fTracAfterUntil[i])
             g_bTracAfter[i] = false;
 
-        if (!g_bTracAfter[i] || !TracCtrlAdjustEnabled())
+        /* 两个条件都不成立 -> 回落到基线, 退出状态机, 不写任何属性 */
+        if (!g_bTracAfter[i] && !g_bTankLongLife[i])
+        {
+            if (g_bTracTracking[i])
+                ResetTracCtrl(i);
+
             continue;
+        }
+
+        /* 有效幅度没超过基线时(或配置写反)不补正: ratio 为 0 时不能进补正流程,
+           否则下面的 "extra 为 0 就强制给 1" 会造成凭空多扣。
+           若此时状态机还挂着(比如曾经生效、现在被改回基线), 把基准挪到当前值,
+           免得之后重新生效时拿一个过期的基准去算改动量(同时保留 trac/长存活标志)。 */
+        float eff = TracEffectiveStep(i);
+        if (eff <= base)
+        {
+            if (g_bTracTracking[i])
+            {
+                int curMeter = GetEntProp(i, Prop_Send, "m_frustration");
+
+                if (curMeter != g_iTracKnownMeter[i])
+                    ArmTracCtrl(i, curMeter);
+            }
+
+            continue;
+        }
+
+        float ratio = (eff / base) - 1.0;   /* 需要额外补的比例(5->6 即 +20%, 5->7 即 +40%) */
 
         int cur = GetEntProp(i, Prop_Send, "m_frustration");
+
+        /* 怒气被重置/回填成满(m_frustration 变成 0) = 这一段控制权重开:
+           丢掉补正状态, 用满怒气作为新基准。这一格绝不能补扣(否则会凭空扣掉怒气)。 */
+        if (cur == 0)
+        {
+            if (g_bTracTracking[i])
+                ArmTracCtrl(i, cur);
+
+            continue;
+        }
+        /* 刚刚进入生效状态(最常见的是"存活满 4 分钟"那一刻): 用当前值做基准, 从下一格开始算 */
+        if (!g_bTracTracking[i])
+        {
+            ArmTracCtrl(i, cur);
+            continue;
+        }
 
         if (cur == g_iTracEngineMeter[i] && g_iTracEngineMeter[i] != g_iTracWantMeter[i]
             && g_iTracPushBacks[i] < CTRL_PUSH_BACK_MAX)
@@ -821,6 +1018,41 @@ void ResetTracCtrl(int client)
     g_iTracPushBacks[client]  = 0;
     g_bTracAfter[client]      = false;
     g_fTracAfterUntil[client] = 0.0;
+    g_bTracTracking[client]   = false;
+}
+
+/* 记下"这辆坦克真正拿到控制权"的时刻, 供长存活规则计时。
+   取值口径是 GetGameTime(); 调用点覆盖: 坦克首次出现(tank_spawn) / 控制权交接
+   (L4D2_OnTankPassControl) / 掉线后 AI 换控 / 换控重建。重置为 0 表示不跟踪。 */
+void MarkTankGotControl(int client)
+{
+    if (client < 1 || client > MaxClients)
+        return;
+
+    g_fTankGotAt[client]   = GetGameTime();
+    g_bTankLongLife[client] = false;
+
+    /* 新的控制权段: 之前那一段的补正基准作废, 从这一刻重新算(避免把上一段当"一格"补扣) */
+    ResetTracCtrl(client);
+}
+
+/* 清掉某辆坦克的长存活计时(死亡 / 失去控制权 / 换回合 / 已不是坦克) */
+void ResetTankLongLife(int client)
+{
+    if (client < 1 || client > MaxClients)
+        return;
+
+    g_fTankGotAt[client]    = 0.0;
+    g_bTankLongLife[client] = false;
+
+    ResetTracCtrl(client);
+}
+
+/* 回合起止时把所有坦克的长存活计时与补正状态一起清掉(这些数组在换图后不会重新归零) */
+void ResetAllTankLongLife()
+{
+    for (int i = 1; i <= MaxClients; i++)
+        ResetTankLongLife(i);
 }
 
 void ResetAllTracCtrl()

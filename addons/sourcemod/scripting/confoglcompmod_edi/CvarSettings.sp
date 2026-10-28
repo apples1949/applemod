@@ -7,7 +7,15 @@
 
 #define CVARS_DEBUG				0
 #define CVS_CVAR_MAXLEN			64
-#define CVS_VALUE_MAXLEN			1024
+// 每个被跟踪的 cvar 要在 CVSEntry 里存两份值(oldval/newval), 用定长数组.
+// 原来取 1024, 而 CVSEntry 因此约 2KB/条, 521 条约 1.05MB —— 是服务器句柄内存里
+// 除了 PLUGINSYS 之外最大的一块(占 confoglcompmod 全部 CellArray 的绝大部分).
+// 实测全库 4746 行 confogl_addcvar(631 个唯一 cvar)里最长的值只有 72 字符
+// (am12v12_wdrop_weapons 的武器白名单), p99=11, 只有 1 条超过 64 —— 128 给出约 1.8 倍余量.
+// 128 时 CVSEntry 约 261 字节, 同样 521 条约 136KB, 直接省下约 0.9MB.
+// 注意: 超过该长度的值现在会被 AddCvar() 拒绝(见下方 strlens 检查)而不是静默截断;
+// 旧值(oldval)超长时同样会拒绝跟踪(见 PushTrackedCvar), 避免回写被截断的配置.
+#define CVS_VALUE_MAXLEN			128
 
 enum struct CVSEntry
 {
@@ -370,6 +378,19 @@ static void AddCvar(const char[] cvar, const char[] newval)
 
 static void PushTrackedCvar(ConVar cvar, const char[] newval)
 {
+	// 用临时缓冲读旧值, 以便判断是否超过 CVS_VALUE_MAXLEN:
+	// GetString() 到 CVS_VALUE_MAXLEN 的缓冲会静默截断, 而 ClearAllSettings() 会把
+	// CVSE_oldval 写回服务器 —— 存半截值等于把配置写坏. 超长就拒绝跟踪并报错.
+	char sCurrentValue[512];
+	cvar.GetString(sCurrentValue, sizeof(sCurrentValue));
+	if (strlen(sCurrentValue) >= CVS_VALUE_MAXLEN) {
+		char sOverflowName[CVS_CVAR_MAXLEN];
+		cvar.GetName(sOverflowName, sizeof(sOverflowName));
+		Debug_LogError(CVS_MODULE_NAME, "ConVar %s 的当前值长度超过 CVS_VALUE_MAXLEN(%d), 放弃跟踪以免回写被截断的值",
+			sOverflowName, CVS_VALUE_MAXLEN);
+		return;
+	}
+
 	char cvarBuffer[CVS_VALUE_MAXLEN];
 	cvar.GetString(cvarBuffer, CVS_VALUE_MAXLEN);
 

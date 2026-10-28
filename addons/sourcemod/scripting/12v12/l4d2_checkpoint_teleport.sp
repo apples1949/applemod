@@ -105,6 +105,28 @@
  *      现在按 spawnflags & 2 剔回退项 -> m_mapName 指向下一张图 -> nav 最后检查点 ->
  *      最后一个安全门 的顺序判定（见 FindLastChangelevel）。
  *
+ *  1.2.3 需求 #7 第三轮修复：两个仍会漏的洞 + 改成状态机 -----------------------
+ *    - 用户回报的两种残留现象：
+ *        A) 「传送到安全屋后，如果门开着，不会关」
+ *        B) 「关着门，可能不会结算」
+ *    - A 的根因：1.2.2 的 Timer_SaferoomDoorFix 在门已经是 DOOR_STATE_OPENED 时
+ *      直接 return —— 它只考虑"门关着要开"，从来没考虑"门开着要关"。而引擎的过关链
+ *      需要的是「Opened + Closed」两次状态变化，门本来就开着时只缺 Closed，
+ *      于是永远没人去关，人齐也不会换图。
+ *    - B 的根因：1.2.2 的补发关门是 0.2s 后的一次性 0.6s timer，且要求那一瞬间
+ *      「全部存活生还者都在安全屋体积内」才发。12v12 有 12 个人挤一个体积，
+ *      只要有人被挤出触发体积（引擎挤压/地形很容易做到），这一次就永久放弃，
+ *      再也没有第二次机会。
+ *    - 修复：把两个一次性 timer 换成一个 0.25s 轮询的状态机（SAFEROOM_SETTLE_TICK），
+ *      按「等门开到位 -> 等全员进体积（不够就补传，可重试）-> 关门 -> 等门关到位 ->
+ *      补发 CheckpointDoorClosed」推进；每步幂等、有重试上限、有 10 秒超时兜底；
+ *      门本来就开着时记成"已开启"后**继续往下走**，不再提前退出。
+ *      FinishCountdownAllSeen（人齐、倒计时提前结束）这条路径原来完全不碰门，
+ *      现在也接入状态机 —— B 现象有一大半是从这里来的。
+ *      仍然只发标准 Open/Close/Teleport 输入，不改 spawnflags / lock，不硬换图。
+ *    - 新增开关沿用原有的 l4d2_cptele_saferoom_opendoor / l4d2_cptele_saferoom_forcedoor：
+ *      opendoor=0 时完全不动门（连状态机都不启动），兼容"不想让插件碰门"的用法。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -118,7 +140,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.2"
+#define PLUGIN_VERSION      "1.2.3"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -137,6 +159,21 @@
 // 安全门修复：传送落位后等多久再去检查 / 动门（等一帧以上，让 TeleportEntity
 // 与 L4D_WarpToValidPositionIfStuck 的落点、以及引擎的触发体积 touching 状态稳定）
 #define SAFEROOM_DOOR_DELAY     0.2
+
+// ↑1.2.3 起 SAFEROOM_DOOR_DELAY 已不再被使用（原来那个 0.2s 一次性复核被状态机取代）。
+//   保留定义只是为了不删历史注释里的引用；新逻辑请用下面的 SAFEROOM_SETTLE_*。
+
+// 1.2.3：安全屋「结算」改成一个轮询状态机（见 Timer_SaferoomDoorFix 的注释）。
+// 原来的两个一次性 timer（0.2s 复核 + 0.6s 补发）有两个覆盖不到的漏洞：
+//   ① 门本来就开着 -> Timer_SaferoomDoorFix 直接 return，永远没人去关门，
+//      引擎等的那次「门关闭」事件一次都不会来（用户报的「开着门不会关」）；
+//   ② 0.6s 太短：门还在开的过程中收到 Close 会被引擎忽略；而且 12v12 有 12 个
+//      生还者，只要有一瞬间有 1 个人被挤出安全屋体积，就永远发不出关闭事件
+//      （用户报的「关着门可能不会结算」）。
+#define SAFEROOM_SETTLE_TICK        0.25    // 状态机轮询间隔（秒）
+#define SAFEROOM_SETTLE_TIMEOUT     10.0    // 状态机总超时（秒），超时留日志收尾，不会无限跑
+#define SAFEROOM_SETTLE_RETRY_MAX   3       // 掉队者最多补传几次（12 人挤一个体积必然有人被挤出）
+#define SAFEROOM_SETTLE_RETRY_DELAY 1.0     // 第 N 次补传最早在第 N*该值 秒之后（给物理/挤压留时间）
 
 // 安全门修复：门到 info_changelevel 体积中心的最大距离（HU）。
 // 与 left4dhooks 里 L4D_GetCheckpointLast 判断「末尾那道门」用的是同一个量级
@@ -230,14 +267,19 @@ int    g_iActiveArea = -1;
 
 // 1.2.1 安全门复核的挂起状态。一张图最多一个关底安全屋区域，同一时刻也只会
 // 有一个倒计时在跑，所以用单槽即可；换图 / 换回合由 ResetRound 统一清掉。
-Handle g_hDoorFix;              // 0.2s 后复核安全门的计时器
+Handle g_hDoorFix;              // 安全屋结算状态机的轮询 timer（1.2.3 起是重复 timer）
 int    g_iDoorFixArea = -1;     // 挂起中的区域索引（-1 = 没有挂起）
 int    g_iDoorFixRef;           // 挂起中区域实体的 EntRef（防跨回合残影）
 
-// 1.2.2 补发关门事件的挂起状态（同上，单槽 + ResetRound 清理）
-Handle g_hDoorClose;            // Open 之后 0.6s，补发 CheckpointDoorClosed 的计时器
-int    g_iDoorCloseArea = -1;
-int    g_iDoorCloseRef;
+// 1.2.3 安全屋结算状态机的进度（原 1.2.2 的两个一次性 timer 已被它取代）
+float  g_fSettleDeadline;       // 绝对超时时刻（GetGameTime 口径）
+int    g_iSettleRetry;          // 已经补传掉队生还者的次数
+float  g_fSettleNextRetry;      // 下次允许补传的时刻
+int    g_iSettleOpenTries;      // 已经发过几次 Open（门被锁时用来止损，不无限重发）
+float  g_fSettleNextOpenTry;    // 下次允许重发 Open 的时刻（给引擎 think 留时间，避免每 tick 判死）
+bool   g_bSettleDoorOpened;     // 门已经历过「开启」（本来就开着也算）
+bool   g_bSettleDoorClosed;     // 已经对该门发过 Close
+bool   g_bSettleEventFired;     // 已经向 info_changelevel 发过 CheckpointDoorClosed
 
 // 本次倒计时期间「到过该区域」的生还者。倒计时结束时只传送「一次都没到过」的人，
 // 已经到过、随后离开继续推进的人不再被传送回来（1.2.0 修复）。
@@ -1722,10 +1764,14 @@ void FinishCountdown(int index)
 	// ---- 开机关 ---------------------------------------------------------
 	OpenAreaMechanism(index, type);
 
-	// ---- 关底安全屋：门关着时传送后不会过关（1.2.1 / 需求 #7）----------
-	// 只有真的传送了人（moved > 0）才需要复核门状态；门开着的时候引擎本来
-	// 就能走完过关链，不需要任何额外动作。
-	if (moved > 0)
+	// ---- 关底安全屋：门没经历「开 -> 关」就不过关（1.2.1 / 需求 #7）-------
+	// 1.2.3 起这里不再区分「门开着还是关着」：
+	//   以前只在 moved > 0 时复核，而且门开着就直接 return（没人去关），
+	//   门关着又要靠一个 0.6s 的一次性 timer 赌「全员恰好都在体积内」。
+	//   现在只要这次倒计时结束时安全屋里确实有人（传送落地了，或者人本来就到齐了），
+	//   就交给状态机去补齐「开启 -> 关门 -> 补发 Closed」这条引擎链。
+	//   状态机内部会自己校验类型（只处理 AREA_SAFEROOM）、门是否存在、是否全员在屋内。
+	if (moved > 0 || CountArrivedSurvivors(index) > 0)
 	{
 		ScheduleSaferoomDoorFix(index);
 	}
@@ -1821,6 +1867,17 @@ void FinishCountdownAllSeen(int index)
 	// 集合完毕 = 该按的机关仍然要按下去（电梯 / 渡轮 / 桥等）
 	OpenAreaMechanism(index, type);
 
+	// 安全屋「全员已进入」= 引擎那边同样缺「开门 -> 关门」这条链：
+	// 人虽然都在屋里，但门要是没人开过、没人关过，引擎照样不会结算。
+	// （用户报的「关着门可能不会结算」正是这条路径：人齐了、倒计时提前结束、
+	//   然后门一直不动 -> 引擎等 CheckpointDoorClosed 永远等不到。）
+	// 这里同样交给状态机，不区分门当前是开还是关。
+	if (IsSafeAreaType(type) && g_iAreaType[index] == AREA_SAFEROOM
+		&& CountArrivedSurvivors(index) > 0)
+	{
+		ScheduleSaferoomDoorFix(index);
+	}
+
 	char sName[32];
 	char sMsg[192];
 
@@ -1892,16 +1949,53 @@ void OpenAreaMechanism(int index, int type)
 }
 
 // ===========================================================================
-//  关底安全门状态修复（1.2.1 / 需求 #7）
+//  关底安全门状态修复（1.2.1 / 需求 #7；1.2.3 改为状态机）
 // ===========================================================================
+//
+//  为什么需要这一整块（引擎侧的根因，三条都已在 server.dll 的 datamap 上核对过）：
+//    ① 过关不是插件判定的，是引擎 info_changelevel 实体的流程。datamap 里
+//       info_changelevel 带 CheckpointDoorOpened / CheckpointDoorClosed 两个实体输入，
+//       引擎 InfoChangelevel::OnCheckpointDoorClosed 里还会逐个用 CBaseTrigger::IsTouching
+//       判「谁还在安全屋外面」，然后才走 ChangelevelThink 换图。
+//    ② 也就是说过关是**由安全门的状态变化驱动**的：门一直不动 -> 两个输入一次都不来
+//       -> 人虽然被传送进屋，引擎根本不会开始过关判定。
+//    ③ 正常游戏里这两次状态变化是玩家自己提供的：开门进屋（Opened）、人齐后关门（Closed）。
+//       倒计时传送是把人 TeleportEntity 直接塞进屋里，门从来没被开过、也没人去关，
+//       于是卡死。表现出来就是用户报的两种现象：
+//         · 门开着 -> 没人去关它 -> 引擎等 CheckpointDoorClosed 永远等不到（"开着门不会关"）；
+//         · 门关着 -> 门没有任何状态变化 -> 引擎连判定都没开始（"关着门可能不会结算"）。
 
 /**
- * 倒计时传送结束后，安排一次「安全门是不是关着」的复核。
+ * 倒计时传送结束后，启动「安全屋结算」状态机。
  *
- * 只有两种情况会走到这里：区域类型是关底安全屋，并且这次倒计时真的传送了人。
+ * 只有一种情况会走到这里：区域类型是关底安全屋，并且这次倒计时真的传送了人。
  * 其余类型（救援点 / 中途集合点）一律不碰门。
  *
- * @param index 区域索引（计时器里会再次校验，防止跨回合残留）
+ * 与 1.2.2 的区别（1.2.2 为什么不够 —— 这两个漏洞正是本次要修的）：
+ *   · 1.2.2 的 Timer_SaferoomDoorFix 在「门已经开着」时直接 return，
+ *     于是**没有任何东西会去关门**——这正是用户报的「开着门不会关」；
+ *   · 1.2.2 的补发关门是 0.2s 后的一个一次性 0.6s timer，而且要求「全部存活生还者
+ *     都在屋内」才发。12v12 有 12 个人挤一个安全屋体积，只要那一瞬间有 1 个人被
+ *     挤出触发体积（引擎的挤压/地形很容易做到），这一次就永久放弃，再也没有第二次机会
+ *     ——这正是「关着门可能不会结算」。
+ *
+ * 状态机做三件事，每一步都幂等、可重试，且有超时兜底：
+ *   1) 让门真正经历一次「开启」（本来就开着的跳过）—— 补上引擎缺的 Opened；
+ *   2) 把掉队的人补传回安全屋体积内（最多 SAFEROOM_SETTLE_RETRY_MAX 次，间隔递增），
+ *      只有「全员都在屋内」才继续 —— 伪造事件没用，引擎会自己查出谁在屋外；
+ *   3) 关门并补发 CheckpointDoorClosed —— 补上引擎缺的 Closed，触发真正的过关链。
+ *
+ * 安全边界（逐条都有守卫，不改任何地图实体的开关状态）：
+ *   · 只发标准实体输入（Open / Close / 传送），绝不改 spawnflags / lock，
+ *     不解锁、不锁门、不调用任何硬换图；
+ *   · 区域索引 / EntRef 双重校验，换回合、换图后 ResetRound 会清空区域表，
+ *     timer 残留时索引对不上就直接放弃；
+ *   · 门实体必须存在且 classname 在门类白名单里，才对它发输入；
+ *   · 安全屋里一个存活生还者都没有时不做任何动作（说明传送其实没落地）；
+ *   · 门被锁住导致 Open 无效时，重发次数有上限（SAFEROOM_SETTLE_RETRY_MAX），
+ *     不无限刷，并留一条错误日志说明本回合可能无法过关。
+ *
+ * @param index 区域索引（timer 每一步都会重新校验，防止跨回合残留）
  */
 void ScheduleSaferoomDoorFix(int index)
 {
@@ -1921,69 +2015,63 @@ void ScheduleSaferoomDoorFix(int index)
 		return;
 	}
 
-	// 已经在排队：不重复创建 timer（同一区域 FinishCountdown 只会走一次，
-	// 这里再挡一层，避免任何异常路径下叠加两次开门）
+	// 已经在跑：不重复启动（同一区域 FinishCountdown 只会走一次，
+	// 这里再挡一层，避免任何异常路径下叠加状态机）
 	if (g_hDoorFix != null)
 	{
 		return;
 	}
 
-	g_iDoorFixArea = index;
-	g_iDoorFixRef = g_iAreaRef[index];
+	g_iDoorFixArea     = index;
+	g_iDoorFixRef      = g_iAreaRef[index];
+	g_fSettleDeadline  = GetGameTime() + SAFEROOM_SETTLE_TIMEOUT;
+	g_iSettleRetry     = 0;
+	g_fSettleNextRetry = 0.0;
+	g_iSettleOpenTries = 0;
+	g_fSettleNextOpenTry  = 0.0;
+	g_bSettleDoorOpened   = false;
+	g_bSettleDoorClosed   = false;
+	g_bSettleEventFired   = false;
 
-	g_hDoorFix = CreateTimer(SAFEROOM_DOOR_DELAY, Timer_SaferoomDoorFix, 0,
-		TIMER_FLAG_NO_MAPCHANGE);
+	// TIMER_REPEAT：状态机每一步都自己判断该不该继续，跑完自己 Stop
+	g_hDoorFix = CreateTimer(SAFEROOM_SETTLE_TICK, Timer_SaferoomDoorFix, 0,
+		TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 启动安全屋结算状态机（区域 #%d，区域实体 #%d）", index, g_iDoorFixRef);
+	}
 }
 
 /**
- * 传送落位后复核安全门。
+ * 安全屋结算状态机（每 SAFEROOM_SETTLE_TICK 跑一步）。
  *
- * 为什么必须做（需求 #7 的根因）：
- *   过关是引擎的流程，不是插件的流程。datamap 里 info_changelevel（CBaseTrigger）
- *   带 CheckpointDoorOpened / CheckpointDoorClosed 两个实体输入，对应的引擎函数
- *   InfoChangelevel::OnCheckpointDoorClosed 会逐个用 CBaseTrigger::IsTouching
- *   判断「谁还在安全屋外面」。也就是说引擎的过关链是由「安全门的状态变化」
- *   驱动的：门一直处于完全关闭状态 -> 没有任何状态变化 -> 这两个输入不会触发
- *   -> 人虽然被传送进屋，引擎根本不会开始过关判定。
- *
- *   正常游戏里生还者是开门进屋的，门处于「已开启」，引擎能接上后续的
- *   关门 + 换图流程；倒计时传送是直接 TeleportEntity 进屋，门从来没被开过，
- *   于是卡死。修复方式就是把门恢复到「已开启」这个引擎认识的状态。
- *
- * 安全边界（逐条都有守卫）：
- *   - 区域索引 / EntRef 双重校验：换回合、换图后 ResetRound 会清空区域表，
- *     timer 残留时索引对不上就直接放弃；
- *   - GetAreaEntity 返回 -1（实体已删除）直接放弃，不做任何空指针访问；
- *   - 门实体存在且必须是门类 classname 才发输入；
- *   - 安全屋里一个存活生还者都没有（传送其实没落地）时不动门；
- *   - 门已经是 DOOR_STATE_OPENED 时不动门；
- *   - 只发 Open，不改 spawnflags / lock，不解锁、不锁门、不硬换图。
+ * 返回值约定：
+ *   Plugin_Continue -> 还没结束，下个 tick 继续；
+ *   Plugin_Stop     -> 结束（成功、无需处理、或超时），timer 会被回收。
  */
 public Action Timer_SaferoomDoorFix(Handle timer)
 {
-	// 先把这个 timer 从挂起槽里摘掉（一次性 timer 自己会被引擎回收，
-	// 这里只是丢掉引用，不能 delete 正在执行的 timer）
-	g_hDoorFix = null;
-
 	int index = g_iDoorFixArea;
-	int ref = g_iDoorFixRef;
+	int ref   = g_iDoorFixRef;
 
-	g_iDoorFixArea = -1;
-	g_iDoorFixRef = 0;
-
+	// 每一 tick 都重新校验：换图 / 换回合后区域表已被清空，残留 timer 必须立刻退出，
+	// 否则会拿着旧索引去读别人的区域数据（甚至越界）
 	if (!g_bMapStarted || !g_cvEnable.BoolValue || !g_bReady)
 	{
+		SettleFinish("地图已结束 / 插件已关闭");
 		return Plugin_Stop;
 	}
 
-	// 索引与 EntRef 必须同时对上，否则说明已经换回合 / 换图
 	if (index < 0 || index >= g_iAreaCount)
 	{
+		SettleFinish("区域表已重置");
 		return Plugin_Stop;
 	}
 
 	if (g_iAreaRef[index] != ref || g_iAreaType[index] != AREA_SAFEROOM)
 	{
+		SettleFinish("区域索引/EntRef 对不上（已换回合或换图）");
 		return Plugin_Stop;
 	}
 
@@ -1991,23 +2079,31 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 
 	if (changelevel == -1)
 	{
-		if (g_cvVerbose.BoolValue)
-		{
-			PrintToServer("[cptele] 安全门复核跳过：区域 #%d 的区域实体已删除", index);
-		}
+		SettleFinish("区域实体已删除");
+		return Plugin_Stop;
+	}
 
+	// ---- 超时兜底：宁可留一条明确的日志，也不让 timer 无限跑 ----------------
+	if (GetGameTime() >= g_fSettleDeadline)
+	{
+		LogError("[cptele] 安全屋结算超时（%.1f 秒）：区域 #%d，屋内 %d/%d 人，已开门=%d 已关门=%d 已补发事件=%d。本回合可能没有结算，请用 l4d2_cptele_verbose 1 复现并检查门是否被锁",
+			SAFEROOM_SETTLE_TIMEOUT, index, CountArrivedSurvivors(index), CountAliveSurvivors(),
+			g_bSettleDoorOpened, g_bSettleDoorClosed, g_bSettleEventFired);
+
+		SettleFinish("超时");
 		return Plugin_Stop;
 	}
 
 	int arrived = CountArrivedSurvivors(index);
 
+	// 传送明明送过人，落位后安全屋里却一个人都没有：说明落点被引擎的
+	// WarpToValidPositionIfStuck / 几何体挤到了体积外，这种情况开门关门也救不回来，
+	// 直接报错留证据，不假装处理了
 	if (arrived <= 0)
 	{
-		// 传送明明送过人，落位 0.2s 后安全屋里却一个人都没有：说明落点被
-		// 引擎的 WarpToValidPositionIfStuck / 几何体挤到了体积外，这种情况
-		// 开门也没用，直接报错留证据，不假装处理了。
-		LogError("[cptele] 安全门复核：区域 #%d 传送后安全屋内没有任何存活生还者，落点可能不在安全屋触发体积内", index);
+		LogError("[cptele] 安全屋结算：区域 #%d 传送后安全屋内没有任何存活生还者，落点可能不在安全屋触发体积内", index);
 
+		SettleFinish("屋内无人");
 		return Plugin_Stop;
 	}
 
@@ -2015,11 +2111,19 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 
 	if (door == -1)
 	{
-		if (g_cvVerbose.BoolValue)
+		// 找不到门就没法提供引擎需要的两次状态变化。仍把事件补发出去，
+		// 因为「全员已在屋内」这件事本身对引擎是有意义的输入（引擎会自己再判 IsTouching）。
+		if (!g_bSettleEventFired && CountArrivedSurvivors(index) >= CountAliveSurvivors())
 		{
-			PrintToServer("[cptele] 安全门复核跳过：找不到本图的安全门实体（区域 #%d）", index);
+			FireCheckpointClosed(changelevel, door, index, arrived, "找不到门，仅补发事件");
+		}
+		else if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全屋结算：找不到本图的安全门实体（区域 #%d），等待全员到齐后只补发事件", index);
 		}
 
+		// 门都找不到，继续等下去也不会有进展
+		SettleFinish("找不到安全门");
 		return Plugin_Stop;
 	}
 
@@ -2027,143 +2131,314 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 
 	if (!GetEntityClassname(door, sClass, sizeof(sClass)) || !IsSafeDoorClass(sClass))
 	{
-		LogError("[cptele] 安全门复核：实体 #%d 的 classname 是 \"%s\"，不是门类实体，忽略", door, sClass);
+		LogError("[cptele] 安全屋结算：实体 #%d 的 classname 是 \"%s\"，不是门类实体，忽略", door, sClass);
 
+		SettleFinish("门类不符");
 		return Plugin_Stop;
 	}
 
-	// m_eDoorState 取值见 left4dhooks_silver.inc 的 DOOR_STATE_* 枚举
-	// （0=完全关闭 1=正在开 2=已开启 3=正在关），这里是 Save 型 datamap 字段，
-	// 必须用 Prop_Data 读。
+	// ---- 第 1 步：让门真正经历一次「开启」（补上引擎缺的 Opened）-------------
+	// 这一步修的是「门本来就开着，没人去关」那一半：
+	// 门本来就开着时我们不需要再开它，但也**不能直接 return**（1.2.2 的 bug），
+	// 而是要把它记成「已经开过」，继续往下走关门流程。
+	if (!g_bSettleDoorOpened)
+	{
+		int state = GetEntProp(door, Prop_Data, "m_eDoorState");
+
+		if (state == DOOR_STATE_OPENED)
+		{
+			// 门已经是「已开启」：这正是玩家开门进屋后引擎能正常过关的状态。
+			// 记下来，接着去关门 —— 关键区别就在这，不再提前退出。
+			g_bSettleDoorOpened = true;
+
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 安全门 #%d 本来就处于开启状态，跳过 Open，继续走关门流程（区域 #%d）", door, index);
+			}
+		}
+		else if (state == DOOR_STATE_OPENING_IN_PROGRESS)
+		{
+			// 门正在开：等它开到 DOOR_STATE_OPENED 再继续，否则现在发 Close 会被引擎丢掉
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 安全门 #%d 正在开启中，等待开到位（区域 #%d）", door, index);
+			}
+
+			return Plugin_Continue;
+		}
+		else if (state == DOOR_STATE_CLOSING_IN_PROGRESS)
+		{
+			// 门正在关：等它关到位，下一 tick 会重新走 Open 分支
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 安全门 #%d 正在关闭中，等待关到位（区域 #%d）", door, index);
+			}
+
+			return Plugin_Continue;
+		}
+		else
+		{
+			// state == DOOR_STATE_CLOSED：完全关闭，补一次标准 Open（等价玩家开门进屋）
+			// 重发之间要留时间给引擎的 think：Open 被接受后 m_eDoorState 通常下一帧就变
+			// DOOR_STATE_OPENING_IN_PROGRESS，但门是被锁住还是被别的插件压回去，得给
+			// 引擎几个 tick 才看得出来。间距用 SAFEROOM_SETTLE_RETRY_DELAY，别每 0.25s 就判死。
+			if (GetGameTime() < g_fSettleNextOpenTry)
+			{
+				return Plugin_Continue;
+			}
+
+			if (g_iSettleOpenTries >= SAFEROOM_SETTLE_RETRY_MAX)
+			{
+				// Open 反复无效：门被锁了。仅作诊断记录，绝不解锁
+				LogError("[cptele] 安全门 #%d 发送 %d 次 Open 仍然无法开启（locked=%d），本回合可能无法过关；请确认该地图安全门是否被锁住",
+					door, g_iSettleOpenTries, view_as<bool>(GetEntProp(door, Prop_Data, "m_bLocked")));
+
+				// 门开不了也要把「全员在屋内」的事件发出去，尽最大努力让引擎能判过关
+				if (CountArrivedSurvivors(index) >= CountAliveSurvivors() && !g_bSettleEventFired)
+				{
+					FireCheckpointClosed(changelevel, door, index, arrived, "门无法开启，仅补发事件");
+				}
+
+				SettleFinish("门无法开启");
+				return Plugin_Stop;
+			}
+
+			g_iSettleOpenTries++;
+			g_fSettleNextOpenTry = GetGameTime() + SAFEROOM_SETTLE_RETRY_DELAY;
+
+			AcceptEntityInput(door, "Open");
+
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 安全门 #%d 已发送 Open（第 %d 次，state=%d），等待开启完成（区域 #%d）",
+					door, g_iSettleOpenTries, state, index);
+			}
+
+			return Plugin_Continue;
+		}
+	}
+
+	// ---- 第 1.5 步：等门真的开到位，再进入关门 ------------------------------
+	// 门还在开的过程中就发 Close，引擎会把这次 Close 丢掉（关门动作被打断），
+	// 于是「关门 -> 引擎收到 Closed」这条链又断了。必须等 DOOR_STATE_OPENED。
+	if (!g_bSettleDoorClosed)
+	{
+		int state = GetEntProp(door, Prop_Data, "m_eDoorState");
+
+		if (state != DOOR_STATE_OPENED)
+		{
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 安全门 #%d 尚未完全开启（state=%d），暂不关门（区域 #%d）", door, state, index);
+			}
+
+			return Plugin_Continue;
+		}
+	}
+
+	// ---- 第 2 步：把掉队的人补传回安全屋体积内 --------------------------------
+	// 引擎的 OnCheckpointDoorClosed 会逐个 IsTouching 判「谁还在屋外」，只要有一个
+	// 人被挤出体积，这一次关门就等于白关。12v12 有 12 个人，挤出去很正常，
+	// 所以这里允许补传若干次（间隔递增），把所有人真正塞进体积内再关门。
+	int alive = CountAliveSurvivors();
+
+	if (alive > 0 && arrived < alive)
+	{
+		if (g_iSettleRetry >= SAFEROOM_SETTLE_RETRY_MAX)
+		{
+			// 补传次数用尽还有人在屋外：说明这些人的落点确实进不了体积
+			// （或者他们正在被特感拖走 / 挂在边缘）。不伪造事件，留日志收尾。
+			LogError("[cptele] 安全屋结算：补传 %d 次后屋内仍只有 %d/%d 人（区域 #%d），本回合可能无法结算；请检查落点是否在安全屋触发体积内、以及是否有生还者被特感控制",
+				SAFEROOM_SETTLE_RETRY_MAX, arrived, alive, index);
+
+			SettleFinish("补传后仍不齐");
+			return Plugin_Stop;
+		}
+
+		if (GetGameTime() < g_fSettleNextRetry)
+		{
+			// 还没到下次补传的时间（给物理挤压 / 引擎落位留时间）
+			return Plugin_Continue;
+		}
+
+		g_iSettleRetry++;
+		g_fSettleNextRetry = GetGameTime() + SAFEROOM_SETTLE_RETRY_DELAY * float(g_iSettleRetry);
+
+		int moved = SettleGatherSurvivors(index);
+
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全屋结算：第 %d 次补传，把 %d 名掉队生还者重新送进安全屋（原屋内 %d/%d 人，区域 #%d）",
+				g_iSettleRetry, moved, arrived, alive, index);
+		}
+
+		// 传完这一批等下一 tick 重新统计，不要在同一 tick 里连续传
+		return Plugin_Continue;
+	}
+
+	// ---- 第 3 步：关门 + 补发 CheckpointDoorClosed（补上引擎缺的 Closed）-----
+	// 走到这里说明：门已经开到位、所有存活生还者都在安全屋体积内。
+	// g_cvSaferoomForceDoor 管的就是"这一层"（1.2.2 起就是这个语义：只做 Open 不补关门）：
+	//   0 = 只开门，门交给玩家自己关（老用法），1 = 由插件把关门 + 补发事件做完。
+	// 1.2.3 起它管的是整个"关门 + 补发事件"阶段，而不只是 0.6s 后那一次补发。
+	if (!g_cvSaferoomForceDoor.BoolValue)
+	{
+		SettleFinish("forcedoor=0，只开门不补发关门事件");
+		return Plugin_Stop;
+	}
+
+	if (!g_bSettleDoorClosed)
+	{
+		// 物理关门是最"正统"的触发源：门自己的 OnClose 只会在关门完成时把事件送给
+		// info_changelevel，引擎认这个。发完仍会再补一次实体输入，双保险。
+		AcceptEntityInput(door, "Close");
+		g_bSettleDoorClosed = true;
+
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全屋结算：已对门 #%d 发送 Close，等待关门完成（屋内 %d/%d 人，区域 #%d）",
+				door, arrived, alive, index);
+		}
+
+		return Plugin_Continue;
+	}
+
+	// 关门动作有自己的动画时间（约 0.5~1 秒）。门还没关到位就发事件，
+	// 引擎那边 IsTouching 判定是对的，但门自己的 OnClose 会在之后重复发一次事件，
+	// 这本身无害（引擎侧 ChangelevelThink 会去重），但为了让画面与逻辑一致，等关到位再发。
 	int state = GetEntProp(door, Prop_Data, "m_eDoorState");
 
-	// 门已经是「已开启」：这正是玩家开门进屋后引擎能正常过关的状态，不动它
-	if (state == DOOR_STATE_OPENED)
+	// 门又被玩家（或引擎）开回去了：重发一次 Close，回到「等关门完成」这一步。
+	// 不重发的话会一直等到 10 秒超时，白白丢掉一次过关机会。
+	if (state == DOOR_STATE_OPENED || state == DOOR_STATE_OPENING_IN_PROGRESS)
+	{
+		g_bSettleDoorClosed = false;
+
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全屋结算：门 #%d 被重新打开（state=%d），重新关门（区域 #%d）", door, state, index);
+		}
+
+		return Plugin_Continue;
+	}
+
+	// 还在关：等它关到位再发事件
+	if (state == DOOR_STATE_CLOSING_IN_PROGRESS)
 	{
 		if (g_cvVerbose.BoolValue)
 		{
-			PrintToServer("[cptele] 安全门 #%d 已经是开启状态，无需处理（区域 #%d，屋内 %d 人）",
-				door, index, arrived);
+			PrintToServer("[cptele] 安全屋结算：等待门 #%d 关到位（state=%d，区域 #%d）", door, state, index);
 		}
 
-		return Plugin_Stop;
+		return Plugin_Continue;
 	}
 
-	// 仅作诊断用：被锁住的门 Open 输入无效，这里记录下来方便排错，
-	// 但绝不去解锁（插件原则：不改安全门的 lock 状态）。
-	bool bLocked = view_as<bool>(GetEntProp(door, Prop_Data, "m_bLocked"));
-
-	AcceptEntityInput(door, "Open");
-
-	// 发完输入再看一次门状态：仍是完全关闭说明输入被忽略（门被锁 / 不是门）
-	int after = GetEntProp(door, Prop_Data, "m_eDoorState");
-
-	if (g_cvVerbose.BoolValue)
+	if (!g_bSettleEventFired)
 	{
-		PrintToServer("[cptele] 安全门 #%d 已发送 Open：state %d -> %d，locked=%d，屋内 %d 人（区域 #%d）",
-			door, state, after, bLocked, arrived, index);
+		FireCheckpointClosed(changelevel, door, index, arrived, "关门完成");
 	}
 
-	if (after == DOOR_STATE_CLOSED)
-	{
-		LogError("[cptele] 安全门 #%d 收到 Open 输入后仍然完全关闭（locked=%d），本回合可能无法过关；请确认该地图安全门是否被锁住",
-			door, bLocked);
-	}
-
-	// 1.2.2：只开门不一定够。引擎的过关链还要一次「门关闭」事件
-	// （CheckpointDoorClosed -> 逐个 IsTouching 判「谁还在屋外」）。正常游戏里这一下是
-	// 玩家进屋后门自己关上来提供的；倒计时传送没人去关门，所以 0.6s 后补一发。
-	if (g_cvSaferoomForceDoor.BoolValue && g_hDoorClose == null)
-	{
-		g_iDoorCloseArea = index;
-		g_iDoorCloseRef = ref;
-		g_hDoorClose = CreateTimer(0.6, Timer_SaferoomForceClose, 0, TIMER_FLAG_NO_MAPCHANGE);
-	}
-
+	SettleFinish("完成");
 	return Plugin_Stop;
 }
 
 /**
- * 1.2.2 补发「门关闭」事件（需求 #7 的第二层保险）。
+ * 把安全屋外（或体积判定失败）的存活生还者重新传送进区域，返回实际传送人数。
  *
- * 触发条件（缺一不可）：
- *   - 这是关底安全屋区域，且区域实体（info_changelevel）仍然有效；
- *   - 本回合所有存活生还者都已经在安全屋体积内（CountArrivedSurvivors == CountAliveSurvivors）。
- *     只要还有人在屋外就不发 —— 引擎的 OnCheckpointDoorClosed 会查出「谁还在屋外」
- *     （PlayerOutsideCheckpoint），伪造这个事件既没用也会误导排查。
- *
- * 动作：先物理关门（让画面/状态与真实过关一致），再向 info_changelevel 发引擎自己那个
- * 输入 CheckpointDoorClosed（datamap: CBaseTrigger-info_changelevel 的 Input）。
- * 不硬换图、不改 spawnflags/lock。
+ * 与 FinishCountdown 里的主传送的区别：这里**不看** g_bSeen / g_cvSkipSeen。
+ * 那些开关的语义是「已经到过集合点的人不要再被传回来」，针对的是中途集合点和
+ * 已经继续推进的生还者；而这里是终局安全屋结算的最后一步，任何人不在体积内
+ * 都会导致引擎判「还有人在屋外」而不换图，所以必须把人补齐。
  */
-public Action Timer_SaferoomForceClose(Handle timer)
+int SettleGatherSurvivors(int index)
 {
-	g_hDoorClose = null;
+	float vDest[3];
 
-	int index = g_iDoorCloseArea;
-	int ref = g_iDoorCloseRef;
-
-	g_iDoorCloseArea = -1;
-	g_iDoorCloseRef = 0;
-
-	if (!g_bMapStarted || !g_cvEnable.BoolValue || !g_bReady)
+	if (!GetAreaDestination(index, vDest))
 	{
-		return Plugin_Stop;
+		return 0;
 	}
 
-	if (index < 0 || index >= g_iAreaCount)
+	bool bFixedDest = g_bAreaDest[index];
+	int moved = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
 	{
-		return Plugin_Stop;
-	}
-
-	if (g_iAreaRef[index] != ref || g_iAreaType[index] != AREA_SAFEROOM)
-	{
-		return Plugin_Stop;
-	}
-
-	int changelevel = GetAreaEntity(index);
-
-	if (changelevel == -1)
-	{
-		return Plugin_Stop;
-	}
-
-	int alive = CountAliveSurvivors();
-	int arrived = CountArrivedSurvivors(index);
-
-	if (alive <= 0 || arrived < alive)
-	{
-		if (g_cvVerbose.BoolValue)
+		if (!IsAliveSurvivor(i))
 		{
-			PrintToServer("[cptele] 补发关门事件跳过：屋内 %d 人 / 存活 %d 人（区域 #%d）", arrived, alive, index);
+			continue;
 		}
 
-		return Plugin_Stop;
+		if (IsClientInArea(i, index))
+		{
+			continue;
+		}
+
+		float vClientDest[3];
+
+		CopyVec(vDest, vClientDest);
+
+		if (bFixedDest)
+		{
+			vClientDest[0] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
+			vClientDest[1] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
+		}
+
+		TeleportSurvivor(i, vClientDest);
+		moved++;
 	}
 
-	int door = FindSaferoomDoor(changelevel);
+	return moved;
+}
 
-	if (door != -1)
-	{
-		// 物理关门：这是最"正统"的触发源（门自己的 OnClose 只会在关门完成时把事件送给
-		// info_changelevel），引擎认这个。
-		AcceptEntityInput(door, "Close");
-	}
-
-	// 再补一次引擎自己的输入。datamap 里 CBaseTrigger-info_changelevel 那两条 Input 的
-	// 名字在 dump 里写成 "OnCheckpointDoorOpened / OnCheckpointDoorClosed"（同一份 dump 里
-	// 其它 Input 都带 "Input" 前缀，这两条没有），所以两种拼法都发一遍：
-	// 未知输入会被引擎静默忽略，不会报错，也不会重复触发过关（引擎侧有 ChangelevelThink 去重）。
+/**
+ * 向 info_changelevel 补发「门关闭」这个引擎自己的输入。
+ *
+ * datamap 里 CBaseTrigger-info_changelevel 那两条 Input 的名字在 dump 里写成
+ * "OnCheckpointDoorOpened / OnCheckpointDoorClosed"（同一份 dump 里其它 Input 都带
+ * "Input" 前缀，这两条没有），所以两种拼法都发一遍：未知输入会被引擎静默忽略，
+ * 不会报错，也不会重复触发过关（引擎侧有 ChangelevelThink 去重）。
+ */
+void FireCheckpointClosed(int changelevel, int door, int index, int arrived, const char[] sReason)
+{
 	AcceptEntityInput(changelevel, "OnCheckpointDoorClosed");
 	AcceptEntityInput(changelevel, "CheckpointDoorClosed");
 
+	g_bSettleEventFired = true;
+
 	if (g_cvVerbose.BoolValue)
 	{
-		PrintToServer("[cptele] 已关门并补发 CheckpointDoorClosed：门 #%d，info_changelevel #%d，屋内 %d 人",
-			door, changelevel, arrived);
+		PrintToServer("[cptele] 已补发 CheckpointDoorClosed（%s）：门 #%d，info_changelevel #%d，屋内 %d 人（区域 #%d）",
+			sReason, door, changelevel, arrived, index);
+	}
+}
+
+/**
+ * 收尾：把状态机挂起槽全部清干净。
+ *
+ * 这个函数只会从 Timer_SaferoomDoorFix 里调用，而调用点全部紧跟着 return Plugin_Stop，
+ * 所以**不能**在这里 delete timer —— 正在执行的重复 timer 由 Plugin_Stop 自己回收。
+ * 这里只负责把引用与进度字段清空，让 ScheduleSaferoomDoorFix 的下一次调用能重新启动。
+ */
+void SettleFinish(const char[] sReason)
+{
+	if (g_cvVerbose.BoolValue && g_iDoorFixArea >= 0)
+	{
+		PrintToServer("[cptele] 安全屋结算结束（%s）：区域 #%d", sReason, g_iDoorFixArea);
 	}
 
-	return Plugin_Stop;
+	g_hDoorFix = null;
+
+	g_iDoorFixArea        = -1;
+	g_iDoorFixRef         = 0;
+	g_fSettleDeadline     = 0.0;
+	g_iSettleRetry        = 0;
+	g_fSettleNextRetry    = 0.0;
+	g_iSettleOpenTries    = 0;
+	g_fSettleNextOpenTry  = 0.0;
+	g_bSettleDoorOpened   = false;
+	g_bSettleDoorClosed   = false;
+	g_bSettleEventFired   = false;
 }
 
 /**
@@ -3139,17 +3414,20 @@ void ResetRound()
 	delete g_hMonitor;
 	g_hMonitor = null;
 
-	// 1.2.1：安全门复核 timer 也要一起清，避免换图 / 换回合后还在旧区域上动作
+	// 安全屋结算状态机（1.2.3 起是一个 TIMER_REPEAT，必须显式 delete 才能停下）
+	// 也要一起清，避免换图 / 换回合后还在旧区域上动作
 	delete g_hDoorFix;
 	g_hDoorFix = null;
 	g_iDoorFixArea = -1;
 	g_iDoorFixRef = 0;
-
-	// 1.2.2：补发关门事件的 timer 同理
-	delete g_hDoorClose;
-	g_hDoorClose = null;
-	g_iDoorCloseArea = -1;
-	g_iDoorCloseRef = 0;
+	g_fSettleDeadline = 0.0;
+	g_iSettleRetry = 0;
+	g_fSettleNextRetry = 0.0;
+	g_iSettleOpenTries = 0;
+	g_fSettleNextOpenTry = 0.0;
+	g_bSettleDoorOpened = false;
+	g_bSettleDoorClosed = false;
+	g_bSettleEventFired = false;
 
 	g_bCountingDown = false;
 	g_iSecondsLeft = 0;

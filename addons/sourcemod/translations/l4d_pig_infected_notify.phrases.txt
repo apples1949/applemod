@@ -1,214 +1,261 @@
 "Phrases"
 {
+	// ==================================================================
+	// 【重要】这里不再使用嵌套翻译（即 n:t 形式）。
+	//
+	// 原因：SourceMod 的 {n:t} 在部分代码路径（VFormat → CPrintToChatAll 等）
+	// 解析子短语时不会沿用 SetGlobalTransTarget 设定的「每个客户端的语言」，
+	// 而是回落到服务端语言。服务端语言通常是 en，于是中文客户端会看到
+	// 「外层中文 + 内层英文」的混排，即用户反馈的「显示中文时错误显示英文」。
+	//
+	// 现在改为：.sp 中对每个客户端先 FormatEx("%t", sSubPhrase) 解析子短语
+	// （此时真实翻译目标就是该客户端），再 CPrintToChat 拼外层，故外层一律用
+	// {n:s} 接收已经本地化好的字符串。
+	// ==================================================================
+
+	// ------------------------------------------------------------------
+	// 一、死亡原因子短语（自杀/环境死亡场景）
+	//    这些是「谓语」，直接跟在外层的主语后面：
+	//    en: "Tank was burned to death by fire."
+	//    zho: "坦克被火焰燒死。"
+	// ------------------------------------------------------------------
 	"killed by fire"
 	{
-		"en"	"killed by fire"
-		"zho"	"玩火自焚"
-		"chi"	"玩火自焚"
+		"en"	"was burned to death by fire"
+		"zho"	"被火焰燒死"
+		"chi"	"被火焰烧死"
 	}
 	"killed by map"
 	{
-		"en"	"killed by map"
-		"zho"	"自爆"
-		"chi"	"自爆"
+		"en"	"was killed by the map"
+		"zho"	"被地圖環境殺死"
+		"chi"	"被地图环境杀死"
 	}
 	"killed himself"
 	{
-		"en"	"killed himself"
-		"zho"	"自我爆☆殺"
+		"en"	"killed itself"
+		"zho"	"自殺"
 		"chi"	"自杀"
 	}
 	"killed by toy"
 	{
-		"en"	"killed by toy"
-		"zho"	"玩車自爆"
-		"chi"	"玩车自爆"
+		"en"	"was crushed by a prop"
+		"zho"	"被道具砸死"
+		"chi"	"被道具砸死"
 	}
 	"killed by boom"
 	{
-		"en"	"killed by toy"
-		"zho"	"被炸死"
-		"chi"	"被炸死"
+		"en"	"was killed by an explosion"
+		"zho"	"被爆炸炸死"
+		"chi"	"被爆炸炸死"
 	}
 	"killed by server"
 	{
-		"en"	"killed by server"
-		"zho"	"自我了斷"
-		"chi"	"被天谴"
+		"en"	"was killed by the server"
+		"zho"	"被伺服器處死"
+		"chi"	"被服务器处死"
 	}
+
+	// ------------------------------------------------------------------
+	// 二、坦克使用什么武器/物件的子短语
+	//    这里只放「名词本身」，外层短语负责补 "with" / "用" 并组成完整句子。
+	//    en: "Tank killed Witch with its fists."
+	//    zho: "坦克用拳頭打死了 Witch。"
+	// ------------------------------------------------------------------
 	"One-Punch"
 	{
-		"en"	"One-Punch"
-		"zho"	"一拳超人"
-		"chi"	"一拳超人"
+		"en"	"its fists"
+		"zho"	"拳頭"
+		"chi"	"拳头"
 	}
 	"Rock-Stone"
 	{
-		"en"	"Rock-Stone"
-		"zho"	"玉石俱焚"
-		"chi"	"玉石俱焚"
+		"en"	"a rock"
+		"zho"	"石頭"
+		"chi"	"石头"
 	}
 	"Toy"
 	{
-		"en"	"Toy"
-		"zho"	"玩車殺"
-		"chi"	"玩车杀"
+		"en"	"a prop"
+		"zho"	"道具"
+		"chi"	"道具"
 	}
 	"Alarm-Car"
 	{
-		"en"	"Alarm-Car"
-		"zho"	"玩警報車殺"
-		"chi"	"玩警报车杀"
+		"en"	"an alarm car"
+		"zho"	"警車"
+		"chi"	"警车"
 	}
-	"Tank is killed by something"
+	"unknown weapon"
 	{
-		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank is {olive}{1}{default}."
-		"zho"	"{green}[提示] {green}Tank {olive}{1}{default}了."
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}{default}了。"
-	}
-	"Player is killed by something"
-	{
-		"#format"	"{1:N},{2:t}"
-		"en"	"{green}[SM] {red}{1}{default} is {olive}{2}{default}."
-		"zho"	"{green}[提示] {red}{1}{default} {olive}{2}{default}了."
-		"chi"	"{green}[提示] {red}{1}{default} {olive}{2}{default}了。"
-	}
-	"Tank Kill Witch"
-	{
-		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank {default}uses {olive}{1}{default} to terminate {red}Witch{default}."
-		"zho"	"{green}[提示] {green}Tank {default}使用 {olive}{1}{default} 星爆氣流斬 {red}Witch{default}."
-		"chi"	"{green}[提示] {green}坦克 {default}使用 {olive}{1}{default} 星爆氣流斬 {red}妹子{default}."
+		"en"	"an unknown weapon"
+		"zho"	"不明武器"
+		"chi"	"不明武器"
 	}
 	"punches"
 	{
-		"en"	"punches"
-		"zho"	"拍"
-		"chi"	"拍"
+		"en"	"its fists"
+		"zho"	"拳頭"
+		"chi"	"拳头"
 	}
 	"smashes"
 	{
-		"en"	"smashes"
-		"zho"	"砸"
-		"chi"	"砸"
+		"en"	"a rock"
+		"zho"	"石頭"
+		"chi"	"石头"
 	}
 	"plays toy to kill"
 	{
-		"en"	"plays toy to kill"
-		"zho"	"玩車殺"
-		"chi"	"玩车杀"
+		"en"	"a prop"
+		"zho"	"道具"
+		"chi"	"道具"
 	}
 	"plays alarm car to kill"
 	{
-		"en"	"plays alarm car to kill"
-		"zho"	"玩警報車殺"
-		"chi"	"玩警报车杀"
+		"en"	"an alarm car"
+		"zho"	"警車"
+		"chi"	"警车"
+	}
+
+	// ------------------------------------------------------------------
+	// 三、外层短语（全部 {n:s}，接收 .sp 已按客户端语言解析好的字符串）
+	// ------------------------------------------------------------------
+	"Tank is killed by something"
+	{
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}{1}."
+		"zho"	"{green}[提示] {green}坦克{default}{1}。"
+		"chi"	"{green}[提示] {green}坦克{default}{1}。"
+	}
+	"Player is killed by something"
+	{
+		"#format"	"{1:N},{2:s}"
+		"en"	"{green}[SM] {red}{1}{default} {2}."
+		"zho"	"{green}[提示] {red}{1}{default}{2}。"
+		"chi"	"{green}[提示] {red}{1}{default}{2}。"
+	}
+	"Tank Kill Witch"
+	{
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed {red}Witch{default} with {1}."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}Witch{default}。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}Witch{default}。"
 	}
 	"Tank kill teammate"
 	{
-		"#format"	"{1:t},{2:s}"
-		"en"	"{green}[SM] {green}Tank {olive}{1}{default} {2}teammate."
-		"zho"	"{green}[提示] {green}Tank {olive}{1}死{default} {2}隊友."
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}死{default} {2}队友。"
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed a teammate with {1}."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了一名特感。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了一名特感。"
+	}
+	"Tank kill teammate AI"
+	{
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed an AI teammate with {1}."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了一名 AI 特感。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了一名 AI 特感。"
 	}
 	"Tank kill Tank"
 	{
-		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank {olive}{1}{default} another Tank."
-		"zho"	"{green}[提示] {green}Tank {olive}{1}死{default} 另一隻Tank."
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}死{default} 另一只Tank。"
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed another Tank with {1}."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了另一隻坦克。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了另一只坦克。"
 	}
+
+	// ------------------------------------------------------------------
+	// 四、事件播报
+	// ------------------------------------------------------------------
 	"l4d_pig_infected1"
 	{
-		"en"	"{green}[SM] {green}Tank{default} get stumble by the door."
-		"zho"	"{green}[提示] {green}Tank{default} 被門暈眩."
-		"chi"	"{green}[提示] {green}Tank{default} 被门晕眩."
+		"en"	"{green}[SM] {green}Tank{default} was staggered by a door."
+		"zho"	"{green}[提示] {green}坦克{default}被門撞暈了。"
+		"chi"	"{green}[提示] {green}坦克{default}被门撞晕了。"
 	}
 	"l4d_pig_infected2"
 	{
-		"en"	"{green}[SM] {red}Witch{default} killed teammate."
-		"zho"	"{green}[提示] {red}妹子{default} 使出 {olive}天馬流星拳 {default}打死隊友."
-		"chi"	"{green}[提示] {red}妹子{default} 使出 {olive}天马流星拳 {default}打死队友。"
+		"en"	"{green}[SM] {red}Witch{default} killed a teammate."
+		"zho"	"{green}[提示] {red}Witch{default} 打死了隊友。"
+		"chi"	"{green}[提示] {red}Witch{default} 打死了队友。"
 	}
 	"l4d_pig_infected3"
 	{
-		"en"	"{green}[SM] {red}Witch{default} killed AI teammate."
-		"zho"	"{green}[提示] {red}妹子{default} 使出 {olive}北斗神拳 {default}打死AI隊友."
-		"chi"	"{green}[提示] {red}妹子{default} 使出 {olive}北斗神拳 {default}打死AI队友。"
+		"en"	"{green}[SM] {red}Witch{default} killed an AI teammate."
+		"zho"	"{green}[提示] {red}Witch{default} 打死了 AI 隊友。"
+		"chi"	"{green}[提示] {red}Witch{default} 打死了 AI 队友。"
 	}
 	"l4d_pig_infected4"
 	{
-		"en"	"{green}[SM] {red}Witch{default} {olive}gone{default}."
-		"zho"	"{green}[提示] {red}妹子{default} {olive}歸天{default}了."
-		"chi"	"{green}[提示] {red}妹子{default} {olive}狗带{default}了。"
+		"en"	"{green}[SM] {red}Witch{default} died."
+		"zho"	"{green}[提示] {red}Witch{default} 已死亡。"
+		"chi"	"{green}[提示] {red}Witch{default} 已死亡。"
 	}
 	"l4d_pig_infected5"
 	{
 		"#format"	"{1:N},{2:N}"
-		"en"	"{green}[SM] {olive}{1}{default} kills {red}{2}{default}'s Boomer to stumble {green}Tank{default}."
-		"zho"	"{green}[提示] {olive}{1}{default} 殺死 {red}{2}{default}'s Boomer 炸暈 {green}Tank{default}."
-		"chi"	"{green}[提示] {olive}{1}{default} 杀死 {red}{2}{default}'s Boomer 炸晕 {green}坦克{default}。"
+		"en"	"{green}[SM] {olive}{1}{default} killed {red}{2}{default}'s Boomer, the explosion staggered {green}Tank{default}."
+		"zho"	"{green}[提示] {olive}{1}{default} 殺死 {red}{2}{default} 的 Boomer，爆炸炸暈了 {green}坦克{default}。"
+		"chi"	"{green}[提示] {olive}{1}{default} 杀死 {red}{2}{default} 的 Boomer，爆炸炸晕了 {green}坦克{default}。"
 	}
 	"l4d_pig_infected6"
 	{
 		"#format"	"{1:N}"
-		"en"	"{green}[SM] {olive}{1}{default} kills {red}AI{default} Boomer to stumble {green}Tank{default}."
-		"zho"	"{green}[提示] {olive}{1}{default} 殺死 {red}AI{default} Boomer 炸暈 {green}Tank{default}."
-		"chi"	"{green}[提示] {olive}{1}{default} 杀死 {red}AI{default} Boomer 炸晕 {green}坦克{default}。"
+		"en"	"{green}[SM] {olive}{1}{default} killed {red}AI{default}'s Boomer, the explosion staggered {green}Tank{default}."
+		"zho"	"{green}[提示] {olive}{1}{default} 殺死 {red}AI{default} 的 Boomer，爆炸炸暈了 {green}坦克{default}。"
+		"chi"	"{green}[提示] {olive}{1}{default} 杀死 {red}AI{default} 的 Boomer，爆炸炸晕了 {green}坦克{default}。"
 	}
 	"l4d_pig_infected7"
 	{
-		"#format"	"{1:t},{2:N}"
-		"en"	"{green}[SM] {green}Tank {olive}{1} {red}{2}{default}'s Boomer to stumble himself."
-		"zho"	"{green}[提示] {green}Tank {olive}死{1} {red}{2}{default}'s Boomer 炸暈自己."
-		"chi"	"{green}[提示] {green}坦克 {olive}死{1} {red}{2}{default}'s Boomer 炸晕自己。"
+		"#format"	"{1:N},{2:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed {red}{1}{default}'s Boomer with {2}, the explosion staggered the Tank itself."
+		"zho"	"{green}[提示] {green}坦克{default}用{2}打死了 {red}{1}{default} 的 Boomer，爆炸把坦克自己炸暈了。"
+		"chi"	"{green}[提示] {green}坦克{default}用{2}打死了 {red}{1}{default} 的 Boomer，爆炸把坦克自己炸晕了。"
 	}
 	"l4d_pig_infected8"
 	{
-		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank {olive}{1} {red}AI{default} Boomer to stumble {default}himself."
-		"zho"	"{green}[提示] {green}Tank {olive}{1}死 {red}AI{default} Boomer 炸暈自己."
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}死 {red}AI{default} Boomer 炸晕自己。"
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed {red}AI{default}'s Boomer with {1}, the explosion staggered the Tank itself."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}AI{default} 的 Boomer，爆炸把坦克自己炸暈了。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}AI{default} 的 Boomer，爆炸把坦克自己炸晕了。"
 	}
 	"l4d_pig_infected9"
 	{
-		"#format"	"{1:t},{2:N}"
-		"en"	"{green}[SM] {green}Tank {olive}{1} {red}{2}{default}'s Boomer."
-		"zho"	"{green}[提示] {green}Tank {olive}{1}死 {red}{2}{default}'s Boomer"
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}死 {red}{2}{default}'s Boomer。"
+		"#format"	"{1:N},{2:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed {red}{1}{default}'s Boomer with {2}."
+		"zho"	"{green}[提示] {green}坦克{default}用{2}打死了 {red}{1}{default} 的 Boomer。"
+		"chi"	"{green}[提示] {green}坦克{default}用{2}打死了 {red}{1}{default} 的 Boomer。"
 	}
 	"l4d_pig_infected10"
 	{
-		"#format"	"{1:t}"
-		"en"	"{green}[SM] {green}Tank {olive}{1} {red}AI{default} Boomer"
-		"zho"	"{green}[提示] {green}Tank {olive}{1}死 {red}AI{default} Boomer"
-		"chi"	"{green}[提示] {green}坦克 {olive}{1}死 {red}AI{default} Boomer。"
+		"#format"	"{1:s}"
+		"en"	"{green}[SM] {green}Tank {default}killed {red}AI{default}'s Boomer with {1}."
+		"zho"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}AI{default} 的 Boomer。"
+		"chi"	"{green}[提示] {green}坦克{default}用{1}打死了 {red}AI{default} 的 Boomer。"
 	}
 	"l4d_pig_infected11"
 	{
 		"#format"	"{1:N}"
 		"en"	"{green}[SM] {red}{1}{default}'s Boomer exploded."
-		"zho"	"{green}[提示] {red}{1}{default}'s Boomer 爆炸啦."
-		"chi"	"{green}[提示] {red}{1}{default}'s Boomer 爆炸啦。"
+		"zho"	"{green}[提示] {red}{1}{default} 的 Boomer 自爆了。"
+		"chi"	"{green}[提示] {red}{1}{default} 的 Boomer 自爆了。"
 	}
 	"l4d_pig_infected12"
 	{
 		"en"	"{green}[SM] {red}AI{default} Boomer exploded."
-		"zho"	"{green}[提示] {red}AI{default} Boomer 爆炸啦."
-		"chi"	"{green}[提示] {red}AI{default} Boomer 爆炸啦。"
+		"zho"	"{green}[提示] {red}AI{default} 的 Boomer 自爆了。"
+		"chi"	"{green}[提示] {red}AI{default} 的 Boomer 自爆了。"
 	}
 	"l4d_pig_infected13"
 	{
 		"#format"	"{1:N}"
-		"en"	"{green}[SM] {red}{1}{default}'s Boomer stumbles {green}Tank{default}."
-		"zho"	"{green}[提示] {default}神隊友 {red}{1}{default}'s Boomer 炸暈 {green}Tank{default}."
-		"chi"	"{green}[提示] {default}神队友 {red}{1}{default}'s Boomer 炸晕 {green}坦克{default}。"
+		"en"	"{green}[SM] {red}{1}{default}'s Boomer exploded and staggered {green}Tank{default}."
+		"zho"	"{green}[提示] {red}{1}{default} 的 Boomer 自爆，炸暈了 {green}坦克{default}。"
+		"chi"	"{green}[提示] {red}{1}{default} 的 Boomer 自爆，炸晕了 {green}坦克{default}。"
 	}
 	"l4d_pig_infected14"
 	{
-		"en"	"{green}[SM] {red}AI{default} Boomer stumbles {green}Tank{default}."
-		"zho"	"{green}[提示] {red}AI{default}'s Boomer 炸暈 {green}Tank{default}."
-		"chi"	"{green}[提示] {red}AI{default}'s Boomer 炸晕 {green}坦克{default}。"
+		"en"	"{green}[SM] {red}AI{default} Boomer exploded and staggered {green}Tank{default}."
+		"zho"	"{green}[提示] {red}AI{default} 的 Boomer 自爆，炸暈了 {green}坦克{default}。"
+		"chi"	"{green}[提示] {red}AI{default} 的 Boomer 自爆，炸晕了 {green}坦克{default}。"
 	}
 }

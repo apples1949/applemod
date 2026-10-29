@@ -267,9 +267,24 @@ int    g_iActiveArea = -1;
 
 // 1.2.1 安全门复核的挂起状态。一张图最多一个关底安全屋区域，同一时刻也只会
 // 有一个倒计时在跑，所以用单槽即可；换图 / 换回合由 ResetRound 统一清掉。
-Handle g_hDoorFix;              // 安全屋结算状态机的轮询 timer（1.2.3 起是重复 timer）
+Handle g_hDoorFix;              // 安全屋结算状态机的轮询 timer（1.2.4 起是「一次性 timer 逐 tick 续命」）
 int    g_iDoorFixArea = -1;     // 挂起中的区域索引（-1 = 没有挂起）
 int    g_iDoorFixRef;           // 挂起中区域实体的 EntRef（防跨回合残影）
+
+// 1.2.4：状态机 timer 的「世代号」，用来根治运行期这条报错：
+//   [SM] Invalid timer handle <h> (error 1) during timer end, displayed function is
+//        timer callback ... Unable to call function "Timer_SaferoomDoorFix"
+// 根因是同一个 timer handle 被**关闭两次**，具体两条路径：
+//   ① 这个重复 timer 原来带 TIMER_FLAG_NO_MAPCHANGE —— 换图时引擎会**自动关闭**它，
+//      而 ResetRound() 又在 OnMapEnd/OnMapStart 里 delete 一次，第二次关闭作用在
+//      已经失效的 handle 上，正是 "Invalid timer handle" 的来源；
+//   ② SourceMod 的 handle 值会被复用，对着一个已失效的旧 handle 做 delete，
+//      有可能顺手关掉**旁边刚新建的那个 timer**（更危险，会让别的 timer 静默消失）。
+// 做法：状态机改成「一次性 timer 每 tick 自己续命」，不再用 TIMER_REPEAT，
+// 也**不再带 TIMER_FLAG_NO_MAPCHANGE**（生命周期完全由我们显式管）；
+// 每次启动/收尾都让世代号 +1，回调只认自己那一代，过期的直接退出且绝不碰 handle。
+// 这样引擎不会背着我们关 timer，我们自己的 delete 也永远只作用在有效 handle 上。
+int    g_iSettleGen;
 
 // 1.2.3 安全屋结算状态机的进度（原 1.2.2 的两个一次性 timer 已被它取代）
 float  g_fSettleDeadline;       // 绝对超时时刻（GetGameTime 口径）
@@ -1243,21 +1258,21 @@ stock bool GetLegacySite(const char[] sMap,
 		return true;
 	}
 
-	if (StrEqual(sMap, "c6m3_port", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "generator_elevator_button");
-		vDest[0] = -744.0;  vDest[1] = -575.0;  vDest[2] = 360.0;
-		return true;
-	}
+	// 1.2.4（需求 #6）**刻意移除** c6m3_port（The Passing 终局）的 legacy 集合点。
+	// 实测 c6m3_port.bsp：全部 changelevel 只有 1 个且 spawnflags=2、map 指向自己
+	// （「往回走到 c6m2」的回退触发），说明本图没有关底安全屋；过关走 trigger_finale。
+	// 而 generator_elevator_button(origin -716 -552 342) 属于终局「罐油发电机 → 电梯」
+	// 这套逃生流程的按钮，不是中途集合点。旧版把它当中途集合点：倒计时结束时既把
+	// 掉队者传到发电机旁、又替玩家 unlock+use 按下它 —— 玩家表现为
+	// 「做电梯下来到罐油发电机就直接结算分数并换边/进下一关」。
+	// 现在该图既不注册 AREA_SAFEROOM，也不再注册这个按钮。
 
-	if (StrEqual(sMap, "c7m3_port", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "bridge_start_button");
-		vDest[0] = 0.0;     vDest[1] = -1730.0; vDest[2] = 355.0;
-		return true;
-	}
+	// 1.2.4（需求 #6）**刻意移除** c7m3_port（The Sacrifice 终局）的 legacy 集合点。
+	// 实测 c7m3_port.bsp：一个 changelevel 都没有；trigger_finale 是
+	// type=2 / StartDisabled=1 / IsSacrificeFinale=1 的牺牲结局逃生装置。
+	// bridge_start_button(origin -120 -1781 460) 是「启动吊桥/电梯」这个逃生动作的按钮，
+	// 插件替玩家 unlock+use 它，等于主动启动逃生流程 => 直接结算换边。
+	// 现在该图既不注册 AREA_SAFEROOM，也不再注册这个按钮。
 
 	// 医院楼顶电梯（L4D1 的 c8m4 / 对战版）
 	if (StrEqual(sMap, "c8m4_interior", false)
@@ -1765,13 +1780,13 @@ void FinishCountdown(int index)
 	OpenAreaMechanism(index, type);
 
 	// ---- 关底安全屋：门没经历「开 -> 关」就不过关（1.2.1 / 需求 #7）-------
-	// 1.2.3 起这里不再区分「门开着还是关着」：
-	//   以前只在 moved > 0 时复核，而且门开着就直接 return（没人去关），
-	//   门关着又要靠一个 0.6s 的一次性 timer 赌「全员恰好都在体积内」。
-	//   现在只要这次倒计时结束时安全屋里确实有人（传送落地了，或者人本来就到齐了），
-	//   就交给状态机去补齐「开启 -> 关门 -> 补发 Closed」这条引擎链。
-	//   状态机内部会自己校验类型（只处理 AREA_SAFEROOM）、门是否存在、是否全员在屋内。
-	if (moved > 0 || CountArrivedSurvivors(index) > 0)
+	// 1.2.4（需求 #6 回归修复）：触发条件收回成「本次倒计时 **真的传送了人**（moved > 0）」。
+	// 1.2.3 曾放宽为 `moved > 0 || CountArrivedSurvivors(index) > 0`，等于「只要有人站在
+	// 判定体积里就动门」。这在终局图（c6m3_port 电梯下来到罐油发电机那一片）会把玩家
+	// 正常路过当成「全员进安全屋」，进而关门+补发 CheckpointDoorClosed => 直接结算换边。
+	// 只有「倒计时传送过掉队者」这一种情况才需要我们补引擎缺的那两次门状态变化；
+	// 玩家自己走进去时，门是他们自己开合的，引擎链路本来是通的。
+	if (moved > 0)
 	{
 		ScheduleSaferoomDoorFix(index);
 	}
@@ -1867,16 +1882,13 @@ void FinishCountdownAllSeen(int index)
 	// 集合完毕 = 该按的机关仍然要按下去（电梯 / 渡轮 / 桥等）
 	OpenAreaMechanism(index, type);
 
-	// 安全屋「全员已进入」= 引擎那边同样缺「开门 -> 关门」这条链：
-	// 人虽然都在屋里，但门要是没人开过、没人关过，引擎照样不会结算。
-	// （用户报的「关着门可能不会结算」正是这条路径：人齐了、倒计时提前结束、
-	//   然后门一直不动 -> 引擎等 CheckpointDoorClosed 永远等不到。）
-	// 这里同样交给状态机，不区分门当前是开还是关。
-	if (IsSafeAreaType(type) && g_iAreaType[index] == AREA_SAFEROOM
-		&& CountArrivedSurvivors(index) > 0)
-	{
-		ScheduleSaferoomDoorFix(index);
-	}
+	// 1.2.4（需求 #6 回归修复）：这条路径**不再**动门。
+	// 「全员已进入 -> 倒计时提前结束」意味着**一个人都没传送**，玩家是自己走进去的，
+	// 门也是他们自己开合的，引擎那条「开门 -> 关门 -> CheckpointDoorClosed」链本来
+	// 就是通的，我们没有任何理由插手。1.2.3 曾在这里也调 ScheduleSaferoomDoorFix，
+	// 结果是终局图（c6m3_port 电梯下来那一片）玩家正常路过就被关门+补发换图事件，
+	// 表现为「直接结算分数并换边/进下一关」。
+	// 真正需要补门状态的只有 FinishCountdown 里 moved > 0（传送过掉队者）那一种情况。
 
 	char sName[32];
 	char sMsg[192];
@@ -2009,6 +2021,22 @@ void ScheduleSaferoomDoorFix(int index)
 		return;
 	}
 
+	// 1.2.4（需求 #6）硬护栏：终局图（c6m3_port / c7m3_port 这类，引擎里有
+	// trigger_finale）**一律不做**「关门 + 补发 CheckpointDoorClosed」。
+	// 终局图的过关不靠 info_changelevel，而是 trigger_finale 的逃生流程；对它发
+	// CheckpointDoorClosed 会让引擎真的换图 => 玩家在电梯/发电机附近就「直接结算分数
+	// 并换边/进下一关」。这条与 FindLastChangelevel 的修复互为双保险：
+	// 即使某张终局图被误判出关底安全屋，这里也绝不会真的去触发换图。
+	if (g_bNtvFinalMap && L4D_IsMissionFinalMap())
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 安全屋结算跳过：本图是终局图（走 trigger_finale，不发 CheckpointDoorClosed）");
+		}
+
+		return;
+	}
+
 	// 纯坐标区域没有实体，也就没有 info_changelevel 可对照，直接跳过
 	if (g_iAreaRef[index] == 0)
 	{
@@ -2033,9 +2061,11 @@ void ScheduleSaferoomDoorFix(int index)
 	g_bSettleDoorClosed   = false;
 	g_bSettleEventFired   = false;
 
-	// TIMER_REPEAT：状态机每一步都自己判断该不该继续，跑完自己 Stop
-	g_hDoorFix = CreateTimer(SAFEROOM_SETTLE_TICK, Timer_SaferoomDoorFix, 0,
-		TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+	// 1.2.4：世代号 +1 让之前所有在途的旧 tick 立即作废（换图/重入都不会有残留动作）。
+	// 用**一次性** timer 而不是 TIMER_REPEAT，也**不带 TIMER_FLAG_NO_MAPCHANGE**：
+	// 生命周期完全由我们显式管，引擎不会背着我们关它（重复关闭正是报错的来源）。
+	g_iSettleGen++;
+	g_hDoorFix = CreateTimer(SAFEROOM_SETTLE_TICK, Timer_SaferoomDoorFix, g_iSettleGen);
 
 	if (g_cvVerbose.BoolValue)
 	{
@@ -2050,8 +2080,18 @@ void ScheduleSaferoomDoorFix(int index)
  *   Plugin_Continue -> 还没结束，下个 tick 继续；
  *   Plugin_Stop     -> 结束（成功、无需处理、或超时），timer 会被回收。
  */
-public Action Timer_SaferoomDoorFix(Handle timer)
+public Action Timer_SaferoomDoorFix(Handle timer, any gen)
 {
+	// 一次性 timer 已经触发 => 这个 handle 由引擎回收，我们立刻放开引用，
+	// 后面无论走哪条路径都**不要再 delete 它**（这正是 "Invalid timer handle" 的根源）。
+	g_hDoorFix = null;
+
+	// 过期的 tick（换图 / 重新启动 / 已收尾）直接退出，绝不碰任何状态
+	if (gen != g_iSettleGen)
+	{
+		return Plugin_Stop;
+	}
+
 	int index = g_iDoorFixArea;
 	int ref   = g_iDoorFixRef;
 
@@ -2164,7 +2204,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 				PrintToServer("[cptele] 安全门 #%d 正在开启中，等待开到位（区域 #%d）", door, index);
 			}
 
-			return Plugin_Continue;
+			return SettleContinue(gen);
 		}
 		else if (state == DOOR_STATE_CLOSING_IN_PROGRESS)
 		{
@@ -2174,7 +2214,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 				PrintToServer("[cptele] 安全门 #%d 正在关闭中，等待关到位（区域 #%d）", door, index);
 			}
 
-			return Plugin_Continue;
+			return SettleContinue(gen);
 		}
 		else
 		{
@@ -2184,7 +2224,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 			// 引擎几个 tick 才看得出来。间距用 SAFEROOM_SETTLE_RETRY_DELAY，别每 0.25s 就判死。
 			if (GetGameTime() < g_fSettleNextOpenTry)
 			{
-				return Plugin_Continue;
+				return SettleContinue(gen);
 			}
 
 			if (g_iSettleOpenTries >= SAFEROOM_SETTLE_RETRY_MAX)
@@ -2214,7 +2254,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 					door, g_iSettleOpenTries, state, index);
 			}
 
-			return Plugin_Continue;
+			return SettleContinue(gen);
 		}
 	}
 
@@ -2232,7 +2272,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 				PrintToServer("[cptele] 安全门 #%d 尚未完全开启（state=%d），暂不关门（区域 #%d）", door, state, index);
 			}
 
-			return Plugin_Continue;
+			return SettleContinue(gen);
 		}
 	}
 
@@ -2258,7 +2298,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 		if (GetGameTime() < g_fSettleNextRetry)
 		{
 			// 还没到下次补传的时间（给物理挤压 / 引擎落位留时间）
-			return Plugin_Continue;
+			return SettleContinue(gen);
 		}
 
 		g_iSettleRetry++;
@@ -2273,7 +2313,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 		}
 
 		// 传完这一批等下一 tick 重新统计，不要在同一 tick 里连续传
-		return Plugin_Continue;
+		return SettleContinue(gen);
 	}
 
 	// ---- 第 3 步：关门 + 补发 CheckpointDoorClosed（补上引擎缺的 Closed）-----
@@ -2300,7 +2340,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 				door, arrived, alive, index);
 		}
 
-		return Plugin_Continue;
+		return SettleContinue(gen);
 	}
 
 	// 关门动作有自己的动画时间（约 0.5~1 秒）。门还没关到位就发事件，
@@ -2319,7 +2359,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 			PrintToServer("[cptele] 安全屋结算：门 #%d 被重新打开（state=%d），重新关门（区域 #%d）", door, state, index);
 		}
 
-		return Plugin_Continue;
+		return SettleContinue(gen);
 	}
 
 	// 还在关：等它关到位再发事件
@@ -2330,7 +2370,7 @@ public Action Timer_SaferoomDoorFix(Handle timer)
 			PrintToServer("[cptele] 安全屋结算：等待门 #%d 关到位（state=%d，区域 #%d）", door, state, index);
 		}
 
-		return Plugin_Continue;
+		return SettleContinue(gen);
 	}
 
 	if (!g_bSettleEventFired)
@@ -2414,6 +2454,32 @@ void FireCheckpointClosed(int changelevel, int door, int index, int arrived, con
 }
 
 /**
+ * 状态机「继续下一 tick」：重新挂一个一次性 timer，并把当前这一代传下去。
+ *
+ * 为什么不用 TIMER_REPEAT：重复 timer 在换图时会被引擎按 TIMER_FLAG_NO_MAPCHANGE
+ * 自动关闭，而 ResetRound 又 delete 一次 => 同一个 handle 被关闭两次，运行期就会报
+ *   "Invalid timer handle <h> (error 1) during timer end, unable to call function
+ *    Timer_SaferoomDoorFix"
+ * 改成一次性 timer 逐 tick 续命后，**每个 handle 只会被关闭一次**（触发即由引擎回收，
+ * 我们只管放开引用），重复关闭的窗口彻底消失。
+ *
+ * @param gen 发起续命的那一代；若期间已经换图/收尾（世代号变了）就不再续命
+ * @return 恒为 Plugin_Stop —— 结束当前这一次性 timer（这是正常行为，不是出错）
+ */
+Action SettleContinue(int gen)
+{
+	// 期间已经换图 / 已收尾 / 已重新启动：不再续命，静静结束
+	if (gen != g_iSettleGen)
+	{
+		return Plugin_Stop;
+	}
+
+	g_hDoorFix = CreateTimer(SAFEROOM_SETTLE_TICK, Timer_SaferoomDoorFix, gen);
+
+	return Plugin_Stop;
+}
+
+/**
  * 收尾：把状态机挂起槽全部清干净。
  *
  * 这个函数只会从 Timer_SaferoomDoorFix 里调用，而调用点全部紧跟着 return Plugin_Stop，
@@ -2426,6 +2492,9 @@ void SettleFinish(const char[] sReason)
 	{
 		PrintToServer("[cptele] 安全屋结算结束（%s）：区域 #%d", sReason, g_iDoorFixArea);
 	}
+
+	// 世代号 +1：让所有在途的旧 tick 立刻作废（它们看到 gen 不匹配会自己退出）
+	g_iSettleGen++;
 
 	g_hDoorFix = null;
 
@@ -2500,10 +2569,15 @@ int FindLastChangelevel()
 		return -1;
 	}
 
-	if (iCand == 1)
-	{
-		return aCand[0];
-	}
+	// 1.2.4（需求 #6）：单候选**不能**直接返回 —— 唯一那个可能正是「往回走」的
+	// 回退触发（spawnflags & 2）。实测 c6m3_port.bsp 全图只有 1 个 info_changelevel：
+	//   spawnflags=2, map=c6m3_port(指向自己), landmark=c6m2-c6m3_landmark
+	// 也就是「从 c6m3 往回走到 c6m2」那个触发，绝不是关底安全屋。旧代码在这里直接
+	// return，把它注册成 AREA_SAFEROOM，于是玩家正常路过后半段（电梯下来到罐油发电机
+	// 那一片正好在这个体积里）就会被当成「全员进入安全屋」，进而触发关门 +
+	// CheckpointDoorClosed，让引擎真的换图 —— 这正是用户报的「c6m3 电梯附近直接结算
+	// 分数并换边/进下一关」。
+	// 走下面的统一过滤（剔 spawnflags & 2），一个都不剩就当这张图没有关底安全屋。
 
 	// ---- 1) 剔掉"往回走"的候选（spawnflags & 2）--------------------------
 	int aPool[16];
@@ -2517,14 +2591,49 @@ int FindLastChangelevel()
 		}
 	}
 
-	// 整张图都被标成回退（罕见的三方图写法）：退化成原候选全集，别把功能直接关死
+	// 一个都没剩下（全被标成"往回走"）：**不要**无条件退化成全集。
+	// 1.2.4（需求 #6）：这里原来直接拿全集兜底，等于把刚才那次过滤又撤销了 ——
+	// c6m3_port 只有 1 个 info_changelevel 且 spawnflags=2，兜底后它照样被当成
+	// 关底安全屋，修复失效。现在改成：只有在「确实存在指向别的图」的候选时才兜底，
+	// 否则判定这张图压根没有关底安全屋（终局图走 trigger_finale，本来也没有）。
 	if (iPool <= 0)
 	{
-		iPool = iCand;
+		char sCur[64];
+		GetCurrentMap(sCur, sizeof(sCur));
 
 		for (int i = 0; i < iCand; i++)
 		{
-			aPool[i] = aCand[i];
+			if (!HasEntProp(aCand[i], Prop_Data, "m_mapName"))
+			{
+				continue;
+			}
+
+			char sTgt[64];
+
+			if (GetEntPropString(aCand[i], Prop_Data, "m_mapName", sTgt, sizeof(sTgt)) <= 0)
+			{
+				continue;
+			}
+
+			// 指向自己 / 空的都是「往回走」的回退项，不算关底
+			if (sTgt[0] == '\0' || StrEqual(sTgt, sCur, false))
+			{
+				continue;
+			}
+
+			aPool[iPool++] = aCand[i];
+		}
+
+		if (iPool <= 0)
+		{
+			if (g_cvVerbose.BoolValue)
+			{
+				PrintToServer("[cptele] 全部 %d 个 changelevel 都是「往回走」的回退项且不指向别的图，判定本图无关底安全屋（终局图走 trigger_finale）", iCand);
+			}
+
+			// 重要：返回 -1 让上层不注册 AREA_SAFEROOM，从而不会误触发
+			// 「开门 -> 关门 -> CheckpointDoorClosed」这条换图链
+			return -1;
 		}
 	}
 
@@ -3414,9 +3523,15 @@ void ResetRound()
 	delete g_hMonitor;
 	g_hMonitor = null;
 
-	// 安全屋结算状态机（1.2.3 起是一个 TIMER_REPEAT，必须显式 delete 才能停下）
-	// 也要一起清，避免换图 / 换回合后还在旧区域上动作
-	delete g_hDoorFix;
+	// 安全屋结算状态机（1.2.4 起是「一次性 timer 逐 tick 续命」）。
+	// 先让世代号 +1：所有在途的旧 tick 会看到 gen 不匹配而立即退出，不会再续命。
+	// 再 delete 挂起的那一个（此时它一定是我们刚挂上、还没触发的，关闭只会发生一次）。
+	// 注意顺序：必须**先**改世代号再 delete，否则 delete 之后引擎仍可能投递已排队的 tick。
+	g_iSettleGen++;
+	if (g_hDoorFix != null)
+	{
+		delete g_hDoorFix;
+	}
 	g_hDoorFix = null;
 	g_iDoorFixArea = -1;
 	g_iDoorFixRef = 0;

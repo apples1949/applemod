@@ -16,7 +16,7 @@
 *	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define PLUGIN_VERSION 		"1.23.1-12v12"
+#define PLUGIN_VERSION 		"1.23.2-12v12"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark logic function.
 
 /*======================================================================================
@@ -30,6 +30,18 @@
 
 ========================================================================================
 	Change Log:
+
+12v12 1.23.2 修改:
+	- "AI 生还者离队自动传送"新增"传送冷却": 同一个 AI 生还者两次落后/离队传送之间至少间隔
+	  l4d2_anti_rush_bot_teleport_cooldown 秒(默认 30.0, 最小值用 CreateConVar 的 min 参数钳到 30.0,
+	  管理员只能调大不能调小, 因为需求是"至少半分钟").
+	  之前只有"检测节流"(l4d2_anti_rush_bot_interval, 默认 1.0 秒, 只管多久重新检测一次), 没有传送冷却,
+	  所以跳图/队友移动/流距离抖动时同一个 bot 可能每秒被传送一次.
+	  两套节流互相独立: 冷却期内照常检测并更新检测节流时间, 只是不再真的传送.
+	- 新增 cvar: l4d2_anti_rush_bot_teleport_cooldown(默认 30.0 秒, 最小 30.0).
+	- 回合重置(ResetClient)时一并清掉冷却计时, 新回合的第一次传送不受上一回合拖累.
+	- 例外: TimerTest 里"本 tick 不再跑图 → 撤限速"那次 ResetClient 传 keepBotTeleportCooldown = true 保留冷却,
+	  否则领先的 bot 刚被传送、下一 tick 限速一解除, 冷却就被清空, 又退回"每秒可传送一次".
 
 12v12 1.23.1 新增:
 	- 新增"AI 生还者离队自动传送": team 2 且 IsFakeClient(没被玩家接管)的生还者, 与"队伍参考点"(采样里除它
@@ -202,11 +214,12 @@ float g_iBenchTicks;
 #define METERS_PER_UNIT		0.0254			// flow 距离单位是 Hammer 单位(约 1 英寸), 乘此系数换算成米给玩家看.
 #define BOT_TELEPORT_OFFSET	20.0		// AI 生还者传送落点相对队友的小偏移(Hammer 单位, 20 约 0.5 米), 避免与队友完全同点互相推挤.
 #define BOT_MIN_SAMPLES		2			// AI 传送规则最少采样人数(含该 bot 自己): 少于 2 人说明没有队友可传, 规则不动作.
+#define BOT_TELEPORT_COOLDOWN_MIN	30.0	// AI 传送冷却下限(秒): 需求是"两次传送至少间隔半分钟", 用 CreateConVar 的 min 参数钳死, 管理员只能调大.
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
 ConVar g_hCvarHint, g_hCvarSound, g_hCvarNotifyTime, g_hCvarTeamNotify, g_hCvarTeamNotifyTime;
 // 12v12 新增: AI 生还者(没被玩家接管)离队自动传送的 cvar.
-ConVar g_hCvarBotTeleport, g_hCvarBotRange, g_hCvarBotInterval;
+ConVar g_hCvarBotTeleport, g_hCvarBotRange, g_hCvarBotInterval, g_hCvarBotCooldown;
 float g_fCvarRangeLast, g_fCvarRangeLead, g_fCvarSlow, g_fCvarWarnLast, g_fCvarWarnLead, g_fCvarWarnTime;
 float g_fCvarNotifyTime, g_fCvarTeamNotifyTime;
 int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
@@ -214,6 +227,7 @@ int g_iCvarHint, g_iCvarSound, g_iCvarTeamNotify;
 // 12v12 新增: AI 生还者离队传送规则的 cvar 缓存值与运行期 native 可用性.
 int g_iCvarBotTeleport;
 float g_fCvarBotRange, g_fCvarBotInterval;
+float g_fCvarBotCooldown;				// 传送冷却(秒): 同一个 AI 生还者两次传送之间的最短间隔, 最小被 cvar 钳到 BOT_TELEPORT_COOLDOWN_MIN.
 bool g_bNtvCheckpoint, g_bNtvWarp;
 bool g_bCvarAllow, bCvarAllow, g_bMapStarted, g_bLeft4Dead2;
 
@@ -230,6 +244,11 @@ bool g_bIntercepted[MAXPLAYERS+1];	// 本 tick 是否被判为跑图拦截(用�
 float g_fTeamNotifyTime;			// 全队简短提示的全局上次发送时间(所有玩家共用, 防多人同时触发刷屏)
 // 12v12 新增: AI 生还者离队传送的状态.
 float g_fBotNextCheck[MAXPLAYERS+1];	// 该 AI 生还者下次允许检测的游戏时间(按 l4d2_anti_rush_bot_interval 节流)
+// 12v12 1.23.2 新增: 传送冷却状态 —— 和上面的 g_fBotNextCheck 是两套完全独立的节流:
+//   g_fBotNextCheck  = "检测节流", 决定多久重新算一次距离(默认 1.0 秒), 冷却期内它照常更新;
+//   g_fBotNextTeleport = "传送冷却", 决定同一个 bot 最短多久能被真正传送一次(默认 30.0 秒).
+// 分开存的原因: 若复用同一个变量, 冷却期会把检测也一起停掉, 队伍移动后 bot 该被拉回时反而判不出来.
+float g_fBotNextTeleport[MAXPLAYERS+1];	// 该 AI 生还者下次允许被传送的最早游戏时间
 float g_fBotNotifyTime;				// AI 传送提示的全局上次发送时间(与全队提示分开计时, 但共用同一个间隔 cvar)
 
 char g_sMap[PLATFORM_MAX_PATH];
@@ -301,6 +320,10 @@ public void OnPluginStart()
 	g_hCvarBotTeleport =	CreateConVar("l4d2_anti_rush_bot_teleport", "1",				"AI 生还者离队自动传送开关: 0=关闭, 1=开启(默认). 这里的 AI 生还者指 team 2 且 IsFakeClient 的身体, 即没被玩家接管的那种.", CVAR_FLAGS);
 	g_hCvarBotRange =		CreateConVar("l4d2_anti_rush_bot_range", "1500.0",			"AI 生还者离队传送距离(流距离, Hammer 单位, 1500 约 38 米): 该 AI 生还者与队伍参考点(除它以外全体存活生还者的平均 flow 距离)相差超过该值就传送回队伍, 不分领先还是落后. 0.0=关闭. 默认 1500.0.", CVAR_FLAGS);
 	g_hCvarBotInterval =	CreateConVar("l4d2_anti_rush_bot_interval", "1.0",			"AI 生还者离队检测节流(秒): 同一个 AI 生还者最短多久重新检测一次. 检测本身跑在 TimerTest 的 1 秒节拍上, 所以最小 1.0. 默认 1.0.", CVAR_FLAGS, true, 1.0);
+	// 12v12 1.23.2 新增: 传送冷却. 注意与上面的 bot_interval 不是一回事 —— bot_interval 只管"多久重新检测一次",
+	// 本项管"同一个 bot 最短多久能被真的传送一次"; 冷却期内仍然照常检测, 只是不执行传送.
+	// 最小值用 min 参数钳到 30.0(需求: 至少半分钟), 防止管理员误设 0/很小值让冷却失效; 调大不受限制.
+	g_hCvarBotCooldown =	CreateConVar("l4d2_anti_rush_bot_teleport_cooldown", "30.0",	"AI 生还者离队传送冷却(秒): 同一个 AI 生还者两次自动传送之间的最短间隔. 最小 30.0(可调大, 不可小于 30.0). 默认 30.0. 注意: 这不同于 l4d2_anti_rush_bot_interval(那只是检测节流).", CVAR_FLAGS, true, BOT_TELEPORT_COOLDOWN_MIN);
 
 	//AutoExecConfig(true, "l4d_anti_rush");
 
@@ -331,6 +354,7 @@ public void OnPluginStart()
 	g_hCvarBotTeleport.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarBotRange.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarBotInterval.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarBotCooldown.AddChangeHook(ConVarChanged_Cvars);
 
 	g_hElevators = new ArrayList();
 
@@ -391,6 +415,10 @@ void GetCvars()
 	g_iCvarBotTeleport = g_hCvarBotTeleport.IntValue;
 	g_fCvarBotRange = g_hCvarBotRange.FloatValue;
 	g_fCvarBotInterval = g_hCvarBotInterval.FloatValue;
+	g_fCvarBotCooldown = g_hCvarBotCooldown.FloatValue;
+	// 兜底: 即使有人绕过引擎下限(例如手工改 cfg 后由别处灌进来), 冷却也不允许低于 BOT_TELEPORT_COOLDOWN_MIN.
+	if (g_fCvarBotCooldown < BOT_TELEPORT_COOLDOWN_MIN)
+		g_fCvarBotCooldown = BOT_TELEPORT_COOLDOWN_MIN;
 
 	// 12v12: 限速上限 = 黄血(瘸腿)速度 survivor_limp_walk_speed (引擎默认 85), 运行时同步, 防止 cfg 改过该值后不同步.
 	if (g_hCvarLimpSpeed == null)
@@ -784,7 +812,10 @@ void ResetPlugin()
 	g_fBotNotifyTime = 0.0;
 }
 
-void ResetClient(int i)
+// keepBotTeleportCooldown: 只有"新回合 / 新一条命 / 换边 / 断线"这类真正的状态重置才清传送冷却;
+// TimerTest 里"本 tick 不再跑图 → 撤限速"那次调用必须传 true, 否则领先的 bot 刚被传送、下一 tick 限速一解除
+// 冷却就被清空, 又退回"每秒可传送一次". 默认 false, 其余调用点语义不变.
+void ResetClient(int i, bool keepBotTeleportCooldown = false)
 {
 	if (g_bInhibit[i] && i <= MaxClients && IsClientInGame(i))
 		SDKUnhook(i, SDKHook_PreThinkPost, PreThinkPost);
@@ -793,6 +824,10 @@ void ResetClient(int i)
 	g_fExecute[i] = 0.0;
 	// 12v12 新增: 客户端状态被整体重置时, 一并清掉 AI 传送检测的节流时间, 免得上一条命的计时拖累新状态.
 	g_fBotNextCheck[i] = 0.0;
+	// 12v12 1.23.2: 传送冷却同样要清 —— 新回合/新一条命第一次离队应立即允许传送, 不该被上一回合的冷却挡住.
+	// 但"撤限速"不算新状态, 那种调用保留冷却(见上面的参数说明).
+	if (!keepBotTeleportCooldown)
+		g_fBotNextTeleport[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
 	ResetNotifyState(i);
 }
@@ -980,7 +1015,7 @@ Action TimerTest(Handle timer)
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (g_bInhibit[client] && !rushing[client])
-			ResetClient(client);
+			ResetClient(client, true);	// 12v12 1.23.2: 只是撤限速, 保留 AI 传送冷却(见 ResetClient 的参数说明)
 
 		// 12v12: 本 tick 没被判为跑图 → 清掉提示状态, 让下次被拦时重新计时并重新发全队提示.
 		if (!g_bIntercepted[client])
@@ -1129,7 +1164,9 @@ bool SurvivorsUnderControl(int client)
 //   - 真人玩家(IsFakeClient == false) —— 他们走原有 rusher/slacker 规则;
 //   - 倒地 / 挂边 / 死亡 / 被控 / 救人中 / 电梯内 / 在安全屋内;
 //   - 采样里没有别的存活生还者(没有队友), 或没有可用落点 → 不传送(绝不硬造坐标);
-//   - 坦克存活且 l4d_anti_rush_tanks = 0 → TimerTest 开头已整体暂停, 本函数根本不会被调用.
+//   - 坦克存活且 l4d_anti_rush_tanks = 0 → TimerTest 开头已整体暂停, 本函数根本不会被调用;
+//   - 该 bot 还在传送冷却期内(l4d2_anti_rush_bot_teleport_cooldown, 默认 30 秒) → 不传送.
+//     注意冷却只挡"传送", 不挡"检测": 检测节流(g_fBotNextCheck)照常推进, 所以冷却一结束就能立刻按最新距离判定.
 void CheckBotsTeleport(const int[] clients, const float[] flows, int count, float totalFlow)
 {
 	if (!g_iCvarBotTeleport || !g_bNtvCheckpoint || g_fCvarBotRange <= 0.0 || count < BOT_MIN_SAMPLES)
@@ -1166,6 +1203,13 @@ void CheckBotsTeleport(const int[] clients, const float[] flows, int count, floa
 		if (FloatAbs(flows[i] - refFlow) <= g_fCvarBotRange)
 			continue;
 
+		// 传送冷却: 这是本规则的第二套节流, 和上面刚更新过的"检测节流"完全独立 ——
+		// 检测已经照常跑了(g_fBotNextCheck 已推进), 这里只决定"能不能真的传送这一次".
+		// 放在算落点之前, 冷却期内连找队友这一步都省掉; 冷却结束后当拍即可按最新距离判断.
+		// (需求: 同一个 bot 两次落后传送至少间隔 l4d2_anti_rush_bot_teleport_cooldown 秒.)
+		if (now < g_fBotNextTeleport[client])
+			continue;
+
 		// 落点: 采样里 flow 距离该 bot 最近的存活队友(真人或 bot 都行, 不含自己).
 		int target;
 		float nearest;
@@ -1194,6 +1238,9 @@ void CheckBotsTeleport(const int[] clients, const float[] flows, int count, floa
 		// 传送后若卡在墙里/半空, 交给 left4dhooks 推到最近的合法位置(native 缺失时跳过, 只做原地点传送).
 		if (g_bNtvWarp)
 			L4D_WarpToValidPositionIfStuck(client);
+
+		// 传送成功才进入冷却(没传送成功就走不到这里), 冷却期内该 bot 再离队只会检测不会传送.
+		g_fBotNextTeleport[client] = now + g_fCvarBotCooldown;
 
 		NotifyBotTeleport(client, now);
 	}

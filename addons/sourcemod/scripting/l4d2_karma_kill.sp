@@ -45,6 +45,26 @@ float g_fkarmaSlowTimeOnServer, g_fkarmaSlowSpeed/*, g_fCooldown*/;
 ConVar cvarFatalFallDamage;
 float g_fFatalFallDamage;
 
+// 高扑联动（技能检测插件 OnHunterHighPounce）：**动态阈值**
+//   第一次：伤害不能低于 l4d2_karma_highpounce_damage_min（默认 25，即 >= 25 才播）
+//   此后  ：伤害必须**高过上一次已播报的伤害值**才会再播（全服共享一个记录）
+// 实现上把两者统一成一条判据：`damage > g_iHighPounceRecord`，
+// 初值取 min-1（25 -> 24），于是首次恰好要求 >= 25；每次播报后把记录刷成本次伤害。
+ConVar cvarHighPounceEnabled, cvarHighPounceDamageMin;
+bool   g_bHighPounceEnabled;
+int    g_iHighPounceDamageMin;
+int    g_iHighPounceRecord;      // 全服共享的"上一次已播报的高扑伤害"；0 = 尚未初始化
+
+/**
+ * 把动态阈值基线重置成"下限 - 1"。
+ * 于是重置后第一次触发就等价于「伤害 >= 下限」（默认下限 24 -> 首次 24 起播）。
+ * 调用时机：插件启动读 cvar 时、每回合开始（round_start）。
+ */
+void ResetHighPounceRecord()
+{
+	g_iHighPounceRecord = g_iHighPounceDamageMin - 1;
+}
+
 
 Handle fw_OnKarmaEventPost = null;
 Handle fw_OnRPGKarmaEventPost = null;
@@ -60,6 +80,7 @@ enum
 	KT_Smoke,
 	KT_Stagger,
 	KT_Jump,
+	KT_HighPounce,    // 高扑：Hunter 高位扑倒生还者（由技能检测插件的 OnHunterHighPounce 驱动）
 	KarmaType_MAX
 };
 
@@ -72,6 +93,7 @@ char karmaNames[KarmaType_MAX][] = {
 	"烟袭",
 	"硬直",
 	"跳跃",
+	"高扑",
 };
 
 // 播报前缀：替换原本写死的 [TS]
@@ -81,6 +103,7 @@ enum
 	KP_InstantKill,       // [秒杀] 生还者因特感将/已直接死亡
 	KP_Suicide,           // [自杀] 生还者主动跳跃导致倒地或死亡
 	KP_Ledge,             // [挂边] 生还者挂边松手
+	KP_HighPounce,        // [高扑] Hunter 高扑伤害超过阈值（技能检测插件联动）
 	KP_MAX
 };
 
@@ -89,6 +112,7 @@ char karmaPrefixes[KP_MAX][] = {
 	"秒杀",
 	"自杀",
 	"挂边",
+	"高扑",
 };
 
 // I'll probably eventually add a logger for karma jumps and add "lastDistance" to this enum struct that dictates the closest special infected if maybe something messed up.
@@ -231,6 +255,8 @@ public void OnPluginStart()
 	//cvarCooldown                     = CreateConVar("l4d2_karma_kill_cooldown", 				"0.0", 	"How long does it take for the next karma to freeze the entire map. Begins counting from the end of the previous freeze", CVAR_FLAGS, true, 0.0);
 	cvarAllowDefib                   = CreateConVar("l4d2_karma_kill_allow_defib", 				"0", 	"Allow karma victims to be revived with defibrillator? 0 - No, 1 - Yes.", CVAR_FLAGS, true, 0.0, true, 1.0);
 	CreateConVar("l4d2_karma_charge_version", PLUGIN_VERSION, " L4D2 Karma Charge Plugin Version ", CVAR_FLAGS_PLUGIN_VERSION);
+	cvarHighPounceEnabled             = CreateConVar("l4d2_karma_highpounce_enabled", 			"1", 	"Trigger the karma effect when a hunter high-pounce damage is greater than l4d2_karma_highpounce_damage_min", CVAR_FLAGS, true, 0.0, true, 1.0);
+	cvarHighPounceDamageMin           = CreateConVar("l4d2_karma_highpounce_damage_min", 		"25", 	"高扑播报的动态阈值下限: 本回合第一次播报要求伤害 >= 该值(默认 25); 之后每次都必须高于上一次已播报的伤害值才会再播", CVAR_FLAGS, true, 0.0);
 	//AutoExecConfig(true, "l4d2_karma_kill");
 
 	GetCvars();
@@ -244,6 +270,8 @@ public void OnPluginStart()
 	cvarisEnabled.AddChangeHook(ConVarChanged_Cvars);
 	//cvarCooldown.AddChangeHook(ConVarChanged_Cvars);
 	cvarAllowDefib.AddChangeHook(ConVarChanged_Cvars);
+	cvarHighPounceEnabled.AddChangeHook(ConVarChanged_Cvars);
+	cvarHighPounceDamageMin.AddChangeHook(ConVarChanged_Cvars);
 
 	if(bLate)
 	{
@@ -391,6 +419,16 @@ void GetCvars()
 	g_bEnabled = cvarisEnabled.BoolValue;
 	//g_fCooldown = cvarCooldown.FloatValue;
 	g_bAllowDefib = cvarAllowDefib.BoolValue;
+	g_bHighPounceEnabled = cvarHighPounceEnabled.BoolValue;
+	g_iHighPounceDamageMin = cvarHighPounceDamageMin.IntValue;
+
+	// 动态阈值基线：首次读 cvar（记录还是 0）或管理员把下限调高到超过现有记录时，
+	// 把记录抬到「下限 - 1」，保证下一次触发至少是 >= 下限。
+	// 不无条件重置，是为了避免改别的 karma cvar 时把本回合已经累积的记录清掉。
+	if (g_iHighPounceRecord < g_iHighPounceDamageMin - 1)
+	{
+		ResetHighPounceRecord();
+	}
 }
 
 public void Plugins_OnJockeyJumpPost(int victim, int jockey, float fForce)
@@ -423,6 +461,60 @@ public void L4D2_OnPounceOrLeapStumble_Post(int victim, int attacker)
 	DettachKarmaFromVictim(victim, KT_Jump);
 
 	// No need to set up a remove m_hTimer, because as long as the player is under stagger, the player is saving the status.
+}
+
+// ---------------------------------------------------------------------------
+// 高扑（Hunter 高位扑倒）联动：消费技能检测插件 l4d2_skill_detect_edi 的 global forward
+//   forward void OnHunterHighPounce(int hunter, int victim, int actualDamage,
+//                                  float calculatedDamage, float height, bool bReportedHigh, bool bPlayerIncapped)
+// 注意：edi 版 forward 是 7 个参数（比 l4d2_skill_detect.inc 里写的 6 个多一个 bPlayerIncapped），
+// 参数个数必须与 .smx 里 CreateGlobalForward 的 Param_ 数量一致，否则运行期直接不匹配。
+// 该 forward 在每次 Hunter 扑中时都会派发（不是"够高"才派发），"高扑"要靠下面的伤害阈值自己判。
+public void OnHunterHighPounce(int hunter, int survivor, int actualDamage, float calculatedDamage, float height, bool bReportedHigh, bool bPlayerIncapped)
+{
+	// 总开关 + 高扑开关：任一关掉整条链路都不生效
+	if (!g_bEnabled || !g_bHighPounceEnabled)
+		return;
+
+	// 动态阈值：必须**高过上一次已播报的伤害**才播。
+	//   首次：记录 = 下限-1（默认 24），所以第一次恰好要求「伤害 >= 25」（不能低于下限）；
+	//   之后：记录 = 上次播报的伤害，于是只有更高的伤害才播，同分或更低都静默。
+	if (actualDamage <= g_iHighPounceRecord)
+		return;
+
+	if (hunter < 1 || hunter > MaxClients || !IsClientInGame(hunter))
+		return;
+
+	if (survivor < 1 || survivor > MaxClients || !IsClientInGame(survivor))
+		return;
+
+	// 只接受"感染者扑生还者"：skill_detect 的 forward 是全局广播，
+	// 若有同名 forward 被别的用途复用，这里挡住免得误播报
+	if (L4D_GetClientTeam(survivor) != L4DTeam_Survivor || L4D_GetClientTeam(hunter) != L4DTeam_Infected)
+		return;
+
+	// 下面两种情况 AnnounceKarma 本来就不会播报/不会慢动作：
+	// 1) only_confirmed=1 时只认"已确认击杀"，高扑属于受伤；
+	// 2) 该受害者已被"每 15 秒一次"的节流挡住（BlockAnnounce）。
+	// 这时若还硬调 AnnounceKarma，它会白删 victimTimer/ledgeTimer 并把 15 秒节流窗口重新计时，
+	// 反而把后面真正该播的播报（例如秒杀）一起推后，所以直接不参与。
+	if (g_bkarmaOnlyConfirmed || BlockAnnounce[survivor])
+		return;
+
+	// 复用既有的 karma 归属登记，AnnounceKarma 播报里的名字 / SteamID 才拿得到人
+	AttachKarmaToVictim(survivor, hunter, KT_HighPounce);
+
+	// bKillConfirmed 传 false：高扑只是"受伤"而不是"击杀确认"，
+	// 因此不走 player_death 那条奖励/改写 attacker 的分支
+	AnnounceKarma(hunter, survivor, KT_HighPounce, false, false, null, INVALID_HANDLE, KP_HighPounce);
+
+	// 播报成功才刷新动态阈值：被上面 only_confirmed /15 秒节流挡掉的更高伤害
+	// 不应悄悄抬高门槛（否则会出现"看着打出了 60 却不播、之后 30 也不播"的困惑）。
+	g_iHighPounceRecord = actualDamage;
+
+	// 播报完立刻回收本次归属：高扑不一定致死，若把 artist 留在 LastKarma 里，
+	// 随后的 player_death / player_incapacitated 会把同一只 Hunter 再播报一遍（前缀还会串成秒杀/高伤）
+	DettachKarmaFromVictim(survivor, KT_HighPounce);
 }
 
 public void L4D2_OnStagger_Post(int victim, int attacker)
@@ -880,6 +972,9 @@ void event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcas
 void event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 	SlowWorldTimeSpeed("0.0", "0.0", "0.0", 0.0, 1.0);
+
+	// 每回合重置高扑的动态阈值记录（全服共享），让新回合第一次播报重新从「下限」起算
+	ResetHighPounceRecord();
 }
 
 void event_RoundStartPostNav(Event event, const char[] name, bool dontBroadcast)

@@ -121,7 +121,45 @@ int	   BhopBtn[MAXPLAYERS + 1];	   /* 上一帧按键快照(检测 IN_JUMP 按�
 int	   BhopTick[MAXPLAYERS + 1];   /* 下一次连跳允许的最小 tick(lilac: next_bhop) */
 int	   BhopChain[MAXPLAYERS + 1];  /* 当前连续完美连跳次数(lilac: perfect_bhops) */
 
-ConVar Apex[28];
+ConVar Apex[40];
+
+/* -----------------------------------------------------------
+   坦克掉控抑制(观测范围) cvar 槽位: 追加在原有 0..27 之后
+----------------------------------------------------------- */
+#define APEX_TF_ENABLE     28
+#define APEX_TF_RANGE      29
+#define APEX_TF_DOT        30
+#define APEX_TF_INTERVAL   31
+#define APEX_TF_DEBUG      32
+#define APEX_TF_T1_TIME    33
+#define APEX_TF_T1_RANGE   34
+#define APEX_TF_T2_TIME    35
+#define APEX_TF_T2_RANGE   36
+#define APEX_TF_T3_TIME    37
+#define APEX_TF_T3_RANGE   38
+
+/* -----------------------------------------------------------
+   坦克掉控抑制(观测范围)
+   -----------------------------------------------------------
+   背景(server.dll 2.2.1.3 逆向实证):
+     CTerrorPlayer::UpdateZombieFrustration (0x1034C610) 每秒给 m_frustration
+     += 100/z_frustration_lifetime(默认 20 → 每秒 5), 满 100 就发 tank_frustrated
+     并把坦克交给 AI = 掉控。它只在“距上次看见生还者”超过 z_frustration_los_delay
+     (默认 2s) 之后才累积。
+     但“算不算看见”由 CTerrorPlayer::CheckEnemySightings 决定, 那次找敌人的检索有
+     两条硬门槛:
+       a) 距离上限硬编码 2000 units(构造点 0x1034D29E 读 2000.0f@0x105D79A0,
+          谓词判定 0x10319388 comiss + ja);
+       b) 方向锥: 视线点积要 > 1 - z_alert_dot(默认 0.3 → 0.7, 约 ±45°)。
+     => 开阔长视野地图(例如 c4m4)坦克站在 2000 units 外明明看得见, 引擎也不认,
+        20 秒后照样掉控。
+   本功能的做法: 用自己的判定(观测范围可配 + 可选朝向锥 + 真实视线), 判定“看得见”
+   就把 m_frustration 原始值写回 0; 判定不成立时完全不干预, 原版“看不到就掉控”照旧。
+   注意: 引擎原始 m_frustration 是 0→100 累加(100=掉控), 与社区 stock
+         GetTankFrustration = 100 - m_frustration 的方向相反, 这里写的是原始值。
+----------------------------------------------------------- */
+Handle g_hTankFrustTimer;
+float  g_fTankCtrlStart[MAXPLAYERS + 1]; /* 该玩家拿到坦克控制权的时刻(0=当前没在跟踪) */
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -310,6 +348,23 @@ public void
 	Apex[27] = CreateConVar("tank_pred_lockout", "0.6", "掷出后的锁定期(秒): 收招阶段引擎还会重选投掷动作, 这段时间内不重开预测窗口(否则石头离手后线会再出现, 而且会取到收招姿势让线画在脚边)", _, true, 0.0, true, 3.0);
 	Apex[26] = CreateConVar("tank_pred_emit", "0.033", "光束发射间隔(秒): 越小越跟手但残影越多(残影=多条线叠在一起). 30Hz 配光束寿命 0.055 秒刚好一条线", _, true, 0.01, true, 0.2);
 	Apex[25] = CreateConVar("tank_pred_off_r", "14.0", "画线视觉右移(点): 整条线往准星右侧让开避免挡视线, 末端收敛到真实落点. 0=不偏移", _, true, 0.0, true, 64.0);
+
+	/* 坦克掉控抑制(观测范围): 默认关闭, 由各模式 cfg 用 confogl_addcvar 打开 */
+	Apex[APEX_TF_ENABLE]   = CreateConVar("l4d2_tankfrust_enable",   "0",     "坦克掉控抑制: 1=玩家坦克看得见生还者时不让怒气累积(不掉控) 0=关闭(原版行为)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TF_RANGE]    = CreateConVar("l4d2_tankfrust_see_range", "0.0",  "基准观测范围(单位): 0=无限; 未到阶梯门槛时用这个值");
+	Apex[APEX_TF_DOT]      = CreateConVar("l4d2_tankfrust_see_dot",  "-1.0",  "朝向锥: 坦克视线与目标方向的点积下限, -1=不检查方向(全向都能看见), 0.7≈±45°", _, true, -1.0, true, 1.0);
+	Apex[APEX_TF_INTERVAL] = CreateConVar("l4d2_tankfrust_interval", "0.2",   "检查间隔(秒)", _, true, 0.05, true, 1.0);
+	Apex[APEX_TF_DEBUG]    = CreateConVar("l4d2_tankfrust_debug",    "0",     "1=把判定结果写进服务器日志(部署核对用)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TF_T1_TIME]  = CreateConVar("l4d2_tankfrust_t1_time",  "210.0", "阶梯1: 坦克存活满多少秒后把观测范围收紧(0=禁用该档)");
+	Apex[APEX_TF_T1_RANGE] = CreateConVar("l4d2_tankfrust_t1_range", "1500.0", "阶梯1: 收紧后的观测范围(单位)");
+	Apex[APEX_TF_T2_TIME]  = CreateConVar("l4d2_tankfrust_t2_time",  "300.0", "阶梯2: 坦克存活满多少秒后进一步收紧(0=禁用该档)");
+	Apex[APEX_TF_T2_RANGE] = CreateConVar("l4d2_tankfrust_t2_range", "1000.0", "阶梯2: 收紧后的观测范围(单位)");
+	Apex[APEX_TF_T3_TIME]  = CreateConVar("l4d2_tankfrust_t3_time",  "360.0", "阶梯3: 坦克存活满多少秒后收到最紧(0=禁用该档)");
+	Apex[APEX_TF_T3_RANGE] = CreateConVar("l4d2_tankfrust_t3_range", "750.0",  "阶梯3: 收紧后的观测范围(单位)");
+
+	Apex[APEX_TF_ENABLE].AddChangeHook(OnTankFrustCvarChanged);
+	Apex[APEX_TF_INTERVAL].AddChangeHook(OnTankFrustCvarChanged);
+	StartTankFrustTimer();
 
 	/* 石头轨迹预测用到的游戏 cvar: 缓存句柄, 避免每帧 FindConVar */
 	g_hSvGravity  = FindConVar("sv_gravity");		 /* 引擎 cvar, L4D2 恒存在; 取不到时按 800 兜底 */
@@ -639,6 +694,10 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 
 	Reset(client);
 	if (Apex[2].IntValue > 0) CreateTimer(0.1, SetTankHealth, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+
+	/* 坦克掉控抑制: 开坦克时重置存活计时, 并兜底启动定时器(万一 cvar 在本插件加载前就已设好, 不会触发 change hook) */
+	g_fTankCtrlStart[client] = GetGameTime();
+	StartTankFrustTimer();
 	/* 姿势提示 + 技能提示(含缩写)统一交给定时器逐条发 */
 	TankHints_Start(client);
 }
@@ -2387,3 +2446,163 @@ void Reset(int client)
 	g_iFlyRock[client]		 = INVALID_ENT_REFERENCE;
 	Pred_ResetCache(client);
 }
+
+/* ===========================================================================
+   坦克掉控抑制(观测范围) —— 实现
+   =========================================================================== */
+
+void OnTankFrustCvarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	StartTankFrustTimer();
+}
+
+void StartTankFrustTimer()
+{
+	delete g_hTankFrustTimer;
+	g_hTankFrustTimer = null;
+
+	/* 不论开关都常驻这个定时器(体里自己判断开关): 万一 l4d2_tankfrust_enable 是在
+	   本插件加载之前就被设好的(不会触发 change hook), 定时器照样能按新值生效 */
+	float fInterval = Apex[APEX_TF_INTERVAL].FloatValue;
+	if (fInterval < 0.05)
+		fInterval = 0.05;
+	if (fInterval > 1.0)
+		fInterval = 1.0;
+
+	g_hTankFrustTimer = CreateTimer(fInterval, Timer_TankFrust, _, TIMER_REPEAT);
+}
+
+/* 按"坦克存活时长"给出这一档的观测范围(后加的档覆盖前面的, 基准范围 = l4d2_tankfrust_see_range) */
+float GetTankFrustSeeRange(float fAliveTime)
+{
+	float fRange = Apex[APEX_TF_RANGE].FloatValue;
+	float fTime;
+
+	fTime = Apex[APEX_TF_T1_TIME].FloatValue;
+	if (fTime > 0.0 && fAliveTime >= fTime)
+		fRange = Apex[APEX_TF_T1_RANGE].FloatValue;
+
+	fTime = Apex[APEX_TF_T2_TIME].FloatValue;
+	if (fTime > 0.0 && fAliveTime >= fTime)
+		fRange = Apex[APEX_TF_T2_RANGE].FloatValue;
+
+	fTime = Apex[APEX_TF_T3_TIME].FloatValue;
+	if (fTime > 0.0 && fAliveTime >= fTime)
+		fRange = Apex[APEX_TF_T3_RANGE].FloatValue;
+
+	if (fRange < 0.0)
+		fRange = 0.0;
+
+	return fRange;
+}
+
+Action Timer_TankFrust(Handle timer)
+{
+	if (!Apex[APEX_TF_ENABLE].BoolValue)
+	{
+		/* 关掉时把存活计时也清了, 重新打开就从当前时刻重新算 */
+		for (int i = 1; i <= MaxClients; i++)
+			g_fTankCtrlStart[i] = 0.0;
+
+		return Plugin_Continue;
+	}
+
+	float fNow = GetGameTime();
+	bool  bDbg = (Apex[APEX_TF_DEBUG].IntValue >= 1);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i))
+		{
+			g_fTankCtrlStart[i] = 0.0;
+			continue;
+		}
+
+		/* 第一次看到这个玩家开坦克 = 记下控制权起点; 换人/重开都靠这个自动重算 */
+		if (g_fTankCtrlStart[i] <= 0.0)
+			g_fTankCtrlStart[i] = fNow;
+
+		int iMeter = GetEntProp(i, Prop_Send, "m_frustration");
+		if (iMeter <= 0)
+			continue; /* 原始值已经是 0(怒气满), 引擎会从 0 开始涨, 不用管 */
+
+		float fAlive = fNow - g_fTankCtrlStart[i];
+		float fRange = GetTankFrustSeeRange(fAlive);
+
+		if (!TankFrustCanSeeSurvivor(i, fRange))
+			continue;
+
+		SetEntProp(i, Prop_Send, "m_frustration", 0);
+
+		if (bDbg)
+			LogMessage("[tankfrust] %N 存活 %.0fs 观测范围 %.0f: m_frustration %d -> 0", i, fAlive, fRange, iMeter);
+	}
+
+	return Plugin_Continue;
+}
+
+bool TankFrustCanSeeSurvivor(int tank, float fRange)
+{
+	float vTankEye[3];
+	GetClientEyePosition(tank, vTankEye);
+
+	float vFwd[3];
+	float fDotMin = Apex[APEX_TF_DOT].FloatValue;
+	bool  bCheckDot = (fDotMin > -1.0);
+
+	if (bCheckDot)
+	{
+		float vAngles[3];
+		GetClientEyeAngles(tank, vAngles);
+		GetAngleVectors(vAngles, vFwd, NULL_VECTOR, NULL_VECTOR);
+	}
+
+	for (int j = 1; j <= MaxClients; j++)
+	{
+		if (j == tank || !IsValidClient(j))
+			continue;
+		if (GetClientTeam(j) != 2 || !IsPlayerAlive(j))
+			continue;
+
+		float vTarget[3];
+		GetClientEyePosition(j, vTarget);
+
+		float fDist = GetVectorDistance(vTankEye, vTarget);
+		if (fRange > 0.0 && fDist > fRange)
+			continue;
+
+		if (bCheckDot)
+		{
+			float vDir[3];
+			MakeVectorFromPoints(vTankEye, vTarget, vDir);
+			NormalizeVector(vDir, vDir);
+
+			if (GetVectorDotProduct(vFwd, vDir) < fDotMin)
+				continue;
+		}
+
+		if (TankFrustLineOfSightClear(vTankEye, vTarget))
+			return true;
+	}
+
+	return false;
+}
+
+/* 只让世界几何体挡视线: 忽略所有客户端实体(坦克/生还者/其它感染者) */
+bool TankFrustLineOfSightClear(const float vStart[3], const float vEnd[3])
+{
+	Handle hTrace = TR_TraceRayFilterEx(vStart, vEnd, MASK_VISIBLE, RayType_EndPoint, TankFrustTraceFilter);
+	bool bClear = !TR_DidHit(hTrace);
+	delete hTrace;
+
+	return bClear;
+}
+
+public bool TankFrustTraceFilter(int entity, int contentsMask, any data)
+{
+	if (entity >= 1 && entity <= MaxClients)
+		return false;
+
+	return true;
+}
+

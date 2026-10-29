@@ -17,7 +17,10 @@ static bool
 	RM_bIsPluginsLoaded	  = false,
 	RM_bIsMapRestarted	  = false,
 	RM_bRestorePending    = false,
-	RM_bIsChmatchRequest = false;
+	RM_bIsChmatchRequest = false,
+	// plugin_manager 可用性自检的状态位（为什么需要它，见 RM_EnsurePluginManager 的说明）。
+	RM_bPmLoadRequested  = false,
+	RM_bPmVerifyPending  = false;
 
 static Handle
 	RM_hRestartTimer = null,
@@ -94,8 +97,11 @@ void RM_OnModuleStart()
 	}
 
 	// 上游 2.6.0 起，退出/切换模式改由 plugin_manager 的 pm_unload_plugins 负责（写在各模式 confogl_off.cfg 里）。
-	// 保护清单由 cfg/protectedplugins.cfg 决定，这里只做可用性检查（缺 plugin_manager 时留一条错误日志）。
-	RM_PluginManagerAvailable(true);
+	// 保护清单由 cfg/protectedplugins.cfg 决定，这里只做可用性检查（真缺 plugin_manager 时留一条错误日志）。
+	// 注意时机：这一刻是 OnPluginStart，SourceMod 正在逐个加载 plugins/ 下的插件，排在后面的
+	// plugin_manager.smx 可能还没轮到（文件名序上 confogl... 先于 plugin...，edi 先加载），
+	// 此时判断必然是误报。所以推迟到“其余插件都加载完”的下一帧再查，见 RM_VerifyPluginManagerDeferred。
+	RequestFrame(RM_VerifyPluginManagerDeferred);
 }
 
 /*
@@ -116,6 +122,60 @@ static bool RM_PluginManagerAvailable(bool bPrint)
 	}
 
 	return false;
+}
+
+/*
+	确认 plugin_manager 可用；不在就先补一条加载命令。
+	补载命令是排进引擎命令队列的，之后才 exec 的 off-cfg 里 pm_unload_plugins 到那时就能真正执行，
+	所以“暂时还没加载 / 被 sm plugins unload_all 一起卸掉”是修好，而不是把日志压掉。
+	返回 true = 现在能用，或已经排入加载；之前补过仍未出现才返回 false（真的装不上）。
+*/
+static bool RM_EnsurePluginManager()
+{
+	if (RM_PluginManagerAvailable(false))
+	{
+		RM_bPmLoadRequested = false;
+		return true;
+	}
+
+	if (RM_bPmLoadRequested)
+	{
+		return false;
+	}
+
+	RM_bPmLoadRequested = true;
+	ServerCommand("sm plugins load plugin_manager.smx");
+	RM_SchedulePluginManagerVerify();
+
+	return true;
+}
+
+// 补载后复核：1 秒后仍然没有 pm 才写错误日志（那才是真缺失）。
+static void RM_SchedulePluginManagerVerify()
+{
+	if (RM_bPmVerifyPending)
+	{
+		return;
+	}
+
+	RM_bPmVerifyPending = true;
+	CreateTimer(1.0, RM_VerifyPluginManagerTimer, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// plugins/ 全部加载完后（OnPluginStart 的下一帧）复核一次：缺了先补载，再由上面的复核收尾。
+static void RM_VerifyPluginManagerDeferred()
+{
+	RM_EnsurePluginManager();
+}
+
+static Action RM_VerifyPluginManagerTimer(Handle hTimer)
+{
+	RM_bPmVerifyPending = false;
+
+	// 补载成功就什么都不做；仍未出现才是真缺，这里才留错误日志。
+	RM_PluginManagerAvailable(true);
+
+	return Plugin_Stop;
 }
 
 void RM_OnAllModulesStarted()
@@ -422,7 +482,12 @@ static void RM_Match_Unload(bool bForced = false)
 		// chmatch：off-cfg 末尾的 pm_unload_plugins 会把本插件一起卸掉（protectedplugins.cfg 只保护
 		// left4dhooks / command_buffer / l4d2_sv_tags）。这里的续载不靠插件自身存活：
 		// 目标模式已写进 match_change，sm plugins refresh 重载本插件后由 RM_RestoreMatchAfterLoad 接着加载。
-		RM_PluginManagerAvailable(true);
+		// RM_CMD_ChangeMatch 已经确认过（或刚补载，命令还在队列里），所以这里不再裸报错：
+		// 只有“压根没补载过”才同步报警，补载后仍不出现的情况由 RM_VerifyPluginManagerTimer 留日志。
+		if (!RM_bPmLoadRequested)
+		{
+			RM_PluginManagerAvailable(true);
+		}
 		ExecuteCfg(sBuffer);
 	}
 
@@ -683,7 +748,10 @@ static Action RM_CMD_ChangeMatch(int client, int args)
 	// 等卸载真发生时（命令队列稍后执行），新实例会读到它。
 	RM_hChangeMatch.SetString(sBuffer);
 
-	bool bHasPluginManager = RM_PluginManagerAvailable(false);
+	// 缺 plugin_manager 时先补载：补载命令排在随后 ExecuteCfg(off-cfg) 之前，
+	// off-cfg 末尾的 pm_unload_plugins 到那时能正常执行（真的卸载 → sm plugins refresh → 本插件重载），
+	// 补不上（RM_bPmLoadRequested 已有记录仍不出现）才退回下面的定时器分支。
+	bool bHasPluginManager = RM_EnsurePluginManager();
 
 	RM_Match_Unload(true);
 

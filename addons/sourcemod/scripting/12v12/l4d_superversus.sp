@@ -904,6 +904,25 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 				}
 			}
 			if (result != Join_Failed) result = TryJoinTeam(client, JoinTarget[client], false);
+
+			/* 自动入队兜底：选中的那一队刚好塞不进去（最常见的是生还者席位被"已死亡但还躺着"
+			   的人占着），就改试另一队的空位，别把新玩家晾在旁观里。 */
+			if (JoinAutomatic[client] && result == Join_Failed)
+			{
+				int other = (JoinTarget[client] == TEAM_SURVIVOR) ? TEAM_INFECTED : TEAM_SURVIVOR;
+				bool bOtherOpen = false;
+
+				if (other == TEAM_INFECTED)
+					bOtherOpen = InfectedAllowed && GetTeamPlayers(TEAM_INFECTED, false) < InfectedLimit.IntValue;
+				else
+					bOtherOpen = GetTeamPlayers(TEAM_SURVIVOR, false) < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+
+				if (bOtherOpen)
+				{
+					JoinTarget[client] = other;
+					result = TryJoinTeam(client, other, false);
+				}
+			}
 		}
 	}
 	// 脱困：没排进去时不能把人留在"生还者队 + 已死亡"的槽位上，否则客户端会一直
@@ -917,7 +936,7 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 		if (JoinAutomatic[client]) NewConnection[client] = false;
 		// 脱困时已经给过"已退回旁观"的提示，不再重复刷一条同样的消息
 		if (result != Join_Success && !rescued)
-			PrintToChat(client, "\x03[SV] \x01当前没有可加入的队伍位置，可按 M 或输入 !join 重试。");
+			ExplainJoinFailure(client);
 		CancelJoin(client);
 	}
 	return Plugin_Stop;
@@ -965,7 +984,7 @@ bool RescueStuckDeadSurvivor(int client)
 	if (GetEntProp(client, Prop_Send, "m_iObserverMode") == 5)
 		SetEntProp(client, Prop_Send, "m_iObserverMode", 0);
 
-	PrintToChat(client, "\x03[SV] \x01当前没有可加入的位置，已退回旁观，可按 M 或输入 !join 重试。");
+	PrintToChat(client, "\x03[SV] \x01当前没有可加入的位置，已退回旁观，可输入 !jg 重试。");
 	return true;
 }
 
@@ -990,6 +1009,39 @@ int SelectBalancedTeam(int client)
 	if (survivors < infected) return TEAM_SURVIVOR;
 	if (infected < survivors) return TEAM_INFECTED;
 	return GetRandomInt(TEAM_SURVIVOR, TEAM_INFECTED);
+}
+
+/* 自动/手动入队失败时说清原因（玩家反馈"进不去却不知道为什么"）。
+   口径与 TryJoinTeam 的判定完全一致：生还者侧可补位 = 真人名额没满 且 没有死亡占位；
+   特感侧可补位 = 允许特感 且 真人名额没满。 */
+void ExplainJoinFailure(int client)
+{
+	int survivors = GetTeamPlayers(TEAM_SURVIVOR, false);
+	int infected  = GetTeamPlayers(TEAM_INFECTED, false);
+
+	bool bDeadSeat     = HasDeadSurvivorSeat();
+	bool bSurvivorFull = survivors >= SurvivorLimit.IntValue;
+	bool bInfectedFull = !InfectedAllowed || infected >= InfectedLimit.IntValue;
+	bool bDiedThisRound = HasSurvivorDied(client);
+
+	char sReason[192];
+
+	if (bSurvivorFull && bDeadSeat)
+		Format(sReason, sizeof(sReason), "生还者真人位已满(%d/%d)，而且还有阵亡玩家的席位要等下一回合复活", survivors, SurvivorLimit.IntValue);
+	else if (bSurvivorFull)
+		Format(sReason, sizeof(sReason), "生还者真人位已满(%d/%d)", survivors, SurvivorLimit.IntValue);
+	else if (bDeadSeat)
+		Format(sReason, sizeof(sReason), "生还者席位被阵亡玩家占着（要等下一回合复活才能补位）");
+	else if (bDiedThisRound)
+		Format(sReason, sizeof(sReason), "你本回合已经阵亡，要等救援/复活或下一回合");
+	else
+		Format(sReason, sizeof(sReason), "生还者暂时没有可接管的位置");
+
+	if (bInfectedFull)
+		PrintToChat(client, "\x03[SV] \x01暂时无法加入：%s；特感位也满了(%d/%d)。等有人退出或下一回合再输入 !jg。",
+			sReason, infected, InfectedLimit.IntValue);
+	else
+		PrintToChat(client, "\x03[SV] \x01本次没能加入：%s。特感还有位置，输入 !jg 会自动进特感。", sReason);
 }
 
 void CancelJoin(int client)
@@ -1179,20 +1231,32 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		{
 			team = TEAM_INFECTED;
 		}
-		else if (GetBotOfIdle(client) || current == TEAM_SURVIVOR || !InfectedAllowed) team = TEAM_SURVIVOR;
+		// 托管着自己的身体：回生还者队接管自己的 Bot，不占新名额
+		else if (GetBotOfIdle(client)) team = TEAM_SURVIVOR;
+		// 活着且在生还者队：!jg 不换队
+		else if (current == TEAM_SURVIVOR && IsPlayerAlive(client)) team = TEAM_SURVIVOR;
+		else if (!InfectedAllowed) team = TEAM_SURVIVOR;
 		else if (current == TEAM_INFECTED) team = TEAM_INFECTED;
 		else
 		{
 			int survivors = GetTeamPlayers(TEAM_SURVIVOR, false);
 			int infected = GetTeamPlayers(TEAM_INFECTED, false);
-			if (survivors >= SurvivorLimit.IntValue && infected >= InfectedLimit.IntValue)
+
+			/* 生还者侧"可补位"要同时满足：真人名额没满 + 队里没有"已死亡但还躺着"的人占位。
+			   有人躺着时那几个席位要等下一回合复活，此刻把人塞进去就是超额，而且会变成一具
+			   死亡身体卡在"点击加入游戏"界面。这种局面下 !jg 应该直接去特感。 */
+			bool bSurvivorOpen = survivors < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+			bool bInfectedOpen = infected < InfectedLimit.IntValue;
+
+			if (!bSurvivorOpen && !bInfectedOpen)
 			{
-				if (announce) PrintToChat(client, "\x03[SV] \x01两支队伍的真人位置都已满。");
+				if (announce) ExplainJoinFailure(client);
 				return Join_Failed;
 			}
-			team = infected >= InfectedLimit.IntValue ? TEAM_SURVIVOR
-				: (survivors >= SurvivorLimit.IntValue ? TEAM_INFECTED
-				: (infected < survivors ? TEAM_INFECTED : TEAM_SURVIVOR));
+
+			if (!bSurvivorOpen) team = TEAM_INFECTED;
+			else if (!bInfectedOpen) team = TEAM_SURVIVOR;
+			else team = (infected < survivors) ? TEAM_INFECTED : TEAM_SURVIVOR;
 		}
 	}
 	if (current == team && (team != TEAM_SURVIVOR || IsPlayerAlive(client))
@@ -1217,7 +1281,7 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 			{
 				if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_SPECTATOR)
 				{
-					PrintToChat(i, "\x03[队伍] \x01%N 已加入旁观。使用 !join、!sur 或 !inf 返回游戏。", client);
+					PrintToChat(i, "\x03[队伍] \x01%N 已加入旁观。输入 !jg 返回游戏（不要按 M，按 M 容易卡住）。", client);
 				}
 			}
 			NextSpectateNotice[client] = GetGameTime() + 7.0;

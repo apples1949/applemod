@@ -6,10 +6,10 @@
 {
 	"You're spectating. Join any team to play."
 	{
-		"en"	"[12V12] Spectating: !join / !jg to join, !sur for Survivors, !inf for Infected."
-		"zho"	"[12V12] 旁觀中：!join / !jg 自動加入，!sur 生還者，!inf 感染者。"
-		"chi"	"[12V12] 旁观中：!join / !jg 自动加入，!sur 生还者，!inf 感染者。"
-		"hu"	"[12V12] Csatlakozas: !join / !jg; tulelok: !sur; fertozottek: !inf."
+		"en"	"[12V12] Spectating: !jg to join."
+		"zho"	"[12V12] 旁觀中：輸入 !jg 自動加入（不要按 M，按 M 容易卡住）。"
+		"chi"	"[12V12] 旁观中：输入 !jg 自动加入（不要按 M，按 M 容易卡住）。"
+		"hu"	"[12V12] Csatlakozas: !jg."
 	}	
 	"[AFK] Inactivity detected! 1"
 	{
@@ -37,17 +37,17 @@
 	"[AFK] Inactivity detected! 3"
 	{
 		"#format"		"{1:d}"
-		"en"	"[12V12 AFK] Open slot: !join to join, !sur for Survivors, !inf for Infected. Join within {1} seconds or be kicked."
-		"zho"	"[12V12 AFK] 有空位：!join 自動加入，!sur 生還者，!inf 感染者\n請在 {1} 秒內補位，否則踢出。"
-		"chi"	"[12V12 AFK] 有空位：!join 自动加入，!sur 生还者，!inf 感染者\n请在 {1} 秒内补位，否则踢出。"
+		"en"	"[12V12 AFK] Open slot: !jg to join. Join within {1} seconds or be kicked."
+		"zho"	"[12V12 AFK] 有空位：輸入 !jg 自動加入（不要按 M，按 M 容易卡住）\n請在 {1} 秒內補位，否則踢出。"
+		"chi"	"[12V12 AFK] 有空位：输入 !jg 自动加入（不要按 M，按 M 容易卡住）\n请在 {1} 秒内补位，否则踢出。"
 		"hu"	"[12V12 AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz {1} masodpercen belul, kulonben kirugunk."
 	}
 	"[AFK] Inactivity detected! 4"
 	{
 		"#format"		"{1:d}"
-		"en"	"[12V12 AFK] Open slot: use !join, !sur or !inf. Join before the survivors leave the safe area."
-		"zho"	"[12V12 AFK] 有空位：輸入 !join、!sur 或 !inf，在生還者離開安全區域前補位。"
-		"chi"	"[12V12 AFK] 有空位：输入 !join、!sur 或 !inf，在生还者离开安全区域前补位。"
+		"en"	"[12V12 AFK] Open slot: use !jg. Join before the survivors leave the safe area."
+		"zho"	"[12V12 AFK] 有空位：輸入 !jg（不要按 M，按 M 容易卡住），在生還者離開安全區域前補位。"
+		"chi"	"[12V12 AFK] 有空位：输入 !jg（不要按 M，按 M 容易卡住），在生还者离开安全区域前补位。"
 		"hu"	"[12V12 AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz, mielott a tulelok elhagyjak a biztonsagos teruletet."
 	}
 	"have been kicked from server due to inactivity"
@@ -60,9 +60,9 @@
 	}	
 	"afkForceSpectate"
 	{
-		"en"	"[12V12 AFK] Moved to {lightgreen}Spectators. Return with !join, !sur or !inf."
-		"zho"	"[12V12 AFK] 你已轉為 {lightgreen}旁觀。輸入 !join 自動加入，!sur 生還者，!inf 感染者。"
-		"chi"	"[12V12 AFK] 你已转为 {lightgreen}旁观。输入 !join 自动加入，!sur 生还者，!inf 感染者。"
+		"en"	"[12V12 AFK] Moved to {lightgreen}Spectators. Return with !jg."
+		"zho"	"[12V12 AFK] 你已轉為 {lightgreen}旁觀。輸入 !jg 自動加入（不要按 M，按 M 容易卡住）。"
+		"chi"	"[12V12 AFK] 你已转为 {lightgreen}旁观。输入 !jg 自动加入（不要按 M，按 M 容易卡住）。"
 		"hu"	"[12V12 AFK] Atkerultel a {lightgreen}nezok koze. Visszateres: !join, !sur vagy !inf."
 	}
 	"[AFK] Inactivity detected! 5"

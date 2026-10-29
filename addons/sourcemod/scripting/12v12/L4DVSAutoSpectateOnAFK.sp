@@ -26,7 +26,7 @@ native bool L4D2_FixTeamShuffle_IsFixComplete();
 ConVar g_hAfkWarnSpecTime, g_hAfkSpecTime, g_hAfkWarnKickTime, g_hAfkKickTime,
  	g_hAfkCheckInterval, g_hAfkKickEnabled, g_hAfkSaferoomIgnore, g_hAfkSafeRoomExitGrace,
 	g_hImmuneAccess, g_hSayResetTime, g_hSpecAfkMsgEnable, g_hAutoSpecSteamIds, g_hImmuneSteamIds, g_hImmuneIps, g_hImmuneNames,
-	g_hIgnoreDeadSurvivorSlot;
+	g_hIgnoreDeadSurvivorSlot, g_hKickNotify;
 
 int afkWarnSpecTime, afkSpecTime, afkWarnKickTime, 
 	afkKickTime, afkCheckInterval;
@@ -182,6 +182,7 @@ public void OnPluginStart()
 	g_hImmuneIps 			= CreateConVar("l4d_specafk_immune_ips", 			"", "这些 IP（或 IP 前缀，如 192.168.1.）的玩家在旁观时不会被本插件警告/踢出（多个用逗号分隔；不使用 Steam 认证，用于 NoSteam 客户端兜底）", FCVAR_NOTIFY);
 	g_hImmuneNames 		= CreateConVar("l4d_specafk_immune_names", 		"", "这些显示名在旁观时不会被本插件警告/踢出（多个用逗号分隔；默认空 = 关闭）。注意：显示名由玩家自行修改，任何人改成同名即可绕过踢出，仅在 SteamID/IP 都取不到时（如 NoSteam 客户端）才建议填写", FCVAR_NOTIFY);
 	g_hIgnoreDeadSurvivorSlot = CreateConVar("l4d_specafk_ignore_dead_survivor_slot", "1", "1=生还者队里还有死亡生还者占着名额时，不把生还者侧算作可补位（默认）；0=沿用旧行为（只要 survivorHumans < survivor_limit 且有存活 AI Bot 就算可补位）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hKickNotify = CreateConVar("l4d_specafk_kick_notify", "0", "1=踢人时全服播报\"某人因旁观不补位被踢出\"；0=不播报（默认，只踢人不出提示）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	CreateConVar("l4d_specafk_version", PLUGIN_VERSION, "L4D VS 自动AFK旁观插件的版本", FCVAR_DONTRECORD|FCVAR_NOTIFY);
 	
 
@@ -1222,9 +1223,13 @@ void afkKickClient (int client)
 	KickClient(client, "%T", "kickplayer", client, afkKickTime);
 	
 	// Print forced info
-	char sName[MAX_NAME_LENGTH];
-	GetClientName(client, sName, sizeof(sName));
-	CPrintToChatAll("%t", "have been kicked from server due to inactivity", sName, afkKickTime);
+	// 播报开关：l4d_specafk_kick_notify 默认 0 = 不播报（只踢人，不再刷"某某因旁观不补位被踢出"）
+	if (g_hKickNotify != null && g_hKickNotify.BoolValue)
+	{
+		char sName[MAX_NAME_LENGTH];
+		GetClientName(client, sName, sizeof(sName));
+		CPrintToChatAll("%t", "have been kicked from server due to inactivity", sName, afkKickTime);
+	}
 }
 
 // 本回合第一个生还者离开安全区域的瞬间（left4dhooks 前挂钩，精度高于每秒轮询）

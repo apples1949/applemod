@@ -109,6 +109,7 @@ ConVar g_cvGlowRange;		// 轮廓可见距离上限
 ConVar g_cvGlowRangeMin;	// 轮廓可见距离下限（witch_glow 同款，不写这个有的图不显示）
 ConVar g_cvGlowFlash;		// 是否额外写 m_bFlashing（交给引擎闪）
 ConVar g_cvInterval;		// 检测/闪烁节奏（秒）
+ConVar g_cvProtectInterval;	// 1.2.3：守护中 bot 的解控/血量回锁节奏（秒），与闪烁节奏分开
 ConVar g_cvInvincible;		// 免疫任何伤害
 ConVar g_cvBlockControl;	// 免疫特感控制 + 已控则解控
 ConVar g_cvMaxCount;		// 1.2.0：同时处于守护状态的未接管生还者数量硬上限（原 max_bots）
@@ -141,6 +142,8 @@ int		g_iGuardAllowed;					// 可守护数（1.2.1 起按比例计算，见 Compu
 int		g_iGuardCount;						// 当前实际处于守护状态的人数
 
 Handle	g_hTickTimer;
+Handle	g_hProtectTimer;					// 1.2.3：高频保护定时器（守护中的 bot 每 0.1s 解控 + 血量回锁）
+int		g_iGuardHealth[MAXPLAYERS + 1];		// 守护期间锁定的实血值（挡住不走 OnTakeDamage 的掉血，例如 spitter 酸液）
 
 public Plugin myinfo =
 {
@@ -204,6 +207,14 @@ public void OnPluginStart()
 		"检测与闪烁节奏（秒）: 每该间隔检查一次状态并切换一次轮廓开关（默认 0.9 = 约 1.1Hz 闪烁，太快的开关会让人以为没光）.",
 		FCVAR_NOTIFY, true, 0.05, true, 5.0);
 
+	// 1.2.3：上面那条是"状态检测 + 闪烁"节奏（0.9s），拿来做保护太慢 ——
+	// charger 捶打/扛走、spitter 酸液在这 0.9s 里仍然能生效。所以单独开一条高频线程，
+	// 只做"立刻解控 + 血量回锁"两件事，开销极小（每个守护中的 bot 两次属性读写）。
+	g_cvProtectInterval = CreateConVar("l4d2_bot_guard_protect_interval",
+		"0.1",
+		"守护中 bot 的解控/血量回锁节奏（秒）。默认 0.1：被 charger 捶打/扛走、被 spitter 酸液掉血都会在 0.1 秒内被纠正.",
+		FCVAR_NOTIFY, true, 0.02, true, 1.0);
+
 	g_cvInvincible = CreateConVar("l4d2_bot_guard_invincible",
 		"1",
 		"守护状态下免疫任何伤害. 0=关闭, 1=启用.",
@@ -260,6 +271,7 @@ public void OnPluginStart()
 	ParseGlowColor();
 	g_cvGlowColor.AddChangeHook(OnConVarChanged);
 	g_cvInterval.AddChangeHook(OnConVarChanged);
+	g_cvProtectInterval.AddChangeHook(OnConVarChanged);
 	// 1.2.0：移速倍率改了要立刻重写一遍（不必等下一 tick）
 	g_cvBotSpeed.AddChangeHook(OnConVarChanged);
 	g_cvBaseSpeed.AddChangeHook(OnConVarChanged);
@@ -281,6 +293,7 @@ public void OnPluginStart()
 		"强制给目标客户端闪轮廓，用于确认发光是否可见: sm_botguard_test <#userid|名字> [秒]");
 
 	StartTickTimer();
+	StartProtectTimer();
 }
 
 public void OnMapStart()
@@ -306,6 +319,12 @@ public void OnPluginEnd()
 	{
 		delete g_hTickTimer;
 		g_hTickTimer = null;
+	}
+
+	if (g_hProtectTimer != null)
+	{
+		delete g_hProtectTimer;
+		g_hProtectTimer = null;
 	}
 
 	// 卸载时把轮廓恢复成进入守护前的样子，避免残留
@@ -376,6 +395,10 @@ public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] n
 	{
 		StartTickTimer();
 	}
+	else if (convar == g_cvProtectInterval)
+	{
+		StartProtectTimer();
+	}
 	else if (convar == g_cvBotSpeed || convar == g_cvBaseSpeed)
 	{
 		// 1.2.0：倍率变了立刻生效，不用等下一 tick
@@ -396,6 +419,49 @@ void StartTickTimer()
 		fInterval = 0.05;
 
 	g_hTickTimer = CreateTimer(fInterval, Timer_Tick, _, TIMER_REPEAT);
+}
+
+void StartProtectTimer()
+{
+	if (g_hProtectTimer != null)
+	{
+		delete g_hProtectTimer;
+		g_hProtectTimer = null;
+	}
+
+	float fInterval = g_cvProtectInterval.FloatValue;
+	if (fInterval < 0.02)
+		fInterval = 0.02;
+
+	g_hProtectTimer = CreateTimer(fInterval, Timer_Protect, _, TIMER_REPEAT);
+}
+
+/* 1.2.3：高频保护（默认 0.1s 一次）。守护中的 bot：
+   ① 立刻解掉任何控制 —— charger 的「捶打/扛走」引擎没有"开始捶打"的前置 forward 可拦，
+      只能靠这条快线程抢在伤害与位移之前打断（舌头/扑击/骑乘/撞墙另有一级前置拦截）；
+   ② 血量回锁 —— spitter 酸液这类伤害不一定经过 OnTakeDamage（SDKHook 拦不到），
+      这里把实血顶回进入守护时的值，保证"守护中绝不掉血"。 */
+public Action Timer_Protect(Handle timer)
+{
+	if (!g_cvEnabled.BoolValue)
+		return Plugin_Continue;
+
+	bool bBlockControl = g_cvBlockControl.BoolValue;
+	bool bInvincible   = g_cvInvincible.BoolValue;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!g_bGuarded[i] || !IsClientInGame(i) || !IsPlayerAlive(i))
+			continue;
+
+		if (bBlockControl)
+			ReleaseControl(i);
+
+		if (bInvincible && g_iGuardHealth[i] > 0 && GetClientHealth(i) < g_iGuardHealth[i])
+			SetEntityHealth(i, g_iGuardHealth[i]);
+	}
+
+	return Plugin_Continue;
 }
 
 // ============================================================================
@@ -850,6 +916,12 @@ void EnterGuard(int client)
 	// 冻结当前虚血
 	g_fTempStash[client] = L4D_GetTempHealth(client);
 
+	// 1.2.3：锁定实血。守护期间 Timer_Protect 会把实血顶回这个值，
+	// 挡住 spitter 酸液这类不经过 OnTakeDamage 的掉血
+	g_iGuardHealth[client] = GetClientHealth(client);
+	if (g_iGuardHealth[client] < 1)
+		g_iGuardHealth[client] = 1;
+
 	// 1.2.2：引擎层免伤。只用 SDKHook_OnTakeDamage 拦截挡不住所有路径
 	// （玩家反馈"无敌状态下 charger 概率造成伤害/概率控中"），这里同时把
 	// m_takedamage 置 0（rygive 的 god mode 同款写法），让引擎自己就不接伤害。
@@ -869,6 +941,7 @@ void LeaveGuard(int client)
 {
 	g_bGuarded[client] = false;
 	g_fTempStash[client] = 0.0;
+	g_iGuardHealth[client] = 0;
 
 	if (!IsClientInGame(client))
 		return;
@@ -1079,6 +1152,16 @@ public Action L4D2_OnJockeyRide(int victim, int attacker)
 
 // 牛冲撞抱人
 public Action L4D2_OnStartCarryingVictim(int victim, int attacker)
+{
+	if (BlockControlOn(victim))
+		return Plugin_Handled;
+
+	return Plugin_Continue;
+}
+
+// 牛捶打（charger pummel）：1.2.3 新增。left4dhooks 有前置 forward（注意参数顺序是 attacker, victim），
+// 拦下来比"被捶打后再 EndPummel"干净 —— 玩家反馈守护中的 bot 仍会被牛捶打/拖走就是这个缺口
+public Action L4D2_OnPummelVictim(int attacker, int victim)
 {
 	if (BlockControlOn(victim))
 		return Plugin_Handled;

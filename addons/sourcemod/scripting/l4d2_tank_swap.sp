@@ -52,6 +52,17 @@ int tankNoTargetRetries               = 0;
 float menuRefreshUntil                = 0.0;
 bool tankMenuChosen                   = false;
 
+/* ---- 选克面板显示倒计时 ----
+   面板弹出后只在 l4d2_tankswap_menudisplay 秒内可用:
+     · 标题里显示"剩余 N 秒"(每秒重建面板刷新);
+     · 到点自动关闭;
+     · 关闭后本次坦克期间不能再通过 !gk/!tankpass/!rk/!pass 唤起。 */
+ConVar cvar_MenuDisplayTime           = null;
+Handle g_hMenuCountdownTimer          = null;
+float  g_fMenuCloseAt                 = 0.0;   /* 面板自动关闭时刻(0=不自动关闭) */
+bool   g_bMenuIsAuto                  = false; /* 当前弹着的是自动面板(true) 还是手动面板(false) */
+bool   g_bMenuLocked[MAXPLAYERS + 1];          /* 该坦克的选克面板已经到期关闭过: 不许再用命令唤起 */
+
 // 菜单分页: 每个坦克玩家各自记住"翻到第几页"(0 基)。
 // 面板重建/重弹时保持当前页, 只有新一次冲锋(新坦克/新接管)、回合结束、断线才归零。
 int g_iMenuPage[MAXPLAYERS + 1];
@@ -95,6 +106,7 @@ public void OnPluginStart()
 	cvar_SurrenderTimeLimit = CreateConVar("l4d_tankswap_timelimit", "15", " 主控坦克玩家可移交控制权的秒数 ", FCVAR_NOTIFY, true, 1.0);
 	cvar_SurrenderChoiceType = CreateConVar("l4d_tankswap_choicetype", "2", " 0 - 禁用；1 - 输入 !tankpass 按钮呼出菜单；2 - 每位坦克玩家都会弹出菜单 ", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 	cvar_SurrenderGhostKill = CreateConVar("l4d_tankswap_ghostkill", "1", " 0 - 禁用，旧坦克会变成新坦克之前控制的特感（灵魂）；1 - 移交时杀死灵魂 ", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	cvar_MenuDisplayTime = CreateConVar("l4d_tankswap_menudisplay", "5", " 选克面板显示秒数: 到点自动关闭, 之后本次坦克不能再唤起面板(0=不自动关闭) ", FCVAR_NOTIFY, true, 0.0);
 
 	cvar_TankLotteryTime = FindConVar("director_tank_lottery_selection_time");
 
@@ -195,6 +207,11 @@ void ResetRoundState()
 	}
 
 	StopMenuRefresh();
+	StopMenuCountdown();
+
+	// 新回合/新坦克: 清掉"面板已关闭"的锁
+	for (int i = 1; i <= MaxClients; i++)
+		g_bMenuLocked[i] = false;
 
 	g_bIsTankAlive = false;
 	currentTank = 0;
@@ -220,6 +237,100 @@ void StopMenuRefresh()
 	menuRefreshUntil = 0.0;
 }
 
+/* ===========================================================================
+   选克面板显示倒计时
+   =========================================================================== */
+
+/* 面板这一轮显示多少秒: 优先 l4d2_tankswap_menudisplay, 设 0 时退回原来的时间上限规则 */
+float GetMenuShowSeconds(bool autoMenu)
+{
+	if (cvar_MenuDisplayTime != null && cvar_MenuDisplayTime.FloatValue > 0.0)
+		return cvar_MenuDisplayTime.FloatValue;
+
+	return autoMenu ? (2.0 * GetSurrenderTimeLimit()) : GetSurrenderTimeLimit();
+}
+
+float GetMenuRemainSeconds()
+{
+	if (g_fMenuCloseAt <= 0.0)
+		return 0.0;
+
+	float fRemain = g_fMenuCloseAt - GetGameTime();
+
+	return (fRemain > 0.0) ? fRemain : 0.0;
+}
+
+/* 面板弹出成功时调用: 记下自动关闭时刻并起 1 秒倒计时。
+   倒计时每秒重建面板会把本函数再叫一次 —— 这时既不能重置截止时间, 也不能 KillTimer 自己。 */
+void StartMenuCountdown(int tank, bool autoMenu)
+{
+	g_bMenuIsAuto = autoMenu;
+
+	float fNow = GetGameTime();
+
+	if (g_fMenuCloseAt <= fNow)
+	{
+		float fShow = GetMenuShowSeconds(autoMenu);
+		g_fMenuCloseAt = (fShow > 0.0) ? (fNow + fShow) : 0.0;
+	}
+
+	if (g_fMenuCloseAt <= 0.0)
+		return;
+
+	if (g_hMenuCountdownTimer != null)
+		return;
+
+	g_hMenuCountdownTimer = CreateTimer(1.0, TS_MenuCountdown, GetClientUserId(tank), TIMER_REPEAT);
+}
+
+void StopMenuCountdown()
+{
+	if (g_hMenuCountdownTimer != null)
+	{
+		KillTimer(g_hMenuCountdownTimer);
+		g_hMenuCountdownTimer = null;
+	}
+
+	g_fMenuCloseAt = 0.0;
+}
+
+/* 每秒: 没到点就重建面板(标题里的"剩余 N 秒"随之刷新); 到点就关面板 + 停重弹 + 锁死命令唤起 */
+public Action TS_MenuCountdown(Handle timer, any userid)
+{
+	int tank = GetClientOfUserId(userid);
+
+	if (tank <= 0 || !IsValidClient(tank) || !IsHumanTank(tank) || tank != primaryTankPlayer)
+	{
+		g_hMenuCountdownTimer = null;
+		StopMenuCountdown();
+		return Plugin_Stop;
+	}
+
+	if (GetMenuRemainSeconds() <= 0.0)
+	{
+		g_hMenuCountdownTimer = null;
+
+		CloseActiveMenu();
+		StopMenuRefresh();
+
+		// 锁死: 本次坦克期间 !gk/!tankpass/!rk/!pass 都不再唤起面板
+		g_bMenuLocked[tank] = true;
+		g_fMenuCloseAt = 0.0;
+
+		CPrintToChat(tank, "{olive}[给克]{default} 选克面板已关闭(%d 秒), 本次坦克不能再唤起", RoundToCeil(GetMenuShowSeconds(g_bMenuIsAuto)));
+
+		return Plugin_Stop;
+	}
+
+	// 重建面板: 候选名单与页码都沿用(g_iMenuPage 记着玩家翻到第几页)
+	if (g_bMenuIsAuto)
+		ShowAutoMenuToTank(tank);
+	else
+		ShowManualMenuToTank(tank);
+
+	return Plugin_Continue;
+}
+
 public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int userid = event.GetInt("userid");
@@ -229,6 +340,11 @@ public Action TC_ev_TankSpawn(Event event, const char[] name, bool dontBroadcast
 	// A duplicate event for the same Tank that we already processed.
 	if (tankid != 0 && tankid == currentTank)
 		return Plugin_Continue;
+
+	// 新坦克: 停掉上一辆坦克的选克面板倒计时, 并清掉"面板已关闭"的锁
+	StopMenuCountdown();
+	if (tankclient > 0)
+		g_bMenuLocked[tankclient] = false;
 
 	// New Tank: discard anything still pending from the previous Tank.
 	if (notifyTimer != null)
@@ -580,7 +696,8 @@ Handle CreateSwapMenu(MenuHandler handler)
 	return menu;
 }
 
-/* 标题: 多页时带上"第 x/y 页"和候选人数, 让玩家知道还有下一页 */
+/* 标题: 多页时带上"第 x/y 页"和候选人数, 让玩家知道还有下一页;
+   底部再带一行"剩余 N 秒"(l4d2_tankswap_menudisplay 生效时), 让玩家知道面板什么时候关 */
 void SetSwapMenuTitle(Handle menu, int client, int page, int pages, int totalTargets)
 {
 	char buffer[256];
@@ -589,6 +706,18 @@ void SetSwapMenuTitle(Handle menu, int client, int page, int pages, int totalTar
 		Format(buffer, sizeof(buffer), "%T", "Menu_Title_Paged", client, page + 1, pages, totalTargets);
 	else
 		Format(buffer, sizeof(buffer), "%T", "Menu_Title", client);
+
+	if (cvar_MenuDisplayTime != null && cvar_MenuDisplayTime.FloatValue > 0.0)
+	{
+		int iRemain = RoundToCeil(GetMenuRemainSeconds());
+		if (iRemain < 1)
+			iRemain = 1;
+
+		char title[320];
+		Format(title, sizeof(title), "%s\n剩余 %d 秒", buffer, iRemain);
+		SetMenuTitle(menu, title);
+		return;
+	}
 
 	SetMenuTitle(menu, buffer);
 }
@@ -709,8 +838,11 @@ bool ShowManualMenuToTank(int tank)
 
 	AddSwapMenuPageItems(surrenderMenu, tank, page, pages);
 
-	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(GetSurrenderTimeLimit())))
+	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(GetMenuShowSeconds(false))))
+	{
+		StartMenuCountdown(tank, false);
 		return true;
+	}
 
 	// 弹不出去(玩家正开着别的面板): 句柄已由 End 回调关掉, 这里只保证引用干净
 	CloseActiveMenu();
@@ -731,6 +863,13 @@ public Action CallSurrenderMenu(int client, int args)
 	if (!withinTimeLimit)
 	{
 		CPrintToChat(client, "%t", "Time_Over");
+		return Plugin_Handled;
+	}
+
+	// 选克面板已经到期关闭过: 本次坦克不再用指令唤起
+	if (g_bMenuLocked[client])
+	{
+		CPrintToChat(client, "{olive}[给克]{default} 选克面板已关闭, 本次坦克不能再用指令唤起");
 		return Plugin_Handled;
 	}
 
@@ -879,8 +1018,11 @@ bool ShowAutoMenuToTank(int tank)
 
 	AddSwapMenuPageItems(surrenderMenu, tank, page, pages);
 
-	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(2.0 * GetSurrenderTimeLimit())))
+	if (DisplayMenu(surrenderMenu, tank, RoundToCeil(GetMenuShowSeconds(true))))
+	{
+		StartMenuCountdown(tank, true);
 		return true;
+	}
 
 	// 弹不出去(玩家正开着别的面板): 句柄已由 End 回调关掉, 这里只保证引用干净
 	CloseActiveMenu();
@@ -917,6 +1059,10 @@ public Action TS_RefreshAutoMenu(Handle timer)
 		return Plugin_Stop;
 
 	if (!IsHumanTank(primaryTankPlayer))
+		return Plugin_Stop;
+
+	// 选克面板已经到期关闭: 不再重弹
+	if (g_bMenuLocked[primaryTankPlayer])
 		return Plugin_Stop;
 
 	if (GetGameTime() >= menuRefreshUntil)
@@ -979,6 +1125,7 @@ public int TS_Auto_MenuCallBack(Handle menu, MenuAction action, int param1, int 
 		// "我自己玩": 玩家已经做出选择, 不再重复弹面板
 		tankMenuChosen = true;
 		StopMenuRefresh();
+		StopMenuCountdown();
 		return 0; // "I want to stay Tank"
 	}
 	else if (choice == 99) // "Anyone but me"
@@ -1186,6 +1333,10 @@ bool PerformTankSwap(int oldTank, int newTank)
 	// 已经换过克: 不再重复弹面板
 	tankMenuChosen = true;
 	StopMenuRefresh();
+	StopMenuCountdown();
+
+	// 换成另一个人开克: 新坦克重新给一次"面板可用"的机会
+	g_bMenuLocked[newTank] = false;
 
 	return true;
 }

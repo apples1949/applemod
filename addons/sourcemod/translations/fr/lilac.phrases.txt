@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"fr"		"Ce serveur est protégé par Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"fr"		"Exploit détecté: Votre interp est trop élevé ({1}ms / {2}ms max). Fixez votre cl_interp à {3} ou moins"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"fr"		"Votre ping est trop élevé ({1} / {2} max)"
 	}
 
@@ -40,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"fr"		"ConVar invalide détecté"
+		"fr"		"ConVar invalide détecté ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"fr" 		"NoLerp détecté"
 	}
 
 	"ban_bhop"
@@ -58,13 +61,48 @@
 		"fr"		"Aimlock détecté"
 	}
 
-	"ban_anti_duck_delay"
+	"ban_macro"
 	{
-		"fr" 		"Anti délai d'accroupissement détecté"
+		"fr" 		"Macro détectée"
 	}
 
-	"ban_noisemaker"
+	"kick_macro"
 	{
-		"fr" 		"Spam deGénérateur de bruit infini détecté"
+		"fr" 		"La macro {1} n'est pas autorisée sur ce serveur"
+	}
+
+	"chat_invalid_characters"
+	{
+		"fr" 		"Votre message a été bloqué (Raison : caractères invalides)."
+	}
+
+	"chat_wide_char_spam"
+	{
+		"fr" 		"Votre message a été bloqué (Raison : spam de caractères larges)."
+	}
+
+	"kick_bad_name"
+	{
+		"fr" 		"Votre pseudo contient des caractères invalides, veuillez le changer"
+	}
+
+	"ban_name_newline"
+	{
+		"fr" 		"Retours à la ligne détectés dans le pseudo"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"fr" 		"{1} est suspecté d'utiliser '{2}' (Détections : {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"fr"		"Votre ping semble de nouveau correct, vous pouvez rejoindre une équipe et jouer sans risque."
+	}
+
+	"ping_kick_warning"
+	{
+		"fr"		"ATTENTION : vous serez expulsé dans {1} secondes si votre ping reste trop élevé ! ({2} / {3} max)"
 	}
 }

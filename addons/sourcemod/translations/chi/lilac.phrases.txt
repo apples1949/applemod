@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"chi"		"本服务器受到LAC反作弊系统保护 {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"chi"		"检测到参数利用：您的interp过高({1}ms / {2}ms 最高)。请设置您的 cl_interp 参数至 {3} 或更低。"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"chi"		"您的Ping值过高！ ({1} / {2} 最高)"
 	}
 
@@ -40,8 +38,9 @@
 
 	"ban_convar"
 	{
-		"chi"		"检测到非法变量"
+		"chi"		"检测到非法变量 ({1})"
 	}
+
 	"ban_nolerp"
 	{
 		"chi"		"检测到非法Lerp值"
@@ -61,15 +60,7 @@
 	{
 		"chi"		"检测到暴力锁头"
 	}
-	"ban_anti_duck_delay"
-	{
-		"chi"		"检测到下蹲辅助"
-	}
 
-	"ban_noisemaker"
-	{
-		"chi"		"检测到刷屏"
-	}
 	"ban_macro"
 	{
 		"chi"		"检测到辅助宏"
@@ -77,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"chi"		"此服务器不允许使用{1}辅助宏 "
 	}
 
@@ -103,7 +93,16 @@
 
 	"admin_chat_warning_generic"
 	{
-		"#format"	"{1:s},{2:s},{3:d}"
 		"chi"		"{1} 可能使用了 '{2}' (检测次数: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"chi"		"您的Ping值似乎已恢复正常，现在可以安全地重新加入队伍并继续游戏。"
+	}
+
+	"ping_kick_warning"
+	{
+		"chi"		"警告：如果您的Ping值持续过高，您将在 {1} 秒后被踢出！({2} / {3} 最高)"
 	}
 }

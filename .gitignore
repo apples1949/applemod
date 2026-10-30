@@ -28,3 +28,8 @@ $RECYCLE.BIN/
 addons/sourcemod/scripting/compile.dat
 addons/sourcemod/gamedata/l4d2_sv_tags.txt
 addons/sourcemod/plugins/l4d2_sv_tags.smx
+addons/sourcemod/scripting/compiled/
+addons/sourcemod/scripting/hdf.sp
+addons/sourcemod/scripting/hdf/methodmaps.sp
+addons/sourcemod/scripting/hdf/variables.sp
+addons/sourcemod/plugins/hdf.smx

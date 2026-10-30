@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"no"		"Denne serveren er beskyttet av Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"no"		"Exploit oppdaget: Interpen din er for høy ({1}ms / {2}ms maks). Sett ned din cl_interp til {3} eller lavere"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"no"		"Nettverk forsinkelsen (Ping) din er for høy ({1} / {2} maks)"
 	}
 
@@ -40,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"no"		"Ugyldig console verdi oppdaget"
+		"no"		"Ugyldig console verdi oppdaget ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"no"		"NoLerp oppdaget"
 	}
 
 	"ban_bhop"
@@ -58,16 +61,6 @@
 		"no"		"Aimlock oppdaget"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"no" 		"Antidukk-forsinkelse oppdaget"
-	}
-
-	"ban_noisemaker"
-	{
-		"no" 		"Uendelig Noisemaker-bruk oppdaget"
-	}
-
 	"ban_macro"
 	{
 		"no"		"Macro oppdaget"
@@ -75,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"no"		"{1} Macro er ikke tillatt på denne serveren"
 	}
 
@@ -101,7 +93,16 @@
 
 	"admin_chat_warning_generic"
 	{
-		"#format"	"{1:s},{2:s},{3:d}"
 		"no"		"{1} mistenkes for å bruke '{2}' (Oppdagelser: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"no"		"Pingen din ser ut til å være i orden igjen, så det er trygt å bli med i et lag og spille."
+	}
+
+	"ping_kick_warning"
+	{
+		"no"		"ADVARSEL: Du blir sparket ut om {1} sekunder hvis pingen din forblir for høy! ({2} / {3} maks)"
 	}
 }

@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"nl"		"Deze server is beveiligd met Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"nl"		"Exploit gedetecteerd: Je interp is te hoog ({1}ms / {2}ms max). Zet cl_interp terug naar {3} of lager"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"nl"		"Je ping is te hoog ({1} / {2} max)"
 	}
 
@@ -40,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"nl"		"Ongeldige ConVar gedetecteerd"
+		"nl"		"Ongeldige ConVar gedetecteerd ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"nl"		"NoLerp gedetecteerd"
 	}
 
 	"ban_bhop"
@@ -58,13 +61,48 @@
 		"nl"		"Aimlock gedetecteerd"
 	}
 
-	"ban_anti_duck_delay"
+	"ban_macro"
 	{
-		"nl"		"Snelle squat gedetecteerd"
+		"nl"		"Macro gedetecteerd"
 	}
 
-	"ban_noisemaker"
+	"kick_macro"
 	{
-		"nl"		"Oneindige noisemaker gedetecteerd"
+		"nl"		"{1}-macro is niet toegestaan op deze server"
+	}
+
+	"chat_invalid_characters"
+	{
+		"nl"		"Je chatbericht is geblokkeerd (Reden: ongeldige tekens)."
+	}
+
+	"chat_wide_char_spam"
+	{
+		"nl"		"Je chatbericht is geblokkeerd (Reden: wide-char-spam)."
+	}
+
+	"kick_bad_name"
+	{
+		"nl"		"Je naam bevat ongeldige tekens, verander je naam alsjeblieft"
+	}
+
+	"ban_name_newline"
+	{
+		"nl"		"Regeleinden in naam gedetecteerd"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"nl"		"{1} wordt verdacht van het gebruik van '{2}' (Detecties: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"nl"		"Je ping lijkt weer in orde te zijn, je kunt weer veilig een team joinen en spelen."
+	}
+
+	"ping_kick_warning"
+	{
+		"nl"		"WAARSCHUWING: Je wordt over {1} seconden gekickt als je ping te hoog blijft! ({2} / {3} max)"
 	}
 }

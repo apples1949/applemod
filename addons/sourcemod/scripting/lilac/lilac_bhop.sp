@@ -20,7 +20,7 @@ static int jump_ticks[MAXPLAYERS + 1];
 static int perfect_bhops[MAXPLAYERS + 1];
 static int next_bhop[MAXPLAYERS + 1];
 static int detections[MAXPLAYERS + 1];
-
+static int air_ticks[MAXPLAYERS + 1];
 
 static void bhop_reset(int client)
 {
@@ -28,6 +28,7 @@ static void bhop_reset(int client)
 	jump_ticks[client] = -1;
 	perfect_bhops[client] = -1;
 	next_bhop[client] = GetGameTickCount();
+	air_ticks[client] = 0;
 }
 
 void lilac_bhop_reset_client(int client)
@@ -46,19 +47,36 @@ void lilac_bhop_check(int client, const int buttons, int last_buttons)
 		jump_ticks[client]++;
 
 	int flags = GetEntityFlags(client);
+
+	/* Airborne: accumulate air time and stop, nothing to evaluate here. */
+	if (!(flags & FL_ONGROUND)) {
+		air_ticks[client]++;
+		return;
+	}
+
 	if ((buttons & IN_JUMP) && !(last_buttons & IN_JUMP)) {
-		if ((flags & FL_ONGROUND)) {
-			if (GetGameTickCount() > next_bhop[client]) {
-				next_bhop[client] = GetGameTickCount() + bhop_settings[BHOP_INDEX_AIR];
-				perfect_bhops[client]++;
-				check_bhop_max(client);
+		if (GetGameTickCount() > next_bhop[client]) {
+			/* Real jumps spend time airborne. Guards against FL_ONGROUND
+			 * flickering on stairs, debris and geometry corners.
+			 * Only applies once a streak is running (perfect_bhops >= 0) —
+			 * the very first jump of a streak has no prior air-time to
+			 * validate against, so requiring one here silently ate every
+			 * streak's first real bhop. */
+			if (perfect_bhops[client] >= 0 && air_ticks[client] < 4) {
+				air_ticks[client] = 0;
+				return;
 			}
-			else {
-				bhop_reset(client);
-			}
+
+			next_bhop[client] = GetGameTickCount() + bhop_settings[BHOP_INDEX_AIR];
+			perfect_bhops[client]++;
+			air_ticks[client] = 0;
+			check_bhop_max(client);
+		}
+		else {
+			bhop_reset(client);
 		}
 	}
-	else if ((flags & FL_ONGROUND)) {
+	else {
 		check_bhop_min(client);
 		bhop_reset(client);
 	}
@@ -90,10 +108,14 @@ static void check_bhop_min(int client)
 	if (perfect_bhops[client] < bhop_settings[BHOP_INDEX_MIN])
 		return;
 
-	/* Jump ticks buffer is set and jump ticks is higher than max, ignore. */
+	/* Jump ticks buffer is set and jump ticks is higher than max, ignore.
+	 * Scales with the streak length instead of a fixed ceiling — a fixed
+	 * JUMP+MIN budget let streaks longer than that (but short of MAX)
+	 * escape detection entirely, since a near-perfect script adds roughly
+	 * one jump tick per bhop. */
 	if (bhop_settings[BHOP_INDEX_JUMP] > -1
-		&& jump_ticks[client] > bhop_settings[BHOP_INDEX_JUMP]
-		+ bhop_settings[BHOP_INDEX_MIN])
+		&& jump_ticks[client] > perfect_bhops[client]
+		+ bhop_settings[BHOP_INDEX_JUMP])
 		return;
 
 	if (lilac_forward_allow_cheat_detection(client, CHEAT_BHOP) == false)
@@ -104,26 +126,39 @@ static void check_bhop_min(int client)
 
 static void lilac_detected_bhop(int client, bool force_log, bool banning)
 {
+	++detections[client];
+
+	char sDetails[512];
+	Format(sDetails, sizeof(sDetails), "Detection: %d | Bhops: %d | JumpTicks: %d",
+	detections[client], perfect_bhops[client], jump_ticks[client]);
+
+	lilac_save_player_details(client, sDetails);
 	lilac_forward_client_cheat(client, CHEAT_BHOP);
 
 	/* Detection expires in 10 minutes. */
 	CreateTimer(600.0, timer_decrement_bhop, GetClientUserId(client));
 
-	/* Don't log the first detection. */
-	if (++detections[client] < 2 && force_log == false)
+	bool reached_total = detections[client] >= bhop_settings[BHOP_INDEX_TOTAL];
+
+	/* Don't log the first detection, unless it's already going to ban —
+	 * otherwise Total=1 silently required a second detection before ever
+	 * banning, same as every other Total value. */
+	if (detections[client] < 2 && !force_log && !reached_total)
 		return;
+
+	if (!banning && !reached_total)
+		lilac_discord_report(client, CHEAT_BHOP, DISCORD_SUSPECT);
 
 	if (icvar[CVAR_CHEAT_WARN]
 		&& !banning
-		&& detections[client] < bhop_settings[BHOP_INDEX_TOTAL])
+		&& !reached_total)
 		lilac_warn_admins(client, CHEAT_BHOP, detections[client]);
 
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s is suspected of using Bhop (Detection: %d | Bhops: %d | JumpTicks: %d).",
-			line_buffer, detections[client], perfect_bhops[client],
-			jump_ticks[client]);
+			"%s is suspected of using Bhop (%s).",
+			line_buffer, sDetails);
 		lilac_log(true);
 
 		if (icvar[CVAR_LOG_EXTRA] == 2)
@@ -131,7 +166,7 @@ static void lilac_detected_bhop(int client, bool force_log, bool banning)
 	}
 	database_log(client, "bhop", detections[client], float(perfect_bhops[client]), float(jump_ticks[client]));
 
-	if (detections[client] >= bhop_settings[BHOP_INDEX_TOTAL])
+	if (reached_total)
 		lilac_ban_bhop(client);
 }
 
@@ -146,8 +181,8 @@ static void lilac_ban_bhop(int client)
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s was detected and banned for Bhop.",
-			line_buffer);
+			"%s %s for Bhop.",
+			line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_BHOP));
 		lilac_log(true);
 
 		if (icvar[CVAR_LOG_EXTRA])

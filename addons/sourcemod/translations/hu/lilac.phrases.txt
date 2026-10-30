@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"hu"		"Ezen szerver a Little Anti-Cheat {1} védelme alatt áll."
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"hu"		"Túl magas az interp-ed ({1}ms), a maximum megengedett érték: {2}ms. Kérlek állítsd át {3}-ra vagy kevesebbre. (Pl.: cl_interp 0)"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"hu"		"A pinged túl magas. ({1}) A maximális megengedett érték: {2}."
 	}
 
@@ -40,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"hu"		"Invalid ConVar Detektálva."
+		"hu"		"Invalid ConVar Detektálva. ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"hu" 		"NoLerp észlelve"
 	}
 
 	"ban_bhop"
@@ -58,13 +61,48 @@
 		"hu"		"Aimlock Detektálva."
 	}
 
-	"ban_anti_duck_delay"
+	"ban_macro"
 	{
-		"hu" 		"Anti-Duck-Delay Detektálva."
+		"hu" 		"Makró észlelve"
 	}
 
-	"ban_noisemaker"
+	"kick_macro"
 	{
-		"hu" 		"Infinite Noisemaker Detektálva."
+		"hu" 		"A(z) {1} makró nem engedélyezett ezen a szerveren"
+	}
+
+	"chat_invalid_characters"
+	{
+		"hu" 		"Az üzeneted blokkolva lett (Ok: Érvénytelen karakterek)."
+	}
+
+	"chat_wide_char_spam"
+	{
+		"hu" 		"Az üzeneted blokkolva lett (Ok: Széles karakteres spam)."
+	}
+
+	"kick_bad_name"
+	{
+		"hu" 		"A neved érvénytelen karaktereket tartalmaz, kérlek változtasd meg"
+	}
+
+	"ban_name_newline"
+	{
+		"hu" 		"Sortörés észlelve a névben"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"hu" 		"{1} gyanúsítható a(z) '{2}' használatával (Észlelések: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"hu"		"A pinged újra rendben van, biztonságosan csatlakozhatsz egy csapathoz és játszhatsz."
+	}
+
+	"ping_kick_warning"
+	{
+		"hu"		"FIGYELEM: Ki leszel rúgva {1} másodpercen belül, ha a pinged túl magas marad! ({2} / {3} max)"
 	}
 }

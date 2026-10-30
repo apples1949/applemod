@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"tr"		"Bu sunucu Little Anti-Cheat {1} tarafından korunmaktadır"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"tr"		"Exploit Algılandı: Interp çok yüksek (en fazla {1}ms / {2}ms). Lütfen cl_interp değerinizi {3} veya daha düşük bir değere ayarlayın"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"tr"		"Pinginiz çok yüksek (en fazla {1} / {2})"
 	}
 
@@ -40,7 +38,7 @@
 
 	"ban_convar"
 	{
-		"tr"		"Geçersiz ConVar Tespit Edildi"
+		"tr"		"Geçersiz ConVar Tespit Edildi ({1})"
 	}
 
 	"ban_nolerp"
@@ -63,16 +61,6 @@
 		"tr"		"Aimlock Algılandı"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"tr" 		"FastDuck Algılandı"
-	}
-
-	"ban_noisemaker"
-	{
-		"tr" 		"Sonsuz Gürültücü Tespit Edildi"
-	}
-
 	"ban_macro"
 	{
 		"tr"		"Makro Algılandı"
@@ -80,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"tr"		"{1} Bu sunucuda makroya izin verilmiyor"
 	}
 
@@ -102,5 +89,20 @@
 	"ban_name_newline"
 	{
 		"tr"		"Adınızda Yeni Satır Algılandı"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"tr"		"{1} '{2}' kullanmaktan şüpheleniliyor (Tespitler: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"tr"		"Pinginiz yeniden normal görünüyor, artık güvenle bir takıma katılıp oynayabilirsiniz."
+	}
+
+	"ping_kick_warning"
+	{
+		"tr"		"UYARI: Pinginiz çok yüksek kalmaya devam ederse {1} saniye içinde sunucudan atılacaksınız! ({2} / en fazla {3})"
 	}
 }

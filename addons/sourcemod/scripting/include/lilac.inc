@@ -1,7 +1,25 @@
-#if defined  _lilac_included_
+/*
+	Little Anti-Cheat
+	Copyright (C) 2018-2023 J_Tanzanite
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+#if defined _lilac_included
  #endinput
 #endif
-#define _lilac_included_
+#define _lilac_included
 
 /* In case anyone wants to change this later on in a pull request or whatever,
  * DON'T DON'T DON'T DON'T DON'T DON'T DON'T DON'T DON'T DON'T DON'T!!!
@@ -9,68 +27,90 @@
  * These values cannot be changed due to forwards,
  *     changing them will cause issues for other plugins.
  * You can add new stuff, but not change the number of anything here. */
-
-enum /*Lilac_DetectionType*/
-{
-	CHEAT_ANGLES 			= 0,
-	CHEAT_CHATCLEAR         = 1,
-	CHEAT_CONVAR            = 2,
-	CHEAT_NOLERP            = 3,
-	CHEAT_BHOP              = 4,
-	CHEAT_AIMBOT            = 5,
-	CHEAT_AIMLOCK           = 6,
-	CHEAT_ANTI_DUCK_DELAY   = 7,
-	CHEAT_NOISEMAKER_SPAM   = 8,
-	CHEAT_MACRO             = 9,/* Macros aren't actually cheats, but are forwarded as such. */
-	CHEAT_NEWLINE_NAME      = 10,
-	CHEAT_MAX               = 11,
-}
+#define CHEAT_ANGLES             0
+#define CHEAT_CHATCLEAR          1
+#define CHEAT_CONVAR             2
+#define CHEAT_NOLERP             3
+#define CHEAT_BHOP               4
+#define CHEAT_AIMBOT             5
+#define CHEAT_AIMLOCK            6
+#define CHEAT_MACRO              9 /* Macros aren't actually cheats, but are forwarded as such. */
+#define CHEAT_NEWLINE_NAME      10
+#define CHEAT_SPEEDHACK         11
+#define CHEAT_INFECTED_DMG      12
+#define CHEAT_SURVIVOR_DMG      13
+#define CHEAT_MAX               14
 
 /**
- * @brief Called when plugin is about to detect if client is cheating (Pre-hook)
- * 
- * @param client		Client index
- * @param cheat			The Lilac Detection Type, check lilac.inc to see Lilac_DetectionType list
- * 
- * @return				Plugin_Handled to block detection on this client, Plugin_Continue otherwise
- */
-forward Action lilac_allow_cheat_detection(int client, int cheat)
-
-/**
- * @brief Called when plugin is about to detect if client is cheating (Post-hook)
- * @remarks This forward will not trigger if the relative pre-hook forward has been blocked with Plugin_Handled
- * 
- * @param client		Client index
- * @param type			The Lilac DetectionType, check lilac.inc to see Lilac_DetectionType list
- * 
+ * Called when a player is detected cheating.
+ *
+ * @param client     	Client index of the player.
+ * @param cheat     	Cheat type. (See lilac_global #L38-#L48)
  * @noreturn
  */
 forward void lilac_cheater_detected(int client, int cheat);
 
 /**
- * @brief Called when client is about to be banned by lilac
- * 
- * @param client		Client index
- * @param type			The Lilac DetectionType, check lilac.inc to see Lilac_DetectionType list
- * 
+ * Called before the player is about to be banned for cheating.
+ *
+ * @param client     	Client index of the player.
+ * @param cheat     	Cheat type. (See lilac_global #L38-#L48)
  * @noreturn
  */
 forward void lilac_cheater_banned(int client, int cheat);
+
+/**
+ * Interupt the cheat detection process.
+ *
+ * @param client     	Client index of the player.
+ * @param cheat     	Cheat type. (See lilac_global #L38-#L48)
+ * @return				1 If the cheat detection process should be interupted. Otherwise 0.
+ */
+forward bool lilac_allow_cheat_detection(int client, int cheat);
+
+/**
+ * Get the player details informations of the currently cheat flagged.
+ * Best moment to call this function is in the lilac_cheater_detected callback.
+ *
+ * @param client		Client index of the player.
+ * @param buffer		Buffer to store the informations in.
+ * @param maxlen		Maximal length of the buffer.
+ * @return				1 If informations found and stored into buffer. Otherwise -1.
+ */
+native int lilac_GetDetectedInfos(int client, char[] buffer, int maxlen);
+
+// Instead of having to implant this into each plugin who want to use forwards
+stock void GetCheatName(int type, char[] buffer, int maxlen)
+{
+	switch(type)
+	{
+		case CHEAT_ANGLES:Format(buffer, maxlen, "Angles");
+		case CHEAT_CHATCLEAR:Format(buffer, maxlen, "Chat Clear");
+		case CHEAT_CONVAR:Format(buffer, maxlen, "Convar");
+		case CHEAT_NOLERP:Format(buffer, maxlen, "NoLerp");
+		case CHEAT_BHOP:Format(buffer, maxlen, "Bhop");
+		case CHEAT_AIMBOT:Format(buffer, maxlen, "Aimbot");
+		case CHEAT_AIMLOCK:Format(buffer, maxlen, "Aimlock");
+		case CHEAT_MACRO:Format(buffer, maxlen, "Macro");
+		case CHEAT_NEWLINE_NAME:Format(buffer, maxlen, "NewLine Name");
+		case CHEAT_SPEEDHACK:Format(buffer, maxlen, "Speedhack");
+		case CHEAT_INFECTED_DMG:Format(buffer, maxlen, "Infected Damage Exploit");
+		case CHEAT_SURVIVOR_DMG:Format(buffer, maxlen, "Survivor Damage Exploit");
+	}
+}
 
 public SharedPlugin __pl_lilac =
 {
 	name = "lilac",
 	file = "lilac.smx",
-#if defined REQUIRE_PLUGIN
-	required = 1,
-#else
-	required = 0,
-#endif
+	#if defined REQUIRE_PLUGIN
+	required = 1
+	#else
+	required = 0
+	#endif
 };
 
-#if !defined REQUIRE_PLUGIN
 public void __pl_lilac_SetNTVOptional()
 {
-	
+	MarkNativeAsOptional("lilac_GetDetectedInfos");
 }
-#endif

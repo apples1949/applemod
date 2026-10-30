@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"da"		"Denne server er beskyttet af Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"da"		"Exploit opdaget: Din interp er for høj ({1}ms / {2}ms max). Venlist sæt din cl_interp tilbage til {3} eller lavere"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"da"		"Din ping er for høj ({1} / {2} max)"
 	}
 
@@ -40,7 +38,7 @@
 
 	"ban_convar"
 	{
-		"da"		"Ugyldig ConVar Opdaget"
+		"da"		"Ugyldig ConVar Opdaget ({1})"
 	}
 
 	"ban_nolerp"
@@ -63,16 +61,6 @@
 		"da"		"Aimlock Opdaget"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"da" 		"Anti-Duck-Forsinkelse Opdaget"
-	}
-
-	"ban_noisemaker"
-	{
-		"da" 		"Uendelig Støj Generator Opdaget"
-	}
-
 	"ban_macro"
 	{
 		"da"		"Macro Opdaget"
@@ -80,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"da"		"{1} Macro er ikke tilladt på denne server"
 	}
 
@@ -102,5 +89,20 @@
 	"ban_name_newline"
 	{
 		"da"		"Navn Newlines Opdaget"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"da"		"{1} mistænkes for at bruge '{2}' (Detektioner: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"da"		"Din ping ser ud til at være fin igen, så du kan trygt tilslutte dig et hold og spille."
+	}
+
+	"ping_kick_warning"
+	{
+		"da"		"ADVARSEL: Du bliver smidt ud om {1} sekunder, hvis din ping forbliver for høj! ({2} / {3} max)"
 	}
 }

@@ -24,8 +24,10 @@
 
 // 中文文本（原 doorlock.phrases.txt 的 chi 行）
 #define DL_TXT_MOVEOUT			"已解锁，可以开始."
-#define DL_TXT_LOCKED			"安全门已锁定，请等待：%i秒."
-#define DL_TXT_FROZEN			"已冻结，请等待：%i秒."
+#define DL_TXT_LOCKED			"安全门已锁定，请等待：%i秒.（倒计时结束前不能按 E 拾取物品）"
+#define DL_TXT_FROZEN			"已冻结，请等待：%i秒.（倒计时结束前不能按 E 拾取物品）"
+#define DL_TXT_NOUSE			"倒计时结束前不能用 E 拾取物品（还剩 %i 秒）"
+#define DL_TXT_NOUSE_WAIT		"等全员加载完、门打开后才能用 E 拾取物品"
 #define DL_TXT_MENU_HEADER		"---------加载状态---------"
 #define DL_TXT_MENU_CONNECTING	"连接中"
 #define DL_TXT_MENU_SURVIVOR	"生还者"
@@ -59,6 +61,7 @@ bool DL_g_bOwnSbStop, DL_g_bOwnNbStop;
 int DL_g_iSavedSbStop, DL_g_iSavedNbStop;
 int DL_g_iFrozenUserId[MAXPLAYERS + 1];
 int DL_g_iReleasedUserId[MAXPLAYERS + 1];
+float DL_g_fUseWarnAt[MAXPLAYERS + 1];	// 上次提示"按 E 无效"的时间（按人节流）
 
 ConVar
 	DL_g_cSbStop,
@@ -75,6 +78,7 @@ ConVar
 	DL_g_cDisplayMode,
 	DL_g_cDisplayPanel,
 	DL_g_cFreezeNodoor,
+	DL_g_cBlockUse,
 	DL_g_cTrace;
 
 bool
@@ -84,6 +88,7 @@ bool
 	DL_g_bBreakTheDoor,
 	DL_g_bFreezeNodoor,
 	DL_g_bFreezeAllowed,
+	DL_g_bBlockUse,
 	DL_g_bLifecycleStarted,
 	DL_g_bIsLoading[MAXPLAYERS + 1];
 
@@ -152,6 +157,7 @@ void DL_OnPluginStart()
 	DL_g_cDisplayMode =	CreateConVar("l4d2_dlock_displaymode",	"1",	"设置倒计时的显示模式。(0-隐藏,1-游戏提示,2-屏幕中心,3-聊天框.任何其他数值都可以隐藏倒计时)", FCVAR_NOTIFY);
 	DL_g_cDisplayPanel =	CreateConVar("l4d2_dlock_displaypanel",	"2",	"玩家状态面板的显示模式,0-不显示，1-隐藏连接失败的玩家，2-完整显示", FCVAR_NOTIFY);
 	DL_g_cFreezeNodoor =	CreateConVar("l4d2_dlock_freezenodoor",	"1",	"如果没有启动安全室的门，则冻结生还者", FCVAR_NOTIFY);
+	DL_g_cBlockUse =	CreateConVar("l4d2_dlock_blockuse",	"1",	"倒计时结束(门打开)之前, 生还者不能按 E 与物品/按钮交互: 0=不限制 1=禁止", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	DL_g_cTrace =		CreateConVar("l4d2_dlock_tracelog",		"1",	"诊断跟踪日志: 1=写入 logs/l4d2_dlock_trace.log (排查崩溃用, 每秒心跳+每次面板发送), 0=关闭", FCVAR_NOTIFY);
 
 	DL_g_cSbStop =		FindConVar("sb_stop");
@@ -171,6 +177,7 @@ void DL_OnPluginStart()
 	DL_g_cDisplayMode.AddChangeHook(DL_CvarChanged);
 	DL_g_cDisplayPanel.AddChangeHook(DL_CvarChanged);
 	DL_g_cFreezeNodoor.AddChangeHook(DL_CvarChanged);
+	DL_g_cBlockUse.AddChangeHook(DL_CvarChanged);
 	DL_g_cTrace.AddChangeHook(DL_CvarChanged);
 	// Observe round boundaries even while confogl has not committed the cvars.
 	DL_HookEvents(true);
@@ -216,6 +223,7 @@ void DL_OnClientDisconnect(int client)
 	DL_g_iTimeout[client] = 0;
 	DL_g_bIsLoading[client] = false;
 	DL_g_iFrozenUserId[client] = 0;
+	DL_g_fUseWarnAt[client] = 0.0;
 	// Keep the old userid (never the slot identity) until the short release window
 	// ends: bot_player_replace can arrive after the source bot disconnected.
 }
@@ -241,6 +249,7 @@ void DL_GetCvars()
 	DL_g_iDisplayMode =		DL_g_cDisplayMode.IntValue;
 	DL_g_iDisplayPanel =	DL_g_cDisplayPanel.IntValue;
 	DL_g_bFreezeNodoor =	DL_g_cFreezeNodoor.BoolValue;
+	DL_g_bBlockUse =	DL_g_cBlockUse.BoolValue;
 	DL_g_iTrace =		DL_g_cTrace.IntValue;
 
 	if (last != DL_g_bBreakTheDoor)
@@ -334,9 +343,65 @@ void DL_HookEvents(bool hook)
 	}
 }
 
-void DL_OnPlayerRunCmd(int client)
+/**
+ * 倒计时结束（门被打开）之前，生还者的 E 键交互要失效。
+ * 物品交互（武器/医疗包/弹药/开箱/按电梯）走的都是 +use，所以直接把这一帧的
+ * IN_USE 位摘掉：引擎与物品类插件都收不到"使用"，按键等于无效，
+ * 但移动/视角/开枪完全不受影响（不是冻结）。门打开(=DL_g_bRoundLive)后自动恢复。
+ * 开关：l4d2_dlock_blockuse（默认 1）。
+ */
+bool DL_ShouldBlockUse(int client)
+{
+	if (!DL_g_bBlockUse) return false;                                   // 总开关
+	if (!DL_g_bCvarAllow || !DL_IsDoorLockReadyMode()) return false;     // 门锁流程没启用
+	if (!DL_g_bMapStarted || !DL_g_bConfigsReady) return false;
+	if (DL_g_bRoundEnded || DL_g_bRoundLive) return false;               // 门已开 / 回合已开始
+	if (client <= 0 || client > MaxClients) return false;
+	if (!IsClientInGame(client) || IsFakeClient(client)) return false;   // bot 不拦
+	if (GetClientTeam(client) != 2) return false;                        // 只管生还者
+	if (!IsPlayerAlive(client)) return false;
+
+	return true;
+}
+
+/** 距离门打开还剩多少秒；还在等加载（DL_g_iCountDown < 0）时返回 -1 */
+int DL_UseBlockRemainSeconds()
+{
+	if (DL_g_iCountDown < 0) return -1;
+
+	int total = DL_g_bFirstRound ? DL_g_iPrepareTime1r : DL_g_iPrepareTime2r;
+	int left = total - DL_g_iCountDown;
+
+	return (left > 0) ? left : 0;
+}
+
+/** 玩家在禁令期间按了 E：提示一次（同一玩家 1.5 秒内只提示一次，不刷屏） */
+void DL_WarnBlockUse(int client)
+{
+	float now = GetGameTime();
+
+	if (now < DL_g_fUseWarnAt[client]) return;
+
+	DL_g_fUseWarnAt[client] = now + 1.5;
+
+	int left = DL_UseBlockRemainSeconds();
+
+	if (left > 0)
+		PrintCenterText(client, DL_TXT_NOUSE, left);
+	else
+		PrintCenterText(client, "%s", DL_TXT_NOUSE_WAIT);
+}
+
+void DL_OnPlayerRunCmd(int client, int &buttons)
 {
 	if (client <= 0 || client > MaxClients) return;
+
+	if ((buttons & IN_USE) && DL_ShouldBlockUse(client))
+	{
+		buttons &= ~IN_USE;
+		DL_WarnBlockUse(client);	// 按了才提示：让玩家知道是"禁止交互"而不是按键坏了
+	}
+
 	if (!DL_g_bFreezeAllowed && !DL_g_hUnfreezeTimer && !DL_g_iFrozenUserId[client]) return;
 	DL_UpdateClientFreeze(client);
 }

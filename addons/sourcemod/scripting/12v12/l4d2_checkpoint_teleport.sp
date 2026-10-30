@@ -127,6 +127,18 @@
  *    - 新增开关沿用原有的 l4d2_cptele_saferoom_opendoor / l4d2_cptele_saferoom_forcedoor：
  *      opendoor=0 时完全不动门（连状态机都不启动），兼容"不想让插件碰门"的用法。
  *
+ *  1.2.5 修复「安全屋倒计时被提前判定为全员已进入，掉队者留在外面，最后还得
+ *        玩家自己再开关一次门才过关」（2026-10-30）：
+ *    - 根因一：提前结束判定用的是"本次倒计时期间到过区域内"（g_bSeen）。
+ *      安全屋/救援点里，玩家进过又跑出去（拿补给、捡枪）也算"到过"，
+ *      于是全员瞬间都算到过 -> FinishCountdownAllSeen -> 一个人都不传送。
+ *      现在安全屋/救援点改成"此刻全员都在区域内"(CountArrivedSurvivors) 才算集合完毕；
+ *      中途集合点仍是"到过就算"（1.2.0 的 c5m2 修复不受影响）。
+ *    - 根因二：倒计时真正到点时的传送会跳过 g_bSeen 的人。安全屋类型下，
+ *      "到过又出去"的掉队者因此永远留在门外；随后补门状态机因为
+ *      「不是全员在屋内」不肯关门，引擎的 CheckpointDoorClosed 也就没来过，
+ *      表现为"最后还得自己开关一次门"。现在安全屋类型不再跳过这类人，一律传送进屋。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -140,7 +152,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.3"
+#define PLUGIN_VERSION      "1.2.5"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -1612,11 +1624,16 @@ public Action Timer_Countdown(Handle timer)
 
 	// 全员都到过集合点 = 集合完毕：倒计时立即结束，一个人都不传送。
 	// 否则会出现「人都走远了，倒计时还在空转，结束时把全队传回来」的问题。
+	// 1.2.5：安全屋 / 救援点必须"此刻全员都在区域内"才算集合完毕；
+	// 只按"到过就算"（g_bSeen）会把"进过安全屋又跑出去补给"的掉队者也判成已进入，
+	// 倒计时提前结束、一个人都不传送，最后关底门凑不齐"全员在屋内"（用户 2026-10-30 报的 bug）。
+	// 中途集合点（AREA_CHECKPOINT）保持 1.2.0 的"到过就算"语义：那边玩家集合完就往前走。
 	if (g_cvSkipSeen.BoolValue)
 	{
 		int iAlive = CountAliveSurvivors();
+		int iHere  = IsSafeAreaType(type) ? CountArrivedSurvivors(index) : CountSeenSurvivors();
 
-		if (iAlive > 0 && CountSeenSurvivors() >= iAlive)
+		if (iAlive > 0 && iHere >= iAlive)
 		{
 			FinishCountdownAllSeen(index);
 			g_hCountdown = null;
@@ -1754,7 +1771,10 @@ void FinishCountdown(int index)
 
 			// 本次倒计时期间已经到过集合点的人：视为已集合完毕，
 			// 不再把人从前方传送回来（这就是「集合完就往前走」的修复点）
-			if (g_cvSkipSeen.BoolValue && g_bSeen[i])
+			// 1.2.5：安全屋 / 救援点例外 —— 那边要的是"此刻人在屋里"，
+			// 进过又跑出去的掉队者必须被传回来，否则关门时引擎逐个 IsTouching
+			// 会发现"还有人在外面"而中止过关（玩家只能自己再开关一次门）。
+			if (!IsSafeAreaType(type) && g_cvSkipSeen.BoolValue && g_bSeen[i])
 			{
 				continue;
 			}
@@ -1918,8 +1938,9 @@ void FinishCountdownAllSeen(int index)
 
 	if (g_cvVerbose.BoolValue)
 	{
-		PrintToServer("[cptele] 区域 #%d 全员已到过集合点，提前结束 (type=%d source=%d)",
-			index, type, g_iAreaSource[index]);
+		PrintToServer("[cptele] 区域 #%d 全集结完毕，提前结束 (type=%d source=%d 到过=%d 此刻在区域内=%d 存活=%d)",
+			index, type, g_iAreaSource[index],
+			CountSeenSurvivors(), CountArrivedSurvivors(index), CountAliveSurvivors());
 	}
 }
 

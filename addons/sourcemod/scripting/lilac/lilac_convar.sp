@@ -17,27 +17,78 @@
 */
 
 
-/* Basic query list. */
-static char query_list[][] = {
-	"sv_cheats",
-	"r_drawothermodels",
-	"mat_wireframe",
-	"snd_show",
-	"snd_visualize",
-	"mat_proxy",
-	"r_drawmodelstatsoverlay",
-	"r_shadowwireframe",
-	"r_showenvcubemap",
-	"r_drawrenderboxes",
-	"r_modelwireframedecal"
-};
-
 static int query_index[MAXPLAYERS + 1];
 static int query_failed[MAXPLAYERS + 1];
 
+/* Structure to store convar validation rules */
+enum struct ConvarRule {
+	char name[32];
+	any expected_value;
+	any max_value;
+	bool is_minimum;
+	bool is_maximum;
+	bool is_range;
+	bool is_float;
+}
+
+static ConvarRule convar_rules[] = {
+    {"cl_clock_correction",         1.0,  0.0,   true,  false, false, true},
+    {"cl_cmdrate",                  10,   0,     true,  false, false, false},
+    {"cl_fov",                      75.0, 120.0, false, false, true,  true},
+    {"cl_leveloverview",            0.0,  0.0,   false, false, false, true},
+    {"cl_overdraw_test",            0.0,  0.0,   false, false, false, true},
+    {"cl_phys_timescale",           1.0,  0.0,   false, false, false, true},
+    {"cl_pitchdown",                90,   0,     false, true, false, false},
+    {"cl_pitchup",                  90,   0,     false, true, false, false},
+    {"cl_showevents",               0.0,  0.0,   false, false, false, true},
+    {"fov_desired",                 75.0, 120.0, false, false, true, true},
+    {"host_timescale",              1.0,  0.0,   false, false, false, true},
+    {"l4d_bhop",                    0.0,  0.0,   false, false, false, true},
+    {"l4d_bhop_autostrafe",         0.0,  0.0,   false, false, false, true},
+    {"mat_fillrate",                0.0,  0.0,   false, false, false, true},
+    {"mat_fullbright",              0.0,  0.0,   false, false, false, true},
+    {"mat_hdr_level",               2.0,  0.0,   false, false, false, true},
+    {"mat_postprocess_enable",      1.0,  0.0,   false, false, false, true},
+    {"mat_proxy",                   0.0,  0.0,   false, false, false, true},
+    {"mat_queue_mode",              3.0,  0.0,   false, true,  false, true},
+    {"mat_texture_list",            0.0,  0.0,   false, false, false, true},
+    {"mat_wireframe",               0.0,  0.0,   false, false, false, true},
+    {"mem_force_flush",             0.0,  0.0,   false, false, false, true},
+    {"net_blockmsg",                0,    0,     false, false, false, false},
+    {"net_droppackets",             0,    0,     false, false, false, false},
+    {"net_fakejitter",              0,    0,     false, false, false, false},
+    {"net_fakelag",                 0,    0,     false, false, false, false},
+    {"net_fakeloss",                0,    0,     false, false, false, false},
+    {"r_aspectratio",               0.0,  0.0,   false, false, false, true},
+    {"r_ClipAreaPortals",           1,    0,     false, false, false, false},
+    {"r_colorstaticprops",          0.0,  0.0,   false, false, false, true},
+    {"r_DispWalkable",              0.0,  0.0,   false, false, false, true},
+    {"r_DrawBeams",                 1.0,  0.0,   false, false, false, true},
+    {"r_drawbrushmodels",           1.0,  0.0,   false, false, false, true},
+    {"r_drawclipbrushes",           0.0,  0.0,   false, false, false, true},
+    {"r_drawdecals",                1.0,  0.0,   false, false, false, true},
+    {"r_drawentities",              1.0,  0.0,   false, false, false, true},
+    {"r_drawmodelstatsoverlay",     0,    0,     false, false, false, false},
+    {"r_drawopaqueworld",           1.0,  0.0,   false, false, false, true},
+    {"r_drawothermodels",           1.0,  0.0,   false, false, false, true},
+    {"r_drawparticles",             1.0,  0.0,   false, false, false, true},
+    {"r_drawrenderboxes",           0.0,  0.0,   false, false, false, true},
+    {"r_drawtranslucentworld",      1.0,  0.0,   false, false, false, true},
+    {"r_modelwireframedecal",       0,    0,     false, false, false, false},
+    {"r_portalsopenall",            0,    0,     false, false, false, false},
+    {"r_shadowwireframe",           0.0,  0.0,   false, false, false, true},
+    {"r_showenvcubemap",            0,    0,     false, false, false, false},
+    {"r_skybox",                    1.0,  0.0,   false, false, false, true},
+    {"r_visocclusion",              0.0,  0.0,   false, false, false, true},
+    {"snd_show",                    0.0,  0.0,   false, false, false, true},
+    {"snd_visualize",               0.0,  0.0,   false, false, false, true},
+    {"sv_cheats",                   0.0,  0.0,   false, false, false, true},
+    {"vcollide_wireframe",          0.0,  0.0,   false, false, false, true}
+};
+
 void lilac_convar_reset_client(int client)
 {
-	query_index[client] = 0;
+	query_index[client] = -1;
 	query_failed[client] = 0;
 }
 
@@ -65,11 +116,11 @@ public Action timer_query(Handle timer)
 		/* Only increments query index if the player
 		 * has responded to the last one. */
 		if (!query_failed[i]) {
-			if (++query_index[i] >= 11)
+			if (++query_index[i] >= sizeof(convar_rules))
 				query_index[i] = 0;
 		}
 
-		QueryClientConVar(i, query_list[query_index[i]], query_reply, 0);
+		QueryClientConVar(i, convar_rules[query_index[i]].name, query_reply, 0);
 
 		if (++query_failed[i] > QUERY_MAX_FAILURES) {
 			if (icvar[CVAR_LOG_MISC]) {
@@ -93,51 +144,160 @@ public Action timer_query(Handle timer)
 	return Plugin_Continue;
 }
 
-public void query_reply(QueryCookie cookie, int client, ConVarQueryResult result,
-			const char[] cvarName, const char[] cvarValue, any value)
+/* What the rule accepts, for reports. */
+static void convar_expected_text(int rule, char[] buffer, int maxlen)
 {
-	/* Player NEEDS to answer the query. */
-	if (result != ConVarQuery_Okay)
-		return;
+    if (convar_rules[rule].is_float) {
+        float expected = view_as<float>(convar_rules[rule].expected_value);
+        float maxval = view_as<float>(convar_rules[rule].max_value);
 
-	/* Client did respond to the query request, move on to the next convar. */
-	query_failed[client] = 0;
+        if (convar_rules[rule].is_range)
+            FormatEx(buffer, maxlen, "%.1f to %.1f", expected, maxval);
+        else if (convar_rules[rule].is_minimum)
+            FormatEx(buffer, maxlen, ">= %.1f", expected);
+        else if (convar_rules[rule].is_maximum)
+            FormatEx(buffer, maxlen, "< %.1f", expected);
+        else
+            FormatEx(buffer, maxlen, "%.1f", expected);
+    } else {
+        int expected = convar_rules[rule].expected_value;
+        int maxval = view_as<int>(convar_rules[rule].max_value);
 
-	/* Any response the server may recieve may also be faulty, ignore. */
-	if (GetTime() < time_sv_cheats || sv_cheats)
-		return;
+        if (convar_rules[rule].is_range)
+            FormatEx(buffer, maxlen, "%d to %d", expected, maxval);
+        else if (convar_rules[rule].is_minimum)
+            FormatEx(buffer, maxlen, ">= %d", expected);
+        else if (convar_rules[rule].is_maximum)
+            FormatEx(buffer, maxlen, "< %d", expected);
+        else
+            FormatEx(buffer, maxlen, "%d", expected);
+    }
+}
 
-	/* Already banned. */
-	if (playerinfo_banned_flags[client][CHEAT_CONVAR])
-		return;
+public void query_reply(QueryCookie cookie, int client, ConVarQueryResult result, const char[] cvarName, const char[] cvarValue, any value)
+{
+    /* ConVarQuery_NotFound is a valid response — cvar doesn't exist on this client.
+    * Reset the failure counter and move on. */
+    if (result == ConVarQuery_NotFound) {
+        query_failed[client] = 0;
+        return;
+    }
 
-	int val = StringToInt(cvarValue);
+    /* Player NEEDS to answer the query. */
+    if (result != ConVarQuery_Okay)
+        return;
 
-	/* Check for invalid convar responses.
-	 * Other than drawothermodels, a value of non-zero is invalid. */
-	if (StrEqual("r_drawothermodels", cvarName, false) && val == 1)
-		return;
-	else if (val == 0)
-		return;
+    /* Client did respond to the query request, move on to the next convar. */
+    query_failed[client] = 0;
 
-	if (lilac_forward_allow_cheat_detection(client, CHEAT_CONVAR) == false)
-		return;
+    /* Any response the server may recieve may also be faulty, ignore. */
+    if (GetTime() < time_sv_cheats || sv_cheats)
+        return;
 
-	lilac_forward_client_cheat(client, CHEAT_CONVAR);
+    /* Already banned. */
+    if (playerinfo_banned_flags[client][CHEAT_CONVAR])
+        return;
 
-	if (icvar[CVAR_LOG]) {
-		lilac_log_setup_client(client);
-		Format(line_buffer, sizeof(line_buffer),
-			"%s was detected and banned for an invalid ConVar (%s %s).",
-			line_buffer, cvarName, cvarValue);
+    /* Check against convar rules */
+    bool rule_found = false;
+    char expected_text[48];
+    expected_text[0] = '\0';
 
-		lilac_log(true);
+    for (int i = 0; i < sizeof(convar_rules); i++) {
+        if (!StrEqual(convar_rules[i].name, cvarName, false))
+            continue;
 
-		if (icvar[CVAR_LOG_EXTRA])
-			lilac_log_extra(client);
-	}
-	database_log(client, "cvar_invalid", DATABASE_BAN);
+        rule_found = true;
 
-	playerinfo_banned_flags[client][CHEAT_CONVAR] = true;
-	lilac_ban_client(client, CHEAT_CONVAR);
+        /* Normalize boolean string values before validation. */
+        char normalizedValue[32];
+        strcopy(normalizedValue, sizeof(normalizedValue), cvarValue);
+        if (StrEqual(normalizedValue, "true", false))
+            strcopy(normalizedValue, sizeof(normalizedValue), "1");
+        else if (StrEqual(normalizedValue, "false", false))
+            strcopy(normalizedValue, sizeof(normalizedValue), "0");
+
+        bool is_valid;
+
+        if (convar_rules[i].is_float) {
+            /* expected_value/max_value are tagged any: retag them as float
+             * explicitly, otherwise spcomp 1.13 does not compare them as
+             * floats (see srcdslab/sm-plugin-lilac#41). */
+            float expected = view_as<float>(convar_rules[i].expected_value);
+            float maxval = view_as<float>(convar_rules[i].max_value);
+            float fval = StringToFloat(normalizedValue);
+            if (convar_rules[i].is_range)
+                is_valid = (fval >= expected && fval <= maxval);
+            else if (convar_rules[i].is_minimum)
+                is_valid = (fval >= expected);
+            else if (convar_rules[i].is_maximum)
+                is_valid = (fval < expected);
+            else
+                is_valid = (fval == expected);
+        } else {
+            int expected = convar_rules[i].expected_value;
+            int maxval = view_as<int>(convar_rules[i].max_value);
+            int ival = StringToInt(normalizedValue);
+            if (convar_rules[i].is_range)
+                is_valid = (ival >= expected && ival <= maxval);
+            else if (convar_rules[i].is_minimum)
+                is_valid = (ival >= expected);
+            else if (convar_rules[i].is_maximum)
+                is_valid = (ival < expected);
+            else
+                is_valid = (ival == expected);
+        }
+
+        if (is_valid)
+            return;
+
+        convar_expected_text(i, expected_text, sizeof(expected_text));
+
+        break;
+    }
+
+    /* No rule for this cvar means nothing to judge, not a violation. */
+    if (!rule_found)
+        return;
+
+    if (lilac_forward_allow_cheat_detection(client, CHEAT_CONVAR) == false)
+        return;
+
+    char sDetails[512];
+    Format(sDetails, sizeof(sDetails), "%s %s", cvarName, cvarValue);
+
+    lilac_save_player_details(client, sDetails);
+    lilac_forward_client_cheat(client, CHEAT_CONVAR);
+
+    char sExtra[64];
+    FormatEx(sExtra, sizeof(sExtra), "Expected: %s", expected_text);
+    lilac_discord_set_extra(client, CHEAT_CONVAR, sExtra);
+
+    if (icvar[CVAR_LOG]) {
+        lilac_log_setup_client(client);
+
+        if (icvar[CVAR_CONVAR] == 1)
+            Format(line_buffer, sizeof(line_buffer),
+                "%s was detected and kicked for an invalid ConVar (%s).",
+                line_buffer, sDetails);
+        else if (icvar[CVAR_CONVAR] == 2)
+            Format(line_buffer, sizeof(line_buffer),
+                "%s %s for an invalid ConVar (%s).",
+                line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_CONVAR), sDetails);
+
+        lilac_log(true);
+
+        if (icvar[CVAR_LOG_EXTRA])
+            lilac_log_extra(client);
+    }
+    database_log(client, "cvar_invalid", icvar[CVAR_CONVAR] == 1 ? DATABASE_KICK : DATABASE_BAN);
+
+    playerinfo_banned_flags[client][CHEAT_CONVAR] = true;
+
+    if (icvar[CVAR_CONVAR] == 1) {
+        lilac_discord_report(client, CHEAT_CONVAR, DISCORD_KICKED);
+        KickClient(client, "[Lilac] %T", "ban_convar", client, sDetails);
+    }
+    else if (icvar[CVAR_CONVAR] == 2)
+        lilac_ban_client(client, CHEAT_CONVAR);
 }

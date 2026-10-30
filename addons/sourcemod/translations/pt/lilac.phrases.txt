@@ -20,6 +20,16 @@
 		"pt"		"A sua latência está muito alta ({1} / máx. {2})"
 	}
 
+	"ping_fine_again"
+	{
+		"pt"		"A sua latência parece estar normal novamente, já é seguro voltar a entrar em um time e jogar."
+	}
+
+	"ping_kick_warning"
+	{
+		"pt"		"AVISO: Você será expulso(a) em {1} segundos se a sua latência continuar muito alta! ({2} / máx. {3})"
+	}
+
 	"kick_ban_generic"
 	{
 		"pt"		"Você foi banido(a) deste servidor"
@@ -37,7 +47,8 @@
 
 	"ban_convar"
 	{
-		"pt"		"Variável do console inválida detectada"
+        "#format"	"{1:s}"
+		"pt"		"Variável do console inválida detectada ({1})"
 	}
 	
 	"ban_nolerp"
@@ -59,16 +70,6 @@
 	{
 		"pt"		"Auxílio de mira (aimlock) detectado"
 	}
-	
-	"ban_anti_duck_delay"
-	{
-		"pt" 		"Remoção do atraso para agachar detectado"
-	}
-
-	"ban_noisemaker"
-	{
-		"pt" 		"Brinquedo Barulhento infinito detectado"
-	}
 
 	"ban_macro"
 	{
@@ -82,12 +83,12 @@
 
 	"chat_invalid_characters"
 	{
-		"pt" 		"A sua mensagem na janela de conversa foi bloqueada por conter caracteres inválidos."
+		"pt" 		"A sua mensagem foi bloqueada por conter caracteres inválidos."
 	}
 
 	"chat_wide_char_spam"
 	{
-		"pt"		"A sua mensagem na janela de conversa foi bloqueada por conter caracteres de spam espaçosos."
+		"pt"		"A sua mensagem foi bloqueada por conter caracteres de spam espaçosos."
 	}
 
 	"kick_bad_name"

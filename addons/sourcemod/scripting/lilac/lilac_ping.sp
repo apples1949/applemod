@@ -52,7 +52,7 @@ public Action timer_check_ping(Handle timer)
 			if (ping_high[i] < ping_warn[i] - 2 && ping_warn[i] > 0) {
 
 				ping_warn[i] = 0;
-				PrintToChat(i, "[Lilac] Your ping appears to be fine again, it is safe to rejoin a team and play.");
+				PrintToChat(i, "[Lilac] %T", "ping_fine_again", i);
 			}
 
 			continue;
@@ -64,7 +64,7 @@ public Action timer_check_ping(Handle timer)
 
 			ping_warn[i] = ping_high[i];
 
-			PrintToChat(i, "[Lilac] WARNING: You will be kicked in %d seconds if your ping stays too high! (%.0f / %d max)",
+			PrintToChat(i, "[Lilac] %T", "ping_kick_warning", i,
 				100 - (ping_high[i] * 5),
 				ping, icvar[CVAR_MAX_PING]);
 		}
@@ -72,19 +72,6 @@ public Action timer_check_ping(Handle timer)
 		/* Player has a higher ping than maximum for 100 seconds. */
 		if (ping_high[i] < 20)
 			continue;
-
-		if (icvar[CVAR_LOG_MISC]) {
-			lilac_log_setup_client(i);
-			Format(line_buffer, sizeof(line_buffer),
-				"%s was kicked for having too high ping (%.3fms / %dms max).",
-				line_buffer, ping, icvar[CVAR_MAX_PING]);
-
-			lilac_log(true);
-
-			if (icvar[CVAR_LOG_EXTRA] == 2)
-				lilac_log_extra(i);
-		}
-		database_log(i, "high_ping", DATABASE_KICK);
 
 		Format(reason, sizeof(reason), "[Lilac] %T", "tban_ping_high", i,
 			ping, icvar[CVAR_MAX_PING]);

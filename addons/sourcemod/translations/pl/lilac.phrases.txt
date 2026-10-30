@@ -1,5 +1,6 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
 		"pl"		"Ten serwer jest chroniony przez Little Anti-Cheat {1}"
@@ -37,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"pl"		"Wykryto Nieprawidłowy ConVar"
+		"pl"		"Wykryto Nieprawidłowy ConVar ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"pl"		"Wykryto NoLerp"
 	}
 
 	"ban_bhop"
@@ -55,13 +61,48 @@
 		"pl"		"Wykryto Aimlock"
 	}
 
-	"ban_anti_duck_delay"
+	"ban_macro"
 	{
-		"pl"		"Wykryto Anti-Duck-Delay"
+		"pl"		"Wykryto makro"
 	}
 
-	"ban_noisemaker"
+	"kick_macro"
 	{
-		"pl"		"Wykryto Nieskończony Zagłuszacz"
+		"pl"		"Makro {1} jest niedozwolone na tym serwerze"
+	}
+
+	"chat_invalid_characters"
+	{
+		"pl"		"Twoja wiadomość została zablokowana (Powód: Nieprawidłowe znaki)."
+	}
+
+	"chat_wide_char_spam"
+	{
+		"pl"		"Twoja wiadomość została zablokowana (Powód: Spam szerokimi znakami)."
+	}
+
+	"kick_bad_name"
+	{
+		"pl"		"Twoja nazwa zawiera nieprawidłowe znaki, zmień ją"
+	}
+
+	"ban_name_newline"
+	{
+		"pl"		"Wykryto znaki nowej linii w nazwie"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"pl"		"{1} jest podejrzany o używanie '{2}' (Wykrycia: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"pl"		"Twój ping wygląda już w porządku, możesz bezpiecznie dołączyć do drużyny i grać."
+	}
+
+	"ping_kick_warning"
+	{
+		"pl"		"OSTRZEŻENIE: Zostaniesz wyrzucony z serwera za {1} sekund, jeśli Twój ping nadal będzie za wysoki! ({2} / {3} maks)"
 	}
 }

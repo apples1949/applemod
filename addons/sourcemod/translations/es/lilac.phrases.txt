@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"es"		"El servidor está protegido por Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"es"		"Detectado Exploit: Tu Interp es demasiado alto ({1}ms / {2}ms máx). Por favor, ajusta el comando cl_interp a {3} o por debajo"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"es"		"Tu Ping es demasiado alto ({1} / {2} máx)"
 	}
 
@@ -40,7 +38,7 @@
 
 	"ban_convar"
 	{
-		"es"		"Detectado ConVar no permitido"
+		"es"		"Detectado ConVar no permitido ({1})"
 	}
 
 	"ban_nolerp"
@@ -63,16 +61,6 @@
 		"es"		"Detectado Aimlock"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"es" 		"Detectado Anti-Duck-Delay"
-	}
-
-	"ban_noisemaker"
-	{
-		"es" 		"Detectado Noisemaker infinito"
-	}
-
 	"ban_macro"
 	{
 		"es"		"Detectada Macro"
@@ -80,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"es"		"{1} las macros no están permitidas en este servidor"
 	}
 
@@ -102,5 +89,20 @@
 	"ban_name_newline"
 	{
 		"es"		"Detectado Newlines en el nombre"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"es"		"{1} es sospechoso de usar '{2}' (Detecciones: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"es"		"Tu Ping parece estar bien de nuevo, ya puedes volver a unirte a un equipo y jugar sin problemas."
+	}
+
+	"ping_kick_warning"
+	{
+		"es"		"ADVERTENCIA: ¡Se te expulsará del servidor en {1} segundos si tu Ping sigue siendo demasiado alto! ({2} / {3} máx)"
 	}
 }

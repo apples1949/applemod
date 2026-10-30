@@ -1,5 +1,6 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
 		"sv"		"Denna server är säkrad av Little Anti-Cheat {1}"
@@ -37,7 +38,7 @@
 
 	"ban_convar"
 	{
-		"sv"		"Ogiltig ConVar Upptäckt"
+		"sv"		"Ogiltig ConVar Upptäckt ({1})"
 	}
 
 	"ban_nolerp"
@@ -60,16 +61,6 @@
 		"sv"		"Aimlock Upptäckt"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"sv" 		"Anti-Duck-Fördröjning Upptäckt"
-	}
-
-	"ban_noisemaker"
-	{
-		"sv" 		"Oändlig Noisemaker Upptäckt"
-	}
-
 	"ban_macro"
 	{
 		"sv"		"Macro Upptäckt"
@@ -77,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"sv"		"{1} Macro är inte tillåtet i denna server."
 	}
 
@@ -99,5 +89,20 @@
 	"ban_name_newline"
 	{
 		"sv"		"Namn-radbrytningar Upptäckt"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"sv"		"{1} misstänks för att använda '{2}' (Upptäckter: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"sv"		"Din ping verkar vara bra igen, så det är säkert att gå med i ett lag och spela."
+	}
+
+	"ping_kick_warning"
+	{
+		"sv"		"VARNING: Du kommer att kickas om {1} sekunder om din ping förblir för hög! ({2} / {3} max)"
 	}
 }

@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"cze"		"Tento server je chráněn Little Anti-Cheat {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"cze"		"Detekováno neférové zneužití: Interp je příliš velký. ({1}ms / {2}ms max). Prosím nastavte svůj cl_interp na hodnotu {3} či méně"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"cze"		"Váš ping je příliš vysoký ({1} / {2} max)"
 	}
 
@@ -40,7 +38,12 @@
 
 	"ban_convar"
 	{
-		"cze"		"Nalezen špatný ConVar"
+		"cze"		"Nalezen špatný ConVar ({1})"
+	}
+
+	"ban_nolerp"
+	{
+		"cze"		"Detekován NoLerp"
 	}
 
 	"ban_bhop"
@@ -56,5 +59,50 @@
 	"ban_aimlock"
 	{
 		"cze"		"Aimlock detekován"
+	}
+
+	"ban_macro"
+	{
+		"cze"		"Detekováno makro"
+	}
+
+	"kick_macro"
+	{
+		"cze"		"Makro {1} není na tomto serveru povoleno"
+	}
+
+	"chat_invalid_characters"
+	{
+		"cze"		"Vaše zpráva byla zablokována (Důvod: Neplatné znaky)."
+	}
+
+	"chat_wide_char_spam"
+	{
+		"cze"		"Vaše zpráva byla zablokována (Důvod: Spam širokými znaky)."
+	}
+
+	"kick_bad_name"
+	{
+		"cze"		"Vaše jméno obsahuje neplatné znaky, změňte si prosím jméno"
+	}
+
+	"ban_name_newline"
+	{
+		"cze"		"Detekováno odřádkování ve jméně"
+	}
+
+	"admin_chat_warning_generic"
+	{
+		"cze"		"{1} je podezřelý z používání '{2}' (Detekce: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"cze"		"Váš ping se zdá být opět v pořádku, můžete se bezpečně znovu připojit k týmu a hrát."
+	}
+
+	"ping_kick_warning"
+	{
+		"cze"		"VAROVÁNÍ: Pokud váš ping zůstane příliš vysoký, hrozí vám vyhození ze serveru za {1} sekund! ({2} / {3} max)"
 	}
 }

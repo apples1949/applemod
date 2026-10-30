@@ -46,7 +46,6 @@ public void OnDatabaseConnected(Database db, const char[] error, any data)
 {
 	if (!db) {
 		LogError("Couldn't connect to the database. Please verify your config.");
-		LogError("Error: %s", error);
 		return;
 	}
 	lil_db = db;
@@ -58,7 +57,7 @@ void InitDatabase()
 {
 	/* SQLite syntax, but seems valid for MySQL too */
 	lil_db.Query(OnDatabaseInit, "CREATE TABLE IF NOT EXISTS lilac_detections("
-		... "name varchar(256) NOT NULL, " /* Honestly, you can deal with less bytes. 32 is fine too, but since you shouldn't have a ton of detections, that should be okay. */
+		... "name varchar(128) NOT NULL, " /* Honestly, you can deal with less bytes. 32 is fine too, but since you shouldn't have a ton of detections, that should be okay. */
 		... "steamid varchar(32) NOT NULL, "
 		... "ip varchar(16) NOT NULL, "
 		... "cheat varchar(50) NOT NULL, "
@@ -113,15 +112,10 @@ void database_log(int client, char[] cheat, int detection=DATABASE_BAN, float da
 	float pos[3], ang[3];
 
 	char name[MAX_NAME_LENGTH];
-	char safe_name[(sizeof(name)*2)+1];
 	if (!GetClientName(client, name, sizeof(name)))
-		strcopy(safe_name, sizeof(safe_name), "<no name>");
-	else {
+		strcopy(name, sizeof(name), "<no name>");
+	else
 		TrimString(name);
-		lil_db.Escape(name, safe_name, sizeof(safe_name));
-		if (strlen(safe_name) >= 128) /* prevents exploits: don't exceed 127 characters else somes names could break the query */
-			strcopy(safe_name, sizeof(safe_name), "<no name>");
-	}
 
 	GetClientAuthId(client, AuthId_Steam2, steamid, sizeof(steamid), true);
 	GetClientIP(client, ip, sizeof(ip), true);
@@ -132,7 +126,7 @@ void database_log(int client, char[] cheat, int detection=DATABASE_BAN, float da
 
 	get_player_log_angles(client, 0, true, ang);
 
-	FormatEx(sql_buffer, sizeof(sql_buffer), "INSERT INTO lilac_detections("
+	lil_db.Format(sql_buffer, sizeof(sql_buffer), "INSERT INTO lilac_detections("
 		... "name, "
 		... "steamid, "
 		... "ip, "
@@ -186,7 +180,7 @@ void database_log(int client, char[] cheat, int detection=DATABASE_BAN, float da
 		... "'%f', "
 		... "'%f', "
 		... "'%s')",
-		safe_name,
+		name,
 		steamid,
 		ip,
 		cheat,
@@ -201,8 +195,8 @@ void database_log(int client, char[] cheat, int detection=DATABASE_BAN, float da
 		map,
 		GetClientTeam(client),
 		weapon,
-		data1,
-		data2,
+		finite_or_zero(data1),
+		finite_or_zero(data2),
 		GetClientAvgLatency(client, NetFlow_Incoming),
 		GetClientAvgLatency(client, NetFlow_Outgoing),
 		GetClientAvgLoss(client, NetFlow_Incoming),

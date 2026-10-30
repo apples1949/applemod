@@ -119,6 +119,10 @@ static void lilac_detected_macro(int client, int type)
 	default: { return; } /* Invalid type. */
 	}
 
+	char sDetails[512];
+	Format(sDetails, sizeof(sDetails), "Macro %s (Detection: %d | Max presses: %d)", string, macro_detected[client][type], macro_max);
+
+	lilac_save_player_details(client, sDetails);
 	lilac_forward_client_cheat(client, CHEAT_MACRO);
 
 	/* Ignore the first detection. */
@@ -129,8 +133,8 @@ static void lilac_detected_macro(int client, int type)
 	if (icvar[CVAR_LOG] && icvar[CVAR_MACRO] < 2) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s was detected of using Macro %s (Detection: %d | Max presses: %d).",
-			line_buffer, string, macro_detected[client][type], macro_max);
+			"%s was detected of using %s.",
+			line_buffer, sDetails);
 
 		lilac_log(true);
 
@@ -183,8 +187,10 @@ static void lilac_detected_macro(int client, int type)
 	if (icvar[CVAR_MACRO] == -1)
 		return;
 
-	if (icvar[CVAR_MACRO_DEAL_METHOD] == 0)
+	if (icvar[CVAR_MACRO_DEAL_METHOD] == 0) {
+		lilac_discord_report(client, CHEAT_MACRO, DISCORD_KICKED);
 		KickClient(client, "[Lilac] %T", "kick_macro", client, string);
+	}
 	else
 		lilac_ban_client(client, CHEAT_MACRO);
 }

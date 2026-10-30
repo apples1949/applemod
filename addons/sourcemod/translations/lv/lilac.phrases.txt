@@ -1,8 +1,8 @@
 "Phrases"
 {
+
 	"welcome_msg"
 	{
-		"#format"	"{1:s}"
 		"lv"		"Šis serveris izmanto Little Anti-Cheat aizsardzību {1}"
 	}
 
@@ -13,13 +13,11 @@
 
 	"kick_interp_exploit"
 	{
-		"#format"	"{1:.0f},{2:d},{3:.3f}"
 		"lv"		"Exploits atklāts: Tavs interp ir pārāk liels ({1}ms / {2}ms max). Lūdzu uzstādi cl_interp atpakaļ uz {3} vai zemāk"
 	}
 
 	"tban_ping_high"
 	{
-		"#format"	"{1:.0f},{2:d}"
 		"lv"		"Tavs pings ir pārāk liels ({1} / {2} max)"
 	}
 
@@ -40,7 +38,7 @@
 
 	"ban_convar"
 	{
-		"lv"		"Invalid ConVar Atklāts"
+		"lv"		"Invalid ConVar Atklāts ({1})"
 	}
 
 	"ban_nolerp"
@@ -63,16 +61,6 @@
 		"lv"		"Aimlock Atklāts"
 	}
 
-	"ban_anti_duck_delay"
-	{
-		"lv" 		"Anti-Duck-Delay Atklāts"
-	}
-
-	"ban_noisemaker"
-	{
-		"lv" 		"Infinite Noise Maker Atklāts"
-	}
-
 	"ban_macro"
 	{
 		"lv"		"Macro Atklāts"
@@ -80,7 +68,6 @@
 
 	"kick_macro"
 	{
-		"#format"	"{1:s}"
 		"lv"		"{1} Macro skriptus aizliegts lietot šajā serverī"
 	}
 
@@ -106,7 +93,16 @@
 
 	"admin_chat_warning_generic"
 	{
-		"#format"	"{1:s},{2:s},{3:d}"
 		"lv"		"{1} Tiek turēts aizdomās par '{2}' (Detections: {3})"
+	}
+
+	"ping_fine_again"
+	{
+		"lv"		"Šķiet, ka tavs pings atkal ir kārtībā, vari droši pievienoties komandai un spēlēt."
+	}
+
+	"ping_kick_warning"
+	{
+		"lv"		"BRĪDINĀJUMS: Tevi izmetīs pēc {1} sekundēm, ja tavs pings paliks pārāk liels! ({2} / {3} max)"
 	}
 }

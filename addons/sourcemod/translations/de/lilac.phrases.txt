@@ -1,8 +1,8 @@
 "Phrases"
 {
+
         "welcome_msg"
         {
-                "#format"        "{1:s}"
                 "de"             "Dieser Server wird von Little Anti-Cheat geschützt {1}"
         }
 
@@ -13,13 +13,11 @@
 
         "kick_interp_exploit"
         {
-                "#format"       "{1:.0f},{2:d},{3:.3f}"
                 "de"            "Exploit entdeckt: Ihr Interp ist zu hoch ({1}ms / {2}ms max). Bitte stellen Sie Ihre cl_interp zurück auf {3} oder niedriger ein"
         }
 
         "tban_ping_high"
         {
-                "#format"       "{1:.0f},{2:d}"
                 "de"            "Ihr Ping ist zu hoch ({1} / {2} max)"
         }
 
@@ -38,9 +36,14 @@
                 "de"            "Chat-Cleaner entdeckt"
         }
 
-        "ban_convar"
+    "ban_convar"
+    {
+        "de"            "Manipulierte ConVar entdeckt ({1})"
+    }
+
+        "ban_nolerp"
         {
-                "de"            "Manipulierte ConVar entdeckt"
+                "de"            "NoLerp erkannt"
         }
 
         "ban_bhop"
@@ -57,4 +60,49 @@
         {
                 "de"            "Aimlock entdeckt"
         }
+
+        "ban_macro"
+        {
+                "de"            "Makro erkannt"
+        }
+
+        "kick_macro"
+        {
+                "de"            "{1}-Makros sind auf diesem Server nicht erlaubt"
+        }
+
+        "chat_invalid_characters"
+        {
+                "de"            "Ihre Chatnachricht wurde blockiert (Grund: Ungültige Zeichen)."
+        }
+
+        "chat_wide_char_spam"
+        {
+                "de"            "Ihre Chatnachricht wurde blockiert (Grund: Wide-Char-Spam)."
+        }
+
+        "kick_bad_name"
+        {
+                "de"            "Ihr Name enthält ungültige Zeichen, bitte ändern Sie Ihren Namen"
+        }
+
+        "ban_name_newline"
+        {
+                "de"            "Zeilenumbrüche im Namen erkannt"
+        }
+
+        "admin_chat_warning_generic"
+        {
+                "de"            "{1} steht unter Verdacht, '{2}' zu benutzen (Erkennungen: {3})"
+        }
+
+    "ping_fine_again"
+    {
+        "de"            "Ihr Ping scheint wieder in Ordnung zu sein, Sie können wieder gefahrlos einem Team beitreten und spielen."
+    }
+
+    "ping_kick_warning"
+    {
+        "de"            "WARNUNG: Sie werden in {1} Sekunden gekickt, wenn Ihr Ping zu hoch bleibt! ({2} / {3} max)"
+    }
 }

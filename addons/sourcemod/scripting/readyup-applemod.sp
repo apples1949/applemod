@@ -13,7 +13,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION "10.3.4"
+#define PLUGIN_VERSION "10.3.6"
 
 public Plugin myinfo =
 {
@@ -390,7 +390,7 @@ public void OnClientDisconnect(int client)
 /* 门锁模块的冻结/倒计时期间保持生还者不动（原来由独立插件自己的 OnPlayerRunCmd 处理） */
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon, int &subtype, int &cmdnum, int &tickcount, int &seed, int mouse[2])
 {
-	DL_OnPlayerRunCmd(client);
+	DL_OnPlayerRunCmd(client, buttons);
 	return Plugin_Continue;
 }
 

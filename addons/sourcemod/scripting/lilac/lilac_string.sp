@@ -18,9 +18,6 @@
 
 public Action OnClientSayCommand(int client, const char[] command, const char[] sArgs)
 {
-	if(client == 0)
-		return Plugin_Continue;
-
 	int flags;
 
 	if (!icvar[CVAR_ENABLE])
@@ -67,13 +64,6 @@ public Action OnClientSayCommand(int client, const char[] command, const char[] 
 
 public void OnClientSayCommand_Post(int client, const char[] command, const char[] sArgs)
 {
-	if(client == 0)
-		return;
-
-	/* Chat-Clear doesn't work in CS:GO. */
-	if (ggame == GAME_CSGO)
-		return;
-
 	/* Todo: CVAR_CHAT is... Now an outdated name... */
 	if (!icvar[CVAR_ENABLE] || !icvar[CVAR_CHAT])
 		return;
@@ -87,13 +77,18 @@ public void OnClientSayCommand_Post(int client, const char[] command, const char
 			return;
 
 		playerinfo_banned_flags[client][CHEAT_CHATCLEAR] = true;
+
+		char sDetails[512];
+		Format(sDetails, sizeof(sDetails), "Chat message: %s", sArgs);
+
+		lilac_save_player_details(client, sDetails);
 		lilac_forward_client_cheat(client, CHEAT_CHATCLEAR);
 
 		if (icvar[CVAR_LOG]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s was detected and banned for Chat-Clear (Chat message: %s)",
-				line_buffer, sArgs);
+				"%s %s for Chat-Clear (%s)",
+				line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_CHATCLEAR), sDetails);
 
 			lilac_log(true);
 
@@ -179,12 +174,14 @@ static void check_name(int client, const char []name)
 			return;
 
 		playerinfo_banned_flags[client][CHEAT_NEWLINE_NAME] = true;
+
+		lilac_save_player_details(client, name);
 		lilac_forward_client_cheat(client, CHEAT_NEWLINE_NAME);
 
 		if (icvar[CVAR_LOG]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s was banned of having newline characters in their name (%s).", line_buffer, name);
+				"%s %s for having newline characters in their name (%s).", line_buffer, LILAC_BANNED_TEXT(CHEAT_NEWLINE_NAME), name);
 
 			lilac_log(true);
 

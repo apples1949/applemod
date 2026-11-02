@@ -158,7 +158,7 @@ void DL_OnPluginStart()
 	DL_g_cDisplayPanel =	CreateConVar("l4d2_dlock_displaypanel",	"2",	"玩家状态面板的显示模式,0-不显示，1-隐藏连接失败的玩家，2-完整显示", FCVAR_NOTIFY);
 	DL_g_cFreezeNodoor =	CreateConVar("l4d2_dlock_freezenodoor",	"1",	"如果没有启动安全室的门，则冻结生还者", FCVAR_NOTIFY);
 	DL_g_cBlockUse =	CreateConVar("l4d2_dlock_blockuse",	"1",	"倒计时结束(门打开)之前, 生还者不能按 E 与物品/按钮交互: 0=不限制 1=禁止", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	DL_g_cTrace =		CreateConVar("l4d2_dlock_tracelog",		"1",	"诊断跟踪日志: 1=写入 logs/l4d2_dlock_trace.log (排查崩溃用, 每秒心跳+每次面板发送), 0=关闭", FCVAR_NOTIFY);
+	DL_g_cTrace =		CreateConVar("l4d2_dlock_tracelog",		"0",	"诊断跟踪日志: 1=写入 logs/l4d2_dlock_trace.log (排查崩溃用, 每秒心跳+每次面板发送), 0=关闭（默认）", FCVAR_NOTIFY);
 
 	DL_g_cSbStop =		FindConVar("sb_stop");
 	DL_g_cNbStop =		FindConVar("nb_stop");

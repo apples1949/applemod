@@ -41,6 +41,18 @@
  *       离开守护/插件卸载时恢复原值；并新增 L4D2_OnSlammedSurvivor 前置拦截，
  *       挡掉牛把守护中的生还者撞墙致残的那条路径。
  *
+ *   1.3.0 变更（玩家反馈"打无敌 bot 一脸懵"）：
+ *     - 玩家操控的特殊感染者攻击"守护中的 AI 生还者"时，给该特感玩家三渠道提示：
+ *         ① 聊天框  ② PrintHintText 屏幕提示  ③ HUD 文字（SetHudTextParams/ShowHudText）
+ *       三渠道各自有开关（l4d2_bot_guard_warn_chat / _hint / _hud），默认全开。
+ *     - 同时播放"投票失败提示音"（默认 ui/beep_error01.wav，与本仓库 l4d_votes_5_VS
+ *       的投票未通过音效同一个文件；可用 l4d2_bot_guard_warn_sound 换成任意 game_sounds 路径）。
+ *     - 提示音与文字共用一条节流：同一名特感玩家默认 3 秒内只会被提示一次
+ *       （l4d2_bot_guard_warn_cooldown，0 = 不节流），避免连点爪击时刷屏刷音。
+ *     - 覆盖的触发点：SDKHook_OnTakeDamage（守护中吃伤害 / 保命判定）、
+ *       舌头 / 扑击 / 骑乘 / 牛抱人 / 牛捶打 / 牛撞墙 六个前置拦截 forward。
+ *     - 新增管理员命令 sm_botguard_warntest [目标]，不节流地演示一遍提示（验证音效是否存在）。
+ *
  *   1.2.0 变更（四条新需求，全部实装）：
  *     - 需求1 移速：所有"未被玩家接管的生还者"（生还者队里 IsFakeClient 的客户端）
  *       移动速度按 m_flLaggedMovementValue 放大，
@@ -89,9 +101,10 @@
 #include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.2.2"
+#define PLUGIN_VERSION		"1.3.0"
 
 #define TEAM_SURVIVOR		2
+#define TEAM_INFECTED		3
 
 // m_iGlowType = 3 是 L4D2 的"常亮轮廓"（参考 l4d2_tank_defib_revive 的写法）
 #define GLOW_TYPE_CONSTANT	3
@@ -120,6 +133,14 @@ ConVar g_cvReviveHealth;	// 自动救起后的血量
 ConVar g_cvReviveDelay;		// 倒地后延迟多久救起（秒）
 ConVar g_cvNotify;			// 自动救起时是否聊天框提示
 
+// 1.3.0：玩家特感攻击"守护中的 AI 生还者"时的提示（提示音 + 三渠道文字）
+ConVar g_cvWarn;			// 总开关
+ConVar g_cvWarnCooldown;	// 同一名特感玩家的提示间隔下限（秒），默认 3.0
+ConVar g_cvWarnSound;		// 提示音路径（相对 sound/ 目录）
+ConVar g_cvWarnChat;		// 渠道① 聊天框
+ConVar g_cvWarnHint;		// 渠道② PrintHintText
+ConVar g_cvWarnHud;			// 渠道③ HUD 文字
+
 bool	g_bGuarded[MAXPLAYERS + 1];			// 当前是否处于守护状态（只看血量）
 bool	g_bGlowProps[MAXPLAYERS + 1];		// 该客户端是否有完整的发光 netprop（仅作诊断用，不再作为写入门的开关）
 int		g_iOrigGlowType[MAXPLAYERS + 1];	// 进入守护前的 m_iGlowType
@@ -131,6 +152,9 @@ float	g_fTempStash[MAXPLAYERS + 1];		// 守护开始时冻结的虚血值
 int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动救起次数
 float	g_fTestGlowUntil[MAXPLAYERS + 1];	// 调试用：到该时刻前强制给该客户端上轮廓
 bool	g_bSpeedApplied[MAXPLAYERS + 1];	// 1.2.0：本插件是否给该客户端写过移速（退出/失效时要还原）
+
+float	g_fWarnLast[MAXPLAYERS + 1];		// 1.3.0：该特感玩家上次收到"打不动"提示的游戏时间
+char	g_sWarnSound[PLATFORM_MAX_PATH];	// 1.3.0：解析后的提示音路径（空 = 不播放）
 
 int		g_iGlowColorPacked;					// 打包后的颜色值（R | G<<8 | B<<16）
 bool	g_bBlinkPhase;						// 闪烁相位（每 tick 取反）
@@ -149,7 +173,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（3秒节流）",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -266,6 +290,37 @@ public void OnPluginStart()
 		"自动救起时是否在聊天框提示. 0=关闭, 1=启用.",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
+	// 1.3.0：玩家特感打守护中的 bot 时，提示音 + 三渠道文字
+	g_cvWarn = CreateConVar("l4d2_bot_guard_warn",
+		"1",
+		"玩家特感攻击守护中的 AI 生还者时, 是否给该特感玩家提示(提示音 + 三渠道文字). 0=关闭, 1=启用.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_cvWarnCooldown = CreateConVar("l4d2_bot_guard_warn_cooldown",
+		"3.0",
+		"同一名特感玩家两次提示的最小间隔(秒). 默认 3.0 = 3 秒播放检测, 防止连点爪击时提示音刷屏. 0 = 不节流.",
+		FCVAR_NOTIFY, true, 0.0, true, 60.0);
+
+	g_cvWarnSound = CreateConVar("l4d2_bot_guard_warn_sound",
+		"ui/beep_error01.wav",
+		"提示音路径(相对游戏 sound/ 目录). 默认 ui/beep_error01.wav = 服务器现有投票插件[l4d_votes_5_VS]投票未通过用的同一个音效; 留空 = 不播放.",
+		FCVAR_NOTIFY);
+
+	g_cvWarnChat = CreateConVar("l4d2_bot_guard_warn_chat",
+		"1",
+		"提示渠道①: 聊天框(只发给攻击的特感玩家). 0=关闭, 1=启用.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_cvWarnHint = CreateConVar("l4d2_bot_guard_warn_hint",
+		"1",
+		"提示渠道②: 屏幕提示(PrintHintText, 只发给攻击的特感玩家). 0=关闭, 1=启用.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_cvWarnHud = CreateConVar("l4d2_bot_guard_warn_hud",
+		"1",
+		"提示渠道③: HUD 文字(ShowHudText, 画面上方, 只发给攻击的特感玩家). 0=关闭, 1=启用.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	// 按 workspace 约定：不生成插件 cfg（不用 AutoExecConfig），
 	// 全部参数由 applemod12v12 的 confogl_addcvar 下发
 	ParseGlowColor();
@@ -275,6 +330,8 @@ public void OnPluginStart()
 	// 1.2.0：移速倍率改了要立刻重写一遍（不必等下一 tick）
 	g_cvBotSpeed.AddChangeHook(OnConVarChanged);
 	g_cvBaseSpeed.AddChangeHook(OnConVarChanged);
+	// 1.3.0：提示音路径改了要重新解析/预缓存
+	g_cvWarnSound.AddChangeHook(OnConVarChanged);
 
 	HookEvent("player_incapacitated", Event_PlayerIncapacitated, EventHookMode_Post);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
@@ -292,8 +349,18 @@ public void OnPluginStart()
 	RegAdminCmd("sm_botguard_test", Cmd_TestGlow, ADMFLAG_GENERIC,
 		"强制给目标客户端闪轮廓，用于确认发光是否可见: sm_botguard_test <#userid|名字> [秒]");
 
+	// 1.3.0：不节流地演示一遍"打守护 bot"的提示（提示音 + 三渠道文字），用来验证音效是否存在
+	RegAdminCmd("sm_botguard_warntest", Cmd_WarnTest, ADMFLAG_GENERIC,
+		"演示一次守护拦截提示(提示音+三渠道文字), 不节流: sm_botguard_warntest [目标 #userid|名字]，默认发给自己");
+
 	StartTickTimer();
 	StartProtectTimer();
+}
+
+// 1.3.0：配置(cfg)下发完后再解析一次提示音路径，保证拿到的是 confogl_addcvar 之后的值
+public void OnConfigsExecuted()
+{
+	RefreshWarnSound(false);
 }
 
 public void OnMapStart()
@@ -304,12 +371,16 @@ public void OnMapStart()
 	g_iGuardAllowed = 0;
 	g_iGuardCount = 0;
 
+	// 1.3.0：解析 + 预缓存提示音（换图后重置节流时间戳）
+	RefreshWarnSound(true);
+
 	for (int i = 0; i <= MaxClients; i++)
 	{
 		g_bGuarded[i] = false;
 		g_fTempStash[i] = 0.0;
 		// 换图后实体重建，m_flLaggedMovementValue 自然是 1.0，只需要清掉标记
 		g_bSpeedApplied[i] = false;
+		g_fWarnLast[i] = 0.0;
 	}
 }
 
@@ -365,6 +436,7 @@ public void OnClientPutInServer(int client)
 	g_fTempStash[client] = 0.0;
 	g_iReviveLeft[client] = g_cvReviveTimes.IntValue;
 	g_bSpeedApplied[client] = false;
+	g_fWarnLast[client] = 0.0;
 
 	// 每个客户端都要挂伤害钩子（r ygive 同款做法：进服即挂）
 	SDKHook(client, SDKHook_OnTakeDamage, Hook_OnTakeDamage);
@@ -378,6 +450,7 @@ public void OnClientDisconnect(int client)
 	g_iReviveLeft[client] = 0;
 	// 客户端已经离开，实体随后销毁，不需要再写属性，只清标记
 	g_bSpeedApplied[client] = false;
+	g_fWarnLast[client] = 0.0;
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -403,6 +476,11 @@ public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] n
 	{
 		// 1.2.0：倍率变了立刻生效，不用等下一 tick
 		UpdateBotSpeed();
+	}
+	else if (convar == g_cvWarnSound)
+	{
+		// 1.3.0：换提示音后立刻重新解析（这张图已经开过，不再预缓存，音效文件本身是库存音效）
+		RefreshWarnSound(false);
 	}
 }
 
@@ -867,6 +945,156 @@ void UpdateBotSpeed()
 	}
 }
 
+// ============================================================================
+// 1.3.0：玩家特感攻击"守护中的 AI 生还者"时的提示
+//
+//   - 提示音：默认 ui/beep_error01.wav（= 本仓库 l4d_votes_5_VS 投票未通过用的同一个
+//     音效文件，服务器上绝对存在）。改 l4d2_bot_guard_warn_sound 可换成任意
+//     game_sounds 路径（相对 sound/ 目录），留空则不播。
+//   - 三渠道文字：① 聊天框 ② PrintHintText ③ HUD 文字，各自有开关。
+//   - 节流：同一名特感玩家默认 3 秒内只提示一次（提示音也一起节流），
+//     连点爪击不会刷屏刷音。
+// ============================================================================
+
+// 解析 l4d2_bot_guard_warn_sound，并（在地图开始时可）预缓存。
+// 音效不存在只记一条 LogError，不影响免疫 / 文字提示。
+void RefreshWarnSound(bool bPrecache)
+{
+	g_cvWarnSound.GetString(g_sWarnSound, sizeof(g_sWarnSound));
+
+	if (g_sWarnSound[0] == '\0')
+		return;
+
+	char sDiskPath[PLATFORM_MAX_PATH];
+	Format(sDiskPath, sizeof(sDiskPath), "sound/%s", g_sWarnSound);
+
+	// valve_fs = true：能查到打进 VPK 的官方音效；再兜一层普通文件系统查询
+	if (!FileExists(sDiskPath, true) && !FileExists(sDiskPath))
+	{
+		LogError("[BotGuard] l4d2_bot_guard_warn_sound 指向的音效不存在: %s（攻击守护中的 bot 时不会有提示音，文字提示照常）",
+			g_sWarnSound);
+		return;
+	}
+
+	if (bPrecache)
+		PrecacheSound(g_sWarnSound, true);
+}
+
+// 只有"玩家操控的特感"才需要提示（AI 特感不刷屏）
+bool IsWarnTarget(int client)
+{
+	if (client < 1 || client > MaxClients)
+		return false;
+
+	if (!IsClientInGame(client) || IsFakeClient(client))
+		return false;
+
+	return GetClientTeam(client) == TEAM_INFECTED;
+}
+
+// 带节流的入口：守护中的 AI 生还者被玩家特感攻击时调用
+void NotifyGuardBlocked(int attacker, int victim)
+{
+	if (!g_cvWarn.BoolValue)
+		return;
+
+	if (!IsWarnTarget(attacker))
+		return;
+
+	float fNow = GetGameTime();
+	float fCooldown = g_cvWarnCooldown.FloatValue;
+	if (fCooldown < 0.0)
+		fCooldown = 0.0;
+
+	// 3 秒播放检测：同一个人在这个窗口内只提示一次（提示音与三渠道文字共用）
+	if (fCooldown > 0.0 && g_fWarnLast[attacker] > 0.0 && fNow - g_fWarnLast[attacker] < fCooldown)
+		return;
+
+	g_fWarnLast[attacker] = fNow;
+
+	ShowGuardBlockedHint(attacker, victim);
+}
+
+// 真正发提示（节流在 NotifyGuardBlocked 里做；管理员命令 sm_botguard_warntest 直接调它）
+void ShowGuardBlockedHint(int attacker, int victim)
+{
+	if (attacker < 1 || attacker > MaxClients || !IsClientInGame(attacker))
+		return;
+
+	// 被守护的生还者名字（找不到就退化成通用说法，管理员命令单独测试时也好看）
+	char sName[MAX_NAME_LENGTH];
+	if (victim > 0 && victim <= MaxClients && IsClientInGame(victim))
+		Format(sName, sizeof(sName), "%N", victim);
+	else
+		strcopy(sName, sizeof(sName), "该 AI 生还者");
+
+	// 提示音（默认 = 投票失败音效）
+	if (g_sWarnSound[0] != '\0')
+		EmitSoundToClient(attacker, g_sWarnSound, SOUND_FROM_PLAYER, SNDCHAN_AUTO,
+			SNDLEVEL_NORMAL, SND_NOFLAGS, 1.0);
+
+	// 渠道① 聊天框
+	if (g_cvWarnChat.BoolValue)
+	{
+		PrintToChat(attacker, "\x04[人机守护]\x01 \x03%s\x01 处于守护状态：\x04免疫伤害 / 免疫控制\x01，攻击与技能都不会生效。",
+			sName);
+	}
+
+	// 渠道② 屏幕提示（PrintHintText）
+	if (g_cvWarnHint.BoolValue)
+	{
+		PrintHintText(attacker, "人机守护中：%s 无敌（免疫伤害与控制）", sName);
+	}
+
+	// 渠道③ HUD 文字（画面上方，2.5 秒）
+	if (g_cvWarnHud.BoolValue)
+	{
+		SetHudTextParams(-1.0, 0.12, 2.5, 255, 80, 80, 255, 0, 0.0, 0.0, 0.0);
+		ShowHudText(attacker, -1, "[人机守护] %s 免疫伤害 / 免疫控制", sName);
+	}
+}
+
+// sm_botguard_warntest [目标]：不节流地演示一遍提示，用来确认音效文件是否存在、三渠道是否都能看到
+public Action Cmd_WarnTest(int client, int args)
+{
+	int target = client;
+
+	if (args >= 1)
+	{
+		char sArg[MAX_NAME_LENGTH];
+		GetCmdArg(1, sArg, sizeof(sArg));
+
+		target = FindTarget(client, sArg, false, false);
+		if (target == -1)
+			return Plugin_Handled;
+	}
+
+	if (target < 1 || target > MaxClients || !IsClientInGame(target))
+	{
+		ReplyToCommand(client, "\x04[BotGuard]\x01 目标无效或不在游戏中。");
+		return Plugin_Handled;
+	}
+
+	// 找一个当前守护中的 bot 当作"被打的对象"，没有就用通用文案
+	int victim = 0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && g_bGuarded[i])
+		{
+			victim = i;
+			break;
+		}
+	}
+
+	g_fWarnLast[target] = 0.0;
+	ShowGuardBlockedHint(target, victim);
+
+	ReplyToCommand(client, "\x04[BotGuard]\x01 已向 #%d 发送一次演示提示（音效=%s，节流已跳过）。",
+		target, (g_sWarnSound[0] != '\0') ? g_sWarnSound : "无");
+
+	return Plugin_Handled;
+}
+
 // 是否应该进入守护状态
 bool ShouldGuard(int client)
 {
@@ -1042,6 +1270,9 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	// 1.2.0 起不再有"AI 数量超限就整段失效"的开关，改由名额本身控制谁能进守护
 	if (g_bGuarded[victim])
 	{
+		// 1.3.0：告诉攻击的玩家特感"这只人机是无敌的"（提示音 + 三渠道文字，带 3 秒节流）
+		NotifyGuardBlocked(attacker, victim);
+
 		damage = 0.0;
 		return Plugin_Handled;
 	}
@@ -1090,6 +1321,9 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	EnterGuard(victim);
 	g_iGuardCount = CountGuarded();
 
+	// 1.3.0：这一击被"保命"吃掉并当场进入守护，同样提示攻击的玩家特感
+	NotifyGuardBlocked(attacker, victim);
+
 	return Plugin_Handled;
 }
 
@@ -1127,7 +1361,10 @@ void ReleaseControl(int victim)
 public Action L4D_OnGrabWithTongue(int victim, int attacker)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1136,7 +1373,10 @@ public Action L4D_OnGrabWithTongue(int victim, int attacker)
 public Action L4D_OnPouncedOnSurvivor(int victim, int attacker)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1145,7 +1385,10 @@ public Action L4D_OnPouncedOnSurvivor(int victim, int attacker)
 public Action L4D2_OnJockeyRide(int victim, int attacker)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1154,7 +1397,10 @@ public Action L4D2_OnJockeyRide(int victim, int attacker)
 public Action L4D2_OnStartCarryingVictim(int victim, int attacker)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1164,7 +1410,10 @@ public Action L4D2_OnStartCarryingVictim(int victim, int attacker)
 public Action L4D2_OnPummelVictim(int attacker, int victim)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1173,7 +1422,10 @@ public Action L4D2_OnPummelVictim(int attacker, int victim)
 public Action L4D2_OnSlammedSurvivor(int victim, int attacker, bool &bWallSlam, bool &bDeadlyCharge)
 {
 	if (BlockControlOn(victim))
+	{
+		NotifyGuardBlocked(attacker, victim);
 		return Plugin_Handled;
+	}
 
 	return Plugin_Continue;
 }
@@ -1335,6 +1587,15 @@ public Action Cmd_Status(int client, int args)
 		g_cvBotSpeed.FloatValue,
 		g_cvBaseSpeed.FloatValue,
 		GetBotSpeedScale());
+
+	// 1.3.0：打守护 bot 的提示配置（提示音路径 + 三渠道开关 + 节流）
+	ReplyToCommand(client, "\x04[BotGuard]\x01 拦截提示: 开关=%d 节流=%.1fs 音效=%s | 渠道 聊天=%d 屏幕=%d HUD=%d",
+		g_cvWarn.IntValue,
+		g_cvWarnCooldown.FloatValue,
+		(g_sWarnSound[0] != '\0') ? g_sWarnSound : "（无）",
+		g_cvWarnChat.IntValue,
+		g_cvWarnHint.IntValue,
+		g_cvWarnHud.IntValue);
 
 	// 1.2.0：当前守护名单（#client 索引列表）
 	char sGuardList[256];

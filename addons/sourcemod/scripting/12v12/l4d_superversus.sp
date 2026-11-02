@@ -915,7 +915,8 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 				if (other == TEAM_INFECTED)
 					bOtherOpen = InfectedAllowed && GetTeamPlayers(TEAM_INFECTED, false) < InfectedLimit.IntValue;
 				else
-					bOtherOpen = GetTeamPlayers(TEAM_SURVIVOR, false) < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+					bOtherOpen = GetTeamPlayers(TEAM_SURVIVOR, false) < SurvivorLimit.IntValue
+						&& (!HasDeadSurvivorSeat() || HasTakeoverSurvivorBot());
 
 				if (bOtherOpen)
 				{
@@ -948,6 +949,16 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 * 所以生还者侧不算"有可用的活人位置"。
 * 注意与 HasSurvivorDied(client) 区分：那个是"这名玩家本局死过"。
 * ---------------------------------------------------------------------- */
+/**
+ * 生还者队里是否存在"可接管"的 Bot。
+ * 接管是换掉一具已有身体（Bot 本来就占着 survivor_limit 里的一个名额），
+ * 不会新增名额、也不会超额 —— 所以哪怕有人阵亡躺着，只要有 Bot 可接管就能进。
+ */
+bool HasTakeoverSurvivorBot()
+{
+	return FindJoinSurvivorBot(true) > 0;
+}
+
 bool HasDeadSurvivorSeat()
 {
 	for (int i = 1; i <= MaxClients; i++)
@@ -1000,7 +1011,8 @@ int SelectBalancedTeam(int client)
 
 	/* 生还者侧"可用"要同时满足：真人位置没满、且队里没有死亡生还者占着名额。
 	   有人躺着时只能去特感；两边都不可用就返回 0，让调用方保持旁观并提示。 */
-	bool survivorOpen = survivors < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+	bool survivorOpen = survivors < SurvivorLimit.IntValue
+		&& (!HasDeadSurvivorSeat() || HasTakeoverSurvivorBot());
 	bool infectedOpen = InfectedAllowed && infected < InfectedLimit.IntValue;
 
 	if (!survivorOpen && !infectedOpen) return 0;
@@ -1245,7 +1257,8 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 			/* 生还者侧"可补位"要同时满足：真人名额没满 + 队里没有"已死亡但还躺着"的人占位。
 			   有人躺着时那几个席位要等下一回合复活，此刻把人塞进去就是超额，而且会变成一具
 			   死亡身体卡在"点击加入游戏"界面。这种局面下 !jg 应该直接去特感。 */
-			bool bSurvivorOpen = survivors < SurvivorLimit.IntValue && !HasDeadSurvivorSeat();
+			bool bSurvivorOpen = survivors < SurvivorLimit.IntValue
+				&& (!HasDeadSurvivorSeat() || HasTakeoverSurvivorBot());
 			bool bInfectedOpen = infected < InfectedLimit.IntValue;
 
 			if (!bSurvivorOpen && !bInfectedOpen)
@@ -1315,20 +1328,23 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		if (announce) PrintToChat(client, "\x03[SV] \x01生还者队伍的真人位置已满。");
 		return Join_Failed;
 	}
-	/* 生还者位置被死亡生还者占着时，不能把人塞进生还者队（否则他会变成一具死亡身体，
-	   客户端一直显示原生"点击加入游戏"却点不动）。
-	   例外：这名玩家托管着自己的生还者 Bot（从旁观回来接管原来的身体），那不是新增名额。 */
-	if (bot <= 0 && HasDeadSurvivorSeat())
-	{
-		if (announce) PrintToChat(client, "\x03[SV] \x01本回合生还者已无可用位置（有阵亡玩家占位），请等待下一回合或加入特感。");
-		return Join_Failed;
-	}
+	/* 先找可接管的 Bot：接管是换一具已有身体，不新增名额，所以即使有人阵亡躺着也不算超额。 */
+	if (bot <= 0) bot = FindJoinSurvivorBot(!died);
+
 	if (died && bot > 0 && IsPlayerAlive(bot))
 	{
 		if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，不能接管存活的 AI。");
 		return Join_Failed;
 	}
-	if (bot <= 0) bot = FindJoinSurvivorBot(!died);
+
+	/* 生还者位置被死亡生还者占着、且**场上没有可接管的 Bot**时，才真的不能塞人进生还者队
+	   （否则他会变成一具死亡身体，客户端一直显示原生"点击加入游戏"却点不动）。
+	   有 Bot 可接管时走下面的 SafeTakeOverSurvivor，安全。 */
+	if (bot <= 0 && HasDeadSurvivorSeat())
+	{
+		if (announce) PrintToChat(client, "\x03[SV] \x01本回合生还者已无可用位置（有阵亡玩家占位且没有可接管的 Bot），请等待下一回合或加入特感。");
+		return Join_Failed;
+	}
 	if (bot <= 0)
 	{
 		if (died)

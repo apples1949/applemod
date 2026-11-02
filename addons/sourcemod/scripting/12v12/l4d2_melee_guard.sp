@@ -121,7 +121,9 @@ public void OnPluginStart()
 	g_cvWarn   = CreateConVar("l4d2_melee_guard_warn",   "1", "1=移除武器时提示玩家", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvDebug  = CreateConVar("l4d2_melee_guard_debug",  "0", "1=输出调试信息", FCVAR_NONE, true, 0.0, true, 1.0);
 
-	AutoExecConfig(true, "l4d2_melee_guard");
+	// AutoExecConfig 已按要求关闭：不再生成/执行 cfg/sourcemod/l4d2_melee_guard.cfg，
+	// 所有 l4d2_melee_guard_* 取源码默认值；要改就在 confogl 的 cfg 里 confogl_addcvar 或控制台设。
+	// AutoExecConfig(true, "l4d2_melee_guard");
 
 	RegConsoleCmd("sm_melee_guard_check", Cmd_Check, "扫描近战武器并打印本图注册的近战脚本表");
 
@@ -365,7 +367,7 @@ void CheckMeleeWeapon(int entity, const char[] source)
 		}
 	}
 
-	AcceptEntityInput(entity, "Kill");
+	KillEntNextFrame(entity);
 	g_iRemoved++;
 }
 
@@ -502,4 +504,24 @@ void BuildMeleeNameList()
 
 		LogMessage("[melee_guard] 本图可用近战脚本(%d): %s", count, buf);
 	}
+}
+
+// ===========================================================================
+//  延迟删除：把删实体推迟到下一帧，避免在引擎回调/实体遍历中途删（崩溃排查用）
+//  RequestFrame 在 SM 1.12 支持带 any data 参数，比 CreateTimer(0.0) 更贴近"下一帧"，
+//  也不会额外创建 timer 对象。
+// ===========================================================================
+void KillEntNextFrame(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+		return;
+
+	RequestFrame(Frame_KillEntNextFrame, EntIndexToEntRef(entity));
+}
+
+public void Frame_KillEntNextFrame(any ref)
+{
+	int ent = EntRefToEntIndex(ref);
+	if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
+		AcceptEntityInput(ent, "Kill");
 }

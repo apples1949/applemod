@@ -55,12 +55,13 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.3.0"
+#define PLUGIN_VERSION "1.3.3"
 #define MAX_CMD_LEN 256
 #define TEAM_SURVIVOR 2        // L4D2：1=旁观/未分配，2=生还者，3=感染者
 #define TEAM_L4D1_SURVIVOR 4   // c7m3_port 这类两代生还者共存的地图会用 4（见 l2d2util_constants.inc）
 #define DUMP_DELAY_SECONDS 70.0 // 自动执行 perf 指令后多久导出报告（perf_start 10 60 是 60 秒）
 #define PARSE_DELAY_SECONDS 4.0 // 导出后再等多久去解析（等 perfstat 把文件写完）
+#define PARSE_RETRY_DELAY   5.0 // 第一遍没看到文件时，重发一次 perf_dump 后再等多久
 #define LINE_MAX 512
 
 ConVar gCvarEnabled;
@@ -74,6 +75,7 @@ bool g_bFired;                          // 本张地图是否已执行过（每�
 bool g_bAnyLeft;                        // 本回合是否已有过"离开安全屋"事件
 bool g_bLeftArea[MAXPLAYERS + 1];       // 模式 1：该生还者本回合是否已离开安全屋
 
+int  g_iDumpRetries;                    // 本轮 perf_dump 已重试次数
 char g_sRaw[PLATFORM_MAX_PATH];         // 原始报告路径（解析后删除）
 char g_sParsed[PLATFORM_MAX_PATH];      // 解析报告路径
 char g_sMap[64];
@@ -124,6 +126,39 @@ public void OnPluginStart()
 			"立刻执行一次 perf 采集指令（测试用，不影响每张图一次的自动触发状态）");
 	RegAdminCmd("sm_perf_capture_status", Cmd_PerfCaptureStatus, ADMFLAG_GENERIC,
 			"查看 l4d2_perf_capture 的配置与当前触发状态");
+}
+
+/**
+ * 启动指令：插件加载时把"怎么用"打到服务端控制台 + 写进日志（不改任何行为）。
+ */
+void PrintStartupHelp()
+{
+	char folder[PLATFORM_MAX_PATH];
+	char cmd[MAX_CMD_LEN];
+
+	GetLogFolder(folder, sizeof(folder));
+	gCvarCmd.GetString(cmd, sizeof(cmd));
+
+	PrintToServer("[perf_capture] L4D2 Perf Capture v%s 已加载", PLUGIN_VERSION);
+	PrintToServer("[perf_capture] 自动采集: 生还者离开安全屋时执行 \"%s\"（每张图一次；对抗只跑前半场）", cmd);
+	PrintToServer("[perf_capture] 手动采集: sm_perf_capture          立刻跑一次采集并自动导出+解析");
+	PrintToServer("[perf_capture] 查看状态: sm_perf_capture_status  看开关/模式/本图是否已触发/报告路径");
+	PrintToServer("[perf_capture] 解析报告目录: %s  (原始报告解析成功后自动删除)", folder);
+
+	LogMessage("[perf_capture] v%s loaded. auto capture \"%s\", report folder: \"%s\". Manual: sm_perf_capture / sm_perf_capture_status.",
+		PLUGIN_VERSION, cmd, folder);
+}
+
+static bool g_bStartupHelpDone;
+
+// 启动提示只打一次：cfg 执行完后再打印，目录/指令显示的是真实值
+public void OnConfigsExecuted()
+{
+	if (g_bStartupHelpDone)
+		return;
+
+	g_bStartupHelpDone = true;
+	PrintStartupHelp();
 }
 
 public void OnMapStart()
@@ -296,6 +331,14 @@ void Trigger(const char[] reason)
 		return;
 	}
 
+	// perfstat 没装就别采集：既省得空转 70 秒，也不会在 errors 日志里留"找不到报告"
+	if (!PerfstatInstalled())
+	{
+		PrintToServer("[perf_capture] 没检测到 perfstat（addons/perfstat.vdf|perfstat.so|perfstat.dll 都不存在），跳过本次采集（不占用本图配额）。");
+		LogMessage("[perf_capture] skip: perfstat not installed");
+		return;
+	}
+
 	if (!PreparePaths())
 	{
 		return;
@@ -332,10 +375,55 @@ bool PreparePaths()
 	GetCurrentMap(g_sMap, sizeof(g_sMap));
 	SanitizeName(g_sMap, sizeof(g_sMap));
 
+	g_iDumpRetries = 0;
+
 	FormatEx(g_sRaw, sizeof(g_sRaw), "%s/raw_perf_%s_%s.log", folder, g_sMap, sTime);
 	FormatEx(g_sParsed, sizeof(g_sParsed), "%s/perf_%s_%s.log", folder, g_sMap, sTime);
 
+	/* 这两条路径会被拼进服务端指令（perf_dump "<raw>"）：
+	   引号/分号会把命令行拆坏，先消毒，保证命令里用的就是真实文件路径 */
+	SanitizeCmdPath(g_sRaw, sizeof(g_sRaw));
+	SanitizeCmdPath(g_sParsed, sizeof(g_sParsed));
+
 	return true;
+}
+
+/** perfstat 是否装了：vdf / .so / .dll 任一存在即认为已安装（路径都相对游戏目录） */
+bool PerfstatInstalled()
+{
+	return FileExists("addons/perfstat.vdf")
+	    || FileExists("addons/perfstat.so")
+	    || FileExists("addons/perfstat.dll");
+}
+
+/** 把 l4d2_perf_capture_dump_cmd 拼出来并提交（导出与重试共用） */
+void SubmitDumpCommand()
+{
+	char sDump[MAX_CMD_LEN * 2];
+	gCvarDumpCmd.GetString(sDump, sizeof(sDump));
+
+	if (sDump[0] == '\0')
+	{
+		PrintToServer("[perf_capture] l4d2_perf_capture_dump_cmd 为空，跳过导出。");
+		return;
+	}
+
+	char sCmd[MAX_CMD_LEN * 2];
+
+	// 模板里带 %s 就替换成原始报告路径；不带的直接把指令原样执行
+	if (StrContains(sDump, "%s") >= 0)
+	{
+		FormatEx(sCmd, sizeof(sCmd), sDump, g_sRaw);
+	}
+	else
+	{
+		strcopy(sCmd, sizeof(sCmd), sDump);
+	}
+
+	InsertServerCommand("%s", sCmd);
+
+	PrintToServer("[perf_capture] 已提交导出指令: %s", sCmd);
+	LogMessage("[perf_capture] submitted dump command: %s", sCmd);
 }
 
 bool HasConfiguredCommand()
@@ -371,32 +459,8 @@ void DoCommand(const char[] reason)
  */
 public Action Timer_DumpReport(Handle timer)
 {
-	char sDump[MAX_CMD_LEN * 2];
-	gCvarDumpCmd.GetString(sDump, sizeof(sDump));
-
-	if (sDump[0] == '\0')
-	{
-		PrintToServer("[perf_capture] l4d2_perf_capture_dump_cmd 为空，跳过导出。");
-		return Plugin_Continue;
-	}
-
-	char sCmd[MAX_CMD_LEN * 2];
-
-	// 模板里带 %s 就替换成原始报告路径；不带的直接把指令原样执行
-	if (StrContains(sDump, "%s") >= 0)
-	{
-		FormatEx(sCmd, sizeof(sCmd), sDump, g_sRaw);
-	}
-	else
-	{
-		strcopy(sCmd, sizeof(sCmd), sDump);
-	}
-
-	InsertServerCommand("%s", sCmd);
-
-	PrintToServer("[perf_capture] 采集已满 %.0f 秒 → 已提交导出指令: %s",
-			DUMP_DELAY_SECONDS, sCmd);
-	LogMessage("[perf_capture] perf window finished, submitted dump command: %s", sCmd);
+	PrintToServer("[perf_capture] 采集已满 %.0f 秒 → 导出报告。", DUMP_DELAY_SECONDS);
+	SubmitDumpCommand();
 
 	// 再等几秒让 perfstat 把文件写完，然后解析 + 删原始
 	CreateTimer(PARSE_DELAY_SECONDS, Timer_ParseReport, _, TIMER_FLAG_NO_MAPCHANGE);
@@ -421,8 +485,23 @@ public Action Timer_ParseReport(Handle timer)
 
 	if (!FileExists(g_sRaw))
 	{
-		PrintToServer("[perf_capture] 没找到原始报告 %s（perf_dump 没写出文件？检查 l4d2_perf_capture_dump_cmd）", g_sRaw);
-		LogError("[perf_capture] raw report not found: \"%s\"", g_sRaw);
+		/* perfstat 落盘失败时它自己会在控制台打 "[perfstat] 无法写入日志文件: ..."。
+		   这里先自动重发一次 perf_dump 并再等 5 秒，避免偶发时序问题。 */
+		if (g_iDumpRetries < 1)
+		{
+			g_iDumpRetries++;
+			PrintToServer("[perf_capture] 还没看到原始报告，重发一次导出指令并再等 %.0f 秒…", PARSE_RETRY_DELAY);
+			SubmitDumpCommand();
+			CreateTimer(PARSE_RETRY_DELAY, Timer_ParseReport, _, TIMER_FLAG_NO_MAPCHANGE);
+			return Plugin_Continue;
+		}
+
+		/* 仍没有：只写普通日志（不污染 errors_*.log），并给出可操作的下一步 */
+		PrintToServer("[perf_capture] 没拿到原始报告: %s", g_sRaw);
+		char sFolder[PLATFORM_MAX_PATH];
+		GetLogFolder(sFolder, sizeof(sFolder));
+		PrintToServer("[perf_capture] 可能原因: ①perfstat 未加载/未安装 ②perfstat 生成报告时异常(看控制台 [perfstat] 输出) ③目录%s不可写", sFolder);
+		LogMessage("[perf_capture] raw report not found: \"%s\" (perfstat loaded=%d)", g_sRaw, PerfstatInstalled() ? 1 : 0);
 		return Plugin_Continue;
 	}
 
@@ -781,6 +860,18 @@ bool EnsureFolder(const char[] folder)
 	}
 
 	return DirExists(folder);
+}
+
+// 供服务端指令使用的路径消毒：引号 / 分号 / 换行都换成下划线
+void SanitizeCmdPath(char[] s, int len)
+{
+	for (int i = 0; i < len && s[i] != '\0'; i++)
+	{
+		if (s[i] == '"' || s[i] == ';' || s[i] == '\r' || s[i] == '\n')
+		{
+			s[i] = '_';
+		}
+	}
 }
 
 void SanitizeName(char[] s, int len)

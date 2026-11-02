@@ -851,7 +851,7 @@ void OnFramePrecache()
 		entity = CreateEntityByName("prop_dynamic");
 		SetEntityModel(entity, g_sModels[i]);
 		DispatchSpawn(entity);
-		RemoveEdict(entity);
+		KillEntNextFrame(entity);
 	}
 }
 
@@ -2905,7 +2905,7 @@ void RemoveHat(int client)
 		Call_PushCell(EntRefToEntIndex(entity));
 		Call_Finish();
 
-		RemoveEntity(entity);
+		KillEntNextFrame(entity);
 	}
 
 	// Hidden entity
@@ -2913,7 +2913,7 @@ void RemoveHat(int client)
 	g_iHatWalls[client] = 0;
 
 	if( IsValidEntRef(entity) )
-		RemoveEntity(entity);
+		KillEntNextFrame(entity);
 }
 
 bool CreateHat(int client, int index = -1, bool notify = false)
@@ -3084,6 +3084,11 @@ bool CreateHat(int client, int index = -1, bool notify = false)
 		SpectatorHatHooks();
 		return true;
 	}
+
+	/* prop 创建失败：刚才那个 info_target 还挂在玩家眼睛上，必须一起清掉，
+	   否则会留下一个永远跟随玩家、又没人管的实体（"漂浮"来源之一）。 */
+	if( g_bCvarWall && target > 0 && IsValidEntity(target) )
+		KillEntNextFrame(target);
 
 	return false;
 }
@@ -3374,4 +3379,84 @@ stock void TranslateHatnames()
 	delete hTran;
 	delete hData;
 	delete hSave;
+}
+
+// ===========================================================================
+//  延迟删除：把删实体推迟到下一帧（RequestFrame），并对同一实体去重。
+//  目的：避免在引擎回调/实体遍历中途删实体；同时避免同一帧把同一实体重复入队
+//  （引擎 release 版的入队去重被编掉了，重复入队会在 CleanupDeleteList 里二次 delete）。
+// ===========================================================================
+static int g_iKillPending[64];
+static int g_iKillPendingCount;
+static Handle g_hKillPump;
+
+/** 立刻把实体"摘父 + 隐藏"：删除是下一帧才发生的，这段空档里它还挂在玩家眼睛上，
+ *  换帽子时会看到两顶帽子叠着 / 一顶漂浮的帽子挡视线。 */
+static void DetachNow(int entity)
+{
+	SetVariantString("");
+	AcceptEntityInput(entity, "ClearParent");
+	SetEntityRenderMode(entity, RENDER_NONE);
+}
+
+void KillEntNextFrame(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+		return;
+
+	DetachNow(entity);   // 先让它从画面里消失，再排队删
+
+	int ref = EntIndexToEntRef(entity);
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		if (g_iKillPending[i] == ref)
+			return;   // 已经在队列里，去重
+	}
+
+	if (g_iKillPendingCount >= sizeof(g_iKillPending))
+	{
+		AcceptEntityInput(entity, "Kill");   // 队列满：退回当帧删，避免漏删
+		return;
+	}
+
+	g_iKillPending[g_iKillPendingCount++] = ref;
+	RequestFrame(Frame_KillEntNextFrame);
+
+	/* RequestFrame 的帧回调在服务器休眠 / 掉帧 / 地图切换那一下可能不跑，
+	   光靠它兜底会让旧帽子越积越多（表现就是"换不回帽子 + 一顶帽子浮在眼前"）。
+	   再加一个常驻定时器，队列清空后自己停。 */
+	if (g_hKillPump == null)
+		g_hKillPump = CreateTimer(0.2, Timer_KillPump, _, TIMER_REPEAT);
+}
+
+static void FlushKillQueue()
+{
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		int ent = EntRefToEntIndex(g_iKillPending[i]);
+		if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
+		{
+			SetVariantString("");
+			AcceptEntityInput(ent, "ClearParent");
+			AcceptEntityInput(ent, "Kill");
+		}
+	}
+	g_iKillPendingCount = 0;
+}
+
+public void Frame_KillEntNextFrame()
+{
+	FlushKillQueue();
+}
+
+public Action Timer_KillPump(Handle timer)
+{
+	if (g_iKillPendingCount > 0)
+	{
+		FlushKillQueue();
+		return Plugin_Continue;
+	}
+
+	g_hKillPump = null;   // 句柄不删，避免 "Handle is invalid"
+	return Plugin_Stop;
 }

@@ -135,7 +135,9 @@ public void OnPluginStart()
 	g_hCvarModesOff = CreateConVar(	"l4d_skip_intro_modes_off",		"",				"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
 	g_hCvarModesTog = CreateConVar(	"l4d_skip_intro_modes_tog",		"0",			"Turn on the plugin in these game modes. 0=All, 1=Coop, 2=Survival, 4=Versus, 8=Scavenge. Add numbers together.", CVAR_FLAGS );
 	CreateConVar(					"l4d_skip_intro_version",		PLUGIN_VERSION,	"Skip Intro plugin version.", FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	AutoExecConfig(true,			"l4d_skip_intro");
+	// AutoExecConfig 已关闭：不再生成/执行 cfg/sourcemod/l4d_skip_intro.cfg，
+	// 需要改 l4d_skip_intro_* 就在 confogl 的 cfg 里 confogl_addcvar 或控制台直接设。
+	// AutoExecConfig(true,			"l4d_skip_intro");
 
 	g_hCvarMPGameMode = FindConVar("mp_gamemode");
 	g_hCvarMPGameMode.AddChangeHook(ConVarChanged_Allow);

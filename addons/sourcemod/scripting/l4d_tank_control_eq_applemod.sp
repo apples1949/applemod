@@ -20,7 +20,7 @@
      4. 每格怒气的"有效幅度"由三条规则取最大值决定(不叠加): 基线 5% / 坦克存活满
         tankcontrol_trac_longlife_time 秒后 longlife_step / 跟踪石命中状态 step。
         默认值全部中性(不加速), 这套加速只在 12v12 配置里由 confogl_addcvar 打开。
-        幅度提升时会私聊通知坦克本人(tankcontrol_trac_notify)。
+        幅度提升时会通知全体玩家(tankcontrol_trac_notify)。
 
    命名口径提醒: 原版的"控制权/frustration"是 GetTankFrustration = 100 - m_frustration,
    而下面跟踪石那套逻辑直接操作引擎原始值 m_frustration(与引擎以及 l4d2_tankrage /
@@ -47,7 +47,7 @@ ConVar
     hTracCtrlAfter,         /* 跟踪石: 命中后持续按 step% 扣的时长(秒, 0=直到坦克死亡/换控) */
     hTracCtrlLongLifeTime,  /* 长存活门限(秒): 坦克从拿到控制权起存活满这么久仍未死亡 */
     hTracCtrlLongLifeStep,  /* 长存活状态: 满门限后每格怒气的扣除幅度(%) */
-    hTracCtrlNotify;        /* 1 = 每格怒气消耗幅度提升时私聊通知坦克本人 */
+    hTracCtrlNotify;        /* 1 = 每格怒气消耗幅度提升时通知全体玩家 */
 
 GlobalForward
     hForwardOnTryOfferingTankBot,
@@ -103,7 +103,7 @@ public Plugin myinfo =
     name = "L4D2 Tank Control",
     author = "apples1949 (原版: arti, Sheo, Sir, Altair-Sossai)",
     description = "Distributes the role of the tank evenly throughout the team, allows for overrides. (Includes forwards) [修改版: 跟踪石命中后怒气每格按 step% 扣; 无日志无控制台输出]",
-    version = "0.0.31-applemod",
+    version = "0.0.32-applemod",
     url = "https://github.com/SirPlease/L4D2-Competitive-Rework"
 }
 
@@ -153,7 +153,7 @@ public void OnPluginStart()
          只有 cfg/cfgogl/applemod12v12/applemod12v12.cfg 用 confogl_addcvar
          把它们设成 7.0 / 240.0 / 6.0。别的模式即使加载本插件也不会加速掉控。
 
-       【通知】有效幅度提升时(跟踪石命中 / 存活满门限)私聊通知坦克本人,
+       【通知】有效幅度提升时(跟踪石命中 / 存活满门限)通知全体玩家,
          由 tankcontrol_trac_notify 开关(默认 1)。 */
     hTracCtrlBase  = CreateConVar("tankcontrol_trac_base", "5.0", "基线: 引擎日常的怒气步进幅度(%%). 只用于换算比例(max 语义的基准), 不会写进游戏");
     /* 默认值必须是中性的(与基线相同 = 不加速): 这套"消耗加速"只在 12v12 配置里生效,
@@ -167,7 +167,7 @@ public void OnPluginStart()
        与跟踪石状态取 max, 不叠加。默认 0 = 关闭, 仅 12v12 配置里由 confogl_addcvar 开启(240 秒)。 */
     hTracCtrlLongLifeTime = CreateConVar("tankcontrol_trac_longlife_time", "0.0", "坦克拿到控制权后存活满这么多秒仍未死亡, 该坦克每格怒气幅度提升到 longlife_step%%. <=0 关闭这条规则. 默认 0 = 关闭, 仅 12v12 配置里由 confogl_addcvar 设为 240.0");
     hTracCtrlLongLifeStep = CreateConVar("tankcontrol_trac_longlife_step", "5.0", "存活满 longlife_time 秒后, 每格怒气的扣除幅度(%%). 默认 5.0 = 与基线相同(不加速), 仅 12v12 配置里由 confogl_addcvar 设为 6.0");
-    hTracCtrlNotify = CreateConVar("tankcontrol_trac_notify", "1", "每格怒气消耗幅度提升时(跟踪石命中 / 存活时间达到门限), 是否私聊通知坦克本人. 0=不通知 1=通知", _, true, 0.0, true, 1.0);
+    hTracCtrlNotify = CreateConVar("tankcontrol_trac_notify", "1", "每格怒气消耗幅度提升时(跟踪石命中 / 存活时间达到门限), 是否通知全体玩家. 0=不通知 1=通知", _, true, 0.0, true, 1.0);
 }
 
 
@@ -869,7 +869,7 @@ float TracEffectiveStep(int client)
     return eff;
 }
 
-/* 每格怒气消耗幅度提升时(跟踪石命中 / 存活满门限), 只私聊告诉坦克本人。
+/* 每格怒气消耗幅度提升时(跟踪石命中 / 存活满门限), 通知全体玩家。
    只在"有效幅度真的变大"时提示: 两个规则取 max, 已经在 7% 的坦克再命中一次不会再提示;
    幅度没有提升(默认中性配置 / 配置被调回基线)时全程静默。 */
 void NotifyTracStepRaised(int client, float effBefore, const char[] reason)
@@ -885,8 +885,9 @@ void NotifyTracStepRaised(int client, float effBefore, const char[] reason)
     if (effAfter <= effBefore + 0.001)
         return;
 
-    CPrintToChat(client, "{olive}[{red}!{olive}]{default} 控制权消耗提升: {red}%s{default} → 每格怒气扣除 {green}%.0f%%{default} (原 {green}%.0f%%{default}), 掉控会更快",
-        reason, effAfter, effBefore);
+    /* 按需求：不再只私聊坦克，改成通知全体玩家（生还者也能看到坦克掉控变快） */
+    CPrintToChatAll("{olive}[{red}!{olive}]{default} 坦克 {green}%N{default} 控制权消耗提升: {red}%s{default} → 每格怒气扣除 {green}%.0f%%{default} (原 {green}%.0f%%{default}), 掉控会更快",
+        client, reason, effAfter, effBefore);
 }
 
 /* 每帧: 对每个坦克算"有效每格幅度 eff", 只有 eff > 基线时才去补正

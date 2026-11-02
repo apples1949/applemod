@@ -42,7 +42,9 @@ public void OnPluginStart()
     hCvarSpecNameChange.AddChangeHook(cvarChanged);
     hCvarSpecSeeChat.AddChangeHook(cvarChanged);
 
-    AutoExecConfig(true);
+    // AutoExecConfig 已关闭：不再生成/执行 cfg/sourcemod/bequiet.cfg，
+    // 需要改 bq_* 就在 confogl 的 cfg 里 confogl_addcvar 或控制台直接设。
+    // AutoExecConfig(true);
     LoadTranslations("bequiet.phrases");
 }
 

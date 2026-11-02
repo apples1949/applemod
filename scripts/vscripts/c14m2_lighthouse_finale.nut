@@ -40,6 +40,16 @@ DirectorOptions <-
 
 local difficulty = GetDifficulty();
 
+// 12v12（多人配置）判定 —— 与 c1m4 同款做法：检测人数上限是否为 12。
+//   用游戏自身的 survivor_limit（12v12 配置设 12，4v4 是 4），
+//   不用 l4d_superversus 的 l4d_survivor_limit（那个默认就是 12，
+//   插件卸载后值还会留着，会把 4v4 误判成多人）。
+//   注意：L4D2 的 Convars 表只有 SetValue/GetStr/GetFloat/GetClientConvarValue，
+//   没有 GetInt（用 GetInt 会报 "the index 'GetInt' does not exist"，整份脚本作废）。
+local survivorLimit = Convars.GetFloat( "survivor_limit" );
+// 用 root-table 槽位（不是 local），保证后面的 OnBeginCustomFinaleStage() 里能读到
+bIs12v12 <- ( survivorLimit != null && survivorLimit >= 12 );
+
 if ( Director.GetGameModeBase() == "versus" )
 {
 	DirectorOptions.rawdelete("A_CustomFinaleMusic7");
@@ -323,7 +333,13 @@ function OnBeginCustomFinaleStage( num, type )
 	else if ( num == 5 )
 	{
 		EntFire( "relay_lighthouse_off", "Trigger" );
-		SpawnScavengeCans( difficulty );
+		// 12v12：按原版"专家"档刷满 12 个桶。SpawnScavengeCans 是 fall-through，
+		// 传 3 会依次刷 expert2 + advanced2 + normal2 + easy6 = 12 个。
+		// 若只改需求数不改这里，场上只有 8 个桶，需求 12 必然卡关。
+		if ( bIs12v12 )
+			SpawnScavengeCans( 3 );
+		else
+			SpawnScavengeCans( difficulty );
 		Director.ResetMobTimer(); //Rework
 	}
 	else if ( num == EscapeStage )
@@ -336,4 +352,18 @@ function GetCustomScriptedStageProgress( defvalue )
 	if ( developer() > 0 )
 		Msg( "Progress was " + defvalue + ", now: " + ScavengeCansPoured + " poured / " + ScavengeCansNeeded + " needed = " + progress + "\n" );
 	return progress;
+}
+
+// ---------------------------------------------------------------------------
+// 12v12：需求 12 桶（原版专家档上限；原版对抗被强制成普通档 = 8）。
+// 放在文件最末尾 —— Squirrel 只要报一次错就整份脚本作废，若这段放在前面，
+// Convars 读失败会让 GasCanTouched / GasCanPoured 一起消失，
+// 表现就是"灌了桶不计数、不触发救援"。
+// 只影响 survivor_limit>=12 的配置；4人/其它配置仍按原版难度 6/8/10/12。
+// ---------------------------------------------------------------------------
+if ( bIs12v12 )
+{
+	NumCansNeeded <- 12
+	EntFire( "progress_display", "SetTotalItems", NumCansNeeded )
+	Msg( " 12v12: c14m2 cans -> 12 " )
 }

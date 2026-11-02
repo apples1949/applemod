@@ -26,11 +26,23 @@
 	on purpose (see the threshold gate below) since a cheat can't meaningfully
 	boost AoE damage the way it can a weapon's fire rate.
 	Tank only for now — widen once other classes are calibrated.
+
+	[applemod patch 2026-10-31] melee / chainsaw thresholds are now scaled by the
+	Tank's real max health (engine deals m_iMaxHealth * 0.05 per melee hit on the
+	Tank) and by l4d2_melee_damage_tank_nerf, so a 10000 HP Tank no longer flags
+	normal melee players as damage exploiters.
 */
 
 #define SURV_DMG_WINDOW      1.0
 #define SURV_DMG_BUF_SIZE    128
 #define SURV_DMG_CLOCK_COOLDOWN 5.0
+
+/* 近战打坦克的阈值要跟着"每击真实伤害"放大（见下方 scale 函数）：
+   一秒内允许的命中次数 × 1.1 余量。近战按原版挥砍节奏约 1 击/秒，
+   留 3 击余量给连续挥砍/网络抖动。
+   电锯不参与缩放：它是固定伤害的独立武器类（脚本 Damage 36），阈值用原版 1155。 */
+#define SURV_DMG_MELEE_HITS_PER_SEC      3.0
+#define SURV_DMG_SCALE_MARGIN            1.1
 
 /* IsPlayerAlive()/tank_killed don't reliably catch the Tank's death
  * animation window; m_isIncapacitated does, same fix used by the
@@ -93,6 +105,53 @@ static void lilac_survivor_damage_init_maps()
 	/* Melee. */
 	weapon_dmg_threshold.SetValue("melee", 588);
 	weapon_dmg_threshold.SetValue("chainsaw", 1155);
+}
+
+/* 引擎对"近战武器打坦克"的结算方式是 m_iMaxHealth * 0.05（不是固定伤害），
+ * 所以坦克血量被插件抬高后，原版按固定伤害校准出来的阈值就不成立了。
+ * 这里把 melee / chainsaw 的阈值按"坦克最大血量 × 5% × 一秒允许的命中数 × 余量"
+ * 重新算一遍，并且不会低于原版阈值（原版血量的服务器灵敏度保持不变）。
+ * 另外还要算上 l4d2_melee_damage_control 对坦克的近战减伤
+ * （l4d2_melee_damage_tank_nerf，>0 时按百分比削减）。 */
+static ConVar surv_dmg_cvar_nerf = null;
+
+static int surv_dmg_scaled_threshold(const char[] weapon, int victim, int base)
+{
+	if (base <= 0)
+		return base;
+
+	float hits;
+
+	/* 只有 melee 走"坦克最大血量 × 5%"这条引擎规则（已在本机 server.dll 逆向确认：
+	 * CTerrorMeleeWeapon::GetDamageForVictim @0x103ea520，类 8=Tank → 最大血量×0.05）。
+	 * chainsaw 是独立武器类，不走这条规则（脚本 Damage 36 / CycleTime 0.175，
+	 * 固定伤害），所以它的阈值保持原版校准值，不按坦克血量放大。 */
+	if (StrEqual(weapon, "melee"))
+		hits = SURV_DMG_MELEE_HITS_PER_SEC;
+	else
+		return base;   /* 枪械 / 电锯：阈值跟坦克血量无关，保持原样 */
+
+	int maxhp = GetEntProp(victim, Prop_Data, "m_iMaxHealth");
+
+	if (maxhp <= 0)
+		return base;
+
+	float per_hit = float(maxhp) * 0.05;
+
+	if (surv_dmg_cvar_nerf == null)
+		surv_dmg_cvar_nerf = FindConVar("l4d2_melee_damage_tank_nerf");
+
+	if (surv_dmg_cvar_nerf != null)
+	{
+		float nerf = surv_dmg_cvar_nerf.FloatValue;
+
+		if (nerf > 0.0 && nerf < 100.0)
+			per_hit *= (100.0 - nerf) / 100.0;
+	}
+
+	int scaled = RoundToNearest(per_hit * hits * SURV_DMG_SCALE_MARGIN);
+
+	return (scaled > base) ? scaled : base;
 }
 
 public Action event_player_hurt_survivor_dmg(Event event, const char[] name, bool dontBroadcast)
@@ -185,6 +244,9 @@ public Action event_player_hurt_survivor_dmg(Event event, const char[] name, boo
 
     int threshold = 0;
     weapon_dmg_threshold.GetValue(weapon, threshold);
+
+    /* 近战 / 电锯：按坦克实际最大血量（以及近战减伤 cvar）放大阈值 */
+    threshold = surv_dmg_scaled_threshold(weapon, victim, threshold);
 
     if (threshold > 0 && real_total > threshold)
         lilac_survivor_damage_clock_note(attacker, weapon, threshold, total, real_total);

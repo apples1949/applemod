@@ -32,4 +32,5 @@ addons/sourcemod/scripting/compiled/
 addons/sourcemod/scripting/hdf.sp
 addons/sourcemod/scripting/hdf/methodmaps.sp
 addons/sourcemod/scripting/hdf/variables.sp
+addons/sourcemod/plugins/optional/another/hdf.smx
 addons/sourcemod/plugins/hdf.smx

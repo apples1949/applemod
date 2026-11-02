@@ -652,7 +652,7 @@ int CreateGlowProxy(int iWeapon, int iRange, int iMinRange, bool bFlashing)
 	if (!DispatchSpawn(iProxy))
 	{
 		LogError("[12v12 wdrop] glow: 代理实体 DispatchSpawn 失败（模型 %s）", sModel);
-		RemoveEntity(iProxy);
+		KillEntNextFrame(iProxy);
 		return 0;
 	}
 
@@ -672,7 +672,7 @@ int CreateGlowProxy(int iWeapon, int iRange, int iMinRange, bool bFlashing)
 		// 没有任何回退手段了，直接放弃（不留下无用实体）。
 		if (g_hDebug.BoolValue)
 			PrintToServer("[12v12 wdrop] glow: 代理实体 %d 也没有发光属性，放弃", iProxy);
-		RemoveEntity(iProxy);
+		KillEntNextFrame(iProxy);
 		return 0;
 	}
 
@@ -728,7 +728,7 @@ void DestroyGlowSlot(int iSlot, bool bKillProxy, bool bClearHostGlow)
 	if (iProxy > 0)
 	{
 		AcceptEntityInput(iProxy, "StopGlowing");
-		RemoveEntity(iProxy);
+		KillEntNextFrame(iProxy);
 	}
 
 	// 宿主武器还活着时把直接发光撤掉。注意：绝不动武器实体本身，那是玩家的枪。
@@ -778,7 +778,7 @@ void SweepOrphanProxies()
 			continue;
 
 		AcceptEntityInput(iEnt, "StopGlowing");
-		RemoveEntity(iEnt);
+		KillEntNextFrame(iEnt);
 
 		if (g_hDebug.BoolValue)
 			PrintToServer("[12v12 wdrop] glow: 清理残留代理实体 %d", iEnt);
@@ -1265,4 +1265,24 @@ int ReadGlowInt(int iEntity, const char[] sProp)
 	if (!HasEntProp(iEntity, Prop_Send, sProp))
 		return -1;
 	return GetEntProp(iEntity, Prop_Send, sProp);
+}
+
+// ===========================================================================
+//  延迟删除：把删实体推迟到下一帧，避免在引擎回调/实体遍历中途删（崩溃排查用）
+//  RequestFrame 在 SM 1.12 支持带 any data 参数，比 CreateTimer(0.0) 更贴近"下一帧"，
+//  也不会额外创建 timer 对象。
+// ===========================================================================
+void KillEntNextFrame(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+		return;
+
+	RequestFrame(Frame_KillEntNextFrame, EntIndexToEntRef(entity));
+}
+
+public void Frame_KillEntNextFrame(any ref)
+{
+	int ent = EntRefToEntIndex(ref);
+	if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
+		AcceptEntityInput(ent, "Kill");
 }

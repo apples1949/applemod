@@ -33,7 +33,7 @@
  * ------------------------------------------------------------------
  */
 
-#define PLUGIN_VERSION "2.0.0"
+#define PLUGIN_VERSION "2.0.2"
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -61,8 +61,13 @@ char g_sConsole[] = "console.log";
 char g_sLogFileOrig[PLATFORM_MAX_PATH];
 char g_sTrigger[64];
 
-Handle g_hStopTimer;
-Handle g_hPollTimer;
+/* 定时器不用句柄存了（地图切换时 TIMER_FLAG_NO_MAPCHANGE 会把它们自动关掉，
+ * 句柄随即失效，再 delete 就会抛 "Handle ... is invalid"）。
+ * 改成"代号"：每次开始录制 +1，回调里对不上就自己退出，全程不 delete 句柄。 */
+int    g_iCaptureGen;   /* 当前这一轮录制的代号 */
+int    g_iPollTicks;    /* 本轮轮询已经跑了几次（用来做超时） */
+int    g_iPollLastSize; /* 上一轮看到的 raw 文件大小 */
+int    g_iPollStable;   /* 连续几次大小不变 */
 int    g_iConsoleOffset = -1;
 bool   g_bL4D2;
 bool   g_bCapturing;   /* 正在录制 / 等待落盘 */
@@ -121,12 +126,21 @@ public void OnPluginStart()
 	BuildFolderPath();
 }
 
+static bool g_bStartupHelpDone;
+
 public void OnConfigsExecuted()
 {
 	if (g_cvLogFile != null)
 		g_cvLogFile.GetString(g_sLogFileOrig, sizeof(g_sLogFileOrig));
 
 	BuildFolderPath();
+
+	// 启动提示只打一次：cfg 已执行完，目录等 cvar 是真值
+	if (!g_bStartupHelpDone)
+	{
+		g_bStartupHelpDone = true;
+		PrintStartupHelp();
+	}
 }
 
 public void OnMapStart()
@@ -134,6 +148,27 @@ public void OnMapStart()
 	/* 换图才重置"本图已录过", 同一张图内团灭重开不重复录 */
 	g_bFired     = false;
 	g_bCapturing = false;
+
+	/* 换代：上一张图留下的定时器（回调里代号对不上）会自己退出 */
+	g_iCaptureGen++;
+}
+
+/**
+ * 启动指令：插件加载时把"怎么用"打到服务端控制台 + 写进日志（不改任何行为）。
+ */
+void PrintStartupHelp()
+{
+	PrintToServer("[vprofiler] Valve Profiler v%s 已加载", PLUGIN_VERSION);
+	PrintToServer("[vprofiler] 自动录制: 生还者离开安全区时录 %.0f 秒 vprof（每张图一次；对抗只录前半场）", g_cvDuration.FloatValue);
+	PrintToServer("[vprofiler] 手动录制: sm_debug                立刻开始一轮采集（到点自动停止+解析）");
+	PrintToServer("[vprofiler] 查看状态: sm_vprofiler_status    看开关/时长/本图是否已录/最近报告路径");
+	PrintToServer("[vprofiler] 解析报告目录: %s  (原始控制台镜像解析成功后自动删除)", g_sFolder);
+
+	if (!g_bL4D2)
+		PrintToServer("[vprofiler] 注意: 非 L4D2 引擎没有 player_left_start_area 事件，自动录制不可用（用 sm_debug 手动录）");
+
+	LogMessage("[vprofiler] v%s loaded. folder: \"%s\". Manual: sm_debug / sm_vprofiler_status.",
+		PLUGIN_VERSION, g_sFolder);
 }
 
 /* ---------------------------------------------------------------- 触发 */
@@ -227,8 +262,12 @@ void BeginCapture(const char[] reason)
 	ServerExecute();
 	RequestFrame(OnFrameStartProf);
 
-	delete g_hStopTimer;
-	g_hStopTimer = CreateTimer(g_cvDuration.FloatValue, Timer_StopCapture, _, TIMER_FLAG_NO_MAPCHANGE);
+	g_iCaptureGen++;
+	g_iPollTicks    = 0;
+	g_iPollStable   = 0;
+	g_iPollLastSize = -1;
+
+	CreateTimer(g_cvDuration.FloatValue, Timer_StopCapture, g_iCaptureGen, TIMER_FLAG_NO_MAPCHANGE);
 }
 
 public void OnFrameStartProf()
@@ -236,22 +275,20 @@ public void OnFrameStartProf()
 	ServerCommand("sm prof start vprof");
 }
 
-public Action Timer_StopCapture(Handle timer)
+public Action Timer_StopCapture(Handle timer, int gen)
 {
-	g_hStopTimer = null;
-
-	if (!g_bCapturing)
-		return Plugin_Continue;
+	/* 上一张图 / 上一轮录制的残留定时器：直接退出，什么都别碰 */
+	if (gen != g_iCaptureGen || !g_bCapturing)
+		return Plugin_Stop;
 
 	ServerCommand("sm prof stop vprof");
 	ServerCommand("sm prof dump vprof");
 	ServerCommand("vprof_off");
 
 	/* 引擎还要一点时间把 dump 打完; L4D2 还要把那段控制台增量镜像出来 */
-	delete g_hPollTimer;
-	g_hPollTimer = CreateTimer(LOG_CHECK_INTERVAL, Timer_PollConsole, 0.0, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	CreateTimer(LOG_CHECK_INTERVAL, Timer_PollConsole, gen, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
-	return Plugin_Continue;
+	return Plugin_Stop;
 }
 
 /**
@@ -260,23 +297,15 @@ public Action Timer_StopCapture(Handle timer)
  * 其它引擎: con_logfile 已经直接指向 raw, 这里只等文件不再变大。
  * 连续两个周期大小不变 = 落定。
  */
-public Action Timer_PollConsole(Handle timer, float elapsed)
+public Action Timer_PollConsole(Handle timer, int gen)
 {
-	static int  iStable;
-	static int  iLastSize;
-	static bool bFirst = true;
+	/* 代号对不上 = 上一张图 / 上一轮录制的残留定时器，直接退出 */
+	if (gen != g_iCaptureGen || !g_bCapturing)
+		return Plugin_Stop;
 
-	if (bFirst)
+	/* 超时自己数：LOG_MAX_WAITTIME 秒内还没落定就不再等了 */
+	if (++g_iPollTicks > RoundToNearest(LOG_MAX_WAITTIME / LOG_CHECK_INTERVAL))
 	{
-		bFirst    = false;
-		iStable   = 0;
-		iLastSize = -1;
-	}
-
-	if (elapsed > LOG_MAX_WAITTIME)
-	{
-		g_hPollTimer = null;
-		bFirst       = true;
 		FinishCapture("等待控制台输出落盘超时");
 		return Plugin_Stop;
 	}
@@ -286,20 +315,18 @@ public Action Timer_PollConsole(Handle timer, float elapsed)
 
 	int size = FileSize(g_sRaw);
 
-	if (size > 0 && size == iLastSize)
+	if (size > 0 && size == g_iPollLastSize)
 	{
-		if (++iStable >= 2)
+		if (++g_iPollStable >= 2)
 		{
-			g_hPollTimer = null;
-			bFirst       = true;
 			FinishCapture("");
 			return Plugin_Stop;
 		}
 	}
 	else
 	{
-		iStable   = 0;
-		iLastSize = size;
+		g_iPollStable   = 0;
+		g_iPollLastSize = size;
 	}
 
 	return Plugin_Continue;

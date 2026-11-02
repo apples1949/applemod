@@ -153,7 +153,9 @@ public void OnPluginStart()
 			FormatEx(cvar, sizeof(cvar), "sm_cvar_test_%d", i);
 			CreateConVar(cvar, "0");
 		}
-		AutoExecConfig(true, "sm_cvar_test");
+		// AutoExecConfig 已按要求关闭（这行本来就在 #if DEBUGGING 里，正式产物从不执行；
+		// 一并注释掉，避免以后打开 DEBUGGING 时又生成 cfg/sourcemod/sm_cvar_test.cfg）
+		// AutoExecConfig(true, "sm_cvar_test");
 		RegAdminCmd("sm_cvar_test", sm_cvar_test, ADMFLAG_ROOT);
 	#endif
 }

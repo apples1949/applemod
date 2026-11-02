@@ -333,7 +333,7 @@ public Action timer_stock_applyDamage(Handle timer, DataPack pack)
 	// Config, delete point_hurt
 	DispatchKeyValue(entPointHurt, "classname", "point_hurt");
 	DispatchKeyValue(victim, "targetname", "null");
-	RemoveEdict(entPointHurt);
+	KillEntNextFrame(entPointHurt);
 
 	// Dispatch global UserMessage notification of the event
 	GlobalPounceAnnouncement(attacker, victim, damage);
@@ -402,4 +402,45 @@ bool IsJockey(int client)
 		&& GetClientTeam(client) == TEAM_INFECTED
 		&& GetEntProp(client, Prop_Send, "m_zombieClass") == Z_JOCKEY
 		&& !GetEntProp(client, Prop_Send, "m_isGhost", 1));
+}
+
+// ===========================================================================
+//  延迟删除：把删实体推迟到下一帧（RequestFrame），并对同一实体去重。
+//  目的：避免在引擎回调/实体遍历中途删实体；同时避免同一帧把同一实体重复入队
+//  （引擎 release 版的入队去重被编掉了，重复入队会在 CleanupDeleteList 里二次 delete）。
+// ===========================================================================
+static int g_iKillPending[64];
+static int g_iKillPendingCount;
+
+void KillEntNextFrame(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+		return;
+
+	int ref = EntIndexToEntRef(entity);
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		if (g_iKillPending[i] == ref)
+			return;   // 已经在队列里，去重
+	}
+
+	if (g_iKillPendingCount >= sizeof(g_iKillPending))
+	{
+		AcceptEntityInput(entity, "Kill");   // 队列满：退回当帧删，避免漏删
+		return;
+	}
+
+	g_iKillPending[g_iKillPendingCount++] = ref;
+	RequestFrame(Frame_KillEntNextFrame);
+}
+
+public void Frame_KillEntNextFrame()
+{
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		int ent = EntRefToEntIndex(g_iKillPending[i]);
+		if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
+			AcceptEntityInput(ent, "Kill");
+	}
+	g_iKillPendingCount = 0;
 }

@@ -10,7 +10,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   "1.1.1-applefix"
+#define PLG_VERS		   "1.1.2-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -137,7 +137,7 @@ ConVar Apex[40];
 #define APEX_TF_T2_RANGE   36
 #define APEX_TF_T3_TIME    37
 #define APEX_TF_T3_RANGE   38
-#define APEX_TF_NOTIFY     39  /* 存活时间把观测范围收紧时, 是否私聊通知坦克本人 */
+#define APEX_TF_NOTIFY     39  /* 存活时间把观测范围收紧时, 是否通知全体玩家 */
 
 /* -----------------------------------------------------------
    坦克掉控抑制(观测范围)
@@ -363,7 +363,7 @@ public void
 	Apex[APEX_TF_T2_RANGE] = CreateConVar("l4d2_tankfrust_t2_range", "750.0", "阶梯2: 收紧后的观测范围(单位)");
 	Apex[APEX_TF_T3_TIME]  = CreateConVar("l4d2_tankfrust_t3_time",  "240.0", "阶梯3: 坦克存活满多少秒后收到最紧(0=禁用该档)");
 	Apex[APEX_TF_T3_RANGE] = CreateConVar("l4d2_tankfrust_t3_range", "500.0",  "阶梯3: 收紧后的观测范围(单位)");
-	Apex[APEX_TF_NOTIFY]   = CreateConVar("l4d2_tankfrust_notify",   "1",     "存活时间把观测范围收紧时, 私聊通知坦克本人(0=不通知 1=通知)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TF_NOTIFY]   = CreateConVar("l4d2_tankfrust_notify",   "1",     "存活时间把观测范围收紧时, 通知全体玩家(0=不通知 1=通知)", _, true, 0.0, true, 1.0);
 
 	/* -1 = 还没观察过这辆坦克(和"0 = 无限"区分开) */
 	for (int i = 1; i <= MaxClients; i++)
@@ -2506,7 +2506,7 @@ float GetTankFrustSeeRange(float fAliveTime)
 	return fRange;
 }
 
-/* 存活时间把观测范围收紧时, 只私聊通知坦克本人一次(每收紧一档提示一次)。
+/* 存活时间把观测范围收紧时, 通知全体玩家一次(每收紧一档提示一次)。
    判定口径:
      * -1 = 还没观察过这辆坦克: 只记录当前范围, 不提示(否则坦克刚出生就收到一条无意义提示);
      * 0    = 当前范围是"无限"(l4d2_tankfrust_see_range / 阶梯范围设成 0);
@@ -2532,8 +2532,9 @@ void TankFrustNotifyRange(int tank, float fRange, float fAlive)
 	if (!bTightened)
 		return;
 
-	CPrintToChat(tank, "%s坦克存活 {lightgreen}%d{darkred} 秒, 视野判定范围收紧到 {lightgreen}%d{darkred} 单位: 超出这个距离的生还者不再算“看得见”, 注意别飘太远",
-		TAG, RoundToNearest(fAlive), RoundToNearest(fRange));
+	/* 按需求：不再只私聊坦克，改成通知全体玩家（让生还者也知道坦克的视野被削弱了） */
+	CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活 {lightgreen}%d{default} 秒, 视野判定范围收紧到 {lightgreen}%d{default} 单位(超出这个距离的生还者不再算“看得见”)",
+		TAG, tank, RoundToNearest(fAlive), RoundToNearest(fRange));
 }
 
 Action Timer_TankFrust(Handle timer)
@@ -2569,7 +2570,7 @@ Action Timer_TankFrust(Handle timer)
 		float fAlive = fNow - g_fTankCtrlStart[i];
 		float fRange = GetTankFrustSeeRange(fAlive);
 
-		/* 存活时间把观测范围收紧时, 私聊通知坦克本人(只发提示, 不动任何判定) */
+		/* 存活时间把观测范围收紧时, 通知全体玩家(只发提示, 不动任何判定) */
 		if (Apex[APEX_TF_NOTIFY].BoolValue)
 			TankFrustNotifyRange(i, fRange, fAlive);
 

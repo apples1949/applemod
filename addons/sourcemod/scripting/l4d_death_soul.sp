@@ -648,7 +648,7 @@ void OnSurvivorSpawn(int client)
 
 	if (g_iEffectClient[client] && (effect = EntRefToEntIndex(g_iEffectClient[client])) != INVALID_ENT_REFERENCE)
 	{
-		AcceptEntityInput(effect, "Kill");
+		KillEntNextFrame(effect);
 		g_iEffectClient[client] = 0;
 	}
 	
@@ -814,7 +814,7 @@ void DissolveTarget(int target, float time = 3.0, int client = 0)
 			GetEntityNetClass(target, sClass, sizeof(sClass));
 			if (strcmp(sClass, "CCSRagdoll") != 0) // don't touch ragdolls since they are controlled by the game
 			{
-				AcceptEntityInput(target, "Kill");
+				KillEntNextFrame(target);
 			}
 		}
 	}
@@ -1165,7 +1165,7 @@ void KillSoul(int client)
 
 	if (g_iEffectClient[client] && (effect = EntRefToEntIndex(g_iEffectClient[client])) != INVALID_ENT_REFERENCE)
 	{
-		AcceptEntityInput(effect, "Kill");
+		KillEntNextFrame(effect);
 		g_iEffectClient[client] = 0;
 	}
 	
@@ -1173,7 +1173,7 @@ void KillSoul(int client)
 	
 	if (g_iSoulClient[client] && (soul = EntRefToEntIndex(g_iSoulClient[client])) != INVALID_ENT_REFERENCE)
 	{
-		AcceptEntityInput(soul, "Kill");
+		KillEntNextFrame(soul);
 		g_iSoulClient[client] = 0;
 	}
 	
@@ -1181,7 +1181,7 @@ void KillSoul(int client)
 
 	if (g_iTrainClient[client] && (train = EntRefToEntIndex(g_iTrainClient[client])) != INVALID_ENT_REFERENCE)
 	{
-		AcceptEntityInput(train, "Kill");
+		KillEntNextFrame(train);
 		g_iTrainClient[client] = 0;
 	}
 	
@@ -1190,7 +1190,7 @@ void KillSoul(int client)
 		
 		if (g_iTrackClient[client][i] && (track = EntRefToEntIndex(g_iTrackClient[client][i])) != INVALID_ENT_REFERENCE)
 		{
-			AcceptEntityInput(track, "Kill");
+			KillEntNextFrame(track);
 			g_iTrackClient[client][i] = 0;
 		}
 	}
@@ -1259,8 +1259,49 @@ bool CheckIfEntitySafe(int entity)
 
 	if(	entity > ENTITY_SAFE_LIMIT)
 	{
-		RemoveEntity(entity);
+		KillEntNextFrame(entity);
 		return false;
 	}
 	return true;
+}
+
+// ===========================================================================
+//  延迟删除：把删实体推迟到下一帧（RequestFrame），并对同一实体去重。
+//  目的：避免在引擎回调/实体遍历中途删实体；同时避免同一帧把同一实体重复入队
+//  （引擎 release 版的入队去重被编掉了，重复入队会在 CleanupDeleteList 里二次 delete）。
+// ===========================================================================
+static int g_iKillPending[64];
+static int g_iKillPendingCount;
+
+void KillEntNextFrame(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+		return;
+
+	int ref = EntIndexToEntRef(entity);
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		if (g_iKillPending[i] == ref)
+			return;   // 已经在队列里，去重
+	}
+
+	if (g_iKillPendingCount >= sizeof(g_iKillPending))
+	{
+		AcceptEntityInput(entity, "Kill");   // 队列满：退回当帧删，避免漏删
+		return;
+	}
+
+	g_iKillPending[g_iKillPendingCount++] = ref;
+	RequestFrame(Frame_KillEntNextFrame);
+}
+
+public void Frame_KillEntNextFrame()
+{
+	for (int i = 0; i < g_iKillPendingCount; i++)
+	{
+		int ent = EntRefToEntIndex(g_iKillPending[i]);
+		if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
+			AcceptEntityInput(ent, "Kill");
+	}
+	g_iKillPendingCount = 0;
 }

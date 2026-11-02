@@ -69,7 +69,10 @@ public void OnPluginStart()
 		"[0=off/1=on] Also block code 5 kick ('Client timed out', VAC check timeout).", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_hCvar_BlockCode5.AddChangeHook(OnEnableChange);
 
-	AutoExecConfig(true, "l4d2_block_no_steam_logon_all");
+	// AutoExecConfig 已按要求关闭：不再生成/执行 cfg/sourcemod/l4d2_block_no_steam_logon_all.cfg，
+	// 两个 cvar 保持源码默认值（enable=1 / block_code5=0）；要改就在 confogl 的 cfg 里 confogl_addcvar，
+	// 或者控制台直接改，不需要插件自己那份 cfg。
+	// AutoExecConfig(true, "l4d2_block_no_steam_logon_all");
 
 	InitPatch();
 	ApplyPatchState();

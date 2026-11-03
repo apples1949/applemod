@@ -12,7 +12,7 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.14-12v12"
+#define PLUGIN_VERSION "2.5.18-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -123,6 +123,17 @@ bool g_bAutofillPending = false;	// 已排队一次补位（避免同一时刻�
 bool g_bFixWasRunning = false;		// 上一 tick 队伍修复是否还在进行中
 float g_fSpecSince[MAXPLAYERS+1];	// 进入旁观队的时刻（0 = 不在旁观）
 
+// ---------------------------------------------------------------------------
+// 2.5.15：闲置（挂机托管 / 加载中却先占了身体）玩家 → 旁观
+// ---------------------------------------------------------------------------
+ConVar IdleToSpec;					// 0=关闭 1=释放托管链接(默认) 2=连身体一起移出并回收
+ConVar IdleToSpecDelay;				// 进入闲置后等多少秒才处理
+ConVar StripInfWeapons;				// 换到感染者时是否清掉残留的生还者武器
+float g_fIdleSince[MAXPLAYERS+1];	// 该玩家进入闲置（托管着某具身体）的时刻（0 = 不闲置）
+float g_fIdleReleasedAt[MAXPLAYERS+1];	// 上次释放闲置的时刻（防抖：引擎若又挂回链接，5 秒内不再抢）
+float g_fIdleNoticeAt[MAXPLAYERS+1];	// 上次给该玩家发"已转为旁观"提示的时刻（30 秒冷却）
+float g_fInGameSince[MAXPLAYERS+1];	// 本次进服时刻（GetGameTime，仅供 sm_svidle 诊断）
+
 float SiTimes[MAXPLAYERS+1] = {0.0, ...};
 
 
@@ -200,6 +211,15 @@ public void OnPluginStart()
 	AutofillMinIdle = CreateConVar("l4d_superversus_autofill_min_idle", "5.0", "旁观时长达到多少秒的玩家才参与补位（避免刚被转去旁观的人立刻被拉回）.", FCVAR_NOTIFY, true, 0.0, true, 120.0);
 	AutofillDelay = CreateConVar("l4d_superversus_autofill_delay", "1.0", "触发后延迟多少秒执行补位.", FCVAR_NOTIFY, true, 0.0, true, 30.0);
 	AutofillDebug = CreateConVar("l4d_superversus_autofill_debug", "0", "1=只在服务端日志里打印补位细节（默认不输出任何东西）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	// 2.5.15：闲置（挂机托管）玩家 → 旁观
+	//   玩家按闲置键、或接管流程里 L4D_SetHumanSpec 之后没接管成功，都会让一个生还者 bot 的
+	//   m_humanSpectatorUserID 指向他（角色头顶显示"闲置：玩家名"），玩家本人却半挂在旁观。
+	//   0 = 关闭本功能；1 = 释放托管（默认，身体交回 AI，人转成真旁观）；2 = 连身体一起移出并回收。
+	IdleToSpec = CreateConVar("l4d_superversus_idle_to_spec", "1", "闲置(挂机托管)玩家处理: 0=关闭; 1=释放托管链接并转旁观(默认); 2=连托管的身体一起移出生还者队并回收.", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	IdleToSpecDelay = CreateConVar("l4d_superversus_idle_to_spec_delay", "1.0", "玩家进入闲置(托管身体)后等多少秒才处理（默认 1.0，避开接管瞬间的正常短暂托管）.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
+	// 2.5.17：引擎会把新玩家先放进生还者队（活着、拿着手枪），随后平衡器才把他换到感染者；
+	// 换队时引擎不清武器，玩家就会"人在感染者队却带着生还者的枪"。换到感染者时统一清一遍。
+	StripInfWeapons = CreateConVar("l4d_superversus_strip_infected_weapons", "1", "真人换到感染者队时，清掉身上残留的生还者武器（防止新玩家先被放进生还者队拿枪、随后被换到特感时把枪带过去）. 0=关闭.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	BlockSpecInTank = CreateConVar("sm_blockspecintank", "0", "Block survivor spectating during a Tank", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	SuppressSpectate = CreateConVar("l4d_pm_supress_spectate", "0", "Don't announce spectator moves");
 	GameData teamData = new GameData("l4d2_si_ability");
@@ -210,6 +230,9 @@ public void OnPluginStart()
 	//RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
 	//RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
+	// 2.5.16：闲置判定体检（谁会被转旁观、谁被"慢加载保护"挡住）
+	RegAdminCmd("sm_svidle", Cmd_IdleStatus, ADMFLAG_GENERIC,
+		"列出每名玩家的闲置(挂机托管)判定: 队伍/进服时长/是否上过场/托管身体/持续闲置时长/新连接与入队标记");
 
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Post);
 	HookEvent("player_bot_replace", Event_BotReplacedPlayer);
@@ -223,6 +246,8 @@ public void OnPluginStart()
 	HookEvent("player_team", Event_PlayerTeamSpecSince, EventHookMode_Post);
 	// 常驻轮询用来观察"队伍修复完成"的跳变；句柄不保存（SourceMod 卸载插件时自动回收）
 	CreateTimer(0.5, Timer_AutofillWatch, _, TIMER_REPEAT);
+	// 2.5.15：常驻轮询把闲置（挂机托管）玩家转成旁观；句柄同样不保存
+	CreateTimer(0.5, Timer_IdleToSpec, _, TIMER_REPEAT);
 
 	AddCommandListener(Cmd_spec_next, "spec_next");
 	AddCommandListener(Cmd_JoinTeam, "jointeam");
@@ -289,6 +314,11 @@ public void OnClientPutInServer(int client)
 {
 	NextSpectateNotice[client] = 0.0;
 	g_fSpecSince[client] = (GetClientTeam(client) == TEAM_SPECTATOR) ? GetGameTime() : 0.0;
+	// 2.5.16：闲置处理后置状态清零（进服时刻用于"慢加载保护"）
+	g_fIdleSince[client] = 0.0;
+	g_fIdleReleasedAt[client] = 0.0;
+	g_fIdleNoticeAt[client] = 0.0;
+	g_fInGameSince[client] = GetGameTime();
 	CancelJoin(client);
 	SurvivorPlaceholder[client] = false;
 	if (!IsFakeClient(client)) ResumeBotPopulation();
@@ -467,6 +497,15 @@ public void OnMapStart()
 	EnsureSurvivorModels();
 	GameType.GetString(gameMode, sizeof(gameMode));
 	InfectedAllowed = AreInfectedAllowed();
+	// 2.5.15：GetGameTime 换图后归零，闲置相关时间戳要一起清，
+	// 否则上一张图的旧值（更大）会把新图的判断挡住。
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_fIdleSince[i] = 0.0;
+		g_fIdleReleasedAt[i] = 0.0;
+		g_fIdleNoticeAt[i] = 0.0;
+		g_fInGameSince[i] = 0.0;
+	}
 	if (!LateLoad) CacheRoundState(false);
 }
 
@@ -578,6 +617,7 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (!IsValidClient(client)) return;
+
 	if (IsFakeClient(client) && !SvBotsAllowed())
 	{
 		QueueEmptyBotCleanup();
@@ -654,6 +694,12 @@ public void OnClientDisconnect(int client)
 	CancelJoin(client);
 	NewConnection[client] = false;
 	SurvivorPlaceholder[client] = false;
+
+	// 2.5.16：清掉闲置处理的后置状态，避免同名/同槽位复用时误判
+	g_fIdleSince[client] = 0.0;
+	g_fIdleReleasedAt[client] = 0.0;
+	g_fIdleNoticeAt[client] = 0.0;
+	g_fInGameSince[client] = 0.0;
 
 	delete TeamPanelTimer[client];			//	Clean up Panel timer
 
@@ -1312,6 +1358,9 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 		int ownedBot = GetBotOfIdle(client);
 		if (ownedBot > 0 && !SafeTakeOverSurvivor(client, ownedBot)) return Join_Wait;
 		ChangeClientTeam(client, TEAM_INFECTED);
+		// 2.5.17：换到特感后立刻清一次武器（"引擎先给生还者席位拿了枪 → 再换到特感"的竞态）
+		// 同时也覆盖 player_team 事件还没来得及触发的情况
+		StripSurvivorWeapons(client);
 		return GetClientTeam(client) == TEAM_INFECTED ? Join_Success : Join_Wait;
 	}
 	if (team != TEAM_SURVIVOR) return Join_Failed;
@@ -1984,6 +2033,213 @@ public void Event_PlayerLeftStartArea(Event event, const char[] name, bool dontB
 }
 
 // ------------------------------------------------------------------------
+// 2.5.15：闲置（挂机托管 / 加载中就被占了席位）玩家 → 旁观
+//
+// 引擎的"闲置"= 一名玩家的身份挂在一具生还者 bot 身体上（bot 的
+// m_humanSpectatorUserID 指向他），角色头顶因此显示"闲置：玩家名"，身体由 AI 顶着。
+// 来源有三类：
+//   ① 玩家自己按闲置键；
+//   ② 接管流程里 L4D_SetHumanSpec 之后没接管成功（伪闲置，玩家会卡在
+//      "点击加入游戏点不动"的半旁观状态）；
+//   ③ 加载慢 / 刚进服的玩家：引擎先把一具生还者 bot 预留给他，人还在加载，
+//      席位却被这具"闲置：名字"的身体占着 —— 这种情况同样要清掉，别占位置。
+// 玩家要求：上述三种一律转到旁观（2.5.18 起不再对③做"慢加载保护"）。
+//
+//   l4d_superversus_idle_to_spec = 1（默认）：清掉托管链接，头顶"闲置：名字"消失，
+//       身体交回 AI 正常行动（生还者席位不再被"闲置"标记占着）；
+//       玩家本人保持/转为旁观，用 !jg 可以重新加入。
+//   = 2：清链接后把身体整只移出生还者队并回收（与 ReconcileSurvivors 清理多余 bot 同款），
+//       队伍随后按最低人数补一个新的普通 AI。
+//   = 0：关闭。
+// 唯一让路：玩家正在插件自己的入队流程里（JoinPending + JoinTimer），抢了会打架。
+// 只处理"身体还活着"的情况；身体已死亡时由 Event_PlayerDeath -> TakeOver 把人叫回身体。
+// ------------------------------------------------------------------------
+
+public Action Timer_IdleToSpec(Handle timer)
+{
+	int iMode = IdleToSpec.IntValue;
+	if (iMode <= 0)
+		return Plugin_Continue;
+
+	if (!SurvivorMapReady || !RoundStarted || !IsServerProcessing())
+		return Plugin_Continue;
+
+	// 队伍修正插件正在锁队还原队伍时不动，避免和它抢换队
+	if (TeamChangesLocked())
+		return Plugin_Continue;
+
+	float fNow = GetGameTime();
+	float fDelay = IdleToSpecDelay.FloatValue;
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsValidClient(client) || IsFakeClient(client))
+		{
+			g_fIdleSince[client] = 0.0;
+			continue;
+		}
+
+		// 刚释放过：引擎若又把托管链接挂回来，5 秒内不再抢（避免和引擎来回打架）
+		if (g_fIdleReleasedAt[client] > 0.0 && fNow - g_fIdleReleasedAt[client] < 5.0)
+		{
+			g_fIdleSince[client] = 0.0;
+			continue;
+		}
+
+		/* 只要"玩家的身体还挂在场上、人却不在操作"，一律按闲置处理，立刻让出位置：
+		   包括①自己按了闲置键；②接管失败留下的伪闲置；③加载慢/刚进服时引擎先给他
+		   预留一具生还者 bot 身体（人还在加载，席位却被这具"闲置：名字"的身体占着）。
+		   用户明确要求：这种占位的人直接放旁观，不要保护。
+		   唯一让路的情况：他正处在入队流程里（JoinPending + JoinTimer），
+		   那是插件自己在做接管，抢了会打架。 */
+		int bot = GetBotOfIdle(client);
+
+		if (bot <= 0)
+		{
+			g_fIdleSince[client] = 0.0;
+			continue;
+		}
+
+		// 正在入队流程里的不动：接管瞬间会短暂出现托管链接，交给流程自己收尾
+		if (JoinPending[client] && JoinTimer[client] != null)
+		{
+			g_fIdleSince[client] = 0.0;
+			continue;
+		}
+
+		// 身体已死亡：交给 Event_PlayerDeath -> TakeOver 处理
+		if (!IsPlayerAlive(bot))
+		{
+			g_fIdleSince[client] = 0.0;
+			continue;
+		}
+
+		if (g_fIdleSince[client] <= 0.0)
+		{
+			g_fIdleSince[client] = fNow;
+			continue;
+		}
+
+		if (fNow - g_fIdleSince[client] < fDelay)
+			continue;
+
+		g_fIdleSince[client] = 0.0;
+
+		if (iMode >= 2)
+			ReleaseIdleBody(client, bot);
+		else
+			ClearIdleLink(bot, client);
+
+		g_fIdleReleasedAt[client] = fNow;
+
+		// 玩家本人确认为旁观（正常闲置本来就在旁观队，只有异常/伪闲置才会被改队）
+		if (IsClientInGame(client) && GetClientTeam(client) != TEAM_SPECTATOR)
+		{
+			ChangeClientTeam(client, TEAM_SPECTATOR);
+
+			// 伪闲置会在玩家身上残留 m_iObserverMode = 5（跟随观察），
+			// 那正是"点击加入游戏点不动"的元凶；只在残留时清回 0。
+			if (IsClientInGame(client) && GetClientTeam(client) == TEAM_SPECTATOR
+				&& GetEntProp(client, Prop_Send, "m_iObserverMode") == 5)
+				SetEntProp(client, Prop_Send, "m_iObserverMode", 0);
+		}
+
+		// 提示带 30 秒冷却：引擎如果反复把链接挂回来，不会刷玩家的屏
+		if (g_fIdleNoticeAt[client] <= 0.0 || fNow - g_fIdleNoticeAt[client] >= 30.0)
+		{
+			g_fIdleNoticeAt[client] = fNow;
+			PrintToChat(client, "\x03[SV] \x01你处于闲置(挂机托管)状态，已转为旁观；输入 !jg 可以重新加入游戏。");
+		}
+	}
+
+	return Plugin_Continue;
+}
+
+// 清掉"bot 身体被 client 托管"的链接复用本插件已有的 ClearIdleLink(bot, client)
+// （见文件末尾"接管"一节；那段注释已说明：对抗里没有主动闲置键，链接一旦残留就只能是 bug）。
+
+// mode 2：清链接后把闲置身体移出生还者队并回收，再让补位逻辑补一个新的普通 AI
+void ReleaseIdleBody(int client, int bot)
+{
+	ClearIdleLink(bot, client);
+
+	if (bot <= 0 || bot > MaxClients || !IsClientInGame(bot))
+		return;
+
+	if (!IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR)
+		return;
+
+	if (IsClientInKickQueue(bot))
+		return;
+
+	ChangeClientTeam(bot, TEAM_SPECTATOR);
+	KickClient(bot, "Idle takeover released");
+
+	// 尽快补一个新 bot；延迟一点点，让引擎先处理掉这次 kick
+	delete BotsUpdateTimer;
+	BotsUpdateTimer = CreateTimer(0.6, Timer_BotsUpdate, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// sm_svidle：把"闲置 → 旁观"的判定条件全部摊开。
+// 线上排查用：谁现在挂着托管身体、会不会被转旁观，一眼就能看出来。
+public Action Cmd_IdleStatus(int client, int args)
+{
+	float fNow = GetGameTime();
+
+	ReplyToCommand(client, "[SV] 闲置转旁观: 模式=%d 持续闲置=%.1fs 释放防抖=5s | 现在 %.1f",
+		IdleToSpec.IntValue, IdleToSpecDelay.FloatValue, fNow);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsValidClient(i) || IsFakeClient(i))
+			continue;
+
+		int bot = GetBotOfIdle(i);
+		float fInGame = (g_fInGameSince[i] > 0.0) ? (fNow - g_fInGameSince[i]) : -1.0;
+		float fIdle = (g_fIdleSince[i] > 0.0) ? (fNow - g_fIdleSince[i]) : -1.0;
+		float fReleased = (g_fIdleReleasedAt[i] > 0.0) ? (fNow - g_fIdleReleasedAt[i]) : -1.0;
+
+		ReplyToCommand(client,
+			"[SV] #%d %N | 队=%d 进服=%.0fs 新连接=%d 入队中=%d | 托管身体=#%d 持续闲置=%.1fs 上次释放=%.1fs",
+			i, i, GetClientTeam(i), fInGame,
+			NewConnection[i] ? 1 : 0,
+			(JoinPending[i] && JoinTimer[i] != null) ? 1 : 0,
+			bot, fIdle, fReleased);
+	}
+
+	return Plugin_Handled;
+}
+
+// 2.5.17：清掉真人身上残留的生还者武器。
+// 竞态来源（实测链路）：引擎把新连接先放进生还者队并让他活着（自带手枪，安全区还能捡枪），
+// 1 秒后平衡器才按人数把他换到感染者；ChangeClientTeam 不会回收武器，
+// 于是出现"人已经在特感队、身上却带着枪"。换到感染者时统一清一遍即可。
+// 只处理生还者武器实体（weapon_*），技能/其它实体一概不碰。
+void StripSurvivorWeapons(int client)
+{
+	if (!StripInfWeapons.BoolValue)
+		return;
+
+	if (!IsValidClient(client) || IsFakeClient(client))
+		return;
+
+	for (int slot = 0; slot <= 4; slot++)
+	{
+		int weapon = GetPlayerWeaponSlot(client, slot);
+		if (weapon <= 0 || !IsValidEntity(weapon))
+			continue;
+
+		char sClass[64];
+		GetEntityClassname(weapon, sClass, sizeof(sClass));
+		if (StrContains(sClass, "weapon_", false) != 0)
+			continue;
+
+		RemovePlayerItem(client, weapon);
+		RemoveEntity(weapon);
+	}
+}
+
+// ------------------------------------------------------------------------
 // 自动补位
 // ------------------------------------------------------------------------
 
@@ -1998,6 +2254,10 @@ public void Event_PlayerTeamSpecSince(Event event, const char[] name, bool dontB
 		g_fSpecSince[client] = GetGameTime();
 	else
 		g_fSpecSince[client] = 0.0;
+
+	// 2.5.17：换到感染者时清掉身上残留的生还者武器（进服时引擎先给生还者席位、随后被换到特感的竞态）
+	if (!IsFakeClient(client) && event.GetInt("team") == TEAM_INFECTED)
+		StripSurvivorWeapons(client);
 }
 
 // 轮询"队伍修复完成"：从"修复进行中"变为"已完成"的那一下触发补位

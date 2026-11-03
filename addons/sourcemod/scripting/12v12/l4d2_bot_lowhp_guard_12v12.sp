@@ -41,6 +41,12 @@
  *       离开守护/插件卸载时恢复原值；并新增 L4D2_OnSlammedSurvivor 前置拦截，
  *       挡掉牛把守护中的生还者撞墙致残的那条路径。
  *
+ *   1.3.1 修复（用户实测日志报"音效不存在"，但音效确实存在）：
+ *     - 取消 RefreshWarnSound 里的 FileExists 门禁：srcds 端 FileExists（valve 文件系统 +
+ *       普通文件系统）对 ui/beep_error01.wav 都返回 false，但 EmitSoundToClient 照样能播
+ *       （库存音效由客户端本地文件提供）。现在不再刷假报错、也不再因此跳过预缓存/播放；
+ *       诊断结果只由 sm_botguard_status / sm_botguard_warntest 打印。
+ *
  *   1.3.0 变更（玩家反馈"打无敌 bot 一脸懵"）：
  *     - 玩家操控的特殊感染者攻击"守护中的 AI 生还者"时，给该特感玩家三渠道提示：
  *         ① 聊天框  ② PrintHintText 屏幕提示  ③ HUD 文字（SetHudTextParams/ShowHudText）
@@ -101,7 +107,7 @@
 #include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.3.0"
+#define PLUGIN_VERSION		"1.3.1"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -957,7 +963,16 @@ void UpdateBotSpeed()
 // ============================================================================
 
 // 解析 l4d2_bot_guard_warn_sound，并（在地图开始时可）预缓存。
-// 音效不存在只记一条 LogError，不影响免疫 / 文字提示。
+//
+// 1.3.1 修复（用户实测：日志报"音效不存在: ui/beep_error01.wav"，但游戏里确实有这个音效）：
+//   **不再**用 FileExists 当门禁。实测该文件在服务器上 FileExists（valve 文件系统 +
+//   普通文件系统两条路）都返回 false —— srcds 端的音效可能只存在于 VPK、或纯靠
+//   客户端本地文件播放，服务器端查文件既不可靠，又会在每次换图刷一条假报错。
+//   现在：
+//     - 播放不做存在性检查，直接 EmitSoundToClient（路径写错最多是没声音，文字提示照常）；
+//     - 预缓存照做（自定义音效要预缓存才能下发，库存音效是 no-op）；
+//     - 诊断只在 sm_botguard_status / sm_botguard_warntest 里打印，且明确说明
+//       "服务器端查不到 ≠ 播放不了"。
 void RefreshWarnSound(bool bPrecache)
 {
 	g_cvWarnSound.GetString(g_sWarnSound, sizeof(g_sWarnSound));
@@ -965,19 +980,27 @@ void RefreshWarnSound(bool bPrecache)
 	if (g_sWarnSound[0] == '\0')
 		return;
 
+	if (bPrecache)
+		PrecacheSound(g_sWarnSound, true);
+}
+
+// 仅用于诊断显示：服务器端能否找到这个音效文件（false 也不代表播放不了）
+bool WarnSoundFoundOnServer()
+{
+	if (g_sWarnSound[0] == '\0')
+		return false;
+
 	char sDiskPath[PLATFORM_MAX_PATH];
 	Format(sDiskPath, sizeof(sDiskPath), "sound/%s", g_sWarnSound);
 
-	// valve_fs = true：能查到打进 VPK 的官方音效；再兜一层普通文件系统查询
-	if (!FileExists(sDiskPath, true) && !FileExists(sDiskPath))
-	{
-		LogError("[BotGuard] l4d2_bot_guard_warn_sound 指向的音效不存在: %s（攻击守护中的 bot 时不会有提示音，文字提示照常）",
-			g_sWarnSound);
-		return;
-	}
+	if (FileExists(sDiskPath, true) || FileExists(sDiskPath))
+		return true;
 
-	if (bPrecache)
-		PrecacheSound(g_sWarnSound, true);
+	// 兼容"配置里自己带了 sound/ 前缀"的写法
+	if (FileExists(g_sWarnSound, true) || FileExists(g_sWarnSound))
+		return true;
+
+	return false;
 }
 
 // 只有"玩家操控的特感"才需要提示（AI 特感不刷屏）
@@ -1089,8 +1112,9 @@ public Action Cmd_WarnTest(int client, int args)
 	g_fWarnLast[target] = 0.0;
 	ShowGuardBlockedHint(target, victim);
 
-	ReplyToCommand(client, "\x04[BotGuard]\x01 已向 #%d 发送一次演示提示（音效=%s，节流已跳过）。",
-		target, (g_sWarnSound[0] != '\0') ? g_sWarnSound : "无");
+	ReplyToCommand(client, "\x04[BotGuard]\x01 已向 #%d 发送一次演示提示（音效=%s，服务器端文件探测=%d，节流已跳过）。",
+		target, (g_sWarnSound[0] != '\0') ? g_sWarnSound : "无", WarnSoundFoundOnServer() ? 1 : 0);
+	ReplyToCommand(client, "\x04[BotGuard]\x01 注意：探测=0 不代表播放不了（srcds 上的库存音效常常只存在于 VPK / 由客户端本地提供）；以耳朵听到的为准。");
 
 	return Plugin_Handled;
 }
@@ -1589,10 +1613,12 @@ public Action Cmd_Status(int client, int args)
 		GetBotSpeedScale());
 
 	// 1.3.0：打守护 bot 的提示配置（提示音路径 + 三渠道开关 + 节流）
-	ReplyToCommand(client, "\x04[BotGuard]\x01 拦截提示: 开关=%d 节流=%.1fs 音效=%s | 渠道 聊天=%d 屏幕=%d HUD=%d",
+	// 1.3.1：附上"服务器端文件探测"结果，仅作诊断（0 也可能正常播放）
+	ReplyToCommand(client, "\x04[BotGuard]\x01 拦截提示: 开关=%d 节流=%.1fs 音效=%s (服务器端探测=%d) | 渠道 聊天=%d 屏幕=%d HUD=%d",
 		g_cvWarn.IntValue,
 		g_cvWarnCooldown.FloatValue,
 		(g_sWarnSound[0] != '\0') ? g_sWarnSound : "（无）",
+		WarnSoundFoundOnServer() ? 1 : 0,
 		g_cvWarnChat.IntValue,
 		g_cvWarnHint.IntValue,
 		g_cvWarnHud.IntValue);

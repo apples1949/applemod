@@ -13,6 +13,14 @@
  *   - 可在指定回血次数后把倒地次数改为目标值。
  *   - 复活后起身(到完全站立)期间豁免 Spitter 酸液伤害；
  *     若起身中被特殊感染者直接控住(扑倒/骑乘/拖拽/冲撞)，立即取消豁免。
+ *
+ * 1.7/1.8（多人模式；多人判定 = survivor_limit >= l4d2_tank_defib_multi_min_survivors，默认 5）：
+ *   - 坦克死亡时只要有生还者"已阵亡"：不再给存活生还者/地面发除颤器，
+ *     而是直接把一名阵亡生还者救回来（1.8：多人阵亡时随机挑一位）——
+ *     传送到队伍(离坦克死亡点最近的存活生还者)身边，
+ *     未倒地，血量 = l4d2_tank_defib_multi_health(默认 50)，主武器槽为空时补
+ *     l4d2_tank_defib_multi_weapon(默认 weapon_smg 冲锋枪)。
+ *   - 无论其他生还者是死是活都按同样规则处理；场上没有阵亡者时保持上面的原逻辑。
  * ========================================================================== */
 
 #pragma semicolon 1
@@ -23,7 +31,7 @@
 #include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.6"
+#define PLUGIN_VERSION		"1.8"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -62,6 +70,15 @@ ConVar g_cvReviveCountSet;
 ConVar g_cvSpitImmune;
 ConVar g_cvSpitImmuneMax;
 
+// 1.7：多人模式下坦克死亡改为"直接复活一名阵亡生还者并归队"，不再发放除颤器
+ConVar g_cvMultiRevive;			// 总开关
+ConVar g_cvMultiMinSurvivors;	// survivor_limit 达到该值即视为多人模式
+ConVar g_cvMultiHealth;			// 复活后血量
+ConVar g_cvMultiWeapon;			// 复活后补的主武器
+ConVar g_cvMultiTeleport;		// 是否传送到队伍
+
+ConVar g_hSurvivorLimit;		// survivor_limit（判断多人模式）
+
 ConVar g_hGameMaxIncap;
 ConVar g_hPillsDecayRate;
 
@@ -87,6 +104,9 @@ bool g_bSwappedTank[MAXPLAYERS + 1];
 
 // 本插件复活后给黑白生还者加的蓝色轮廓
 bool g_bBWOutline[MAXPLAYERS + 1];
+
+// 1.7：直接复活后的归队目标点（坦克死亡那一刻算好，复活后再传送）
+float g_vReviveDest[MAXPLAYERS + 1][3];
 
 // 起身期间 Spitter 酸液豁免（除颤器复活 -> 完全站立）
 bool g_bSpitImmune[MAXPLAYERS + 1];			// 豁免生效中（伤害钩子只看这个）
@@ -121,6 +141,7 @@ public void OnPluginStart()
 {
 	g_hGameMaxIncap		= FindConVar("survivor_max_incapacitated_count");
 	g_hPillsDecayRate	= FindConVar("pain_pills_decay_rate");
+	g_hSurvivorLimit	= FindConVar("survivor_limit");
 
 	int defaultReviveCount = 0;
 	if (g_hGameMaxIncap != null && g_hGameMaxIncap.IntValue > 0)
@@ -145,6 +166,13 @@ public void OnPluginStart()
 	g_cvReviveCountSet			= CreateConVar("l4d2_tank_defib_revive_count_set", "1", "回血达到l4d2_tank_defib_revive_count_tick次数后设置的倒地次数: 0=未倒地状态,设置值不能超过survivor_max_incapacitated_count(运行时自动钳制).", FCVAR_NOTIFY, true, 0.0, true, 100.0);
 	g_cvSpitImmune				= CreateConVar("l4d2_tank_defib_spit_immune", "1", "除颤器复活后起身(到完全站立)期间是否豁免 Spitter 酸液伤害: 0=关闭, 1=开启(起身中被特感控住则立即取消豁免).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_cvSpitImmuneMax			= CreateConVar("l4d2_tank_defib_spit_immune_max", "5.0", "起身豁免的兜底上限(秒): 游戏状态异常、无法判定起身已结束时, 最多豁免这么久.", FCVAR_NOTIFY, true, 0.5, true, 30.0);
+
+	// 1.7：多人模式（survivor_limit 达标）下，坦克死亡改为直接复活一名阵亡生还者
+	g_cvMultiRevive				= CreateConVar("l4d2_tank_defib_multi_revive", "1", "多人模式下坦克死亡时, 若有生还者已阵亡: 不再发放除颤器, 而是直接复活一名阵亡生还者并传送到队伍(未倒地, 血量=l4d2_tank_defib_multi_health, 补一把 l4d2_tank_defib_multi_weapon). 0=关闭, 保持原来的发放除颤器逻辑.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_cvMultiMinSurvivors		= CreateConVar("l4d2_tank_defib_multi_min_survivors", "5", "survivor_limit 达到该值即视为\"多人模式\"(默认 5 = 超过原版 4 人).", FCVAR_NOTIFY, true, 2.0, true, 24.0);
+	g_cvMultiHealth				= CreateConVar("l4d2_tank_defib_multi_health", "50", "直接复活后的血量(实血, 会先清空虚血).", FCVAR_NOTIFY, true, 1.0, true, 100.0);
+	g_cvMultiWeapon				= CreateConVar("l4d2_tank_defib_multi_weapon", "weapon_smg", "直接复活后补的武器(仅在主武器槽为空时补). 默认 weapon_smg = 冲锋枪; 留空=不补.");
+	g_cvMultiTeleport			= CreateConVar("l4d2_tank_defib_multi_teleport", "1", "直接复活后是否把生还者传送到队伍(离坦克死亡点最近的存活生还者)身边. 0=原地复活.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvInitialReviveCount.SetInt(defaultReviveCount, false, false);
 
@@ -621,6 +649,12 @@ public Action Timer_HealTick(Handle timer, int userid)
 // =============================
 void HandleTankDeath(const float tankPos[3])
 {
+	// 1.7：多人模式下不再发除颤器 —— 有阵亡生还者就直接把他救回队伍
+	if (TryMultiplayerRevive(tankPos))
+	{
+		return;
+	}
+
 	int mode = g_cvGiveMode.IntValue;
 	int target = -1;
 
@@ -757,6 +791,172 @@ void SpawnDefibAt(const float tankPos[3])
 	TeleportEntity(entity, pos, NULL_VECTOR, NULL_VECTOR);
 
 	PrintToChatAll("\x03[除颤器] 坦克死亡处已掉落一个除颤器");
+}
+
+// =============================
+// 1.7：多人模式 —— 坦克死亡直接复活一名阵亡生还者并归队
+//
+// 需求（多人模式 = survivor_limit >= l4d2_tank_defib_multi_min_survivors）：
+//   坦克死亡时若有生还者阵亡，不再给存活生还者/地上发除颤器，
+//   而是直接把一名阵亡生还者救回来：传送到队伍身边、未倒地、血量 50、补一把冲锋枪。
+//   多人阵亡时随机挑一位（1.8）。只复活"已阵亡"（不是倒地/挂边）的生还者；
+//   没有阵亡者时退回原来的除颤器逻辑。
+// =============================
+bool IsMultiplayerMode()
+{
+	int limit = 4;
+	if (g_hSurvivorLimit != null)
+	{
+		limit = g_hSurvivorLimit.IntValue;
+	}
+
+	return limit >= g_cvMultiMinSurvivors.IntValue;
+}
+
+bool TryMultiplayerRevive(const float tankPos[3])
+{
+	if (!g_cvMultiRevive.BoolValue || !IsMultiplayerMode())
+	{
+		return false;
+	}
+
+	int target = FindDeadSurvivorForRevive();
+	if (target == -1)
+	{
+		// 场上没有阵亡生还者：保持原逻辑（在坦克死亡处生成除颤器 / 给最近的存活生还者）
+		return false;
+	}
+
+	// 先算好归队点：离坦克死亡点最近的存活生还者脚下（没人在就退到坦克死亡点）
+	if (g_cvMultiTeleport.BoolValue)
+	{
+		if (!GetTeamRallyPoint(tankPos, g_vReviveDest[target]))
+		{
+			g_vReviveDest[target] = tankPos;
+		}
+	}
+	else
+	{
+		GetEntPropVector(target, Prop_Send, "m_vecOrigin", g_vReviveDest[target]);
+	}
+
+	// 原地复活（reset=false 保留击杀等统计）
+	L4D_RespawnPlayer(target, false);
+
+	// 血量/武器/传送统一在下一帧处理：引擎的出生流程可能晚一帧才把人刷出来，
+	// 这里不再做"立刻检查是否存活"的回退（否则会在同一次坦克死亡里既复活又发除颤器）。
+	CreateTimer(0.15, Timer_FinishMultiRevive, GetClientUserId(target), TIMER_FLAG_NO_MAPCHANGE);
+	return true;
+}
+
+// 随机挑一名"已阵亡"（在生还者队但已死亡，不是倒地/挂边）的生还者。
+// 需求（1.8）：同时有多人阵亡时随机复活一位（真人 / bot 一视同仁）。
+int FindDeadSurvivorForRevive()
+{
+	int candidates[MAXPLAYERS + 1];
+	int count = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsValidSurvivor(i) || IsPlayerAlive(i))
+		{
+			continue;
+		}
+
+		candidates[count++] = i;
+	}
+
+	if (count <= 0)
+	{
+		return -1;
+	}
+
+	return candidates[GetRandomInt(0, count - 1)];
+}
+
+// 归队点：离 refPos 最近的存活生还者位置，稍微错开避免重叠
+bool GetTeamRallyPoint(const float refPos[3], float dest[3])
+{
+	int living = FindNearestLivingTo(refPos);
+	if (living == -1)
+	{
+		return false;
+	}
+
+	GetEntPropVector(living, Prop_Send, "m_vecOrigin", dest);
+
+	float angle = GetRandomFloat(0.0, 6.283185);
+	dest[0] += Cosine(angle) * 40.0;
+	dest[1] += Sine(angle) * 40.0;
+
+	return true;
+}
+
+public Action Timer_FinishMultiRevive(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (!IsValidSurvivor(client) || !IsPlayerAlive(client))
+	{
+		LogError("[TankDefib] 多人模式直接复活 %L 失败（复活后仍不是存活状态），本次坦克奖励作废", client);
+		return Plugin_Stop;
+	}
+
+	// 传送归队
+	if (g_cvMultiTeleport.BoolValue)
+	{
+		TeleportEntity(client, g_vReviveDest[client], NULL_VECTOR, NULL_VECTOR);
+	}
+
+	// 未倒地 / 未挂边
+	SetEntProp(client, Prop_Send, "m_isIncapacitated", 0, 1);
+	SetEntProp(client, Prop_Send, "m_isHangingFromLedge", 0, 1);
+
+	// 血量：先清虚血，再设实血（总血量 = 目标值）
+	L4D_SetTempHealth(client, 0.0);
+
+	int health = g_cvMultiHealth.IntValue;
+	if (health < 1)
+	{
+		health = 1;
+	}
+	SetEntityHealth(client, health);
+
+	// 补武器（主武器槽为空时才补）
+	EnsurePrimaryWeapon(client);
+
+	char name[MAX_NAME_LENGTH];
+	GetClientName(client, name, sizeof(name));
+	PrintToChatAll("\x03[复活] \x01坦克已被击杀：%s 被直接救回队伍（%d 血）", name, health);
+
+	return Plugin_Stop;
+}
+
+// 主武器槽为空时补一把配置里的武器；被武器上限/拾取链拦住时退回 cheat "give"
+void EnsurePrimaryWeapon(int client)
+{
+	if (GetPlayerWeaponSlot(client, 0) != -1)
+	{
+		return;
+	}
+
+	char classname[64];
+	g_cvMultiWeapon.GetString(classname, sizeof(classname));
+	if (classname[0] == '\0')
+	{
+		return;
+	}
+
+	GivePlayerItem(client, classname);
+
+	if (GetPlayerWeaponSlot(client, 0) != -1)
+	{
+		return;
+	}
+
+	int flags = GetCommandFlags("give");
+	SetCommandFlags("give", flags & ~FCVAR_CHEAT);
+	FakeClientCommand(client, "give %s", classname);
+	SetCommandFlags("give", flags);
 }
 
 // =============================

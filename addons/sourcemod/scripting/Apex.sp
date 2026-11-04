@@ -10,7 +10,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   "1.1.2-applefix"
+#define PLG_VERS		   "1.1.3-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -158,10 +158,26 @@ ConVar Apex[40];
    就把 m_frustration 原始值写回 0; 判定不成立时完全不干预, 原版“看不到就掉控”照旧。
    注意: 引擎原始 m_frustration 是 0→100 累加(100=掉控), 与社区 stock
          GetTankFrustration = 100 - m_frustration 的方向相反, 这里写的是原始值。
+
+   2026-11-04 修复(玩家反馈):
+     1) "已经掉控的坦克, 看到生还者会直接回控": 原始 m_frustration 到顶(100)说明引擎
+        已经把坦克交给 AI / 玩家的控制权被收走; 这时候再写回 0, 引擎会把控制权还回
+        玩家(回控)。现在用两条信号判"已掉控": 引擎的 tank_frustrated 事件(主判据,
+        掉控瞬间就会发) + 定时器观察到 m_frustration >= 100(兜底); 一旦判定, 本局
+        这条命内不再写任何怒气(存活计时/范围通知照旧), 新一条命/新坦克在 Reset() 里重来。
+     2) "看不见生还者也被判成看得见": 之前 cfg 把观测范围设成 0(无限)又关掉了朝向锥,
+        只要是同一条无遮挡直线上的生还者(包括坦克背后、几千米外)都算"看得见", 怒气
+        被一直清零 -> 坦克永不掉控。现在朝向锥恒定生效(配置写 -1 只退化成前半球, 不再
+        允许"背后"), 默认 0.7(≈±45°, 与引擎 z_alert_dot 同源); 观测范围默认 3000,
+        再按存活时长用阶梯收紧。
 ----------------------------------------------------------- */
+/* 引擎原始 m_frustration 的上限: 到顶即"掉控"(引擎把坦克交给 AI / 收回玩家控制权) */
+#define TF_FRUSTRATION_MAX 100
+
 Handle g_hTankFrustTimer;
 float  g_fTankCtrlStart[MAXPLAYERS + 1]; /* 该玩家拿到坦克控制权的时刻(0=当前没在跟踪) */
 float  g_fTankFrustRange[MAXPLAYERS + 1]; /* 已认可(已通知过)的观测范围: 0=未初始化/无限 */
+bool   g_bTankFrustDropped[MAXPLAYERS + 1]; /* 这条命已经掉控: 之后一律不再写怒气, 否则会把控制权"送回"给玩家 */
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -353,8 +369,8 @@ public void
 
 	/* 坦克掉控抑制(观测范围): 默认关闭, 由各模式 cfg 用 confogl_addcvar 打开 */
 	Apex[APEX_TF_ENABLE]   = CreateConVar("l4d2_tankfrust_enable",   "0",     "坦克掉控抑制: 1=玩家坦克看得见生还者时不让怒气累积(不掉控) 0=关闭(原版行为)", _, true, 0.0, true, 1.0);
-	Apex[APEX_TF_RANGE]    = CreateConVar("l4d2_tankfrust_see_range", "0.0",  "基准观测范围(单位): 0=无限; 未到阶梯门槛时用这个值");
-	Apex[APEX_TF_DOT]      = CreateConVar("l4d2_tankfrust_see_dot",  "-1.0",  "朝向锥: 坦克视线与目标方向的点积下限, -1=不检查方向(全向都能看见), 0.7≈±45°", _, true, -1.0, true, 1.0);
+	Apex[APEX_TF_RANGE]    = CreateConVar("l4d2_tankfrust_see_range", "3000.0", "基准观测范围(单位): 0=无限(不推荐, 远处的生还者也会被当成看得见); 未到阶梯门槛时用这个值");
+	Apex[APEX_TF_DOT]      = CreateConVar("l4d2_tankfrust_see_dot",  "0.7",  "朝向锥: 坦克视线与目标方向的点积下限. 0.7≈±45°(与引擎 z_alert_dot 同源, 默认). 写 -1 或更小只退化成前半球(仍不允许背后的生还者)", _, true, -1.0, true, 1.0);
 	Apex[APEX_TF_INTERVAL] = CreateConVar("l4d2_tankfrust_interval", "0.2",   "检查间隔(秒)", _, true, 0.05, true, 1.0);
 	Apex[APEX_TF_DEBUG]    = CreateConVar("l4d2_tankfrust_debug",    "0",     "1=把判定结果写进服务器日志(部署核对用)", _, true, 0.0, true, 1.0);
 	Apex[APEX_TF_T1_TIME]  = CreateConVar("l4d2_tankfrust_t1_time",  "180.0", "阶梯1: 坦克存活满多少秒后把观测范围收紧(0=禁用该档)");
@@ -396,6 +412,7 @@ public void
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	HookEvent("player_jump_apex", Event_PlayerJumpApex);
 	HookEvent("tank_spawn", Event_TankSpawn);
+	HookEvent("tank_frustrated", Event_TankFrustrated);
 	HookEvent("round_end", Event_RoundEnd);
 
 	RegConsoleCmd("sm_trac", Call_Trac);
@@ -707,6 +724,21 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	StartTankFrustTimer();
 	/* 姿势提示 + 技能提示(含缩写)统一交给定时器逐条发 */
 	TankHints_Start(client);
+}
+
+/* 引擎掉控(原始 m_frustration 到顶)时会发这条事件, userid = 被收走坦克的玩家。
+   这是"已经掉控"最可靠的信号: 掉控瞬间玩家可能马上被弹出坦克(IsTank 变 false),
+   只靠 0.2s 轮询会漏掉那个窗口; 一旦漏掉, 引擎把怒气清零后就再也看不出掉控过。 */
+public void Event_TankFrustrated(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client <= 0)
+		return;
+
+	g_bTankFrustDropped[client] = true;
+
+	if (Apex[APEX_TF_DEBUG].IntValue >= 1)
+		LogMessage("[tankfrust] %N 触发 tank_frustrated(引擎已掉控), 这条命不再干预控制权", client);
 }
 
 Action SetTankHealth(Handle timer, any client)
@@ -2443,6 +2475,9 @@ void Reset(int client)
 	/* 观测范围记录的"已认可值"也清掉: 新一条命重新观察(不提示) */
 	g_fTankFrustRange[client] = -1.0;
 
+	/* 掉控标记也清掉: 新一条命/新坦克重新观察, 不继承上一辆坦克的掉控状态 */
+	g_bTankFrustDropped[client] = false;
+
 	/* 新一条命/新回合不继承"手里那颗石头"的记录(实体本身会被引擎清掉) */
 	g_iHeldRock[client]	  = INVALID_ENT_REFERENCE;
 	g_bPredActive[client] = false;
@@ -2560,6 +2595,9 @@ Action Timer_TankFrust(Handle timer)
 		{
 			g_fTankCtrlStart[i] = 0.0;
 			g_fTankFrustRange[i] = -1.0;
+			/* 掉控标记故意不在这里清: 掉控后玩家可能短暂变成幽灵, 引擎若又把控制权还回来
+			   而没触发新的 spawn, 每 tick 清标记会让"回控"重新发生。标记只在 Reset()
+			   (player_spawn / tank_spawn / round_end / map_end) 里清。 */
 			continue;
 		}
 
@@ -2575,8 +2613,26 @@ Action Timer_TankFrust(Handle timer)
 			TankFrustNotifyRange(i, fRange, fAlive);
 
 		int iMeter = GetEntProp(i, Prop_Send, "m_frustration");
+
+		/* 已掉控: 原始怒气到顶 = 引擎已经把坦克交给 AI / 收回玩家的控制权。
+		   这时候再写回 0, 引擎会把控制权还回玩家(实测"看到生还者直接回控").
+		   所以一旦观察到掉控, 本局这条命内不再写任何怒气(存活计时/范围通知照旧)。 */
+		if (iMeter >= TF_FRUSTRATION_MAX)
+		{
+			if (!g_bTankFrustDropped[i])
+			{
+				g_bTankFrustDropped[i] = true;
+				if (bDbg)
+					LogMessage("[tankfrust] %N 已掉控(m_frustration=%d), 这条命不再干预控制权", i, iMeter);
+			}
+			continue;
+		}
+
+		if (g_bTankFrustDropped[i])
+			continue;
+
 		if (iMeter <= 0)
-			continue; /* 原始值已经是 0(怒气满), 引擎会从 0 开始涨, 不用管 */
+			continue; /* 原始值已经是 0(尚未累积), 引擎会从 0 开始涨, 不用管 */
 
 		if (!TankFrustCanSeeSurvivor(i, fRange))
 			continue;
@@ -2596,15 +2652,17 @@ bool TankFrustCanSeeSurvivor(int tank, float fRange)
 	GetClientEyePosition(tank, vTankEye);
 
 	float vFwd[3];
-	float fDotMin = Apex[APEX_TF_DOT].FloatValue;
-	bool  bCheckDot = (fDotMin > -1.0);
+	float vAngles[3];
+	GetClientEyeAngles(tank, vAngles);
+	GetAngleVectors(vAngles, vFwd, NULL_VECTOR, NULL_VECTOR);
 
-	if (bCheckDot)
-	{
-		float vAngles[3];
-		GetClientEyeAngles(tank, vAngles);
-		GetAngleVectors(vAngles, vFwd, NULL_VECTOR, NULL_VECTOR);
-	}
+	/* 朝向锥恒定生效: 配置写 -1(或更小)时只退化成"前半球", 不再允许"坦克背后的生还者
+	   也算看得见" —— 这正是"看不见也被判成看得见"的主因之一。默认 0.7 ≈ ±45°。 */
+	float fDotMin = Apex[APEX_TF_DOT].FloatValue;
+	if (fDotMin < 0.0)
+		fDotMin = 0.0;
+	if (fDotMin > 1.0)
+		fDotMin = 1.0;
 
 	for (int j = 1; j <= MaxClients; j++)
 	{
@@ -2620,15 +2678,13 @@ bool TankFrustCanSeeSurvivor(int tank, float fRange)
 		if (fRange > 0.0 && fDist > fRange)
 			continue;
 
-		if (bCheckDot)
-		{
-			float vDir[3];
-			MakeVectorFromPoints(vTankEye, vTarget, vDir);
-			NormalizeVector(vDir, vDir);
+		/* 朝向锥: 正向看到的生还者才算"看得见" */
+		float vDir[3];
+		MakeVectorFromPoints(vTankEye, vTarget, vDir);
+		NormalizeVector(vDir, vDir);
 
-			if (GetVectorDotProduct(vFwd, vDir) < fDotMin)
-				continue;
-		}
+		if (GetVectorDotProduct(vFwd, vDir) < fDotMin)
+			continue;
 
 		if (TankFrustLineOfSightClear(vTankEye, vTarget))
 			return true;

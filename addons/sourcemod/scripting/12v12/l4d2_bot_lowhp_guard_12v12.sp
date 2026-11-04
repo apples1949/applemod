@@ -41,6 +41,9 @@
  *       离开守护/插件卸载时恢复原值；并新增 L4D2_OnSlammedSurvivor 前置拦截，
  *       挡掉牛把守护中的生还者撞墙致残的那条路径。
  *
+ *   1.3.2 变更（按需求）：提示音/文字节流(l4d2_bot_guard_warn_cooldown)默认 3 秒改 1 秒，
+ *     打无敌 bot 的提示更及时。
+ *
  *   1.3.1 修复（用户实测日志报"音效不存在"，但音效确实存在）：
  *     - 取消 RefreshWarnSound 里的 FileExists 门禁：srcds 端 FileExists（valve 文件系统 +
  *       普通文件系统）对 ui/beep_error01.wav 都返回 false，但 EmitSoundToClient 照样能播
@@ -53,7 +56,7 @@
  *       三渠道各自有开关（l4d2_bot_guard_warn_chat / _hint / _hud），默认全开。
  *     - 同时播放"投票失败提示音"（默认 ui/beep_error01.wav，与本仓库 l4d_votes_5_VS
  *       的投票未通过音效同一个文件；可用 l4d2_bot_guard_warn_sound 换成任意 game_sounds 路径）。
- *     - 提示音与文字共用一条节流：同一名特感玩家默认 3 秒内只会被提示一次
+ *     - 提示音与文字共用一条节流：同一名特感玩家默认 1 秒内只会被提示一次
  *       （l4d2_bot_guard_warn_cooldown，0 = 不节流），避免连点爪击时刷屏刷音。
  *     - 覆盖的触发点：SDKHook_OnTakeDamage（守护中吃伤害 / 保命判定）、
  *       舌头 / 扑击 / 骑乘 / 牛抱人 / 牛捶打 / 牛撞墙 六个前置拦截 forward。
@@ -107,7 +110,7 @@
 #include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.3.1"
+#define PLUGIN_VERSION		"1.3.2"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -141,7 +144,7 @@ ConVar g_cvNotify;			// 自动救起时是否聊天框提示
 
 // 1.3.0：玩家特感攻击"守护中的 AI 生还者"时的提示（提示音 + 三渠道文字）
 ConVar g_cvWarn;			// 总开关
-ConVar g_cvWarnCooldown;	// 同一名特感玩家的提示间隔下限（秒），默认 3.0
+ConVar g_cvWarnCooldown;	// 同一名特感玩家的提示间隔下限（秒），默认 1.0
 ConVar g_cvWarnSound;		// 提示音路径（相对 sound/ 目录）
 ConVar g_cvWarnChat;		// 渠道① 聊天框
 ConVar g_cvWarnHint;		// 渠道② PrintHintText
@@ -179,7 +182,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（3秒节流）",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -303,8 +306,8 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvWarnCooldown = CreateConVar("l4d2_bot_guard_warn_cooldown",
-		"3.0",
-		"同一名特感玩家两次提示的最小间隔(秒). 默认 3.0 = 3 秒播放检测, 防止连点爪击时提示音刷屏. 0 = 不节流.",
+		"1.0",
+		"同一名特感玩家两次提示的最小间隔(秒). 默认 1.0 = 1 秒, 防止连点爪击时提示音刷屏. 0 = 不节流.",
 		FCVAR_NOTIFY, true, 0.0, true, 60.0);
 
 	g_cvWarnSound = CreateConVar("l4d2_bot_guard_warn_sound",
@@ -958,7 +961,7 @@ void UpdateBotSpeed()
 //     音效文件，服务器上绝对存在）。改 l4d2_bot_guard_warn_sound 可换成任意
 //     game_sounds 路径（相对 sound/ 目录），留空则不播。
 //   - 三渠道文字：① 聊天框 ② PrintHintText ③ HUD 文字，各自有开关。
-//   - 节流：同一名特感玩家默认 3 秒内只提示一次（提示音也一起节流），
+//   - 节流：同一名特感玩家默认 1 秒内只提示一次（提示音也一起节流），
 //     连点爪击不会刷屏刷音。
 // ============================================================================
 
@@ -1029,7 +1032,7 @@ void NotifyGuardBlocked(int attacker, int victim)
 	if (fCooldown < 0.0)
 		fCooldown = 0.0;
 
-	// 3 秒播放检测：同一个人在这个窗口内只提示一次（提示音与三渠道文字共用）
+	// 1 秒播放检测：同一个人在这个窗口内只提示一次（提示音与三渠道文字共用）
 	if (fCooldown > 0.0 && g_fWarnLast[attacker] > 0.0 && fNow - g_fWarnLast[attacker] < fCooldown)
 		return;
 
@@ -1294,7 +1297,7 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	// 1.2.0 起不再有"AI 数量超限就整段失效"的开关，改由名额本身控制谁能进守护
 	if (g_bGuarded[victim])
 	{
-		// 1.3.0：告诉攻击的玩家特感"这只人机是无敌的"（提示音 + 三渠道文字，带 3 秒节流）
+		// 1.3.0：告诉攻击的玩家特感"这只人机是无敌的"（提示音 + 三渠道文字，带 1 秒节流）
 		NotifyGuardBlocked(attacker, victim);
 
 		damage = 0.0;

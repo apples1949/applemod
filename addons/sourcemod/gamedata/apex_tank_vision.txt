@@ -1,0 +1,27 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Offsets"
+		{
+			// CTerrorPlayer 怒气闸门(float): UpdateZombieFrustration 里第一道判定
+			//   if (*(float*)(this + GateOffset) > 0.0) 才累加, 否则走 else 分支每帧把
+			//   m_frustration 强制清 0 -> 怒气永远 0, 也永远不会触发 tank_frustrated(掉控)。
+			//   插件刷出来的坦克这个字段常是 0, 所以插件写 100 也会被抹掉、不掉控。
+			//   win 0x1034C687 -> +0x3A98 = 14984; linux +0x3A90 = 14992
+			"TankGateOffset"
+			{
+				"windows"	"14984"
+				"linux"		"14992"
+			}
+			// CTerrorPlayer 记录的「最后看见生还者时刻」(float). 引擎用它判断"多久没看见" ->
+			//   往老里写 = 让引擎也认为坦克看不见生还者(从而正常累积怒气/掉控)
+			//   win 0x1034D406 (值 +0x313C) = 12604; linux +0x3128 = 12584
+			"TankLastSeenOffset"
+			{
+				"windows"	"12604"
+				"linux"		"12584"
+			}
+		}
+	}
+}

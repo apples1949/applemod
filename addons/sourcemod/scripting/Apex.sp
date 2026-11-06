@@ -10,7 +10,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   "1.1.3-applefix"
+#define PLG_VERS		   "1.7.1-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -24,6 +24,10 @@
 #define TAG				   "{olive}[{lightred}!{olive}]{orange}"
 
 native int TankAttackControl_GetThrowSequence(int client);
+
+/* 控制权插件(修改版 l4d_tank_control_eq)排队的下一位坦克; 插件不存在时用 GetFeatureStatus 先判断 */
+native int GetTankSelection();
+
 
 #define TRAC_ROCK_MAX	   2048 /* 跟踪石相关数组上限(tank_rock 实体索引) */
 #define ROCK_FLY_SOUND	   "HulkZombie.Throw.FlyLoop" /* 坦克石头飞行动画循环音效(server.dll 里引擎按这个名字播放) */
@@ -121,63 +125,92 @@ int	   BhopBtn[MAXPLAYERS + 1];	   /* 上一帧按键快照(检测 IN_JUMP 按�
 int	   BhopTick[MAXPLAYERS + 1];   /* 下一次连跳允许的最小 tick(lilac: next_bhop) */
 int	   BhopChain[MAXPLAYERS + 1];  /* 当前连续完美连跳次数(lilac: perfect_bhops) */
 
-ConVar Apex[40];
+ConVar Apex[52];
 
 /* -----------------------------------------------------------
-   坦克掉控抑制(观测范围) cvar 槽位: 追加在原有 0..27 之后
+	坦克视野(原独立插件 l4d2_tank_vision.sp, 已合并回本插件)
+	-----------------------------------------------------------
+	为什么必须自己算「看得见」(实测结论, 别再走回头路):
+	  玩家控坦克时, 引擎那条“敌人可见性”路径(CTerrorPlayer::CheckEnemySightings)
+	  一次都不跑 —— 它属于 AI think, 只有 AI 控特感才走。玩家坦克的 m_frustration
+	  是无条件累加的: 看得见看不见都照涨, 到 100 就 tank_frustrated 掉控。
+	  所以本插件自己判: 看得见 -> 把引擎原始 m_frustration 写回 0(抑制累积);
+	  看不见 -> 不干预引擎自己的累积, 只在“跟踪石命中 / 存活满门限”这两个状态下
+	  按原版节奏额外再扣一点(见下面“扣控”说明)。
+
+	判定口径(三条全过才算看得见):
+	  距离  : 坦克眼睛 -> 生还者眼睛 <= 当前档位范围(范围按存活时长阶梯收紧)
+	  朝向锥: 坦克视线与目标方向点积 >= l4d2_tankvision_dot (0.7≈±45°)
+	  视线  : MASK_VISIBLE 射线, 只让世界几何体挡(忽略所有客户端实体)
+
+	扣控规则(2026-11 需求, 最终版):
+	  * 接管门槛: 坦克存活满 start_time(默认 240 秒 = 4 分钟)之后, 插件才开始接管控制权;
+	    4 分钟之前完全不接管(那段是游戏原生的 5%/秒);
+	  * 可见范围(插件判定用): 默认 range(2000); 4.5 分钟 1000 -> 5.5 分钟 750 -> 6.5 分钟 500;
+	  * 插件判定"看不见生还者"时, 先分清是谁判定的:
+	      a) 游戏自己也在掉怒气(引擎判定看不到) -> 用游戏原生的掉控节奏, 插件不插手;
+	      b) 游戏判定"看得见"(怒气不涨)、只有插件判定看不见 -> 由插件强制扣控;
+	  * 插件强制扣控的速率(四种情况, 叠加):
+	      正常 5% | 存活满 4 分钟 +1% -> 6% | 跟踪石命中 +1% -> 6% | 两者都有 7%;
+	  * 按游戏掉控频率(每秒一笔)写入 m_frustration; 已经掉控后本命闩锁, 再看到生还者也不回控。
 ----------------------------------------------------------- */
-#define APEX_TF_ENABLE     28
-#define APEX_TF_RANGE      29
-#define APEX_TF_DOT        30
-#define APEX_TF_INTERVAL   31
-#define APEX_TF_DEBUG      32
-#define APEX_TF_T1_TIME    33
-#define APEX_TF_T1_RANGE   34
-#define APEX_TF_T2_TIME    35
-#define APEX_TF_T2_RANGE   36
-#define APEX_TF_T3_TIME    37
-#define APEX_TF_T3_RANGE   38
-#define APEX_TF_NOTIFY     39  /* 存活时间把观测范围收紧时, 是否通知全体玩家 */
+#define APEX_TV_ENABLE		28	/* 1=接管(看得见不掉控/看不见按阶梯扣) 0=关闭(原版) */
+#define APEX_TV_RANGE		29	/* 基准可见范围(单位), 0=无限 */
+#define APEX_TV_DOT			30	/* 朝向锥: 视线点积下限 */
+#define APEX_TV_INTERVAL	31	/* 判定间隔(秒) */
+#define APEX_TV_DEBUG		32	/* 0=安静 1=每秒一条 2=再加范围/扣控日志 */
+#define APEX_TV_T1_TIME		33
+#define APEX_TV_T1_RANGE	34
+#define APEX_TV_T2_TIME		35
+#define APEX_TV_T2_RANGE	36
+#define APEX_TV_T3_TIME		37
+#define APEX_TV_T3_RANGE	38
+#define APEX_TV_NOTIFY		39	/* 范围收紧/开始扣控时通知全体玩家 */
+#define APEX_TV_STEP		40	/* 每格基础幅度(%), <=0 自动读 tankcontrol_trac_base */
+#define APEX_TV_SEEN_CLEAR	41	/* 看得见时是否把怒气清 0(1=清, 0=不干预) */
+#define APEX_TV_START_TIME	42	/* 存活满多少秒后插件才接管控制权(默认 210 = 3.5 分钟) */
+#define APEX_TV_ALIVE_TIME	43	/* 存活满多少秒后每秒多扣 1(默认 240 = 4 分钟) */
+#define APEX_TV_ALIVE_EXTRA	44	/* 存活满门限后每秒多加的百分点(默认 1) */
+#define APEX_TV_TRAC_EXTRA	45	/* 跟踪石命中后每秒多加的百分点(默认 1) */
+#define APEX_TV_FORCE		46	/* 0=游戏在掉控时让位 1=不管游戏, 插件总是强制按速率扣 */
+#define APEX_TV_GATE		47	/* 0=不碰引擎内存 1=强制打开闸门 2=只在扣满100时打开 */
+#define APEX_TV_FORCE_DROP	48	/* 1=扣满100且引擎不判掉控时, 由插件走原生换控(备用) */
+#define APEX_TV_FORCE_BLIND	49	/* 1=插件判定看不见时, 把引擎的"最后看见时间"写老, 让引擎自己走原生掉控 */
 
-/* -----------------------------------------------------------
-   坦克掉控抑制(观测范围)
-   -----------------------------------------------------------
-   背景(server.dll 2.2.1.3 逆向实证):
-     CTerrorPlayer::UpdateZombieFrustration (0x1034C610) 每秒给 m_frustration
-     += 100/z_frustration_lifetime(默认 20 → 每秒 5), 满 100 就发 tank_frustrated
-     并把坦克交给 AI = 掉控。它只在“距上次看见生还者”超过 z_frustration_los_delay
-     (默认 2s) 之后才累积。
-     但“算不算看见”由 CTerrorPlayer::CheckEnemySightings 决定, 那次找敌人的检索有
-     两条硬门槛:
-       a) 距离上限硬编码 2000 units(构造点 0x1034D29E 读 2000.0f@0x105D79A0,
-          谓词判定 0x10319388 comiss + ja);
-       b) 方向锥: 视线点积要 > 1 - z_alert_dot(默认 0.3 → 0.7, 约 ±45°)。
-     => 开阔长视野地图(例如 c4m4)坦克站在 2000 units 外明明看得见, 引擎也不认,
-        20 秒后照样掉控。
-   本功能的做法: 用自己的判定(观测范围可配 + 可选朝向锥 + 真实视线), 判定“看得见”
-   就把 m_frustration 原始值写回 0; 判定不成立时完全不干预, 原版“看不到就掉控”照旧。
-   注意: 引擎原始 m_frustration 是 0→100 累加(100=掉控), 与社区 stock
-         GetTankFrustration = 100 - m_frustration 的方向相反, 这里写的是原始值。
+/* 引擎原始 m_frustration: 0 -> 100 累加, 到顶即掉控(把坦克交给 AI) */
+#define TV_FRUSTRATION_MAX	100
 
-   2026-11-04 修复(玩家反馈):
-     1) "已经掉控的坦克, 看到生还者会直接回控": 原始 m_frustration 到顶(100)说明引擎
-        已经把坦克交给 AI / 玩家的控制权被收走; 这时候再写回 0, 引擎会把控制权还回
-        玩家(回控)。现在用两条信号判"已掉控": 引擎的 tank_frustrated 事件(主判据,
-        掉控瞬间就会发) + 定时器观察到 m_frustration >= 100(兜底); 一旦判定, 本局
-        这条命内不再写任何怒气(存活计时/范围通知照旧), 新一条命/新坦克在 Reset() 里重来。
-     2) "看不见生还者也被判成看得见": 之前 cfg 把观测范围设成 0(无限)又关掉了朝向锥,
-        只要是同一条无遮挡直线上的生还者(包括坦克背后、几千米外)都算"看得见", 怒气
-        被一直清零 -> 坦克永不掉控。现在朝向锥恒定生效(配置写 -1 只退化成前半球, 不再
-        允许"背后"), 默认 0.7(≈±45°, 与引擎 z_alert_dot 同源); 观测范围默认 3000,
-        再按存活时长用阶梯收紧。
------------------------------------------------------------ */
-/* 引擎原始 m_frustration 的上限: 到顶即"掉控"(引擎把坦克交给 AI / 收回玩家控制权) */
-#define TF_FRUSTRATION_MAX 100
+ConVar g_hTankVisionControlAfter;    /* tankcontrol_trac_after: 跟踪石命中后的加速持续时间(0=到死亡/交接) */
 
-Handle g_hTankFrustTimer;
-float  g_fTankCtrlStart[MAXPLAYERS + 1]; /* 该玩家拿到坦克控制权的时刻(0=当前没在跟踪) */
-float  g_fTankFrustRange[MAXPLAYERS + 1]; /* 已认可(已通知过)的观测范围: 0=未初始化/无限 */
-bool   g_bTankFrustDropped[MAXPLAYERS + 1]; /* 这条命已经掉控: 之后一律不再写怒气, 否则会把控制权"送回"给玩家 */
+Handle g_hTVGateConf;						/* gamedata: CTerrorPlayer 怒气闸门偏移 */
+int    g_iTVGateOffset = 14984;				/* 默认 Windows 偏移, 加载 gamedata 后覆盖 */
+int    g_iTVLastSeenOffset = 12604;			/* 「最后看见生还者时刻」偏移 */
+bool   g_bTVGateLogged[MAXPLAYERS + 1];		/* 该坦克已经记过"闸门已打开"日志 */
+float  g_fVisionEngAcc[MAXPLAYERS + 1];		/* 引擎怒气速率统计: 窗口内增量 */
+float  g_fVisionEngSpan[MAXPLAYERS + 1];	/* 引擎怒气速率统计: 窗口时长 */
+float  g_fVisionEngRate[MAXPLAYERS + 1];	/* 引擎怒气速率(%/秒, 每 2 秒结算一次) */
+
+Handle g_hTankVisionTimer;
+float  g_fTankCtrlStart[MAXPLAYERS + 1];   /* 该玩家拿到坦克(开始跟踪)的时刻, 0=没在跟踪 */
+float  g_fVisionAliveBias[MAXPLAYERS + 1]; /* 调试指令额外加的存活秒数(不改真实起点, 避免把起点算成负数) */
+float  g_fVisionRangeMark[MAXPLAYERS + 1]; /* 已通知过的范围(-1=还没观察过这辆坦克) */
+bool   g_bVisionDropped[MAXPLAYERS + 1];   /* 这条命已经掉控: 之后一律不再写怒气 */
+bool   g_bVisionWroteFull[MAXPLAYERS + 1]; /* 怒气已被我们写到 100(但引擎还没真掉控, 出生保护期常见) */
+bool   g_bVisionDropTried[MAXPLAYERS + 1]; /* 已经尝试过插件强制掉控 */
+float  g_fVisionFullAt[MAXPLAYERS + 1];    /* 怒气第一次满 100 的时刻 */
+float  g_fVisionUnseenAt[MAXPLAYERS + 1];  /* 本轮“看不见”开始时刻(0=看得见/未跟踪) */
+bool   g_bVisionPenalty[MAXPLAYERS + 1];   /* 是否已经进入“扣控制权”状态 */
+bool   g_bVisionTracHit[MAXPLAYERS + 1];   /* 这辆坦克的跟踪石命中过生还者(加成状态) */
+float  g_fVisionTracAt[MAXPLAYERS + 1];    /* 跟踪石命中时刻(tankcontrol_trac_after>0 时用来算到期) */
+int    g_iVisionMeter[MAXPLAYERS + 1];     /* 上次观察到的怒气原始值(不含本插件自己的写入) */
+float  g_fVisionEngineAt[MAXPLAYERS + 1];   /* 上次观察到"引擎自己让怒气上涨"的时刻(判游戏是否在掉控) */
+float  g_fVisionMeterF[MAXPLAYERS + 1];     /* 插件接管时的怒气读数(浮点): 每秒 += 速率, 直接覆盖写 m_frustration */
+float  g_fVisionPayAt[MAXPLAYERS + 1];      /* 上次"插件强制扣控"的时刻(与游戏掉控频率一致: 每秒一笔) */
+float  g_fVisionSampleAt[MAXPLAYERS + 1];  /* 上次结算时刻 */
+float  g_fVisionChatAt[MAXPLAYERS + 1];    /* 每秒一条调试日志的节流 */
+float  g_fVisionRangeOverride;             /* 测试指令强制的可见范围(<=0 = 不强制) */
+float  g_fVisionRangeOverrideUntil;        /* 强制范围的到期时刻(0 = 不过期) */
+
 
 /* -----------------------------------------------------------
 	跟踪石平衡功能(原 l4d_tracerock.sp 新增功能迁移至此)
@@ -260,6 +293,7 @@ public Plugin myinfo =
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	MarkNativeAsOptional("TankAttackControl_GetThrowSequence");
+	MarkNativeAsOptional("GetTankSelection");
 	RegPluginLibrary("Apex");
 	CreateNative("Apex_IsBhopEnabled", Native_IsBhopEnabled);
 	CreateNative("Apex_IsTracEnabled", Native_IsTracEnabled);
@@ -270,12 +304,21 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	/* 跟踪石命中 forward: 命中生还者时通知控制权插件(如修改版 l4d_tank_control_eq)做控制权调整 */
 	g_hFwdTracRockHit = CreateGlobalForward("Apex_OnTracRockHit", ET_Ignore, Param_Cell, Param_Cell);
 	g_bLateLoad = late;
+
 	return APLRes_Success;
 }
 
 /* 通报"跟踪石命中生还者": tank = 掷石坦克, victim = 被命中的生还者 */
 void FireTracRockHit(int tank, int victim)
 {
+	/* 坦克视野的"跟踪石命中"加成状态(与控制权插件口径一致: 命中后到坦克死亡/交接为止)。
+	   这里先记状态再发通知, 保证即使没人监听 forward 加成也生效。 */
+	if (tank > 0 && tank <= MaxClients)
+	{
+		g_bVisionTracHit[tank] = true;
+		g_fVisionTracAt[tank]  = GetGameTime();
+	}
+
 	if (g_hFwdTracRockHit == null)
 		return;
 
@@ -367,27 +410,60 @@ public void
 	Apex[26] = CreateConVar("tank_pred_emit", "0.033", "光束发射间隔(秒): 越小越跟手但残影越多(残影=多条线叠在一起). 30Hz 配光束寿命 0.055 秒刚好一条线", _, true, 0.01, true, 0.2);
 	Apex[25] = CreateConVar("tank_pred_off_r", "14.0", "画线视觉右移(点): 整条线往准星右侧让开避免挡视线, 末端收敛到真实落点. 0=不偏移", _, true, 0.0, true, 64.0);
 
-	/* 坦克掉控抑制(观测范围): 默认关闭, 由各模式 cfg 用 confogl_addcvar 打开 */
-	Apex[APEX_TF_ENABLE]   = CreateConVar("l4d2_tankfrust_enable",   "0",     "坦克掉控抑制: 1=玩家坦克看得见生还者时不让怒气累积(不掉控) 0=关闭(原版行为)", _, true, 0.0, true, 1.0);
-	Apex[APEX_TF_RANGE]    = CreateConVar("l4d2_tankfrust_see_range", "3000.0", "基准观测范围(单位): 0=无限(不推荐, 远处的生还者也会被当成看得见); 未到阶梯门槛时用这个值");
-	Apex[APEX_TF_DOT]      = CreateConVar("l4d2_tankfrust_see_dot",  "0.7",  "朝向锥: 坦克视线与目标方向的点积下限. 0.7≈±45°(与引擎 z_alert_dot 同源, 默认). 写 -1 或更小只退化成前半球(仍不允许背后的生还者)", _, true, -1.0, true, 1.0);
-	Apex[APEX_TF_INTERVAL] = CreateConVar("l4d2_tankfrust_interval", "0.2",   "检查间隔(秒)", _, true, 0.05, true, 1.0);
-	Apex[APEX_TF_DEBUG]    = CreateConVar("l4d2_tankfrust_debug",    "0",     "1=把判定结果写进服务器日志(部署核对用)", _, true, 0.0, true, 1.0);
-	Apex[APEX_TF_T1_TIME]  = CreateConVar("l4d2_tankfrust_t1_time",  "180.0", "阶梯1: 坦克存活满多少秒后把观测范围收紧(0=禁用该档)");
-	Apex[APEX_TF_T1_RANGE] = CreateConVar("l4d2_tankfrust_t1_range", "1000.0", "阶梯1: 收紧后的观测范围(单位)");
-	Apex[APEX_TF_T2_TIME]  = CreateConVar("l4d2_tankfrust_t2_time",  "210.0", "阶梯2: 坦克存活满多少秒后进一步收紧(0=禁用该档)");
-	Apex[APEX_TF_T2_RANGE] = CreateConVar("l4d2_tankfrust_t2_range", "750.0", "阶梯2: 收紧后的观测范围(单位)");
-	Apex[APEX_TF_T3_TIME]  = CreateConVar("l4d2_tankfrust_t3_time",  "240.0", "阶梯3: 坦克存活满多少秒后收到最紧(0=禁用该档)");
-	Apex[APEX_TF_T3_RANGE] = CreateConVar("l4d2_tankfrust_t3_range", "500.0",  "阶梯3: 收紧后的观测范围(单位)");
-	Apex[APEX_TF_NOTIFY]   = CreateConVar("l4d2_tankfrust_notify",   "1",     "存活时间把观测范围收紧时, 通知全体玩家(0=不通知 1=通知)", _, true, 0.0, true, 1.0);
+	/* 坦克视野(原 l4d2_tank_vision.sp): 判定口径 / 范围阶梯 / 额外扣控
+	   扣控只有两项加成(跟踪石命中 / 存活满门限); step <=0 时自动读 tankcontrol_trac_base,
+	   alive_time <0 时自动读 tankcontrol_trac_longlife_time(读不到就视为关闭)。 */
+	Apex[APEX_TV_ENABLE]      = CreateConVar("l4d2_tankvision_enable", "1", "坦克视野: 1=接管(看得见就不掉控; 看不见时按跟踪石命中/存活满门限额外扣控制权) 0=关闭(原版行为)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_RANGE]       = CreateConVar("l4d2_tankvision_range", "2000.0", "基准可见范围(单位): 未到阶梯门槛时用这个值, 0=无限");
+	Apex[APEX_TV_DOT]         = CreateConVar("l4d2_tankvision_dot", "0.7", "朝向锥: 坦克视线与目标方向点积下限. 0.7≈±45°(与引擎 z_alert_dot 同源), 写 -1 只退化成前半球", _, true, -1.0, true, 1.0);
+	Apex[APEX_TV_INTERVAL]    = CreateConVar("l4d2_tankvision_interval", "0.2", "视野判定间隔(秒)", _, true, 0.05, true, 1.0);
+	Apex[APEX_TV_DEBUG]       = CreateConVar("l4d2_tankvision_debug", "2", "调试输出(聊天框+服务器日志): 0=安静 1=每秒一条(发给坦克本人, 含是否看得见) 2=再加范围收紧/开始扣控/每笔扣控日志", _, true, 0.0, true, 2.0);
+	Apex[APEX_TV_T1_TIME]     = CreateConVar("l4d2_tankvision_t1_time", "270.0", "阶梯1: 坦克存活满多少秒开始收紧可见范围(0=禁用该档)");
+	Apex[APEX_TV_T1_RANGE]    = CreateConVar("l4d2_tankvision_t1_range", "1000.0", "阶梯1: 收紧后的可见范围(单位)");
+	Apex[APEX_TV_T2_TIME]     = CreateConVar("l4d2_tankvision_t2_time", "330.0", "阶梯2: 坦克存活满多少秒进一步收紧(0=禁用该档)");
+	Apex[APEX_TV_T2_RANGE]    = CreateConVar("l4d2_tankvision_t2_range", "750.0", "阶梯2: 收紧后的可见范围(单位)");
+	Apex[APEX_TV_T3_TIME]     = CreateConVar("l4d2_tankvision_t3_time", "390.0", "阶梯3: 坦克存活满多少秒收到最紧(0=禁用该档)");
+	Apex[APEX_TV_T3_RANGE]    = CreateConVar("l4d2_tankvision_t3_range", "500.0", "阶梯3: 收紧后的可见范围(单位)");
+	Apex[APEX_TV_NOTIFY]      = CreateConVar("l4d2_tankvision_notify", "1", "可见范围收紧 / 开始扣控制权时通知全体玩家(0=不通知 1=通知)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_STEP]        = CreateConVar("l4d2_tankvision_step", "5.0", "基础扣控幅度(%%/秒), 默认 5. 这就是「正常 5%%」那一档, 不再自动读别的插件");
+	Apex[APEX_TV_SEEN_CLEAR]  = CreateConVar("l4d2_tankvision_seen_clear", "0", "看得见生还者时是否把怒气写回 0(1=清, 坦克不会掉控; 0=不干预, 交给引擎原生判断)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_START_TIME]  = CreateConVar("l4d2_tankvision_start_time", "240.0", "坦克存活满多少秒后本插件才接管控制权(秒). 默认 240 = 4 分钟", _, true, 0.0);
+	Apex[APEX_TV_ALIVE_TIME]  = CreateConVar("l4d2_tankvision_alive_time", "240.0", "坦克存活满多少秒后, 每秒扣控再加 1 个百分点(秒). 默认 240 = 4 分钟", _, true, 0.0);
+	Apex[APEX_TV_ALIVE_EXTRA] = CreateConVar("l4d2_tankvision_alive_extra", "1.0", "存活满 alive_time 后每秒多加的百分点", _, true, 0.0, true, 100.0);
+	Apex[APEX_TV_TRAC_EXTRA]  = CreateConVar("l4d2_tankvision_trac_extra", "1.0", "跟踪石命中过生还者后, 每秒多加的百分点", _, true, 0.0, true, 100.0);
+	Apex[APEX_TV_FORCE]       = CreateConVar("l4d2_tankvision_force", "1", "0=游戏自己也在掉控时让位(用游戏原生的) 1=不管游戏, 插件总是强制按 5/6/7% 每秒扣", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_GATE]        = CreateConVar("l4d2_tankvision_gate", "0", "默认 0=完全不碰引擎内存(怒气闸门保持引擎自己的值). 1=强制打开(引擎恢复原生累积) 2=只在插件扣满100时打开", _, true, 0.0, true, 2.0);
+	Apex[APEX_TV_FORCE_DROP]  = CreateConVar("l4d2_tankvision_force_drop", "0", "1=怒气扣满 100 后引擎不判掉控时, 由插件用原生 ReplaceTank 走二控(有玩家)/交给AI(没玩家); 0=只在怒气满时挂着等引擎", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_FORCE_BLIND] = CreateConVar("l4d2_tankvision_force_blind", "1", "1=插件判定看不见时, 把引擎记录的「最后看见生还者时刻」写老, 让引擎自己也判定看不见 -> 走原生掉控(有玩家=二控, 没玩家=AI); 0=不碰引擎内存", _, true, 0.0, true, 1.0);
 
-	/* -1 = 还没观察过这辆坦克(和"0 = 无限"区分开) */
+	/* 版本/关键参数落一条日志: 现场核对"服务器跑的到底是不是这个 build" */
+	LogMessage("[tankvision] build %s loaded: enable=%d base=%.1f start=%.0fs alive=%.0fs extra=%.1f/%.1f force=%d seen_clear=%d",
+		PLG_VERS, Apex[APEX_TV_ENABLE].IntValue, VisionBaseStep(), VisionStartTime(), VisionAliveTime(),
+		Apex[APEX_TV_ALIVE_EXTRA].FloatValue, Apex[APEX_TV_TRAC_EXTRA].FloatValue,
+		Apex[APEX_TV_FORCE].IntValue, Apex[APEX_TV_SEEN_CLEAR].IntValue);
+
+	/* -1 = 还没观察过这辆坦克(和“0 = 无限”区分开) */
 	for (int i = 1; i <= MaxClients; i++)
-		g_fTankFrustRange[i] = -1.0;
+		g_fVisionRangeMark[i] = -1.0;
 
-	Apex[APEX_TF_ENABLE].AddChangeHook(OnTankFrustCvarChanged);
-	Apex[APEX_TF_INTERVAL].AddChangeHook(OnTankFrustCvarChanged);
-	StartTankFrustTimer();
+	/* 怒气闸门偏移(用于 l4d2_tankvision_gate): 读不到就用默认 Windows 偏移 */
+	g_hTVGateConf = LoadGameConfigFile("apex_tank_vision");
+	if (g_hTVGateConf != null)
+	{
+		int iOff = GameConfGetOffset(g_hTVGateConf, "TankGateOffset");
+		if (iOff > 0)
+			g_iTVGateOffset = iOff;
+
+		iOff = GameConfGetOffset(g_hTVGateConf, "TankLastSeenOffset");
+		if (iOff > 0)
+			g_iTVLastSeenOffset = iOff;
+		CloseHandle(g_hTVGateConf);
+		g_hTVGateConf = null;
+	}
+
+	Apex[APEX_TV_ENABLE].AddChangeHook(OnTankVisionCvarChanged);
+	Apex[APEX_TV_INTERVAL].AddChangeHook(OnTankVisionCvarChanged);
+	StartTankVisionTimer();
 
 	/* 石头轨迹预测用到的游戏 cvar: 缓存句柄, 避免每帧 FindConVar */
 	g_hSvGravity  = FindConVar("sv_gravity");		 /* 引擎 cvar, L4D2 恒存在; 取不到时按 800 兜底 */
@@ -424,6 +500,14 @@ public void
 	/* 调试用: 不看技能/不看蓄力, 直接按当前瞄准画线, 用来单独验证"线能不能画出来"(管理员) */
 	RegAdminCmd("sm_predtest", Call_PredTest, ADMFLAG_ROOT, "石头轨迹预测自检: 立即画 N 秒预测线 (默认 3 秒)");
 
+	/* 坦克视野测试指令(与原 l4d2_tank_vision.sp 同名, 便于沿用习惯) */
+	RegConsoleCmd("sm_tankvision", Cmd_TankVision, "查看当前坦克的视野判定/扣控制权状态");
+	RegConsoleCmd("sm_tankvision_dbg", Cmd_TankVisionDebug, "坦克视野调试档位: 0=安静 1=每秒一条(含是否看得见) 2=再加范围/扣控日志");
+	RegConsoleCmd("sm_tankvision_set", Cmd_TankVisionSet, "测试: 强制当前坦克可见范围 sm_tankvision_set <范围> [秒], 0=取消");
+	RegConsoleCmd("sm_tankvision_time", Cmd_TankVisionTime, "调试: 查看/改插件统计的坦克存活时间 sm_tankvision_time [秒|+N|-N]");
+	RegConsoleCmd("sm_tankvision_trac", Cmd_TankVisionTrac, "调试: 查看/改坦克的跟踪石命中加成 sm_tankvision_trac [0|1]");
+	RegAdminCmd("sm_tankvision_frust", Cmd_TankVisionFrust, ADMFLAG_ROOT, "查看/设置当前坦克怒气 sm_tankvision_frust [值] (0=满控制权, 100=掉控)");
+
 	if (g_bLateLoad)
 	{
 		for (int i = 1; i <= MaxClients; i++)
@@ -435,6 +519,9 @@ public void
 public void OnAllPluginsLoaded()
 {
 	g_bHasTracePlugin = LibraryExists("L4D_OnTraceRockCreated");
+
+	/* 坦克视野的"参考幅度"来自控制权插件的 cvar: 这里缓存句柄(取不到就按内置默认) */
+	g_hTankVisionControlAfter      = FindConVar("tankcontrol_trac_after");
 }
 
 /* -----------------------------------------------------------
@@ -719,26 +806,27 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	Reset(client);
 	if (Apex[2].IntValue > 0) CreateTimer(0.1, SetTankHealth, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 
-	/* 坦克掉控抑制: 开坦克时重置存活计时, 并兜底启动定时器(万一 cvar 在本插件加载前就已设好, 不会触发 change hook) */
+	/* 坦克视野: 开坦克这一刻记下存活起点, 并兜底启动定时器
+	   (万一 cvar 在本插件加载前就已设好, 不会触发变更钩子) */
 	g_fTankCtrlStart[client] = GetGameTime();
-	StartTankFrustTimer();
-	/* 姿势提示 + 技能提示(含缩写)统一交给定时器逐条发 */
+	StartTankVisionTimer();
+
 	TankHints_Start(client);
 }
 
 /* 引擎掉控(原始 m_frustration 到顶)时会发这条事件, userid = 被收走坦克的玩家。
    这是"已经掉控"最可靠的信号: 掉控瞬间玩家可能马上被弹出坦克(IsTank 变 false),
-   只靠 0.2s 轮询会漏掉那个窗口; 一旦漏掉, 引擎把怒气清零后就再也看不出掉控过。 */
+   只靠 0.2 秒轮询会漏掉那个窗口。 */
 public void Event_TankFrustrated(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
-	if (client <= 0)
+	if (client <= 0 || client > MaxClients)
 		return;
 
-	g_bTankFrustDropped[client] = true;
+	g_bVisionDropped[client] = true;
 
-	if (Apex[APEX_TF_DEBUG].IntValue >= 1)
-		LogMessage("[tankfrust] %N 触发 tank_frustrated(引擎已掉控), 这条命不再干预控制权", client);
+	if (Apex[APEX_TV_DEBUG].IntValue >= 1)
+		LogMessage("[tankvision] %N 触发 tank_frustrated(引擎已掉控), 这条命不再干预控制权", client);
 }
 
 Action SetTankHealth(Handle timer, any client)
@@ -1336,6 +1424,14 @@ public void OnClientPutInServer(int client)
 public void OnClientDisconnect(int client)
 {
 	SDKUnhook(client, SDKHook_OnTakeDamage, OnClientTakeDamage);
+
+	/* 掉线不保留坦克视野的存活计时/扣控状态(客户端索引会被复用, 新玩家不从上一辆坦克继承) */
+	VisionClearTracking(client);
+	g_bVisionDropped[client] = false;
+	g_bVisionWroteFull[client] = false;
+	g_bVisionDropTried[client] = false;
+	g_fVisionFullAt[client]    = 0.0;
+
 
 	/* 跟踪石的连续命中约束(控制权状态已移交 l4d_tank_control_eq 修改版) */
 	g_iLastTracTarget[client] = 0;
@@ -2472,11 +2568,6 @@ void Reset(int client)
 	/* 新一条命/新回合不继承跟踪石的连续命中约束 */
 	g_iLastTracTarget[client] = 0;
 
-	/* 观测范围记录的"已认可值"也清掉: 新一条命重新观察(不提示) */
-	g_fTankFrustRange[client] = -1.0;
-
-	/* 掉控标记也清掉: 新一条命/新坦克重新观察, 不继承上一辆坦克的掉控状态 */
-	g_bTankFrustDropped[client] = false;
 
 	/* 新一条命/新回合不继承"手里那颗石头"的记录(实体本身会被引擎清掉) */
 	g_iHeldRock[client]	  = INVALID_ENT_REFERENCE;
@@ -2490,50 +2581,99 @@ void Reset(int client)
 	g_bFlyActive[client]	 = false;
 	g_iFlyRock[client]		 = INVALID_ENT_REFERENCE;
 	Pred_ResetCache(client);
+
+	/* 坦克视野: 新一条命/新回合不继承上一辆坦克的存活计时、范围提示、
+	   看不见计时、扣控状态与掉控标记(掉控标记只在 Reset 里清, 见 Timer_TankVision 的说明) */
+	VisionClearTracking(client);
+	g_bVisionDropped[client] = false;
 }
 
 /* ===========================================================================
-   坦克掉控抑制(观测范围) —— 实现
+	坦克视野(自 l4d2_tank_vision.sp 合并) —— 实现
    =========================================================================== */
 
-void OnTankFrustCvarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+void OnTankVisionCvarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
-	StartTankFrustTimer();
+	StartTankVisionTimer();
 }
 
-void StartTankFrustTimer()
+void StartTankVisionTimer()
 {
-	delete g_hTankFrustTimer;
-	g_hTankFrustTimer = null;
+	/* 换图时引擎可能已经把 TIMER_REPEAT 干掉, 句柄这时是失效的: 先确认有效再 delete,
+	   否则会刷 "Invalid Handle"(极端情况下该句柄槽位被复用还会误关别人的定时器) */
+	if (g_hTankVisionTimer != null && IsValidHandle(g_hTankVisionTimer))
+		delete g_hTankVisionTimer;
 
-	/* 不论开关都常驻这个定时器(体里自己判断开关): 万一 l4d2_tankfrust_enable 是在
-	   本插件加载之前就被设好的(不会触发 change hook), 定时器照样能按新值生效 */
-	float fInterval = Apex[APEX_TF_INTERVAL].FloatValue;
+	g_hTankVisionTimer = null;
+
+	/* 不论开关都常驻这个定时器(体里自己判断开关): 万一 cvar 在本插件加载前就已设好, 不会触发变更钩子 */
+	float fInterval = Apex[APEX_TV_INTERVAL].FloatValue;
 	if (fInterval < 0.05)
 		fInterval = 0.05;
 	if (fInterval > 1.0)
 		fInterval = 1.0;
 
-	g_hTankFrustTimer = CreateTimer(fInterval, Timer_TankFrust, _, TIMER_REPEAT);
+	g_hTankVisionTimer = CreateTimer(fInterval, Timer_TankVision, _, TIMER_REPEAT);
 }
 
-/* 按"坦克存活时长"给出这一档的观测范围(后加的档覆盖前面的, 基准范围 = l4d2_tankfrust_see_range) */
-float GetTankFrustSeeRange(float fAliveTime)
+/* 清掉某个玩家的坦克视野跟踪状态(不是坦克 / 插件关闭 / Reset 时调用) */
+void VisionClearTracking(int client)
 {
-	float fRange = Apex[APEX_TF_RANGE].FloatValue;
+	if (client < 1 || client > MaxClients)
+		return;
+
+	g_fTankCtrlStart[client]   = 0.0;
+	g_fVisionAliveBias[client]= 0.0;
+	g_fVisionRangeMark[client] = -1.0;
+	g_fVisionUnseenAt[client]  = 0.0;
+	g_bVisionPenalty[client]   = false;
+	g_bVisionTracHit[client]   = false;
+	g_fVisionTracAt[client]    = 0.0;
+	g_iVisionMeter[client]     = 0;
+	g_fVisionEngineAt[client]  = 0.0;
+	g_fVisionEngAcc[client]    = 0.0;
+	g_fVisionEngSpan[client]   = 0.0;
+	g_fVisionEngRate[client]   = 0.0;
+	g_bTVGateLogged[client]    = false;
+	g_fVisionMeterF[client]    = 0.0;
+	g_fVisionPayAt[client]     = 0.0;
+	g_fVisionSampleAt[client]  = 0.0;
+	g_fVisionChatAt[client]    = 0.0;
+}
+
+void VisionClearAll()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		VisionClearTracking(i);
+}
+
+/* 按"坦克存活时长"给出这一档的可见范围(后加的档覆盖前面的, 基准 = l4d2_tankvision_range)。
+   阶梯档的 range <= 0 视为"这一档不生效"(保持上一档), 不把范围放开成无限:
+   range = 0 在下面表示"无限", 配置写 0 的语义必须是"不收紧"而不是"全图可见"。 */
+float VisionRangeByAlive(float fAlive)
+{
+	/* 测试指令强制范围优先(绕过阶梯) */
+	if (g_fVisionRangeOverride > 0.0)
+		return g_fVisionRangeOverride;
+
+	float fRange = Apex[APEX_TV_RANGE].FloatValue;
 	float fTime;
+	float fTier;
 
-	fTime = Apex[APEX_TF_T1_TIME].FloatValue;
-	if (fTime > 0.0 && fAliveTime >= fTime)
-		fRange = Apex[APEX_TF_T1_RANGE].FloatValue;
+	fTime = Apex[APEX_TV_T1_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T1_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fRange = fTier;
 
-	fTime = Apex[APEX_TF_T2_TIME].FloatValue;
-	if (fTime > 0.0 && fAliveTime >= fTime)
-		fRange = Apex[APEX_TF_T2_RANGE].FloatValue;
+	fTime = Apex[APEX_TV_T2_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T2_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fRange = fTier;
 
-	fTime = Apex[APEX_TF_T3_TIME].FloatValue;
-	if (fTime > 0.0 && fAliveTime >= fTime)
-		fRange = Apex[APEX_TF_T3_RANGE].FloatValue;
+	fTime = Apex[APEX_TV_T3_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T3_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fRange = fTier;
 
 	if (fRange < 0.0)
 		fRange = 0.0;
@@ -2541,169 +2681,112 @@ float GetTankFrustSeeRange(float fAliveTime)
 	return fRange;
 }
 
-/* 存活时间把观测范围收紧时, 通知全体玩家一次(每收紧一档提示一次)。
-   判定口径:
-     * -1 = 还没观察过这辆坦克: 只记录当前范围, 不提示(否则坦克刚出生就收到一条无意义提示);
-     * 0    = 当前范围是"无限"(l4d2_tankfrust_see_range / 阶梯范围设成 0);
-     * 只有"变得比记录值更小"才算收紧 —— 从无限变成有限也算收紧(基线常常就是 0=无限);
-     * 范围变宽 / 变回无限(改配置、关掉某一档)只记录不提示。
-   注意这里只发聊天, 不改任何判定结果。 */
-void TankFrustNotifyRange(int tank, float fRange, float fAlive)
+/* 取控制权插件的 cvar 值(句柄缓存; 对方被热卸载时句柄会失效, 这时重新查一次, 仍没有就用 fallback) */
+float VisionControlCvar(ConVar &cv, const char[] name, float fFallback)
 {
-	float fPrev = g_fTankFrustRange[tank];
+	if (cv == null || !IsValidHandle(cv))
+		cv = FindConVar(name);
 
-	/* 首次观察: 记录, 不提示 */
+	return (cv == null) ? fFallback : cv.FloatValue;
+}
+
+/* 每格怒气的基础幅度(%): <=0 时自动读控制权插件的 tankcontrol_trac_base, 缺失按 5 */
+float VisionBaseStep()
+{
+	/* 基础扣控幅度只认本插件自己的 l4d2_tankvision_step(默认 5).
+	   以前这里会自动读 tankcontrol_trac_base, 那个 cvar 在某些配置下是 0,
+	   结果被夹成 1, 面板上就出现"基础 1" —— 现在不再做这种隐式回退. */
+	float f = Apex[APEX_TV_STEP].FloatValue;
+
+	if (f <= 0.0 || f > 100.0)
+		f = 5.0;
+
+	return f;
+}
+
+/* 接管门槛(秒): 坦克存活满这么久之后, 插件才开始接管控制权 */
+float VisionStartTime()
+{
+	float f = Apex[APEX_TV_START_TIME].FloatValue;
+	return (f > 0.0) ? f : 0.0;
+}
+
+/* 存活加成门限(秒): 存活满这么久后每秒多扣 1 个点 */
+float VisionAliveTime()
+{
+	float f = Apex[APEX_TV_ALIVE_TIME].FloatValue;
+	return (f > 0.0) ? f : 0.0;
+}
+
+/* 跟踪石加速持续时长(秒): tankcontrol_trac_after; 0 = 直到坦克死亡/控制权交接 */
+float VisionTracAfter()
+{
+	float f = VisionControlCvar(g_hTankVisionControlAfter, "tankcontrol_trac_after", 0.0);
+	return (f > 0.0) ? f : 0.0;
+}
+
+/* 插件强制扣控时, 每秒扣多少(四种情况, 叠加):
+     正常                          = 基础 base(默认 5)
+     存活满 alive_time(4 分钟)     + alive_extra(默认 1) -> 6
+     跟踪石命中过生还者            + trac_extra(默认 1)  -> 6
+     两者都有                      -> 7 */
+float VisionRate(int tank, float fAlive)
+{
+	float fRate = VisionBaseStep();
+
+	float fAliveTime = VisionAliveTime();
+	if (fAliveTime > 0.0 && fAlive >= fAliveTime)
+		fRate += Apex[APEX_TV_ALIVE_EXTRA].FloatValue;
+
+	if (g_bVisionTracHit[tank])
+		fRate += Apex[APEX_TV_TRAC_EXTRA].FloatValue;
+
+	if (fRate < 1.0)
+		fRate = 1.0;
+	if (fRate > 100.0)
+		fRate = 100.0;
+
+	return fRate;
+}
+
+/* 是否已经进入"插件接管控制权"的阶段: 存活满 start_time(默认 3.5 分钟) */
+bool VisionTakeover(float fAlive)
+{
+	return (fAlive >= VisionStartTime());
+}
+
+/* 插件统计的"坦克存活秒数" = 真实拿到坦克的时间 + 调试指令的偏移 */
+float VisionAliveSeconds(int client)
+{
+	float fAlive = (g_fTankCtrlStart[client] > 0.0) ? (GetGameTime() - g_fTankCtrlStart[client]) : 0.0;
+	return fAlive + g_fVisionAliveBias[client];
+}
+
+/* 存活时间把可见范围收紧时通知全体玩家一次(每收紧一档提示一次)。
+   判定口径: -1 = 还没观察过这辆坦克 -> 只记录不提示; 0 = 无限; 只有变小才算收紧。 */
+void VisionNotifyRange(int tank, float fRange, float fAlive)
+{
+	float fPrev = g_fVisionRangeMark[tank];
+
 	if (fPrev < 0.0)
 	{
-		g_fTankFrustRange[tank] = fRange;
+		g_fVisionRangeMark[tank] = fRange;
 		return;
 	}
 
-	/* 有限值 且 (之前无限 或 之前更宽) = 收紧 */
 	bool bTightened = (fRange > 0.0) && (fPrev <= 0.0 || fRange < fPrev - 0.5);
 
-	g_fTankFrustRange[tank] = fRange;
+	g_fVisionRangeMark[tank] = fRange;
 
 	if (!bTightened)
 		return;
 
-	/* 按需求：不再只私聊坦克，改成通知全体玩家（让生还者也知道坦克的视野被削弱了） */
 	CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活 {lightgreen}%d{default} 秒, 视野判定范围收紧到 {lightgreen}%d{default} 单位(超出这个距离的生还者不再算“看得见”)",
 		TAG, tank, RoundToNearest(fAlive), RoundToNearest(fRange));
 }
 
-Action Timer_TankFrust(Handle timer)
-{
-	if (!Apex[APEX_TF_ENABLE].BoolValue)
-	{
-		/* 关掉时把存活计时也清了, 重新打开就从当前时刻重新算 */
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			g_fTankCtrlStart[i] = 0.0;
-			g_fTankFrustRange[i] = -1.0;
-		}
-
-		return Plugin_Continue;
-	}
-
-	float fNow = GetGameTime();
-	bool  bDbg = (Apex[APEX_TF_DEBUG].IntValue >= 1);
-
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsTank(i))
-		{
-			g_fTankCtrlStart[i] = 0.0;
-			g_fTankFrustRange[i] = -1.0;
-			/* 掉控标记故意不在这里清: 掉控后玩家可能短暂变成幽灵, 引擎若又把控制权还回来
-			   而没触发新的 spawn, 每 tick 清标记会让"回控"重新发生。标记只在 Reset()
-			   (player_spawn / tank_spawn / round_end / map_end) 里清。 */
-			continue;
-		}
-
-		/* 第一次看到这个玩家开坦克 = 记下控制权起点; 换人/重开都靠这个自动重算 */
-		if (g_fTankCtrlStart[i] <= 0.0)
-			g_fTankCtrlStart[i] = fNow;
-
-		float fAlive = fNow - g_fTankCtrlStart[i];
-		float fRange = GetTankFrustSeeRange(fAlive);
-
-		/* 存活时间把观测范围收紧时, 通知全体玩家(只发提示, 不动任何判定) */
-		if (Apex[APEX_TF_NOTIFY].BoolValue)
-			TankFrustNotifyRange(i, fRange, fAlive);
-
-		int iMeter = GetEntProp(i, Prop_Send, "m_frustration");
-
-		/* 已掉控: 原始怒气到顶 = 引擎已经把坦克交给 AI / 收回玩家的控制权。
-		   这时候再写回 0, 引擎会把控制权还回玩家(实测"看到生还者直接回控").
-		   所以一旦观察到掉控, 本局这条命内不再写任何怒气(存活计时/范围通知照旧)。 */
-		if (iMeter >= TF_FRUSTRATION_MAX)
-		{
-			if (!g_bTankFrustDropped[i])
-			{
-				g_bTankFrustDropped[i] = true;
-				if (bDbg)
-					LogMessage("[tankfrust] %N 已掉控(m_frustration=%d), 这条命不再干预控制权", i, iMeter);
-			}
-			continue;
-		}
-
-		if (g_bTankFrustDropped[i])
-			continue;
-
-		if (iMeter <= 0)
-			continue; /* 原始值已经是 0(尚未累积), 引擎会从 0 开始涨, 不用管 */
-
-		if (!TankFrustCanSeeSurvivor(i, fRange))
-			continue;
-
-		SetEntProp(i, Prop_Send, "m_frustration", 0);
-
-		if (bDbg)
-			LogMessage("[tankfrust] %N 存活 %.0fs 观测范围 %.0f: m_frustration %d -> 0", i, fAlive, fRange, iMeter);
-	}
-
-	return Plugin_Continue;
-}
-
-bool TankFrustCanSeeSurvivor(int tank, float fRange)
-{
-	float vTankEye[3];
-	GetClientEyePosition(tank, vTankEye);
-
-	float vFwd[3];
-	float vAngles[3];
-	GetClientEyeAngles(tank, vAngles);
-	GetAngleVectors(vAngles, vFwd, NULL_VECTOR, NULL_VECTOR);
-
-	/* 朝向锥恒定生效: 配置写 -1(或更小)时只退化成"前半球", 不再允许"坦克背后的生还者
-	   也算看得见" —— 这正是"看不见也被判成看得见"的主因之一。默认 0.7 ≈ ±45°。 */
-	float fDotMin = Apex[APEX_TF_DOT].FloatValue;
-	if (fDotMin < 0.0)
-		fDotMin = 0.0;
-	if (fDotMin > 1.0)
-		fDotMin = 1.0;
-
-	for (int j = 1; j <= MaxClients; j++)
-	{
-		if (j == tank || !IsValidClient(j))
-			continue;
-		if (GetClientTeam(j) != 2 || !IsPlayerAlive(j))
-			continue;
-
-		float vTarget[3];
-		GetClientEyePosition(j, vTarget);
-
-		float fDist = GetVectorDistance(vTankEye, vTarget);
-		if (fRange > 0.0 && fDist > fRange)
-			continue;
-
-		/* 朝向锥: 正向看到的生还者才算"看得见" */
-		float vDir[3];
-		MakeVectorFromPoints(vTankEye, vTarget, vDir);
-		NormalizeVector(vDir, vDir);
-
-		if (GetVectorDotProduct(vFwd, vDir) < fDotMin)
-			continue;
-
-		if (TankFrustLineOfSightClear(vTankEye, vTarget))
-			return true;
-	}
-
-	return false;
-}
-
-/* 只让世界几何体挡视线: 忽略所有客户端实体(坦克/生还者/其它感染者) */
-bool TankFrustLineOfSightClear(const float vStart[3], const float vEnd[3])
-{
-	Handle hTrace = TR_TraceRayFilterEx(vStart, vEnd, MASK_VISIBLE, RayType_EndPoint, TankFrustTraceFilter);
-	bool bClear = !TR_DidHit(hTrace);
-	delete hTrace;
-
-	return bClear;
-}
-
-public bool TankFrustTraceFilter(int entity, int contentsMask, any data)
+/* 视线射线的碰撞过滤: 只让世界几何体挡视线, 忽略所有客户端实体(坦克/生还者/其它感染者) */
+public bool VisionTraceFilter(int entity, int contentsMask, any data)
 {
 	if (entity >= 1 && entity <= MaxClients)
 		return false;
@@ -2711,3 +2794,688 @@ public bool TankFrustTraceFilter(int entity, int contentsMask, any data)
 	return true;
 }
 
+bool VisionLineOfSightClear(const float vStart[3], const float vEnd[3])
+{
+	Handle hTrace = TR_TraceRayFilterEx(vStart, vEnd, MASK_VISIBLE, RayType_EndPoint, VisionTraceFilter);
+	bool bClear = !TR_DidHit(hTrace);
+	delete hTrace;
+
+	return bClear;
+}
+
+/* 判定"这辆坦克现在看得见生还者吗"。fNearest 输出最近的生还者距离(没有生还者时 0, 只用于调试) */
+bool VisionCanSeeSurvivor(int tank, float fRange, float &fNearest)
+{
+	float vTankEye[3];
+	GetClientEyePosition(tank, vTankEye);
+
+	float vAngles[3];
+	float vFwd[3];
+	GetClientEyeAngles(tank, vAngles);
+	GetAngleVectors(vAngles, vFwd, NULL_VECTOR, NULL_VECTOR);
+
+	/* 朝向锥恒定生效: 写 -1 也只退化成前半球, 永远不允许"背后的生还者也算看得见" */
+	float fDotMin = Apex[APEX_TV_DOT].FloatValue;
+	if (fDotMin < 0.0)
+		fDotMin = 0.0;
+	if (fDotMin > 1.0)
+		fDotMin = 1.0;
+
+	fNearest = 0.0;
+
+	for (int j = 1; j <= MaxClients; j++)
+	{
+		if (j == tank || !IsValidClient(j) || !IsPlayerAlive(j))
+			continue;
+		if (GetClientTeam(j) != 2)
+			continue;
+
+		float vTarget[3];
+		GetClientEyePosition(j, vTarget);
+
+		float fDist = GetVectorDistance(vTankEye, vTarget);
+		if (fNearest <= 0.0 || fDist < fNearest)
+			fNearest = fDist;
+
+		if (fRange > 0.0 && fDist > fRange)
+			continue;
+
+		float vDir[3];
+		MakeVectorFromPoints(vTankEye, vTarget, vDir);
+		NormalizeVector(vDir, vDir);
+
+		if (GetVectorDotProduct(vFwd, vDir) < fDotMin)
+			continue;
+
+		if (VisionLineOfSightClear(vTankEye, vTarget))
+			return true;
+	}
+
+	return false;
+}
+
+/* 详细日志(只在 l4d2_tankvision_debug >= 2 时写服务器日志) */
+void VisionLog(const char[] fmt, any ...)
+{
+	if (Apex[APEX_TV_DEBUG].IntValue < 2)
+		return;
+
+	char buf[256];
+	VFormat(buf, sizeof(buf), fmt, 2);
+	LogMessage("[tankvision] %s", buf);
+}
+
+/* -----------------------------------------------------------
+	坦克视野测试指令(与原 l4d2_tank_vision.sp 同名)
+	  sm_tankvision                 查看当前坦克的视野/扣控状态
+	  sm_tankvision_dbg <0|1|2>     调试档位(等同 l4d2_tankvision_debug)
+	  sm_tankvision_set <范围> [秒]  临时强制可见范围(0=取消)
+	  sm_tankvision_time [秒|+N|-N]  调试: 查看/改插件统计的坦克存活时间(各阶段效果不用真等)
+	  sm_tankvision_trac [0|1]      调试: 查看/改坦克的"跟踪石命中"加成状态
+	  sm_tankvision_frust [值]      管理员: 查看/设置当前坦克怒气(0=满控制权, 100=掉控)
+----------------------------------------------------------- */
+
+Action Cmd_TankVision(int client, int args)
+{
+	ReplyToCommand(client, "[坦克视野] 开关=%d 判定间隔=%.2f 秒 调试=%d 强制范围=%s",
+		Apex[APEX_TV_ENABLE].IntValue,
+		Apex[APEX_TV_INTERVAL].FloatValue, Apex[APEX_TV_DEBUG].IntValue,
+		(g_fVisionRangeOverride > 0.0) ? "有(测试)" : "无");
+
+	int iShown = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i) || !IsPlayerAlive(i))
+			continue;
+
+		iShown++;
+
+		float fAlive   = VisionAliveSeconds(i);
+		float fRange   = VisionRangeByAlive(fAlive);
+		float fNearest = 0.0;
+		bool  bSee     = VisionCanSeeSurvivor(i, fRange, fNearest);
+		float fUnseen  = (g_fVisionUnseenAt[i] > 0.0) ? (GetGameTime() - g_fVisionUnseenAt[i]) : 0.0;
+		int   iMeter   = GetEntProp(i, Prop_Send, "m_frustration");
+		float fBase     = VisionBaseStep();
+		float fRateNow  = VisionRate(i, fAlive);
+		float fStart    = VisionStartTime();
+		float fAliveT   = VisionAliveTime();
+		bool  bTakeover = VisionTakeover(fAlive);
+		bool  bGameDrop = (g_fVisionEngineAt[i] > 0.0) && ((GetGameTime() - g_fVisionEngineAt[i]) <= 2.0);
+
+		ReplyToCommand(client, "[坦克视野] %N 存活 %.0f 秒 | 范围 %.0f | 看得见 %s(最近 %.0f) | 怒气 %d/100 | 看不见 %.0f 秒 | %s",
+			i, fAlive, fRange, bSee ? "是" : "否", fNearest, iMeter, fUnseen,
+			g_bVisionPenalty[i] ? "插件正在强制扣控" : "未扣控");
+
+		float fGateVal = -1.0;
+		float fLastSeenAgo = -1.0;
+		if (GetEntityAddress(i) != Address_Null)
+		{
+			fGateVal = view_as<float>(LoadFromAddress(GetEntityAddress(i) + view_as<Address>(g_iTVGateOffset), NumberType_Int32));
+
+			float fLastSeen = view_as<float>(LoadFromAddress(GetEntityAddress(i) + view_as<Address>(g_iTVLastSeenOffset), NumberType_Int32));
+			fLastSeenAgo = GetGameTime() - fLastSeen;
+
+			/* 明显不合理(没被写过/是别的数据) -> 打 -1 */
+			if (fLastSeenAgo < 0.0 || fLastSeenAgo > 3600.0)
+				fLastSeenAgo = -1.0;
+		}
+
+		ReplyToCommand(client, "[坦克视野]   版本 %s | 基础 %.1f | 引擎速率 %.1f%%/秒(近2秒) | 怒气闸门 %.3f | 引擎最后看见 %.1f 秒前 | 接管门槛 %.0f 秒(%s) | 强制速率 %.1f%%/秒 = 基础 %.1f + 存活 %s + 跟踪石 %s | 游戏自己在掉控=%s | 强制模式=%s | 掉控闩锁=%s",
+			PLG_VERS, fBase, g_fVisionEngRate[i], fGateVal, fLastSeenAgo,
+			fStart, bTakeover ? "已达" : "未达",
+			fRateNow, fBase,
+			(fAliveT > 0.0 && fAlive >= fAliveT) ? "1" : "0",
+			g_bVisionTracHit[i] ? "1" : "0",
+			bGameDrop ? "是" : "否",
+			Apex[APEX_TV_FORCE].BoolValue ? "总是强制" : "让位",
+			g_bVisionDropped[i] ? "已锁(本命不再写怒气)" : "无");
+	}
+
+	if (iShown == 0)
+		ReplyToCommand(client, "[坦克视野] 当前没有活着的真人坦克(AI 坦克不接管)");
+
+	return Plugin_Handled;
+}
+
+Action Cmd_TankVisionDebug(int client, int args)
+{
+	if (args < 1)
+	{
+		ReplyToCommand(client, "[坦克视野] 当前调试档位 %d (0=安静 1=每秒一条(含是否看得见) 2=再加范围/扣控日志)",
+			Apex[APEX_TV_DEBUG].IntValue);
+		return Plugin_Handled;
+	}
+
+	int iVal = GetCmdArgInt(1);
+	if (iVal < 0)
+		iVal = 0;
+	if (iVal > 2)
+		iVal = 2;
+
+	Apex[APEX_TV_DEBUG].SetInt(iVal);
+	ReplyToCommand(client, "[坦克视野] 调试档位 = %d", iVal);
+
+	return Plugin_Handled;
+}
+
+Action Cmd_TankVisionSet(int client, int args)
+{
+	if (args < 1)
+	{
+		ReplyToCommand(client, "[坦克视野] 用法: sm_tankvision_set <范围> [秒]   0 = 取消强制");
+		ReplyToCommand(client, "[坦克视野] 当前强制: %s | 基准 %.0f | 阶梯 %.0f@%.0fs / %.0f@%.0fs / %.0f@%.0fs",
+			(g_fVisionRangeOverride > 0.0) ? "有" : "无",
+			Apex[APEX_TV_RANGE].FloatValue,
+			Apex[APEX_TV_T1_RANGE].FloatValue, Apex[APEX_TV_T1_TIME].FloatValue,
+			Apex[APEX_TV_T2_RANGE].FloatValue, Apex[APEX_TV_T2_TIME].FloatValue,
+			Apex[APEX_TV_T3_RANGE].FloatValue, Apex[APEX_TV_T3_TIME].FloatValue);
+		return Plugin_Handled;
+	}
+
+	float fRange = GetCmdArgFloat(1);
+	if (fRange < 0.0)
+		fRange = 0.0;
+
+	float fSec = (args >= 2) ? GetCmdArgFloat(2) : 0.0;
+	if (fSec < 0.0)
+		fSec = 0.0;
+
+	g_fVisionRangeOverride = (fRange > 0.0) ? fRange : 0.0;
+	g_fVisionRangeOverrideUntil = (fRange > 0.0 && fSec > 0.0) ? (GetGameTime() + fSec) : 0.0;
+
+	if (fRange > 0.0)
+		CPrintToChatAll("%s[坦克视野] 测试: 可见范围强制为 {lightgreen}%.0f{default} 单位%s",
+			TAG, fRange, (fSec > 0.0) ? " (限时, 到点自动恢复)" : " (常驻, sm_tankvision_set 0 取消)");
+	else
+		CPrintToChatAll("%s[坦克视野] 测试: 已取消强制范围, 回到阶梯逻辑", TAG);
+
+	return Plugin_Handled;
+}
+
+/* 调试: 改插件统计的"坦克存活时间", 这样 3.5/4/4.5/5.5/6.5 分钟各阶段不用真等。
+   用法: sm_tankvision_time 300 | sm_tankvision_time +60 | sm_tankvision_time -60 | 不带参数=查看 */
+Action Cmd_TankVisionTime(int client, int args)
+{
+	int iShown = 0;
+
+	if (args < 1)
+	{
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (!IsTank(i) || !IsPlayerAlive(i))
+				continue;
+
+			iShown++;
+
+			float fAlive = VisionAliveSeconds(i);
+
+			ReplyToCommand(client, "[坦克视野] %N 存活 %.0f 秒 | 范围 %.0f | 接管=%s | 存活加成=%s",
+				i, fAlive, VisionRangeByAlive(fAlive),
+				VisionTakeover(fAlive) ? "是" : "否",
+				(VisionAliveTime() > 0.0 && fAlive >= VisionAliveTime()) ? "是" : "否");
+		}
+
+		if (iShown == 0)
+			ReplyToCommand(client, "[坦克视野] 当前没有活着的真人坦克");
+
+		ReplyToCommand(client, "[坦克视野] 用法: sm_tankvision_time <秒>  (也可 +60 / -60 相对调整)");
+		return Plugin_Handled;
+	}
+
+	char sArg[32];
+	GetCmdArg(1, sArg, sizeof(sArg));
+
+	bool  bRelative = (sArg[0] == '+' || sArg[0] == '-');
+	float fValue    = StringToFloat(sArg);
+	float fNow      = GetGameTime();
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i) || !IsPlayerAlive(i))
+			continue;
+
+		iShown++;
+
+		/* 只改偏移, 不动真实起点: 直接写 g_fTankCtrlStart = now - 秒数 在地图刚加载
+		   (GetGameTime 还很小)时会算成负数, 被下面的"首次识别"逻辑当成 0 重新起算,
+		   表现出来就是"存活 X 秒从头开始"。 */
+		float fRaw = (g_fTankCtrlStart[i] > 0.0) ? (fNow - g_fTankCtrlStart[i]) : 0.0;
+		float fCur = fRaw + g_fVisionAliveBias[i];
+		float fNew = bRelative ? (fCur + fValue) : fValue;
+
+		if (fNew < 0.0)
+			fNew = 0.0;
+
+		g_fVisionAliveBias[i] = fNew - fRaw;
+		float fAlive = fCur;
+
+		ReplyToCommand(client, "[坦克视野] %N 存活时间 %.0f -> %.0f 秒 | 范围 %.0f | 接管=%s | 存活加成=%s",
+			i, fAlive, fNew, VisionRangeByAlive(fNew),
+			VisionTakeover(fNew) ? "是" : "否",
+			(VisionAliveTime() > 0.0 && fNew >= VisionAliveTime()) ? "是" : "否");
+
+		VisionLog("%N 存活时间被调试指令改为 %.0f 秒", i, fNew);
+	}
+
+	if (iShown == 0)
+	{
+		ReplyToCommand(client, "[坦克视野] 当前没有活着的真人坦克");
+		return Plugin_Handled;
+	}
+
+	/* 说明: 改存活时间会重算判定范围(存活越久范围越小)。如果改小时间让范围变宽、坦克
+	   又刚好看得见生还者, 插件会把它当"重新看见" -> "看不见"计时与扣控状态都会重新开始,
+	   这是正常判定, 不是插件重置。想连续看各阶段的扣控数字, 先 sm_tankvision_set 1 固定
+	   "看不见", 再只往大改时间(240 -> 270 -> 330 -> 390), 计时就不会断。 */
+	ReplyToCommand(client, "[坦克视野] 提示: 改时间会重算判定范围; 若变宽后能看见生还者, \"看不见\"计时会重新开始");
+
+	return Plugin_Handled;
+}
+
+/* 调试: 手动开关"跟踪石命中过生还者"加成, 用来测 6%/7% 那两档 */
+Action Cmd_TankVisionTrac(int client, int args)
+{
+	int iShown = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i) || !IsPlayerAlive(i))
+			continue;
+
+		iShown++;
+
+		if (args >= 1)
+		{
+			bool bOn = (GetCmdArgInt(1) != 0);
+
+			g_bVisionTracHit[i] = bOn;
+			g_fVisionTracAt[i]  = GetGameTime();
+
+			ReplyToCommand(client, "[坦克视野] %N 跟踪石加成 = %s", i, bOn ? "开(测试)" : "关");
+		}
+		else
+		{
+			ReplyToCommand(client, "[坦克视野] %N 跟踪石加成 = %s", i, g_bVisionTracHit[i] ? "开" : "关");
+		}
+	}
+
+	if (iShown == 0)
+		ReplyToCommand(client, "[坦克视野] 当前没有活着的真人坦克");
+
+	return Plugin_Handled;
+}
+
+Action Cmd_TankVisionFrust(int client, int args)
+{
+	int iShown = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsTank(i) || !IsPlayerAlive(i))
+			continue;
+
+		iShown++;
+
+		if (args >= 1)
+		{
+			int iVal = GetCmdArgInt(1);
+			if (iVal < 0)
+				iVal = 0;
+			if (iVal > TV_FRUSTRATION_MAX)
+				iVal = TV_FRUSTRATION_MAX;
+
+			SetEntProp(i, Prop_Send, "m_frustration", iVal);
+			g_bVisionDropped[i] = false;
+
+			ReplyToCommand(client, "[坦克视野] %N 怒气设为 %d (0=满控制权, 100=掉控), 掉控闩锁已解开", i, iVal);
+		}
+		else
+		{
+			ReplyToCommand(client, "[坦克视野] %N 怒气 %d/100", i, GetEntProp(i, Prop_Send, "m_frustration"));
+		}
+	}
+
+	if (iShown == 0)
+		ReplyToCommand(client, "[坦克视野] 当前没有活着的真人坦克");
+
+	return Plugin_Handled;
+}
+
+/* 打开某个坦克的"怒气闸门"(CTerrorPlayer+偏移): 只有 >0 引擎才会累加怒气并触发掉控 */
+void VisionOpenGate(int client, const char[] reason)
+{
+	if (GetEntityAddress(client) == Address_Null)
+		return;
+
+	Address addrGate = GetEntityAddress(client) + view_as<Address>(g_iTVGateOffset);
+	float fGate = view_as<float>(LoadFromAddress(addrGate, NumberType_Int32));
+
+	if (fGate <= 0.0)
+	{
+		StoreToAddress(addrGate, view_as<int>(1.0), NumberType_Int32);
+		LogMessage("[tankvision] %N 怒气闸门 %.3f -> 1.0 (%s, 偏移 +0x%X)", client, fGate, reason, g_iTVGateOffset);
+	}
+}
+
+/* 怒气满了但引擎不判掉控(它认为玩家坦克还看得见生还者)时, 由插件走原生换控:
+   1) 有排队的感染者玩家 -> L4D_ReplaceTank(tank, 玩家) = 二控(同一辆坦克控制权交给下一位);
+   2) 没有玩家、场上又感染者 AI(bot) -> 交给 bot = 变 AI;
+   3) 都没有 -> 保持怒气满, 等引擎自己处理。 */
+void VisionForceDrop(int tank)
+{
+	int target = 0;
+	bool bBot = false;
+
+	if (GetFeatureStatus(FeatureType_Native, "GetTankSelection") == FeatureStatus_Available)
+	{
+		int sel = GetTankSelection();
+
+		if (sel > 0 && sel <= MaxClients && sel != tank && IsClientInGame(sel)
+			&& !IsFakeClient(sel) && GetClientTeam(sel) == 3)
+			target = sel;
+	}
+
+	if (target == 0)
+	{
+		for (int j = 1; j <= MaxClients; j++)
+		{
+			if (j == tank || !IsClientInGame(j) || !IsFakeClient(j))
+				continue;
+			if (GetClientTeam(j) != 3)
+				continue;
+
+			target = j;
+			bBot = true;
+			break;
+		}
+	}
+
+	if (target == 0)
+	{
+		LogMessage("[tankvision] %N 怒气已满, 但引擎不判掉控且没有可接手的玩家/AI -> 保持怒气满", tank);
+		return;
+	}
+
+	if (GetFeatureStatus(FeatureType_Native, "L4D_ReplaceTank") != FeatureStatus_Available)
+	{
+		LogMessage("[tankvision] %N 怒气已满, 但 L4D_ReplaceTank 不可用 -> 无法强制掉控", tank);
+		return;
+	}
+
+	PrintToChatAll("%s坦克 {lightgreen}%N{default} 控制权由插件收回(%s)", TAG, tank, bBot ? "交给 AI" : "二控给下一位");
+	LogMessage("[tankvision] %N 强制掉控 -> %N (bot=%d)", tank, target, bBot ? 1 : 0);
+
+	L4D_ReplaceTank(tank, target);
+}
+
+/* 让引擎也认为"这辆坦克很久没看见生还者": 把 CTerrorPlayer 里记录的
+   「最后看见生还者时刻」往老里写。引擎下一次 UpdateZombieFrustration 就会按
+   "看不见"处理 -> 怒气累加到 100 -> 原生掉控(有玩家=二控, 没玩家=AI)。 */
+void VisionForceBlind(int tank)
+{
+	if (GetEntityAddress(tank) == Address_Null)
+		return;
+
+	Address addr = GetEntityAddress(tank) + view_as<Address>(g_iTVLastSeenOffset);
+	float fOld = GetGameTime() - 60.0;
+
+	StoreToAddress(addr, view_as<int>(fOld), NumberType_Int32);
+}
+
+Action Timer_TankVision(Handle timer)
+{
+	if (!Apex[APEX_TV_ENABLE].BoolValue)
+	{
+		VisionClearAll();
+		return Plugin_Continue;
+	}
+
+	float fNow = GetGameTime();
+	int   iDebug = Apex[APEX_TV_DEBUG].IntValue;
+
+	/* 测试指令的强制范围到期后自动回到阶梯逻辑 */
+	if (g_fVisionRangeOverrideUntil > 0.0 && fNow >= g_fVisionRangeOverrideUntil)
+	{
+		g_fVisionRangeOverride = 0.0;
+		g_fVisionRangeOverrideUntil = 0.0;
+		CPrintToChatAll("%s[坦克视野] 测试强制范围已到期, 回到阶梯逻辑", TAG);
+	}
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		/* 只接管"活着的真人坦克": 尸体也会保留坦克职业, 所以必须判 IsPlayerAlive */
+		if (!IsTank(i) || !IsPlayerAlive(i))
+		{
+			VisionClearTracking(i);
+			/* 掉控标记故意不在这里清: 掉控后玩家可能短暂变成幽灵, 引擎若又把控制权还回来
+			   而没触发新的 spawn, 每 tick 清标记会让"回控"重新发生。标记只在 Reset() 里清。 */
+			continue;
+		}
+
+		/* 第一次看到这个玩家开坦克 = 记下存活起点; 换人/重开都靠这个自动重算 */
+		if (g_fTankCtrlStart[i] <= 0.0)
+		{
+			int iMeter0 = GetEntProp(i, Prop_Send, "m_frustration");
+
+			g_fTankCtrlStart[i]   = fNow;
+			g_fVisionAliveBias[i] = 0.0;
+			g_fVisionRangeMark[i] = -1.0;
+			g_fVisionUnseenAt[i]  = 0.0;
+			g_bVisionPenalty[i]   = false;
+			g_bVisionTracHit[i]   = false;
+			g_fVisionChatAt[i]    = 0.0;
+			g_fVisionSampleAt[i]  = fNow;
+			g_iVisionMeter[i]     = iMeter0;
+			g_fVisionEngineAt[i]  = 0.0;
+			g_fVisionPayAt[i]     = fNow;
+
+			/* 新的控制权段(控制权交接/换人后没走 spawn): 怒气不满说明这不是"已经掉控的那一辆",
+			   把掉控闩锁解开, 否则这一回合就再也不会被本模块惩罚 */
+			if (g_bVisionDropped[i] && iMeter0 < 50)
+				g_bVisionDropped[i] = false;
+		}
+
+		float fDt = fNow - g_fVisionSampleAt[i];
+		if (fDt < 0.01)
+			fDt = 0.01;
+		g_fVisionSampleAt[i] = fNow;
+
+		float fAlive = VisionAliveSeconds(i);
+		float fRange = VisionRangeByAlive(fAlive);
+
+		/* 跟踪石加速状态到期(tankcontrol_trac_after > 0 时是限时的; 0 = 直到死亡/交接) */
+		if (g_bVisionTracHit[i])
+		{
+			float fTracAfter = VisionTracAfter();
+			if (fTracAfter > 0.0 && g_fVisionTracAt[i] > 0.0 && (fNow - g_fVisionTracAt[i]) >= fTracAfter)
+			{
+				g_bVisionTracHit[i] = false;
+				VisionLog("%N 跟踪石加速时长已到(%.0f 秒), 恢复基础幅度", i, fTracAfter);
+			}
+		}
+
+		if (Apex[APEX_TV_NOTIFY].BoolValue)
+			VisionNotifyRange(i, fRange, fAlive);
+
+		int iMeter = GetEntProp(i, Prop_Send, "m_frustration");
+
+		/* 真的掉控过(tank_frustrated 事件) -> 这条命不再写怒气, 否则引擎会把控制权还回玩家 */
+		if (g_bVisionDropped[i])
+		{
+			g_iVisionMeter[i] = iMeter;
+			continue;
+		}
+
+		/* 怒气满了但引擎还没掉控: 很常见, 坦克刚出生有 z_frustration_spawn_delay(这里 30 秒)
+		   的保护期, 期间引擎不处理掉控(除非这段时间对生还者造成伤害)。
+		   这是我们自己写上去的 100, 不能当成"已经掉控"去闩锁, 否则这辆坦克这条命就再也不会扣了。 */
+		if (iMeter >= TV_FRUSTRATION_MAX && !g_bVisionWroteFull[i])
+		{
+			g_bVisionWroteFull[i] = true;
+
+			if (iDebug >= 1)
+				LogMessage("[tankvision] %N 怒气已满: 等坦克玩家自己看不到生还者约 1 秒(z_frustration_los_delay)后, 引擎才判无控制权(有玩家=二控, 无玩家=AI)", i);
+		}
+
+		/* 判断"游戏自己是不是在掉控": 在不是本插件写入的情况下怒气上涨 = 引擎判定看不到生还者。
+		   (本插件写入后会同步 g_iVisionMeter, 所以自己的写不会被算成引擎的) */
+		int iEngDelta = iMeter - g_iVisionMeter[i];
+		if (iEngDelta > 0)
+		{
+			g_fVisionEngineAt[i] = fNow;
+			g_fVisionEngAcc[i]  += float(iEngDelta);
+		}
+
+		g_fVisionEngSpan[i] += fDt;
+		if (g_fVisionEngSpan[i] >= 2.0)
+		{
+			g_fVisionEngRate[i] = g_fVisionEngAcc[i] / g_fVisionEngSpan[i];
+			g_fVisionEngAcc[i]  = 0.0;
+			g_fVisionEngSpan[i] = 0.0;
+		}
+
+		g_iVisionMeter[i] = iMeter;
+
+		/* 怒气闸门: 插件刷出来的坦克这个字段常是 0, 引擎会每帧把怒气清 0 ->
+		   既不会累加也不会触发掉控(插件写 100 也会被抹掉).
+		     gate=1 常开: 引擎恢复原生累积(会提前掉控);
+		     gate=2 只在插件扣满 100 时打开: 平时引擎不累积(不提前掉控), 到点点闸门让引擎掉控. */
+		if (Apex[APEX_TV_GATE].IntValue == 1)
+			VisionOpenGate(i, "gate=1 常开");
+
+		float fNearest = 0.0;
+		bool  bSee = VisionCanSeeSurvivor(i, fRange, fNearest);
+
+		/* ---------------- 看得见: 怒气写回 0, 不掉控 ---------------- */
+		if (bSee)
+		{
+			if (g_fVisionUnseenAt[i] > 0.0)
+			{
+				g_fVisionUnseenAt[i] = 0.0;
+				g_bVisionPenalty[i]  = false;
+
+				VisionLog("%N 重新看见生还者, 停止扣控制权(范围 %d)", i, RoundToNearest(fRange));
+			}
+
+			if (Apex[APEX_TV_SEEN_CLEAR].BoolValue && iMeter > 0)
+				SetEntProp(i, Prop_Send, "m_frustration", 0);
+
+			g_iVisionMeter[i] = Apex[APEX_TV_SEEN_CLEAR].BoolValue ? 0 : iMeter;
+
+			if (iDebug >= 1 && (fNow - g_fVisionChatAt[i]) >= 1.0)
+			{
+				g_fVisionChatAt[i] = fNow;
+				CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 存活 %d 秒 | 范围 %d | 看得见{green}是{default}(最近 %d) | 怒气 %d(已清 0, 不扣)",
+					TAG, i, RoundToNearest(fAlive), RoundToNearest(fRange), RoundToNearest(fNearest), iMeter);
+			}
+
+			continue;
+		}
+
+		/* ---------------- 看不见: 插件接管控制权 ---------------- */
+		if (g_fVisionUnseenAt[i] <= 0.0)
+			g_fVisionUnseenAt[i] = fNow;
+
+		float fUnseen = fNow - g_fVisionUnseenAt[i];
+
+		/* 接管门槛: 存活满 start_time(默认 3.5 分钟)之前完全不碰怒气 */
+		if (!VisionTakeover(fAlive))
+		{
+			g_bVisionPenalty[i] = false;
+			continue;
+		}
+
+		float fRate = VisionRate(i, fAlive);
+
+		/* 游戏自己也在掉怒气(引擎判定看不到)时:
+		   force=1(默认) -> 插件仍然按自己的速率接管, 读数会覆盖引擎那点累积, 保证每秒 5/6/7;
+		   force=0        -> 让位, 用游戏原生的掉控节奏。 */
+		bool bGameDeducting = (g_fVisionEngineAt[i] > 0.0) && ((fNow - g_fVisionEngineAt[i]) <= 2.0);
+
+		if (bGameDeducting && !Apex[APEX_TV_FORCE].BoolValue)
+		{
+			g_bVisionPenalty[i] = false;
+
+			if (iDebug >= 1 && (fNow - g_fVisionChatAt[i]) >= 1.0)
+			{
+				g_fVisionChatAt[i] = fNow;
+				CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 看不见 %d 秒 | 范围 %d | 怒气 %d | 游戏自己在掉控(插件让位, 原生约 5%%/秒) | 插件速率应为 %d%%/秒",
+					TAG, i, RoundToNearest(fUnseen), RoundToNearest(fRange), iMeter, RoundToNearest(fRate));
+			}
+
+			continue;
+		}
+
+		if (!g_bVisionPenalty[i])
+		{
+			g_bVisionPenalty[i] = true;
+			g_fVisionMeterF[i]  = float(iMeter);
+
+			if (Apex[APEX_TV_NOTIFY].BoolValue)
+				CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活已满 {lightgreen}%d{default} 秒, 插件接管控制权: 每秒 {lightgreen}%d%%{default}{default}%s",
+					TAG, i, RoundToNearest(VisionStartTime()), RoundToNearest(fRate),
+					bGameDeducting ? " (游戏也在掉控, 读数按插件速率覆盖)" : "");
+
+			VisionLog("%N 存活 %.0f 秒 -> 插件接管控制权: %d%%/秒 (引擎自己在掉控=%s)",
+				i, fAlive, RoundToNearest(fRate), bGameDeducting ? "是" : "否");
+		}
+
+		/* 怒气被引擎/别的插件大幅回填(变小很多) -> 把插件读数重新对齐, 免得下一秒跳回高位 */
+		if (float(iMeter) < g_fVisionMeterF[i] - 5.0)
+			g_fVisionMeterF[i] = float(iMeter);
+
+		/* 接管: 用插件自己的读数(每秒 +fRate)直接覆盖 m_frustration,
+		   这样不管引擎那点累积, 面板上看到的就是 5/6/7% 每秒。 */
+		g_fVisionMeterF[i] += fRate * fDt;
+		if (g_fVisionMeterF[i] < 0.0)
+			g_fVisionMeterF[i] = 0.0;
+		if (g_fVisionMeterF[i] > float(TV_FRUSTRATION_MAX))
+			g_fVisionMeterF[i] = float(TV_FRUSTRATION_MAX);
+
+		int iWant = RoundToNearest(g_fVisionMeterF[i]);
+		if (iWant != iMeter)
+			SetEntProp(i, Prop_Send, "m_frustration", iWant);
+
+		g_iVisionMeter[i] = iWant;
+
+		/* 让引擎也判定"看不见"(不依赖玩家自己跑到盲区): 写老"最后看见时间" */
+		if (Apex[APEX_TV_FORCE_BLIND].BoolValue)
+			VisionForceBlind(i);
+
+		/* 扣到顶: 打开闸门, 让引擎自己走"tank_frustrated -> 掉控/二控" */
+		if (iWant >= TV_FRUSTRATION_MAX && Apex[APEX_TV_GATE].IntValue >= 2)
+			VisionOpenGate(i, "插件扣满 100, 让引擎掉控");
+
+		/* 满 100 后给引擎 1 秒自己处理(玩家坦克自己看不见时会走原生掉控);
+		   还没掉就由插件走原生换控: 有玩家->二控, 没玩家->AI */
+		if (iWant >= TV_FRUSTRATION_MAX)
+		{
+			if (g_fVisionFullAt[i] <= 0.0)
+				g_fVisionFullAt[i] = fNow;
+
+			if (!g_bVisionDropTried[i] && Apex[APEX_TV_FORCE_DROP].BoolValue
+				&& (fNow - g_fVisionFullAt[i]) >= 1.0)
+			{
+				g_bVisionDropTried[i] = true;
+				VisionForceDrop(i);
+			}
+		}
+
+
+
+		if (iDebug >= 1 && (fNow - g_fVisionChatAt[i]) >= 1.0)
+		{
+			g_fVisionChatAt[i] = fNow;
+			CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 看不见 %d 秒 | 范围 %d | 怒气 {lightgreen}%d{default} -> {lightgreen}%d{default} (+%d/秒 = 基础 %d + 存活 %s + 跟踪石 %s) | 游戏自己在掉控=%s",
+				TAG, i, RoundToNearest(fUnseen), RoundToNearest(fRange), iMeter, iWant,
+				RoundToNearest(fRate), RoundToNearest(VisionBaseStep()),
+				(VisionAliveTime() > 0.0 && fAlive >= VisionAliveTime()) ? "1" : "0",
+				g_bVisionTracHit[i] ? "1" : "0",
+				bGameDeducting ? "是" : "否");
+		}
+	}
+
+	return Plugin_Continue;
+}

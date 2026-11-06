@@ -13,9 +13,19 @@
 // 实测全库 4746 行 confogl_addcvar(631 个唯一 cvar)里最长的值只有 72 字符
 // (am12v12_wdrop_weapons 的武器白名单), p99=11, 只有 1 条超过 64 —— 128 给出约 1.8 倍余量.
 // 128 时 CVSEntry 约 261 字节, 同样 521 条约 136KB, 直接省下约 0.9MB.
-// 注意: 超过该长度的值现在会被 AddCvar() 拒绝(见下方 strlens 检查)而不是静默截断;
-// 旧值(oldval)超长时同样会拒绝跟踪(见 PushTrackedCvar), 避免回写被截断的配置.
-#define CVS_VALUE_MAXLEN			128
+// 注意: 超过该长度的新值仍会被 AddCvar() 拒绝(见下方 strlens 检查)而不是静默截断;
+// 旧值(oldval)超长时不保存(避免回写被截断的配置), 但**照常跟踪并应用配置值** —— 见 PushTrackedCvar.
+// 2026-11-05 (128 → 256): 上面那次统计只看了 confogl_addcvar 这一侧的值, 漏掉了
+// "跟踪开始时的当前值"也可以很长 —— 插件自己的默认值就是:
+//   l4d2_extendedsight_modes_off 默认 152 字符(versus,teamversus,...,l4d1vs 模式黑名单),
+//   而 cfg/cfgogl/applemod12v12/applemod12v12.cfg 给它的是 "none".
+//   于是每张图执行 confogl_addcvar 时 PushTrackedCvar 读到 152 >= 128 就拒绝跟踪, 结果:
+//     · 日志每次刷一条 error;
+//     · 更要紧的是这条 confogl_addcvar 被整条跳过(连 cvar.SetString("none") 都不执行),
+//       配置里写的 "none" 从未生效, 插件一直用那 152 字符的默认黑名单(versus 下被禁用).
+//   取 256 覆盖现网所有单值(被跟踪 cvar 里最长的就是这条 152 字符, 次高 72);
+//   CVSEntry 约 520 字节, 538 条约 273KB(比 128 时多约 134KB, 仍比最初的 1.05MB 小得多).
+#define CVS_VALUE_MAXLEN			256
 
 enum struct CVSEntry
 {
@@ -24,6 +34,8 @@ enum struct CVSEntry
 	char CVSE_newval[CVS_VALUE_MAXLEN];
 	// 该 cvar 是否已经提示过"重复登记", 用来保证每个 cvar 只报一次(见 AddCvar)
 	bool CVSE_dupWarned;
+	// 是否保存了完整可回滚的旧值: 登记时当前值就超长的项为 false(ClearAllSettings 不回写它)
+	bool CVSE_restorable;
 }
 
 enum struct CVSPending
@@ -267,7 +279,10 @@ static void ClearAllSettings()
 		CvarSettingsArray.GetArray(i, cvsetting, sizeof(cvsetting));
 
 		(cvsetting.CVSE_cvar).RemoveChangeHook(CVS_ConVarChange);
-		(cvsetting.CVSE_cvar).SetString(cvsetting.CVSE_oldval);
+		// 旧值超长的项(CVSE_restorable=false)没有完整旧值可回写, 跳过而不是写半截值
+		if (cvsetting.CVSE_restorable) {
+			(cvsetting.CVSE_cvar).SetString(cvsetting.CVSE_oldval);
+		}
 	}
 
 	CvarSettingsArray.Clear();
@@ -378,27 +393,37 @@ static void AddCvar(const char[] cvar, const char[] newval)
 
 static void PushTrackedCvar(ConVar cvar, const char[] newval)
 {
-	// 用临时缓冲读旧值, 以便判断是否超过 CVS_VALUE_MAXLEN:
-	// GetString() 到 CVS_VALUE_MAXLEN 的缓冲会静默截断, 而 ClearAllSettings() 会把
-	// CVSE_oldval 写回服务器 —— 存半截值等于把配置写坏. 超长就拒绝跟踪并报错.
+	// 读当前值(旧值)只用于"回滚": ClearAllSettings() 会把 CVSE_oldval 写回服务器,
+	// 所以绝不能存被截断的半截值. 但旧值读不全只该影响"能不能回滚", 不该影响
+	// "配置值要不要应用" —— 旧代码在这里直接 return, 结果是日志报一条错 +
+	// confogl_addcvar 整条静默失效(l4d2_extendedsight_modes_off 的 152 字符默认值
+	// 撞上 128 上限时就是这样: 配置写的 "none" 从来没生效过).
 	char sCurrentValue[512];
 	cvar.GetString(sCurrentValue, sizeof(sCurrentValue));
-	if (strlen(sCurrentValue) >= CVS_VALUE_MAXLEN) {
+
+	int iOldLen = strlen(sCurrentValue);
+	bool bRestorable = (iOldLen < CVS_VALUE_MAXLEN);
+
+	if (!bRestorable) {
 		char sOverflowName[CVS_CVAR_MAXLEN];
 		cvar.GetName(sOverflowName, sizeof(sOverflowName));
-		Debug_LogError(CVS_MODULE_NAME, "ConVar %s 的当前值长度超过 CVS_VALUE_MAXLEN(%d), 放弃跟踪以免回写被截断的值",
-			sOverflowName, CVS_VALUE_MAXLEN);
-		return;
+		LogMessage("[%s] ConVar %s 的当前值长 %d 字符, 超过 CVS_VALUE_MAXLEN(%d): 配置值照常应用, 但不保存可回滚的旧值",
+			CVS_MODULE_NAME, sOverflowName, iOldLen, CVS_VALUE_MAXLEN);
 	}
 
 	char cvarBuffer[CVS_VALUE_MAXLEN];
-	cvar.GetString(cvarBuffer, CVS_VALUE_MAXLEN);
+	if (bRestorable) {
+		cvar.GetString(cvarBuffer, CVS_VALUE_MAXLEN);
+	} else {
+		cvarBuffer[0] = '\0';
+	}
 
 	CVSEntry newEntry;
 	newEntry.CVSE_cvar = cvar;
 	strcopy(newEntry.CVSE_oldval, CVS_VALUE_MAXLEN, cvarBuffer);
 	strcopy(newEntry.CVSE_newval, CVS_VALUE_MAXLEN, newval);
 	newEntry.CVSE_dupWarned = false;
+	newEntry.CVSE_restorable = bRestorable;
 
 #if CVARS_DEBUG
 	char cvarName[CVS_CVAR_MAXLEN];

@@ -75,7 +75,7 @@ void lilac_config_setup()
         "封禁理由使用的语言。\n0 = 使用服务器语言。\n1 = 使用作弊者自己的语言。",
         FCVAR_PROTECTED, true, 0.0, true, 1.0);
     hcvar[CVAR_CHEAT_WARN] = new Convar("lilac_cheat_warning", "1",
-        "在聊天里提醒管理员注意可疑玩家。",
+        "检测到可疑行为时，在聊天框广播提醒全体玩家（含玩家名、作弊类型与累计检测次数）。",
         FCVAR_PROTECTED, true, 0.0, true, 1.0);
     hcvar[CVAR_ANGLES] = new Convar("lilac_angles", "1",
         "检测角度类作弊（基础 Anti-Aim、合法反背刺、蹲行加速 Duckspeed）。\n-1 = 仅记录日志。\n0 = 关闭。\n1 = 开启。",
@@ -126,7 +126,7 @@ void lilac_config_setup()
         "检测宏（Macro）。\n-1 = 仅记录日志。\n0 = 关闭。\n1 = 开启。\n2 = 开启，但不写日志。",
         FCVAR_PROTECTED, true, -1.0, true, 2.0);
     hcvar[CVAR_MACRO_WARNING] = new Convar("lilac_macro_warning", "1",
-        "宏检测的警告方式：\n0 = 不警告。\n1 = 警告使用宏的玩家。\n2 = 警告服务器内的管理员。\n3 = 警告所有人。",
+        "宏检测的警告方式：\n0 = 不警告。\n1 = 警告使用宏的玩家。\n2 = 广播给全体玩家（与 3 相同）。\n3 = 广播给全体玩家。",
         FCVAR_PROTECTED, true, 0.0, true, 3.0);
     hcvar[CVAR_MACRO_DEAL_METHOD] = new Convar("lilac_macro_method", "0",
         "对检测到使用宏的玩家如何处理：\n0 = 踢出。\n1 = 封禁。",

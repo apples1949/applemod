@@ -99,7 +99,7 @@ void lilac_network_format_burst(int client, char[] buffer, int maxlen)
 	char stats[40];
 
 	if (n < NET_BURST_MIN) {
-		strcopy(stats, sizeof(stats), "n/a");
+		strcopy(stats, sizeof(stats), "无数据");
 	}
 	else {
 		float sum = 0.0, sq = 0.0;
@@ -118,10 +118,10 @@ void lilac_network_format_burst(int client, char[] buffer, int maxlen)
 		float avg = sum / float(n);
 		float sd = SquareRoot(FloatAbs(sq / float(n) - avg * avg));
 
-		FormatEx(stats, sizeof(stats), "avg %.1f max %d sd %.1f", avg, max, sd);
+		FormatEx(stats, sizeof(stats), "均值 %.1f 最大 %d 标准差 %.1f", avg, max, sd);
 	}
 
-	FormatEx(buffer, maxlen, "%s pkts/s %.0f cmds/s %d", stats,
+	FormatEx(buffer, maxlen, "%s 包/秒 %.0f 指令/秒 %d", stats,
 		GetClientAvgPackets(client, NetFlow_Incoming),
 		lilac_recent_cmd_count(client, GetGameTime()));
 }
@@ -221,11 +221,11 @@ void lilac_network_format(int client, char[] buffer, int maxlen)
 	if (icvar[CVAR_TELEMETRY] & TELEMETRY_NETWORK) {
 		char stats[96];
 		lilac_network_format_burst(client, stats, sizeof(stats));
-		FormatEx(burst, sizeof(burst), " | Burst: %s", stats);
+		FormatEx(burst, sizeof(burst), " | 突发: %s", stats);
 	}
 
 	FormatEx(buffer, maxlen,
-		"Ping: %.0f | Jitter: %.1f | Loss: %.1f/%.1f | Choke: %.1f/%.1f | BadSamples: %d%s",
+		"延迟: %.0f | 抖动: %.1f | 丢包: %.1f/%.1f | 阻塞: %.1f/%.1f | 异常采样: %d%s",
 		lilac_network_get_max_ping(client),
 		lilac_network_get_jitter(client),
 		GetClientAvgLoss(client, NetFlow_Incoming) * 100.0,

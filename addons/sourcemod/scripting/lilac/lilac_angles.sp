@@ -62,7 +62,7 @@ static void lilac_detected_angles(int client, float ang[3])
 	format_float_safe(sPitch, sizeof(sPitch), ang[0]);
 	format_float_safe(sYaw, sizeof(sYaw), ang[1]);
 	format_float_safe(sRoll, sizeof(sRoll), ang[2]);
-	Format(sDetails, sizeof(sDetails), "Pitch: %s, Yaw: %s, Roll: %s", sPitch, sYaw, sRoll);
+	Format(sDetails, sizeof(sDetails), "俯仰角: %s，偏航角: %s，翻滚角: %s", sPitch, sYaw, sRoll);
 
 	lilac_save_player_details(client, sDetails);
 	lilac_forward_client_cheat(client, CHEAT_ANGLES);
@@ -70,7 +70,7 @@ static void lilac_detected_angles(int client, float ang[3])
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s %s for Angle-Cheats (%s).",
+			"%s %s（角度类作弊：%s）。",
 			line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_ANGLES), sDetails);
 
 		lilac_log(true);

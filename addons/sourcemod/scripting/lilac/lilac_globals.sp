@@ -18,9 +18,9 @@
 
 #define NATIVE_EXISTS(%0)   (GetFeatureStatus(FeatureType_Native, %0) == FeatureStatus_Available)
 
-/* Log text for a ban, true to what really happens (lilac_ban 0, log only). */
-#define LILAC_BANNED_TEXT(%0)           (lilac_ban_active(%0) ? "was banned" : "would have been banned")
-#define LILAC_DETECTED_BANNED_TEXT(%0)  (lilac_ban_active(%0) ? "was detected and banned" : "would have been banned")
+/* 封禁日志用词，如实反映实际情况（lilac_ban 为 0 或仅记录日志时）。 */
+#define LILAC_BANNED_TEXT(%0)           (lilac_ban_active(%0) ? "已封禁" : "仅记录日志，本应封禁")
+#define LILAC_DETECTED_BANNED_TEXT(%0)  (lilac_ban_active(%0) ? "已检测到并封禁" : "仅记录日志，本应封禁")
 
 #define CMD_LENGTH   330
 
@@ -158,6 +158,13 @@
 #define SPEEDHACK_BAN_MIN    3
 #define SPEEDHACK_CMD_RATIO  1.9 /* Flag if cmds/sec > tickrate * this value. */
 
+/* 内部开关（编译期，不暴露成 ConVar）：变速检测的"服务器 TPS 异常暂停"功能。
+ *   0 = 关闭暂停功能 —— 不管服务器卡不卡，变速检测每秒照常运行（当前设置）。
+ *   1 = 保留旧行为 —— TPS 掉到基线 75% 以下或补帧超过 150% 时暂停 5 秒并写日志。
+ * 关闭暂停后，检测不再被服务器负载打断；TPS 统计本身仍保留，因为 tickbase
+ * 保护与网络 telemetry 还在用 lilac_server_is_lagging()。 */
+#define SPEEDHACK_LAG_PAUSE_ENABLED  0
+
 /* Network safety veto. This is not a detector: it suppresses punishment when
  * the connection makes timing-based analysis unreliable. Aggregation is by
  * maximum, not mean — a single spike inside the window is enough to
@@ -234,7 +241,9 @@
 int   g_iTicksThisSecond = 0;
 float g_fTPSWindowStart   = 0.0;
 int   g_iCurrentTPS       = 0;
-int   g_iTriggerTPS       = 0;
+#if SPEEDHACK_LAG_PAUSE_ENABLED
+int   g_iTriggerTPS       = 0; /* 仅暂停功能在写日志时使用；暂停关闭时不编译 */
+#endif
 int   g_iServerTickrate   = 0;
 
 // Rolling baseline — the ongoing "recent normal" TPS. Seeded once via a short
@@ -248,7 +257,9 @@ int   g_iTPSCalibSamples  = 0;
 // Lag pause state
 float g_fTimeSinceMapStart   = 0.0;
 float g_fServerLagPauseUntil = 0.0;
-bool  g_bServerLagLogged     = false;
+#if SPEEDHACK_LAG_PAUSE_ENABLED
+bool  g_bServerLagLogged     = false; /* 仅暂停日志闩锁使用；暂停关闭时不编译 */
+#endif
 
 // Tracks whether the TPS window has been armed after the grace period.
 bool  g_bTPSWindowArmed      = false;

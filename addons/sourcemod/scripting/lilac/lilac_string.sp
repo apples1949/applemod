@@ -79,7 +79,7 @@ public void OnClientSayCommand_Post(int client, const char[] command, const char
 		playerinfo_banned_flags[client][CHEAT_CHATCLEAR] = true;
 
 		char sDetails[512];
-		Format(sDetails, sizeof(sDetails), "Chat message: %s", sArgs);
+		Format(sDetails, sizeof(sDetails), "聊天内容: %s", sArgs);
 
 		lilac_save_player_details(client, sDetails);
 		lilac_forward_client_cheat(client, CHEAT_CHATCLEAR);
@@ -87,7 +87,7 @@ public void OnClientSayCommand_Post(int client, const char[] command, const char
 		if (icvar[CVAR_LOG]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s %s for Chat-Clear (%s)",
+				"%s %s（清空聊天：%s）",
 				line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_CHATCLEAR), sDetails);
 
 			lilac_log(true);
@@ -181,7 +181,7 @@ static void check_name(int client, const char []name)
 		if (icvar[CVAR_LOG]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s %s for having newline characters in their name (%s).", line_buffer, LILAC_BANNED_TEXT(CHEAT_NEWLINE_NAME), name);
+				"%s %s（昵称中含换行符：%s）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_NEWLINE_NAME), name);
 
 			lilac_log(true);
 
@@ -197,7 +197,7 @@ static void check_name(int client, const char []name)
 		if (icvar[CVAR_LOG_MISC]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s was kicked for having invalid characters in their name (%s).", line_buffer, name);
+				"%s 因昵称含非法字符被踢出（%s）。", line_buffer, name);
 
 			lilac_log(true);
 

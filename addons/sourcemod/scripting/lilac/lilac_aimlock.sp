@@ -224,7 +224,7 @@ static void lilac_detected_aimlock(int client, int target, float distance, float
 	CreateTimer(600.0, timer_decrement_aimlock, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 
 	char sDetails[512];
-	Format(sDetails, sizeof(sDetails), "Detection: %d", playerinfo_aimlock[client]);
+	Format(sDetails, sizeof(sDetails), "检测次数: %d", playerinfo_aimlock[client]);
 
 	lilac_save_player_details(client, sDetails);
 	lilac_forward_client_cheat(client, CHEAT_AIMLOCK);
@@ -246,25 +246,25 @@ static void lilac_detected_aimlock(int client, int target, float distance, float
 			sTarget, sTeam, distance, snap, locked, tracked);
 		lilac_discord_set_extra(client, CHEAT_AIMLOCK, sExtra);
 
-		FormatEx(sInfo, sizeof(sInfo), "Target: %s (%s), Distance: %.0f, Snap: %.1f deg, Locked: %d ticks, Tracked: %.1f deg",
+		FormatEx(sInfo, sizeof(sInfo), "受击目标: %s (%s)，距离: %.0f，瞬时转动: %.1f 度，锁定: %d tick，跟踪角度: %.1f 度",
 			sTarget, sTeam, distance, snap, locked, tracked);
 	}
 
 	lilac_discord_report(client, CHEAT_AIMLOCK, DISCORD_SUSPECT);
 
 	if (icvar[CVAR_CHEAT_WARN])
-		lilac_warn_admins(client, CHEAT_AIMLOCK, playerinfo_aimlock[client]);
+		lilac_warn_all(client, CHEAT_AIMLOCK, playerinfo_aimlock[client]);
 
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 
 		if (sInfo[0])
 			Format(line_buffer, sizeof(line_buffer),
-				"%s is suspected of using an aimlock (%s, %s).",
+				"%s 疑似使用锁头（%s，%s）。",
 				line_buffer, sDetails, sInfo);
 		else
 			Format(line_buffer, sizeof(line_buffer),
-				"%s is suspected of using an aimlock (%s).",
+				"%s 疑似使用锁头（%s）。",
 				line_buffer, sDetails);
 
 		lilac_log(true);
@@ -281,7 +281,7 @@ static void lilac_detected_aimlock(int client, int target, float distance, float
 		if (icvar[CVAR_LOG]) {
 			lilac_log_setup_client(client);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s %s for Aimlock.", line_buffer, LILAC_BANNED_TEXT(CHEAT_AIMLOCK));
+				"%s %s（锁头）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_AIMLOCK));
 
 			lilac_log(true);
 

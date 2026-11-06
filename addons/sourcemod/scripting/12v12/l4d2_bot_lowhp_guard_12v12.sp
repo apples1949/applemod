@@ -41,6 +41,22 @@
  *       离开守护/插件卸载时恢复原值；并新增 L4D2_OnSlammedSurvivor 前置拦截，
  *       挡掉牛把守护中的生还者撞墙致残的那条路径。
  *
+ *   1.3.3 变更（按需求）：守护中的 AI 生还者不得自行使用医疗物品
+ *     - 接 Actions 扩展（可选依赖，缺失时插件照常工作、只跳过拦截）拦两个引擎 action：
+ *         SurvivorTakePills —— 吃药(weapon_pain_pills) 与打针(weapon_adrenaline) 共用这一个
+ *                              action（server.dll 里没有独立的 SurvivorUseAdrenaline）；
+ *         SurvivorHealSelf  —— 给自己打包(weapon_first_aid_kit)。
+ *       OnStart / Update 里直接 result.type = DONE 取消动作（Update 兜住"动作开始后
+ *       才进入守护"的情况）；**不拦** SurvivorHealFriend / SurvivorGivePillsToFriend，
+ *       那是给队友包扎/递药，守护中的人机照样可以做。
+ *     - player_bot_replace 兜底（参考 l4d2_block_bot_pills.sp）：玩家离开、身体交给 bot
+ *       接管时，bot 会"继承"玩家手里正在被使用的止痛药/肾上腺素并立刻吃掉。新 bot 满足
+ *       ShouldGuard() 且手持 weapon_pain_pills / weapon_adrenaline 时，先 Kill 掉当前物品
+ *       实体，再 CreateEntityByName + DispatchSpawn + EquipPlayerWeapon 换一件同款新物品，
+ *       打断这次自动服用（物品种类与数量都不变，只是换了实体）。
+ *     - 新增 cvar l4d2_bot_guard_block_items（默认 1，中文描述），sm_botguard_status
+ *       增加一行显示物品拦截开关 + Actions 扩展是否可用。
+ *
  *   1.3.2 变更（按需求）：提示音/文字节流(l4d2_bot_guard_warn_cooldown)默认 3 秒改 1 秒，
  *     打无敌 bot 的提示更及时。
  *
@@ -110,7 +126,16 @@
 #include <sdkhooks>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION		"1.3.2"
+// 1.3.3：Actions 扩展（可选依赖）—— 用来拦"守护中的 AI 生还者自行吃药/打针/打包"。
+// 用 SourceMod 的标准写法把扩展降级成"可选"：REQUIRE_EXTENSIONS 未定义时，
+// actions.inc 里的 __ext_actions 以 required=0 注册、并把原生函数全部 MarkNativeAsOptional，
+// 于是扩展缺失时插件照常加载、其余功能照常工作，只有物品拦截不生效
+// （OnPluginStart 里用 LibraryExists("actionslib") 判定，缺失时只打一条控制台提示）。
+#undef REQUIRE_EXTENSIONS
+#include <actions>
+#define REQUIRE_EXTENSIONS
+
+#define PLUGIN_VERSION		"1.3.3"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -150,6 +175,9 @@ ConVar g_cvWarnChat;		// 渠道① 聊天框
 ConVar g_cvWarnHint;		// 渠道② PrintHintText
 ConVar g_cvWarnHud;			// 渠道③ HUD 文字
 
+// 1.3.3：守护中的 AI 生还者禁止自行吃药/打针/打包（需要 Actions 扩展）
+ConVar g_cvBlockItems;	// 是否拦截"守护中自行使用医疗物品"
+
 bool	g_bGuarded[MAXPLAYERS + 1];			// 当前是否处于守护状态（只看血量）
 bool	g_bGlowProps[MAXPLAYERS + 1];		// 该客户端是否有完整的发光 netprop（仅作诊断用，不再作为写入门的开关）
 int		g_iOrigGlowType[MAXPLAYERS + 1];	// 进入守护前的 m_iGlowType
@@ -168,6 +196,10 @@ char	g_sWarnSound[PLATFORM_MAX_PATH];	// 1.3.0：解析后的提示音路径（�
 int		g_iGlowColorPacked;					// 打包后的颜色值（R | G<<8 | B<<16）
 bool	g_bBlinkPhase;						// 闪烁相位（每 tick 取反）
 
+// 1.3.3：Actions 扩展是否可用（LibraryExists("actionslib")，含晚加载/卸载刷新）。
+// false 时物品拦截整段跳过，插件其余功能完全不受影响。
+bool g_bActionsAvailable;
+
 // 1.2.0：守护名额相关的统计值（每 tick 刷新，sm_botguard_status 直接读）
 int		g_iAiSurvivors;						// 当前"存活且未被玩家接管"的生还者数量
 int		g_iDownCount;						// 全队（team 2）倒地人数（m_isIncapacitated=1）
@@ -182,7 +214,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -333,6 +365,13 @@ public void OnPluginStart()
 	// 按 workspace 约定：不生成插件 cfg（不用 AutoExecConfig），
 	// 全部参数由 applemod12v12 的 confogl_addcvar 下发
 	ParseGlowColor();
+	// 1.3.3：守护中的 AI 生还者禁止自行吃药/打针/打包
+	// （超管想让人机自己吃药时把它关掉；关闭不影响其它任何功能）
+	g_cvBlockItems = CreateConVar("l4d2_bot_guard_block_items",
+		"1",
+		"守护中的 AI 生还者是否禁止自行使用医疗物品(吃药/打针/打包). 0=关闭, 1=启用. 需要服务器的 Actions 扩展.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	g_cvGlowColor.AddChangeHook(OnConVarChanged);
 	g_cvInterval.AddChangeHook(OnConVarChanged);
 	g_cvProtectInterval.AddChangeHook(OnConVarChanged);
@@ -342,8 +381,20 @@ public void OnPluginStart()
 	// 1.3.0：提示音路径改了要重新解析/预缓存
 	g_cvWarnSound.AddChangeHook(OnConVarChanged);
 
+	// 1.3.3：Actions 扩展是**可选**的 —— 没有它插件其余功能全部照常，
+	// 只是不拦"守护中的 AI 生还者自行吃药/打针/打包"（绝不 SetFailState）
+	g_bActionsAvailable = LibraryExists("actionslib");
+
+	if (!g_bActionsAvailable)
+	{
+		PrintToServer("[BotGuard] 未检测到 Actions 扩展 (actionslib)：守护中的 AI 生还者仍会自行吃药/打针/打包。插件其余功能不受影响。");
+	}
+
 	HookEvent("player_incapacitated", Event_PlayerIncapacitated, EventHookMode_Post);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
+
+	// 1.3.3：玩家离开、身体被 bot 接管时，打断"继承"过来的自动吃药/打针
+	HookEvent("player_bot_replace", Event_PlayerBotReplace, EventHookMode_Post);
 
 	// 晚加载：已经连进来的客户端也要补挂伤害钩子
 	for (int i = 1; i <= MaxClients; i++)
@@ -364,6 +415,20 @@ public void OnPluginStart()
 
 	StartTickTimer();
 	StartProtectTimer();
+}
+
+// 1.3.3：Actions 扩展晚加载 / 被卸载时刷新可用标记。
+// 插件本体绝不因为扩展缺失而 SetFailState —— 只把物品拦截整段跳过。
+public void OnLibraryAdded(const char[] name)
+{
+	if (strcmp(name, "actionslib") == 0)
+		g_bActionsAvailable = true;
+}
+
+public void OnLibraryRemoved(const char[] name)
+{
+	if (strcmp(name, "actionslib") == 0)
+		g_bActionsAvailable = false;
 }
 
 // 1.3.0：配置(cfg)下发完后再解析一次提示音路径，保证拿到的是 confogl_addcvar 之后的值
@@ -1541,6 +1606,129 @@ public Action Timer_AutoRevive(Handle timer, any iUserId)
 }
 
 // ============================================================================
+// 1.3.3：守护中的 AI 生还者禁止自行使用医疗物品（吃药 / 打针 / 打包）
+//
+//   Actions 扩展把引擎里生还者的"行为动作"暴露成具名 action，拦截手法就是给对应的
+//   action 挂 OnStart / Update 回调，把 result.type 设成 DONE 来取消这个动作：
+//     - SurvivorTakePills  吃药(weapon_pain_pills) 与 打针(weapon_adrenaline) 共用
+//                          这一个 action —— server.dll 里没有独立的 SurvivorUseAdrenaline；
+//     - SurvivorHealSelf   给自己打包(weapon_first_aid_kit)。
+//   **不拦** SurvivorHealFriend / SurvivorGivePillsToFriend：那是给队友包扎/递药，
+//   需求只要求"守护中不得自行使用"，救队友的行为保持原样。
+//
+//   参考实现：仓库里的 l4d2_block_bot_pills.sp（SurvivorTakePills 的 OnStart 拦截）
+//   与 l4d_bot_healing.sp（SurvivorHealSelf / SurvivorTakePills 的 OnStart 写法）。
+// ============================================================================
+
+// 该 actor 的"自行用药"动作是否要拦：扩展可用 + 两个开关都开着 + 确实处于守护状态
+bool ShouldBlockItemUse(int client)
+{
+	if (!g_bActionsAvailable || !g_cvBlockItems.BoolValue || !g_cvEnabled.BoolValue)
+		return false;
+
+	if (client < 1 || client > MaxClients)
+		return false;
+
+	// 只拦"守护中"的人机（守护状态由主状态机维护，见 EnterGuard / LeaveGuard）
+	return g_bGuarded[client];
+}
+
+// 每个动作创建时挂回调。
+// 注意：这里不能只按 g_bGuarded 决定挂不挂 —— 动作有可能在进入守护之前就创建好了，
+// 所以按"动作名"挂上，真正是否拦截放到回调里用 ShouldBlockItemUse() 再判一次。
+public void OnActionCreated(BehaviorAction action, int actor, const char[] name)
+{
+	if (!g_bActionsAvailable || !g_cvBlockItems.BoolValue)
+		return;
+
+	if (actor < 1 || actor > MaxClients || !IsClientInGame(actor))
+		return;
+
+	// 只关心"给自己用医疗物品"的两个 action（吃药/打针 共用 SurvivorTakePills）
+	if (strcmp(name, "SurvivorTakePills") != 0 && strcmp(name, "SurvivorHealSelf") != 0)
+		return;
+
+	action.OnStart = OnGuardItemActionStart;
+	action.Update  = OnGuardItemActionUpdate;
+}
+
+// 动作开始：守护中的直接取消（result.type = DONE）
+public Action OnGuardItemActionStart(BehaviorAction action, int actor, BehaviorAction priorAction, ActionResult result)
+{
+	if (!ShouldBlockItemUse(actor))
+		return Plugin_Continue;
+
+	result.type = DONE;
+	return Plugin_Changed;
+}
+
+// 动作进行中：守护状态可能在动作开始之后才生效（例如刚好被"保命"打进守护），
+// 这里再拦一次，避免"已经开始吃"的人机把药吃完/把包打完。
+public Action OnGuardItemActionUpdate(BehaviorAction action, int actor, float interval, ActionResult result)
+{
+	if (!ShouldBlockItemUse(actor))
+		return Plugin_Continue;
+
+	result.type = DONE;
+	return Plugin_Changed;
+}
+
+// player_bot_replace 兜底（参考 l4d2_block_bot_pills.sp 的同名处理）：
+// 玩家离开、身体交给 bot 接管时，bot 会"继承"玩家手里正在被使用的那件止痛药/肾上腺素，
+// 于是刚接管的人机立刻把药吃掉。这里把新 bot 手上那件物品的实体换掉，打断这次自动服用。
+public void Event_PlayerBotReplace(Event event, const char[] name, bool dontBroadcast)
+{
+	if (!g_cvEnabled.BoolValue || !g_cvBlockItems.BoolValue)
+		return;
+
+	int bot = GetClientOfUserId(event.GetInt("bot"));
+
+	if (bot < 1 || bot > MaxClients || !IsClientInGame(bot))
+		return;
+
+	// 只处理"接管后应当被守护"的人机（总血量已经掉到阈值以下的那批）
+	if (!ShouldGuard(bot))
+		return;
+
+	RefreshHeldHealItem(bot);
+}
+
+// 把 client 手上正拿着的止痛药/肾上腺素换成一件同款新实体（打断"继承"过来的使用动作）。
+//   - 只看 slot 4（L4D2 的临时物品槽，止痛药与肾上腺素都在这一格），医疗包/除颤器不动；
+//   - 先取类名再 Kill（Kill 之后旧实体句柄就悬空了）；
+//   - 物品种类与数量都不变，只是换了个实体，bot 之后照样能用（只是这一口吃不成了）。
+void RefreshHeldHealItem(int client)
+{
+	char sWeapon[64];
+	GetClientWeapon(client, sWeapon, sizeof(sWeapon));
+
+	// 只处理会"自动吃"的两件（药与针共用 SurvivorTakePills）
+	if (strcmp(sWeapon, "weapon_pain_pills") != 0 && strcmp(sWeapon, "weapon_adrenaline") != 0)
+		return;
+
+	int iOld = GetPlayerWeaponSlot(client, 4);
+
+	if (iOld <= 0 || !IsValidEntity(iOld))
+		return;
+
+	char sClass[64];
+	GetEdictClassname(iOld, sClass, sizeof(sClass));
+
+	if (sClass[0] == '\0')
+		return;
+
+	AcceptEntityInput(iOld, "Kill");
+
+	int iNew = CreateEntityByName(sClass);
+
+	if (iNew <= 0 || !IsValidEntity(iNew))
+		return;
+
+	DispatchSpawn(iNew);
+	EquipPlayerWeapon(client, iNew);
+}
+
+// ============================================================================
 // 工具
 // ============================================================================
 
@@ -1625,6 +1813,13 @@ public Action Cmd_Status(int client, int args)
 		g_cvWarnChat.IntValue,
 		g_cvWarnHint.IntValue,
 		g_cvWarnHud.IntValue);
+
+	// 1.3.3：守护中禁止自行使用医疗物品（吃药 / 打针 / 打包）—— 需要 Actions 扩展
+	ReplyToCommand(client, "\x04[BotGuard]\x01 物品拦截: 开关=%d 实际生效=%d | Actions 扩展=%d (actionslib) | %s",
+		g_cvBlockItems.IntValue,
+		(g_cvBlockItems.BoolValue && g_bActionsAvailable) ? 1 : 0,
+		g_bActionsAvailable ? 1 : 0,
+		g_bActionsAvailable ? "拦截 SurvivorTakePills(吃药/打针) + SurvivorHealSelf(打包)" : "扩展缺失，不拦截（其余功能正常）");
 
 	// 1.2.0：当前守护名单（#client 索引列表）
 	char sGuardList[256];

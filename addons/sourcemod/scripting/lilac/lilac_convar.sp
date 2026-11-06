@@ -126,7 +126,7 @@ public Action timer_query(Handle timer)
 			if (icvar[CVAR_LOG_MISC]) {
 				lilac_log_setup_client(i);
 				Format(line_buffer, sizeof(line_buffer),
-					"%s was kicked for failing to respond to %d queries in %.0f seconds.",
+					"%s 未响应 %d 次 ConVar 查询（%.0f 秒内），已被踢出。",
 					line_buffer, QUERY_MAX_FAILURES,
 					QUERY_TIMER * QUERY_MAX_FAILURES);
 
@@ -278,11 +278,11 @@ public void query_reply(QueryCookie cookie, int client, ConVarQueryResult result
 
         if (icvar[CVAR_CONVAR] == 1)
             Format(line_buffer, sizeof(line_buffer),
-                "%s was detected and kicked for an invalid ConVar (%s).",
+                "%s 检测到非法 ConVar，已被踢出（%s）。",
                 line_buffer, sDetails);
         else if (icvar[CVAR_CONVAR] == 2)
             Format(line_buffer, sizeof(line_buffer),
-                "%s %s for an invalid ConVar (%s).",
+                "%s %s（非法 ConVar：%s）。",
                 line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_CONVAR), sDetails);
 
         lilac_log(true);

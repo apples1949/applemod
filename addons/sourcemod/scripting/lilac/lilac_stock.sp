@@ -16,41 +16,23 @@
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-void lilac_warn_admins(int client, int cheat, int detections)
+void lilac_warn_all(int client, int cheat, int detections)
 {
 	char name[MAX_NAME_LENGTH];
-	char type[16];
-	int admins[MAXPLAYERS + 1];
-	int n = 0;
+	char type[64];
 	
 	/* We'll assume the player is valid, as this function
 	 * should never be called on invalid clients in the first place. */
 	/* if (!is_player_valid(client))
 		return; */
 	
-	/* Setup a list of admins. */
-	for (int i = 1; i <= MaxClients; i++) {
-		if (!is_player_valid(i))
-			continue;
-		
-		if (IsFakeClient(i))
-			continue;
-		
-		if (is_player_admin(i))
-			admins[n++] = i;
-	}
-	
-	/* No admins are on. */
-	if (!n)
-		return;
-	
 	switch (cheat) {
-	case CHEAT_BHOP:      { strcopy(type, sizeof(type), "Bhop"); }
-	case CHEAT_AIMBOT:    { strcopy(type, sizeof(type), "Aimbot"); }
-	case CHEAT_AIMLOCK:   { strcopy(type, sizeof(type), "Aimlock"); }
-	case CHEAT_SPEEDHACK:     { strcopy(type, sizeof(type), "Speedhack"); }
-	case CHEAT_INFECTED_DMG:  { strcopy(type, sizeof(type), "Infected Damage Exploit"); }
-	case CHEAT_SURVIVOR_DMG:  { strcopy(type, sizeof(type), "Survivor Damage Exploit"); }
+	case CHEAT_BHOP:          { strcopy(type, sizeof(type), "「连跳（Bhop）」外挂"); }
+	case CHEAT_AIMBOT:        { strcopy(type, sizeof(type), "「自瞄（Aimbot）」外挂"); }
+	case CHEAT_AIMLOCK:       { strcopy(type, sizeof(type), "「锁头（Aimlock）」外挂"); }
+	case CHEAT_SPEEDHACK:     { strcopy(type, sizeof(type), "「变速（Speedhack）」外挂"); }
+	case CHEAT_INFECTED_DMG:  { strcopy(type, sizeof(type), "「特感伤害漏洞（Infected Damage）」"); }
+	case CHEAT_SURVIVOR_DMG:  { strcopy(type, sizeof(type), "「生还者伤害漏洞（Survivor Damage）」"); }
 	/* Macros have their own warning system. */
 	default: { return; }
 	}
@@ -58,10 +40,8 @@ void lilac_warn_admins(int client, int cheat, int detections)
 	if (!GetClientName(client, name, sizeof(name)))
 		strcopy(name, sizeof(name), "[NAME_ERROR]");
 	
-	for (int i = 0; i < n; i++)
-		PrintToChat(admins[i],
-			"[Lilac] %T", "admin_chat_warning_generic",
-			admins[i], name, type, detections);
+	/* 不只提醒管理员：把嫌疑提示广播给全体玩家。 */
+	PrintToChatAll("[Lilac] 玩家 %s 疑似使用%s，累计检测 %d 次", name, type, detections);
 }
 
 /* Useless Todo: I should update this soon... But I won't :P */
@@ -138,10 +118,10 @@ void lilac_log_setup_client(int client)
 	matchid_part[0] = '\0';
 
 	if (icvar[CVAR_AR] && NATIVE_EXISTS("AR_GetMatchID") && AR_GetMatchID(matchid, sizeof(matchid)))
-		Format(matchid_part, sizeof(matchid_part), " | MatchID: %s", matchid);
+		Format(matchid_part, sizeof(matchid_part), " | 比赛ID: %s", matchid);
 
 	FormatEx(line_buffer, sizeof(line_buffer),
-		"%s [Version %s] {Name: \"%N\" | SteamID: %s | IP: %s%s}",
+		"%s [版本 %s] {玩家名: \"%N\" | SteamID: %s | IP: %s%s}",
 		date, PLUGIN_VERSION, client, steamid, ip, matchid_part);
 }
 
@@ -175,14 +155,14 @@ void lilac_log_extra(int client)
 	if (icvar[CVAR_TELEMETRY] & TELEMETRY_NETWORK) {
 		char stats[96];
 		lilac_network_format_burst(client, stats, sizeof(stats));
-		FormatEx(burst, sizeof(burst), ", Burst={%s}", stats);
+		FormatEx(burst, sizeof(burst), ", 突发={%s}", stats);
 	}
 
 	/* Latency in ms, Loss/Choke in % — same scale and precision as
 	 * lilac_network_format(), instead of raw 0-1 fractions at the default
 	 * 6 decimal places. */
 	FormatEx(line_buffer, sizeof(line_buffer),
-		"\tServerTick={%d}, Pos={%.0f,%.0f,%.0f}, Angles={%.5f,%.5f,%.5f}, Map=\"%s\", Team={%d}, Weapon=\"%s\", Latency={Inc:%.1f,Out:%.1f}, Loss={Inc:%.1f,Out:%.1f}, Choke={Inc:%.1f,Out:%.1f}%s, ConnectionTime={%.1f seconds}, GameTime={%.1f seconds}",
+		"\t服务器Tick={%d}, 坐标={%.0f,%.0f,%.0f}, 视角={%.5f,%.5f,%.5f}, 地图=\"%s\", 队伍={%d}, 武器=\"%s\", 延迟={入:%.1f,出:%.1f}, 丢包={入:%.1f,出:%.1f}, 阻塞={入:%.1f,出:%.1f}%s, 连接时长={%.1f 秒}, 游戏时长={%.1f 秒}",
 		GetGameTickCount(),
 		pos[0], pos[1], pos[2],
 		ang[0], ang[1], ang[2],
@@ -200,7 +180,7 @@ void lilac_log_extra(int client)
 
 	if (demo_tick >= 0)
 		Format(line_buffer, sizeof(line_buffer),
-			"%s, DemoTick={%d}", line_buffer, demo_tick);
+			"%s, 录像Tick={%d}", line_buffer, demo_tick);
 
 	lilac_log(false);
 }
@@ -210,7 +190,7 @@ void lilac_log(bool cleanup)
 	Handle file = OpenFile(log_file, "a");
 
 	if (file == null) {
-		PrintToServer("[Lilac] Cannot open log file.");
+		PrintToServer("[Lilac] 无法打开日志文件。");
 		return;
 	}
 
@@ -251,7 +231,7 @@ void lilac_log_smooth_telemetry_setup()
     Handle file = OpenFile(smooth_telemetry_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open smooth telemetry log file.");
+        PrintToServer("[Lilac] 无法打开平滑自瞄监测日志文件。");
         return;
     }
 
@@ -259,14 +239,14 @@ void lilac_log_smooth_telemetry_setup()
     FormatTime(date, sizeof(date), dateformat, GetTime());
 
     WriteFileLine(file,
-        "=========[Notice]=========\n\
-Smooth Telemetry Log — Little Anti-Cheat %s\n\
-Created: %s\n\n\
-This log contains telemetry data for calibrating smooth aimbot detection thresholds.\n\
-Smooth-Telemetry fields: Name | SteamID | IP | N | CV | Jerk | TotalDelta | FinalDist\n\
-Bypass-Telemetry fields: Name | SteamID | IP | N | CV | Jerk | TotalDelta | FinalDist | PreConverge | PostConverge\n\
-These are NOT detections — data is logged when values are near detection thresholds.\n\
-Use this data to calibrate thresholds before enabling bans.\n\n",
+        "=========[说明]=========\n\
+平滑自瞄监测日志 — Little Anti-Cheat %s\n\
+创建时间: %s\n\n\
+本日志记录用于校准平滑自瞄检测阈值的数据。\n\
+平滑监测（Smooth-Telemetry）字段：玩家名 | SteamID | IP | 样本数N | 变异系数CV | 抖动Jerk | 总偏转TotalDelta | 末段距离FinalDist\n\
+绕过监测（Bypass-Telemetry）字段：玩家名 | SteamID | IP | 样本数N | 变异系数CV | 抖动Jerk | 总偏转TotalDelta | 末段距离FinalDist | 收敛前PreConverge | 收敛后PostConverge\n\
+这些都不是检测结果 — 只有数值接近检测阈值时才会记录。\n\
+请在开启封禁前，先用这些数据校准阈值。\n\n",
         PLUGIN_VERSION, date);
 
     CloseHandle(file);
@@ -282,7 +262,7 @@ void lilac_log_smooth_telemetry(int client, int sm_n, float sm_cv, float sm_avg_
     Handle file = OpenFile(smooth_telemetry_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open smooth telemetry log file.");
+        PrintToServer("[Lilac] 无法打开平滑自瞄监测日志文件。");
         return;
     }
 
@@ -296,14 +276,14 @@ void lilac_log_smooth_telemetry(int client, int sm_n, float sm_cv, float sm_avg_
     if (pre_ratio < 0.0) {
         /* Standard smooth aimbot entry. */
         FormatEx(telemetry_buffer, sizeof(telemetry_buffer),
-            "%s [Version %s] {Name: \"%N\" | SteamID: %s | IP: %s} Smooth-Telemetry | N: %d | CV: %.3f | Jerk: %.4f | TotalDelta: %.2f | FinalDist: %.2f",
+            "%s [版本 %s] {玩家名: \"%N\" | SteamID: %s | IP: %s} 平滑监测 | 样本数: %d | 变异系数: %.3f | 抖动: %.4f | 总偏转: %.2f | 末段距离: %.2f",
             date, PLUGIN_VERSION, client, steamid, ip,
             sm_n, sm_cv, sm_avg_jerk, sm_total_delta, final_dist);
     }
     else {
         /* Bypass telemetry entry — includes pre/post convergence ratios. */
         FormatEx(telemetry_buffer, sizeof(telemetry_buffer),
-            "%s [Version %s] {Name: \"%N\" | SteamID: %s | IP: %s} Bypass-Telemetry | N: %d | CV: %.3f | Jerk: %.4f | TotalDelta: %.2f | FinalDist: %.2f | PreConverge: %.2f | PostConverge: %.2f",
+            "%s [版本 %s] {玩家名: \"%N\" | SteamID: %s | IP: %s} 绕过监测 | 样本数: %d | 变异系数: %.3f | 抖动: %.4f | 总偏转: %.2f | 末段距离: %.2f | 收敛前: %.2f | 收敛后: %.2f",
             date, PLUGIN_VERSION, client, steamid, ip,
             sm_n, sm_cv, sm_avg_jerk, sm_total_delta, final_dist,
             pre_ratio, post_ratio);
@@ -329,24 +309,24 @@ void lilac_log_speedhack_shadow_setup()
     Handle file = OpenFile(speedhack_shadow_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open speedhack shadow log file.");
+        PrintToServer("[Lilac] 无法打开变速影子日志文件。");
         return;
     }
 
     char date[512];
     FormatTime(date, sizeof(date), dateformat, GetTime());
 
-    WriteFileLine(file, "=========[Notice]=========");
-    WriteFileLine(file, "Speedhack Shadow Log - Little Anti-Cheat %s", PLUGIN_VERSION);
-    WriteFileLine(file, "Created: %s", date);
+    WriteFileLine(file, "=========[说明]=========");
+    WriteFileLine(file, "变速影子日志 - Little Anti-Cheat %s", PLUGIN_VERSION);
+    WriteFileLine(file, "创建时间: %s", date);
     WriteFileLine(file, "");
-    WriteFileLine(file, "This log is for calibration. Nothing here is a detection or a ban.");
-    WriteFileLine(file, "It only covers players with real choke of 10 percent or more, which the speedhack never bans today.");
-    WriteFileLine(file, "Each player is compared with his own normal command rate, learned in his first 30 seconds.");
-    WriteFileLine(file, "WOULD BAN: the per-player rule would have banned this player.");
-    WriteFileLine(file, "not banned: the player went over the limit, but it looks normal for him.");
-    WriteFileLine(file, "Fields: Detection | CmdsPerSec | Normal | Contrast | MedianContrast | AvgChoke | Observed | OthersFlagged");
-    WriteFileLine(file, "OthersFlagged: other players over the limit in the last 3 seconds. Several at once points to a server event, not cheating.");
+    WriteFileLine(file, "本日志仅用于校准，这里没有任何检测或封禁结论。");
+    WriteFileLine(file, "只覆盖真实阻塞（choke）在 10% 及以上的玩家，这类玩家目前不会因变速被封禁。");
+    WriteFileLine(file, "每个玩家都与他自己的正常指令速率比较，该速率在他进服务器的前 30 秒内学习得到。");
+    WriteFileLine(file, "WOULD BAN（本应封禁）：按单玩家规则，这名玩家会被封禁。");
+    WriteFileLine(file, "未封禁：玩家超过了上限，但对他来说属于正常范围。");
+    WriteFileLine(file, "字段：检测次数 | 每秒指令数 | 正常值 | 对比度 | 对比度中位数 | 平均阻塞 | 观察时长 | 其他被标记人数");
+    WriteFileLine(file, "其他被标记人数：最近 3 秒内同样超限的其他玩家数。多人同时超限通常意味着服务器事件，而不是作弊。");
     WriteFileLine(file, "");
 
     CloseHandle(file);
@@ -360,12 +340,12 @@ void lilac_log_speedhack_shadow(int client, const char[] message)
     Handle file = OpenFile(speedhack_shadow_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open speedhack shadow log file.");
+        PrintToServer("[Lilac] 无法打开变速影子日志文件。");
         return;
     }
 
     lilac_log_setup_client(client);
-    Format(line_buffer, sizeof(line_buffer), "%s speedhack shadow: %s", line_buffer, message);
+    Format(line_buffer, sizeof(line_buffer), "%s 变速影子: %s", line_buffer, message);
 
     for (int i = 0; line_buffer[i]; i++) {
         if (line_buffer[i] == '\n' || line_buffer[i] == 0x0d)
@@ -386,24 +366,24 @@ void lilac_log_damage_clock_setup()
     Handle file = OpenFile(damage_clock_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open damage clock log file.");
+        PrintToServer("[Lilac] 无法打开伤害时钟日志文件。");
         return;
     }
 
     char date[512];
     FormatTime(date, sizeof(date), dateformat, GetTime());
 
-    WriteFileLine(file, "=========[Notice]=========");
-    WriteFileLine(file, "Damage Clock Log - Little Anti-Cheat %s", PLUGIN_VERSION);
-    WriteFileLine(file, "Created: %s", date);
+    WriteFileLine(file, "=========[说明]=========");
+    WriteFileLine(file, "伤害时钟日志 - Little Anti-Cheat %s", PLUGIN_VERSION);
+    WriteFileLine(file, "创建时间: %s", date);
     WriteFileLine(file, "");
-    WriteFileLine(file, "This log is for calibration. Nothing here is a detection or a ban.");
-    WriteFileLine(file, "A line is written when a survivor's damage to a Tank in one second goes over the weapon limit on the real clock.");
-    WriteFileLine(file, "GameClock: damage in 1 second on the player's own game clock (what the survivor damage module uses).");
-    WriteFileLine(file, "RealClock: damage in 1 second of real time.");
-    WriteFileLine(file, "ClockAhead: how far the player's clock is ahead of the server, in seconds.");
-    WriteFileLine(file, "Cmds1s: commands received from the player in the last second (normal is about the tickrate).");
-    WriteFileLine(file, "Fields: Weapon | Threshold | GameClock | RealClock | ClockAhead | Cmds1s | ServerLag | network info");
+    WriteFileLine(file, "本日志仅用于校准，这里没有任何检测或封禁结论。");
+    WriteFileLine(file, "当生还者对坦克 1 秒内的伤害按真实时钟计算超过武器上限时，写入一行记录。");
+    WriteFileLine(file, "GameClock（游戏时钟）：按玩家自身游戏时钟计算的 1 秒内伤害（生还者伤害模块采用的口径）。");
+    WriteFileLine(file, "RealClock（真实时钟）：按真实时间计算的 1 秒内伤害。");
+    WriteFileLine(file, "ClockAhead（时钟超前）：玩家的时钟领先服务器多少秒。");
+    WriteFileLine(file, "Cmds1s（每秒指令）：最近 1 秒收到的该玩家指令数（正常约为 tickrate）。");
+    WriteFileLine(file, "字段：武器 | 阈值 | 游戏时钟 | 真实时钟 | 时钟超前 | 每秒指令 | 服务器卡顿 | 网络信息");
     WriteFileLine(file, "");
 
     CloseHandle(file);
@@ -417,12 +397,12 @@ void lilac_log_damage_clock(int client, const char[] message)
     Handle file = OpenFile(damage_clock_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open damage clock log file.");
+        PrintToServer("[Lilac] 无法打开伤害时钟日志文件。");
         return;
     }
 
     lilac_log_setup_client(client);
-    Format(line_buffer, sizeof(line_buffer), "%s damage clock: %s", line_buffer, message);
+    Format(line_buffer, sizeof(line_buffer), "%s 伤害时钟: %s", line_buffer, message);
 
     for (int i = 0; line_buffer[i]; i++) {
         if (line_buffer[i] == '\n' || line_buffer[i] == 0x0d)
@@ -445,7 +425,7 @@ void lilac_log_angle_metric(int client, float eu_delta, float tr_delta,
     Handle file = OpenFile(angle_metric_log_file, "a");
 
     if (file == null) {
-        PrintToServer("[Lilac] Cannot open angle metric log file.");
+        PrintToServer("[Lilac] 无法打开角度指标日志文件。");
         return;
     }
 
@@ -454,13 +434,13 @@ void lilac_log_angle_metric(int client, float eu_delta, float tr_delta,
     GetClientAuthId(client, AuthId_Steam2, steamid, sizeof(steamid), true);
 
     FormatEx(buf, sizeof(buf),
-        "%s {Name: \"%N\" | SteamID: %s} AngleMetric | Ticks: %d | Pitch: %.1f | \
-Delta: %.2f/%.2f | TotalDelta: %.2f/%.2f | FinalDist: %.2f/%.2f | Flags: %d/%d | Ratio: %.3f%s",
+        "%s {玩家名: \"%N\" | SteamID: %s} 角度指标 | Tick数: %d | 俯仰角: %.1f | \
+偏转: %.2f/%.2f | 总偏转: %.2f/%.2f | 末段距离: %.2f/%.2f | 标记: %d/%d | 比值: %.3f%s",
         date, client, steamid, ticks, shot_pitch,
         eu_delta, tr_delta, eu_total, tr_total, eu_final, tr_final,
         eu_flags, tr_flags,
         (tr_total > 0.01) ? (eu_total / tr_total) : 0.0,
-        (eu_flags != tr_flags) ? " <<< DISAGREE" : "");
+        (eu_flags != tr_flags) ? " <<< DISAGREE（两者不一致）" : "");
 
     for (int i = 0; buf[i]; i++) {
         if (buf[i] == '\n' || buf[i] == 0x0d) buf[i] = '*';
@@ -478,14 +458,14 @@ void lilac_log_first_time_setup()
     * over trivial stuff. */
     if (!FileExists(log_file, false, NULL_STRING)) {
         FormatEx(line_buffer, sizeof(line_buffer),
-"=========[Notice]=========\n\
-Thank you for installing Little Anti-Cheat %s!\n\
-Just a few notes about this Anti-Cheat:\n\n\
-If a player is logged as \"suspected\" of using cheats, they are not necessarily cheating.\n\
-If the suspicions logged are few and rare, they are likely false positives.\n\
-An automatic ban is triggered by 5 or more \"suspicions\" or by one \"detection\".\n\
-If you think a ban may be incorrect, please do not hesitate to let me know.\n\n\
-That is all, have a wonderful day~\n\n\n", PLUGIN_VERSION);
+"=========[说明]=========\n\
+感谢安装 Little Anti-Cheat %s！\n\
+关于这个反作弊插件，有几点需要说明：\n\n\
+如果某名玩家被记录为「疑似（suspected）」使用作弊，那并不代表他一定在作弊。\n\
+如果记录的疑似次数很少、出现得很稀疏，那很可能是误报。\n\
+自动封禁由 5 次及以上「疑似（suspicion）」或 1 次「检测（detection）」触发。\n\
+如果你认为某次封禁可能有误，请随时告诉我。\n\n\
+就这些，祝你游戏愉快~\n\n\n", PLUGIN_VERSION);
         lilac_log(false);
     }
 
@@ -802,11 +782,6 @@ int intabs(int num)
 	return ((num < 0) ? num * -1 : num);
 }
 
-bool is_player_admin(int client)
-{
-	return CheckCommandAccess(client, "", ADMFLAG_GENERIC | ADMFLAG_KICK | ADMFLAG_SLAY, true);
-}
-
 bool is_player_valid(int client)
 {
 	return (client >= 1 && client <= MaxClients
@@ -911,14 +886,18 @@ public int lilac_native_get_detected_infos(Handle hPlugin, int numParams)
 	return -1;
 }
 
-/* Returns true if speedhack detection should currently be paused. */
+/* Returns true while the server TPS counts as abnormal (stall / catch-up burst).
+ * 变速检测已不再使用它（SPEEDHACK_LAG_PAUSE_ENABLED = 0，暂停功能不编译）；
+ * 现在只剩 tickbase 保护的日志抑制与网络 telemetry 在读。 */
 bool lilac_server_is_lagging()
 {
     return (GetEngineTime() < g_fServerLagPauseUntil);
 }
 
 /* Logs the pause once per lag episode. Called from timer_check_speedhack
- * when lilac_server_is_lagging() is true. */
+ * when lilac_server_is_lagging() is true.
+ * 仅当内部开关 SPEEDHACK_LAG_PAUSE_ENABLED = 1 时才会编译进来。 */
+#if SPEEDHACK_LAG_PAUSE_ENABLED
 void lilac_server_lag_log_once()
 {
     if (g_bServerLagLogged)
@@ -933,7 +912,7 @@ void lilac_server_lag_log_once()
     FormatTime(date, sizeof(date), dateformat, GetTime());
 
     FormatEx(line_buffer, sizeof(line_buffer),
-        "%s [Version %s] speedhack detection paused: server tps abnormal | tps: %d (baseline ~%d @ %dtick) | paused %.1fs",
+        "%s [版本 %s] 变速检测已暂停：服务器 TPS 异常 | tps: %d（基线 ~%d @ %dtick）| 暂停 %.1fs",
         date, PLUGIN_VERSION,
         g_iTriggerTPS,
         RoundToNearest(g_fTPSBaselineEWMA),
@@ -948,6 +927,7 @@ void lilac_server_lag_reset_log()
 {
     g_bServerLagLogged = false;
 }
+#endif
 
 /* ===== Tickbase Fix (shared helper) =====
  * Clamps client tickbase when it deviates too far from the server tick.
@@ -1024,7 +1004,7 @@ static void lilac_tickbase_fix_log(int client, int magnitude)
     lilac_log_setup_client(client);
 
     Format(line_buffer, sizeof(line_buffer),
-        "%s tickbase manipulation: %d ticks (%.1fs) behind. Clamped.",
+        "%s tickbase（时钟基准）异常：落后 %d tick（%.1fs），已钳制。",
         line_buffer, magnitude, float(magnitude) * GetTickInterval());
 
     lilac_log(true);
@@ -1113,7 +1093,7 @@ static void lilac_tickbase_fix_log_ahead(int client, int magnitude)
     lilac_log_setup_client(client);
 
     Format(line_buffer, sizeof(line_buffer),
-        "%s tickbase manipulation: %d ticks (%.1fs) ahead. Not clamped (monitoring only).",
+        "%s tickbase（时钟基准）异常：超前 %d tick（%.1fs），未钳制（仅监测）。",
         line_buffer, magnitude, float(magnitude) * GetTickInterval());
 
     lilac_log(true);

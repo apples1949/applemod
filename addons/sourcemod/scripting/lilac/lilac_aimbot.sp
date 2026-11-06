@@ -474,20 +474,20 @@ static void lilac_detected_aimbot(int client, float delta, float td, int flags, 
     if (net_vetoed) {
         char sNetData[192];
         lilac_network_format(client, sNetData, sizeof(sNetData));
-        Format(sNet, sizeof(sNet), " | NETWORK VETO {%s}", sNetData);
+        Format(sNet, sizeof(sNet), " | 网络作废 {%s}", sNetData);
     }
 
     char sDetails[512];
     Format(sDetails, sizeof(sDetails),
-            "Detection: %d | Delta: %.0f | TotalDelta: %.0f | Detected:%s%s%s%s%s%s%s%s",
+            "检测次数: %d | 偏转: %.0f | 总偏转: %.0f | 命中特征:%s%s%s%s%s%s%s%s",
             aimbot_detection[client], delta, td,
-            ((flags & AIMBOT_FLAG_SNAP)      ? " Aim-Snap"        : ""),
-            ((flags & AIMBOT_FLAG_SNAP2)     ? " Aim-Snap2"       : ""),
-            ((flags & AIMBOT_FLAG_AUTOSHOOT) ? " Autoshoot"       : ""),
-            ((flags & AIMBOT_FLAG_REPEAT)    ? " Angle-Repeat"    : ""),
-            ((flags & AIMBOT_FLAG_SMOOTH)    ? " Smooth-Converge" : ""),
-            ((flags & AIMBOT_FLAG_JITTER)    ? " Jitter"          : ""),
-            ((td > AIMBOT_MAX_TOTAL_DELTA)   ? " Total-Delta"     : ""),
+            ((flags & AIMBOT_FLAG_SNAP)      ? " 瞬瞄（Aim-Snap）"        : ""),
+            ((flags & AIMBOT_FLAG_SNAP2)     ? " 瞬瞄2（Aim-Snap2）"       : ""),
+            ((flags & AIMBOT_FLAG_AUTOSHOOT) ? " 自动开火（Autoshoot）"       : ""),
+            ((flags & AIMBOT_FLAG_REPEAT)    ? " 角度重复（Angle-Repeat）"    : ""),
+            ((flags & AIMBOT_FLAG_SMOOTH)    ? " 平滑收敛（Smooth-Converge）" : ""),
+            ((flags & AIMBOT_FLAG_JITTER)    ? " 抖动（Jitter）"          : ""),
+            ((td > AIMBOT_MAX_TOTAL_DELTA)   ? " 总偏转超限（Total-Delta）"     : ""),
             sNet);
 
     lilac_save_player_details(client, sDetails);
@@ -498,7 +498,7 @@ static void lilac_detected_aimbot(int client, float delta, float td, int flags, 
         if (icvar[CVAR_LOG]) {
             lilac_log_setup_client(client);
             Format(line_buffer, sizeof(line_buffer),
-                "%s triggered an aimbot detection that was vetoed by network conditions (%s).",
+                "%s 触发了自瞄检测，但因网络状况被作废（%s）。",
                 line_buffer, sDetails);
             lilac_log(true);
 
@@ -520,12 +520,12 @@ static void lilac_detected_aimbot(int client, float delta, float td, int flags, 
     lilac_discord_report(client, CHEAT_AIMBOT, DISCORD_SUSPECT);
 
     if (icvar[CVAR_CHEAT_WARN])
-        lilac_warn_admins(client, CHEAT_AIMBOT, aimbot_detection[client]);
+        lilac_warn_all(client, CHEAT_AIMBOT, aimbot_detection[client]);
 
     if (icvar[CVAR_LOG]) {
         lilac_log_setup_client(client);
         Format(line_buffer, sizeof(line_buffer),
-            "%s is suspected of using an aimbot (%s).",
+            "%s 疑似使用自瞄（%s）。",
             line_buffer, sDetails);
 
         lilac_log(true);
@@ -541,7 +541,7 @@ static void lilac_detected_aimbot(int client, float delta, float td, int flags, 
         if (icvar[CVAR_LOG]) {
             lilac_log_setup_client(client);
             Format(line_buffer, sizeof(line_buffer),
-                "%s %s for Aimbot.", line_buffer, LILAC_BANNED_TEXT(CHEAT_AIMBOT));
+                "%s %s（自瞄）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_AIMBOT));
 
             lilac_log(true);
 

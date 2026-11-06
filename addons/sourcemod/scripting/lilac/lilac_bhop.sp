@@ -129,7 +129,7 @@ static void lilac_detected_bhop(int client, bool force_log, bool banning)
 	++detections[client];
 
 	char sDetails[512];
-	Format(sDetails, sizeof(sDetails), "Detection: %d | Bhops: %d | JumpTicks: %d",
+	Format(sDetails, sizeof(sDetails), "检测次数: %d | 连跳次数: %d | 起跳Tick: %d",
 	detections[client], perfect_bhops[client], jump_ticks[client]);
 
 	lilac_save_player_details(client, sDetails);
@@ -152,12 +152,12 @@ static void lilac_detected_bhop(int client, bool force_log, bool banning)
 	if (icvar[CVAR_CHEAT_WARN]
 		&& !banning
 		&& !reached_total)
-		lilac_warn_admins(client, CHEAT_BHOP, detections[client]);
+		lilac_warn_all(client, CHEAT_BHOP, detections[client]);
 
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s is suspected of using Bhop (%s).",
+			"%s 疑似使用连跳（%s）。",
 			line_buffer, sDetails);
 		lilac_log(true);
 
@@ -181,7 +181,7 @@ static void lilac_ban_bhop(int client)
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s %s for Bhop.",
+			"%s %s（连跳）。",
 			line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_BHOP));
 		lilac_log(true);
 

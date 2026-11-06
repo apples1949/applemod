@@ -85,7 +85,7 @@ static void detected_lerp_exploit(int client, float lerp)
 	if (icvar[CVAR_LOG_MISC]) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s was kicked for exploiting interpolation (%.3fms / %dms max).",
+			"%s 因滥用插值（interp）被踢出（%.3fms / 上限 %dms）。",
 			line_buffer, lerp * 1000.0, icvar[CVAR_MAX_LERP]);
 
 		lilac_log(true);
@@ -114,7 +114,7 @@ static void detected_nolerp(int client, float lerp)
 
 	if (icvar[CVAR_LOG]) {
 		lilac_log_setup_client(client);
-		Format(line_buffer, sizeof(line_buffer), "%s %s for NoLerp (%s).",
+		Format(line_buffer, sizeof(line_buffer), "%s %s（NoLerp：%s）。",
 			line_buffer, LILAC_DETECTED_BANNED_TEXT(CHEAT_NOLERP), sDetails);
 
 		lilac_log(true);

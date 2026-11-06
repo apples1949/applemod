@@ -311,12 +311,16 @@ public void OnMapStart()
 {
     g_fTimeSinceMapStart   = GetEngineTime();
     g_fServerLagPauseUntil = 0.0;
+#if SPEEDHACK_LAG_PAUSE_ENABLED
     g_bServerLagLogged     = false;
+#endif
     g_iServerTickrate      = 0;
     g_iTicksThisSecond     = 0;
     g_fTPSWindowStart      = 0.0;
     g_iCurrentTPS          = 0;
+#if SPEEDHACK_LAG_PAUSE_ENABLED
     g_iTriggerTPS          = 0;
+#endif
 
     g_fTPSBaselineEWMA     = 0.0;
     g_iTPSCalibSum         = 0;
@@ -412,7 +416,9 @@ public void OnGameFrame()
              * the server stays this way, the pause simply keeps renewing —
              * accepted trade-off, no auto-recovery timeout. */
             g_fServerLagPauseUntil = engineNow + SERVER_LAG_PAUSE_SECS;
+#if SPEEDHACK_LAG_PAUSE_ENABLED
             g_iTriggerTPS          = g_iCurrentTPS;
+#endif
         }
         else
         {

@@ -96,6 +96,7 @@ static int get_macro_input(int macro_type)
 static void lilac_detected_macro(int client, int type)
 {
 	char string[20];
+	char sMacroName[48];
 
 	/* Clear history, prevents overlap. */
 	lilac_macro_reset_client_history(client, type);
@@ -114,13 +115,13 @@ static void lilac_detected_macro(int client, int type)
 	}
 
 	switch (type) {
-	case MACRO_AUTOJUMP: { strcopy(string, sizeof(string), "Auto-Jump"); }
-	case MACRO_AUTOSHOOT: { strcopy(string, sizeof(string), "Auto-Shoot"); }
+	case MACRO_AUTOJUMP: { strcopy(string, sizeof(string), "Auto-Jump"); strcopy(sMacroName, sizeof(sMacroName), "自动跳跃宏（Auto-Jump）"); }
+	case MACRO_AUTOSHOOT: { strcopy(string, sizeof(string), "Auto-Shoot"); strcopy(sMacroName, sizeof(sMacroName), "自动开火宏（Auto-Shoot）"); }
 	default: { return; } /* Invalid type. */
 	}
 
 	char sDetails[512];
-	Format(sDetails, sizeof(sDetails), "Macro %s (Detection: %d | Max presses: %d)", string, macro_detected[client][type], macro_max);
+	Format(sDetails, sizeof(sDetails), "宏 %s（检测次数: %d | 每秒最大按键数: %d）", string, macro_detected[client][type], macro_max);
 
 	lilac_save_player_details(client, sDetails);
 	lilac_forward_client_cheat(client, CHEAT_MACRO);
@@ -133,7 +134,7 @@ static void lilac_detected_macro(int client, int type)
 	if (icvar[CVAR_LOG] && icvar[CVAR_MACRO] < 2) {
 		lilac_log_setup_client(client);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s was detected of using %s.",
+			"%s 被检测到使用%s。",
 			line_buffer, sDetails);
 
 		lilac_log(true);
@@ -159,22 +160,16 @@ static void lilac_detected_macro(int client, int type)
 			PrintToChat(client, "[Little Anti-Cheat] Warning: Macro usage isn't allowed!");
 		}
 		case 2: {
-			for (int i = 1; macro_detected[client][type] == 2 && i <= MaxClients; i++) {
-				if (!is_player_valid(i) || IsFakeClient(i))
-					continue;
-
-				if (!is_player_admin(i))
-					continue;
-
-				PrintToChat(i, "[Little Anti-Cheat] %N was detected of using Macro %s.",
-					client, string);
-			}
+			/* 与 case 3 相同：广播给全体玩家（原本只提醒管理员）。 */
+			if (macro_detected[client][type] == 2)
+				PrintToChatAll("[Lilac] 玩家 %N 被检测到使用%s，累计检测 %d 次",
+					client, sMacroName, macro_detected[client][type]);
 		}
 		case 3: {
 			/* Warn everyone once... */
 			if (macro_detected[client][type] == 2)
-				PrintToChatAll("[Little Anti-Cheat] %N was detected of using Macro %s.",
-					client, string);
+				PrintToChatAll("[Lilac] 玩家 %N 被检测到使用%s，累计检测 %d 次",
+					client, sMacroName, macro_detected[client][type]);
 		}
 		}
 	}

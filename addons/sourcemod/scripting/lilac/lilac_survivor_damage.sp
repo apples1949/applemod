@@ -277,9 +277,9 @@ static void lilac_survivor_damage_clock_note(int attacker, const char[] weapon, 
     lilac_network_format(attacker, sNet, sizeof(sNet));
 
     FormatEx(sMsg, sizeof(sMsg),
-        "Weapon: %s | Threshold: %d | GameClock: %d | RealClock: %d | ClockAhead: %.2f | Cmds1s: %d | ServerLag: %s | %s",
+        "武器: %s | 阈值: %d | 游戏时钟: %d | 真实时钟: %d | 时钟超前: %.2f | 每秒指令: %d | 服务器卡顿: %s | %s",
         weapon, threshold, total, real_total, ahead, cmds,
-        lilac_server_is_lagging() ? "yes" : "no", sNet);
+        lilac_server_is_lagging() ? "是" : "否", sNet);
 
     lilac_log_damage_clock(attacker, sMsg);
 }
@@ -303,9 +303,9 @@ static void lilac_survivor_damage_flag(int attacker, int victim, const char[] we
 
 	++surv_dmg_detections[attacker];
 
-	char sDetails[256];
+	char sDetails[384];
 	Format(sDetails, sizeof(sDetails),
-		"Detection: %d | Weapon: %s | DmgInWindow: %d | Threshold: %d | LastHit: %d | Victim: %N",
+		"检测次数: %d | 武器: %s | 窗口内伤害: %d | 阈值: %d | 最近一次伤害: %d | 受击者: %N",
 		surv_dmg_detections[attacker], weapon, total,
 		threshold, last_hit, victim);
 
@@ -320,13 +320,13 @@ static void lilac_survivor_damage_flag(int attacker, int victim, const char[] we
 	lilac_discord_report(attacker, CHEAT_SURVIVOR_DMG, DISCORD_SUSPECT);
 
 	if (icvar[CVAR_CHEAT_WARN])
-		lilac_warn_admins(attacker, CHEAT_SURVIVOR_DMG, surv_dmg_detections[attacker]);
+		lilac_warn_all(attacker, CHEAT_SURVIVOR_DMG, surv_dmg_detections[attacker]);
 
 	if (icvar[CVAR_LOG])
 	{
 		lilac_log_setup_client(attacker);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s is suspected of using a survivor damage exploit (%s).",
+			"%s 疑似利用生还者伤害漏洞（%s）。",
 			line_buffer, sDetails);
 
 		lilac_log(true);
@@ -345,7 +345,7 @@ static void lilac_survivor_damage_flag(int attacker, int victim, const char[] we
 		{
 			lilac_log_setup_client(attacker);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s %s for using a survivor damage exploit.", line_buffer, LILAC_BANNED_TEXT(CHEAT_SURVIVOR_DMG));
+				"%s %s（生还者伤害漏洞）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_SURVIVOR_DMG));
 
 			lilac_log(true);
 

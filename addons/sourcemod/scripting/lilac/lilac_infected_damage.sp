@@ -125,7 +125,7 @@ static int lilac_inf_threshold(int zclass)
 
 			FormatTime(date, sizeof(date), dateformat, GetTime());
 			FormatEx(line_buffer, sizeof(line_buffer),
-				"%s [Version %s] Infected damage limit of %s is %d (damage cvars x%.2f).",
+				"%s [版本 %s] %s 的伤害上限为 %d（伤害 ConVar 倍率 x%.2f）。",
 				date, PLUGIN_VERSION, inf_dmg_class_name[zclass], limit, factor);
 
 			lilac_log(false);
@@ -271,9 +271,9 @@ static void lilac_infected_damage_flag(int attacker, int victim, int zclass, int
 	char class_name[16];
 	strcopy(class_name, sizeof(class_name), inf_dmg_class_name[zclass]);
 
-	char sDetails[256];
+	char sDetails[384];
 	Format(sDetails, sizeof(sDetails),
-		"Detection: %d | Class: %s | DmgInWindow: %d | Threshold: %d | LastHit: %d | Hits: %d | Weapon: %s | Victim: %N",
+		"检测次数: %d | 特感类型: %s | 窗口内伤害: %d | 阈值: %d | 最近一次伤害: %d | 命中次数: %d | 武器: %s | 受击者: %N",
 		inf_dmg_detections[attacker], class_name, total,
 		threshold, last_hit, hits, weapon, victim);
 
@@ -288,13 +288,13 @@ static void lilac_infected_damage_flag(int attacker, int victim, int zclass, int
 	lilac_discord_report(attacker, CHEAT_INFECTED_DMG, DISCORD_SUSPECT);
 
 	if (icvar[CVAR_CHEAT_WARN])
-		lilac_warn_admins(attacker, CHEAT_INFECTED_DMG, inf_dmg_detections[attacker]);
+		lilac_warn_all(attacker, CHEAT_INFECTED_DMG, inf_dmg_detections[attacker]);
 
 	if (icvar[CVAR_LOG])
 	{
 		lilac_log_setup_client(attacker);
 		Format(line_buffer, sizeof(line_buffer),
-			"%s is suspected of using an infected damage exploit (%s).",
+			"%s 疑似利用特感伤害漏洞（%s）。",
 			line_buffer, sDetails);
 
 		lilac_log(true);
@@ -313,7 +313,7 @@ static void lilac_infected_damage_flag(int attacker, int victim, int zclass, int
 		{
 			lilac_log_setup_client(attacker);
 			Format(line_buffer, sizeof(line_buffer),
-				"%s %s for using an infected damage exploit.", line_buffer, LILAC_BANNED_TEXT(CHEAT_INFECTED_DMG));
+				"%s %s（特感伤害漏洞）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_INFECTED_DMG));
 
 			lilac_log(true);
 

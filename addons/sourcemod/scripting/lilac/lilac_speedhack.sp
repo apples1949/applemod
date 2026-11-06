@@ -161,8 +161,8 @@ static void lilac_speedhack_shadow_decide(int client, int count, float normal, f
 
     char sMessage[256];
     FormatEx(sMessage, sizeof(sMessage),
-        "%s | Detection: %d | CmdsPerSec: %d | Normal: %.0f | Contrast: %.1f | MedianContrast: %.1f | AvgChoke: %.2f | Observed: %ds | OthersFlagged: %d",
-        would_ban ? "WOULD BAN (today: no ban, choke gate)" : "not banned, looks normal for this player",
+        "%s | 检测次数: %d | 每秒指令: %d | 正常值: %.0f | 对比度: %.1f | 对比度中位数: %.1f | 平均阻塞: %.2f | 观察: %d 秒 | 其他被标记: %d",
+        would_ban ? "WOULD BAN（本应封禁：当前因阻塞门槛不封禁）" : "未封禁：对这名玩家来说属于正常",
         speedhack_detection[client], count, normal, contrast, median,
         player_avg_choke[client], shadow_observed[client], others);
 
@@ -265,6 +265,12 @@ public Action timer_check_speedhack(Handle timer)
     if (tick_rate <= 0)
         return Plugin_Continue;
 
+    /* 服务器 TPS 异常（卡顿 / 补帧突发）时的暂停由编译期内部开关
+     * SPEEDHACK_LAG_PAUSE_ENABLED（lilac_globals.sp）控制：
+     *   0（当前设置）= 关闭暂停功能 —— 不管服务器怎么样，变速检测每秒照常运行；
+     *   1            = 旧行为，异常时暂停 5 秒并写一条 "变速检测已暂停" 日志。
+     * 不暴露成 ConVar，运行时不可改动；关闭时这段逻辑连编译都不会生成。 */
+#if SPEEDHACK_LAG_PAUSE_ENABLED
     if (lilac_server_is_lagging()) {
         lilac_server_lag_log_once();
 
@@ -272,6 +278,7 @@ public Action timer_check_speedhack(Handle timer)
     } else {
         lilac_server_lag_reset_log();
     }
+#endif
 
     float now = GetGameTime();
 
@@ -383,7 +390,7 @@ static void lilac_speedhack_log_ignored(int client, int count, int baseline)
 
     lilac_log_setup_client(client);
     Format(line_buffer, sizeof(line_buffer),
-        "%s speedhack count ignored, command numbers are normal (CmdsPerSec: %d | CmdnumRate: %d | Dups: %d | ExpectedMax: ~%d).",
+        "%s 变速计数已忽略：指令编号正常（每秒指令: %d | 编号速率: %d | 重复: %d | 预期上限: ~%d）。",
         line_buffer, count, player_cmdnum_rate[client], player_cmdnum_dups[client],
         RoundToFloor(float(baseline) * SPEEDHACK_CMD_RATIO));
 
@@ -421,14 +428,14 @@ static void lilac_detected_speedhack(int client, int cmdcount, int baseline)
         GetClientInfo(client, "cl_updaterate", sUpdaterate, sizeof(sUpdaterate));
 
         FormatEx(sExtra, sizeof(sExtra),
-            " | Moved: %.0f | Flags: %d | MoveType: %d | cl_cmdrate: %s | cl_updaterate: %s",
+            " | 移动量: %.0f | 状态标记: %d | 移动类型: %d | cl_cmdrate: %s | cl_updaterate: %s",
             player_moved[client], GetEntityFlags(client),
             view_as<int>(GetEntityMoveType(client)), sCmdrate, sUpdaterate);
     }
 
     char sDetails[640];
     Format(sDetails, sizeof(sDetails),
-        "Detection: %d | CmdsPerSec: %d | CmdnumRate: %d | Dups: %d | ExpectedMax: ~%d | AvgChoke: %.2f | Ahead: %.0f | Current TPS: %d | Baseline TPS: %d | Tickrate: %d | %s%s",
+        "检测次数: %d | 每秒指令: %d | 编号速率: %d | 重复: %d | 预期上限: ~%d | 平均阻塞: %.2f | 时钟超前: %.0f | 当前 TPS: %d | 基线 TPS: %d | Tickrate: %d | %s%s",
         speedhack_detection[client], cmdcount,
         player_cmdnum_rate[client], player_cmdnum_dups[client],
         RoundToFloor(float(baseline) * SPEEDHACK_CMD_RATIO),
@@ -449,12 +456,12 @@ static void lilac_detected_speedhack(int client, int cmdcount, int baseline)
     lilac_discord_report(client, CHEAT_SPEEDHACK, DISCORD_SUSPECT);
 
     if (icvar[CVAR_CHEAT_WARN])
-        lilac_warn_admins(client, CHEAT_SPEEDHACK, speedhack_detection[client]);
+        lilac_warn_all(client, CHEAT_SPEEDHACK, speedhack_detection[client]);
 
     if (icvar[CVAR_LOG]) {
         lilac_log_setup_client(client);
         Format(line_buffer, sizeof(line_buffer),
-            "%s is suspected of using a speedhack (%s).",
+            "%s 疑似使用变速（%s）。",
             line_buffer, sDetails);
 
         lilac_log(true);
@@ -471,7 +478,7 @@ static void lilac_detected_speedhack(int client, int cmdcount, int baseline)
         if (icvar[CVAR_LOG]) {
             lilac_log_setup_client(client);
             Format(line_buffer, sizeof(line_buffer),
-                "%s %s for Speedhack.", line_buffer, LILAC_BANNED_TEXT(CHEAT_SPEEDHACK));
+                "%s %s（变速）。", line_buffer, LILAC_BANNED_TEXT(CHEAT_SPEEDHACK));
 
             lilac_log(true);
 

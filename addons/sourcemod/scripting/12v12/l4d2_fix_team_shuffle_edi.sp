@@ -14,6 +14,11 @@
 // 独立日志文件（相对 addons/sourcemod，即 addons/sourcemod/logs/）
 #define FIX_LOG_FILE "logs/l4d2_fix_team_shuffle_edi.log"
 
+/* 拿不到 SteamID（非 Steam 客户端 / 授权还没完成）时的授权宽限秒数。
+   必须按"真实时间"算：2.3.9 把个人计时器从 1.0s 改成 0.2s 之后，
+   原先按 tick 计数的 `> 5` 实际只等到了约 1 秒，远不够慢速授权完成。 */
+#define NO_AUTH_GRACE_SECONDS 5.0
+
 // ========== 主要状态变量 ==========
 
 // 记录表：SteamID(Steam2) -> 记录时的队伍号（1旁观 2生还者 3特感）
@@ -52,7 +57,7 @@ bool g_bFixStartLogged;             // 本次修复的"开始修复"表头是否
 bool g_bChecked[MAXPLAYERS + 1];      // 某玩家是否正在等待自己的还原计时器
 int g_iFailureCount[MAXPLAYERS + 1];  // 某玩家还原失败的次数
 bool g_bJoinTeamUsed[MAXPLAYERS + 1]; // 插件自己执行队伍转移期间临时放行 jointeam
-int g_iNoAuthTicks[MAXPLAYERS + 1];   // 连续拿不到 SteamID 的秒数（非 Steam 客户端/授权未完成）
+float g_fNoAuthSince[MAXPLAYERS + 1]; // 连续拿不到 SteamID 的起始时刻（GetGameTime，0.0=当前能拿到）
 
 Handle g_hCheckTimer = INVALID_HANDLE;   // 5 秒检查计时器
 Handle g_hTimeoutTimer = INVALID_HANDLE; // 超时兜底计时器
@@ -62,6 +67,16 @@ bool g_bMapReady;
 
 bool g_bEventsHooked = false;
 bool g_bVoteHooksInstalled = false;
+
+// ========== 待入队名单（分队结束后自动平均入队） ==========
+
+/* 本次分队里被插件自己请到旁观、又"不在记录表"的玩家。
+   钥匙：能拿到 SteamID 时用 SteamID（断线重连也能对上），否则用 "uid:<userid>"。
+   ForceToUnlock 之后延迟 1 秒执行一次平均入队，执行完立即清空；
+   不允许跨回合/跨地图残留（KeepTeams / AbortProcess / OnMapStart / 关闭总开关都会清）。 */
+StringMap g_hAutoJoin;
+Handle g_hAutoJoinTimer = INVALID_HANDLE;
+int g_iAutoJoinRetry;   // 解锁瞬间又被重新锁队（管理员手动启动等）时的重试次数
 
 GlobalForward g_hFwdFixComplete;
 
@@ -150,6 +165,7 @@ public void OnPluginStart()
 	g_hPendingRecords = new StringMap();
 	g_hShuffleTargets = new StringMap();
 	g_hTargetTeams = new StringMap();
+	g_hAutoJoin = new StringMap();
 
 	g_hFwdFixComplete = new GlobalForward("L4D2_FixTeamShuffle_OnFixComplete", ET_Ignore);
 
@@ -300,6 +316,8 @@ public void OnCvarChange_Enabled(ConVar convar, const char[] oldValue, const cha
 	if (g_bTeamLock)
 		LogFixSummary("总开关被关闭");
 
+	// 待入队名单一并作废：插件已关闭，不再自动改任何人的队伍
+	ClearAutoJoin();
 	ClearVars();
 
 	if (g_bCvarEnabled)
@@ -498,6 +516,9 @@ void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 
 	CancelProcessTimers();
 	ResetClientFlags();
+
+	// 新一轮记录 = 上一轮分队彻底结束：上一轮的待入队名单不能带过来
+	ClearAutoJoin();
 
 	g_hTeamRecords.Clear();
 	g_hPendingRecords.Clear();
@@ -748,6 +769,9 @@ public void OnMapStart()
 	g_bMapReady = true;
 	g_bFinalMap = L4D_IsMissionFinalMap();
 
+	// 换图后上一张图的待入队名单必须作废：那些人已经不在这张图上了
+	ClearAutoJoin();
+
 	PrecacheSurvivorModels();
 
 	if (!g_bCvarEnabled)
@@ -802,6 +826,7 @@ public void OnMapEnd()
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
+		g_fNoAuthSince[client] = 0.0;
 	}
 }
 
@@ -901,7 +926,7 @@ public void OnClientPutInServer(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
-	g_iNoAuthTicks[client] = 0;
+	g_fNoAuthSince[client] = 0.0;
 
 	if (!g_bTeamLock || IsFakeClient(client))
 		return;
@@ -918,7 +943,16 @@ public void OnClientDisconnect(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
-	g_iNoAuthTicks[client] = 0;
+	g_fNoAuthSince[client] = 0.0;
+
+	// 按 userid 记的待入队条目对这个人已经失效，立刻清掉（userid 不会复用，
+	// 但没必要留一份指向已断线玩家的名单）
+	if (g_hAutoJoin != null)
+	{
+		char sKey[32];
+		FormatEx(sKey, sizeof(sKey), "uid:%d", GetClientUserId(client));
+		g_hAutoJoin.Remove(sKey);
+	}
 }
 
 void StartClientRestore(int client)
@@ -986,51 +1020,59 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		   12v12 满员时就把本该归位的人挤在旁观里
 		   （2026-10-24 23:06 c2m4_barns：无 SteamID 的 JOJO 占了生还者第 12 席，
 		   apples1949 一直回不去）。
-		   现在给 5 秒授权宽限，之后按"不在记录中"处理：先移到旁观腾出名额；
-		   计时器不结束，万一之后授权到位、能对上记录，再按正常流程归位。 */
-		g_iNoAuthTicks[client]++;
+		   现在给按真实时间计算的 5 秒授权宽限（2.3.9 把个人计时器改成 0.2s 之后，
+		   原来按 tick 计数的"5 秒"实际只剩约 1.2 秒），之后按"不在记录中"处理：
+		   先移到旁观腾出名额；计时器不结束，万一之后授权到位、能对上记录，
+		   再按正常流程归位。被这样请到旁观的人记入待入队名单，分队结束后自动放回。 */
+		if (g_fNoAuthSince[client] <= 0.0)
+			g_fNoAuthSince[client] = GetGameTime();
 
 		// 开关关闭（l4d2_fix_team_shuffle_no_auth_spectate 0）：不处理，
 		// 保持引擎分配的队伍（即修复前的旧行为）
 		if (!g_bCvarNoAuthSpectate)
 			return Plugin_Continue;
 
-		if (g_iNoAuthTicks[client] > 5)
+		// 宽限未满：继续等授权（每 0.2s 一次的个人计时器只是"查一下"，不改队伍）
+		if (GetGameTime() - g_fNoAuthSince[client] < NO_AUTH_GRACE_SECONDS)
+			return Plugin_Continue;
+
+		// 旁观里挂机托管着生还者 Bot 同样占名额：先接管回来，再退回旁观
+		if (currentTeam == TEAM_SPECTATOR && IsClientIdle(client))
 		{
-			// 旁观里挂机托管着生还者 Bot 同样占名额：先接管回来，再退回旁观
-			if (currentTeam == TEAM_SPECTATOR && IsClientIdle(client))
+			L4D_TakeOverBot(client);
+
+			if (g_bCvarLog)
+				FixLogClient(client, "修复：拿不到 SteamID 且正挂机托管 Bot，先接管解除托管");
+		}
+
+		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
+			g_bJoinTeamUsed[client] = true;
+			ChangeClientTeam(client, TEAM_SPECTATOR);
+			g_bJoinTeamUsed[client] = false;
+
+			// 玩家视角的提示：突然被移出队伍必须给个原因，并说明之后会被放回
+			PrintToChat(client, "\x04[队伍修正]\x01 读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；分队完成后会自动把你随机放进人少的一队。");
+
+			// 分队结束后随机放回队伍（拿不到 SteamID，按 userid 记）
+			if (GetClientTeam(client) == TEAM_SPECTATOR)
+				AddAutoJoinCandidate(client);
+
+			if (g_bCvarLog)
 			{
-				L4D_TakeOverBot(client);
+				char sBefore[16], sAfter[16];
+				GetTeamLabel(currentTeam, sBefore, sizeof(sBefore));
+				GetTeamLabel(GetClientTeam(client), sAfter, sizeof(sAfter));
 
-				if (g_bCvarLog)
-					FixLogClient(client, "修复：拿不到 SteamID 且正挂机托管 Bot，先接管解除托管");
-			}
-
-			if (GetClientTeam(client) != TEAM_SPECTATOR)
-			{
-				g_bJoinTeamUsed[client] = true;
-				ChangeClientTeam(client, TEAM_SPECTATOR);
-				g_bJoinTeamUsed[client] = false;
-
-				// 玩家视角的提示：突然被移出队伍必须给个原因
-				PrintToChat(client, "\x04[队伍修正]\x01 读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；解锁后可以自行选队。");
-
-				if (g_bCvarLog)
-				{
-					char sBefore[16], sAfter[16];
-					GetTeamLabel(currentTeam, sBefore, sizeof(sBefore));
-					GetTeamLabel(GetClientTeam(client), sAfter, sizeof(sAfter));
-
-					FixLogClient(client, "修复：拿不到 SteamID，无法核对记录，%s -> %s", sBefore, sAfter);
-				}
+				FixLogClient(client, "修复：拿不到 SteamID，无法核对记录，%s -> %s", sBefore, sAfter);
 			}
 		}
 
 		return Plugin_Continue;
 	}
 
-	// 授权已到位：清空宽限计数
-	g_iNoAuthTicks[client] = 0;
+	// 授权已到位：清空宽限起始时刻
+	g_fNoAuthSince[client] = 0.0;
 
 	// 本轮的换边目标在延迟启动时冻结；不能在不同玩家的重试之间改变目标。
 
@@ -1055,15 +1097,31 @@ public Action Timer_RestoreClient(Handle timer, any data)
 	int targetTeam;
 	if (!ResolveTargetTeam(auth, targetTeam))
 	{
-		// 记录表中查不到 = 换图后才新加入的玩家：一次性赶去旁观
+		/* 记录表中查不到 = 换图后才新加入的玩家：先请到旁观，
+		   等本次分队结束（ForceToUnlock 之后）再由 Timer_AutoJoin 按两队平均放回。
+		   注意：只有"确实被我们挪走"的人才进待入队名单——本来就在旁观
+		   （自己选的旁观 / 刚连进来还没选队）的玩家不替他们做决定。 */
 		bool isIdle = (currentTeam == TEAM_SPECTATOR && IsClientIdle(client));
+		bool bMovedToSpectator = false;
 
 		g_bJoinTeamUsed[client] = true;
 		if (isIdle)
 			L4D_TakeOverBot(client);
 		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
 			ChangeClientTeam(client, TEAM_SPECTATOR);
+			bMovedToSpectator = (GetClientTeam(client) == TEAM_SPECTATOR);
+		}
 		g_bJoinTeamUsed[client] = false;
+
+		if (bMovedToSpectator)
+		{
+			// 玩家视角的提示：说明为什么被挪走、挪走之后会怎样
+			PrintToChat(client, "\x04[队伍修正]\x01 队伍记录里没有你（换图后才加入），先把你放到旁观；分队完成后会自动把你随机放进人少的一队。");
+
+			// 记入待入队名单：解锁后延迟 1 秒按"两队平均"放回队伍
+			AddAutoJoinCandidate(client);
+		}
 
 		if (g_bCvarLog)
 		{
@@ -1128,6 +1186,12 @@ public Action Timer_RestoreClient(Handle timer, any data)
 			// 先转旁观再找 Bot 接管
 			ChangeClientTeam(client, TEAM_SPECTATOR);
 			attemptedMove = true;
+
+			// 玩家视角的提示：从特感被拽走也要说明原因与去处。
+			// 只有确实离开了特感才提示，避免转移失败时每 0.2s 刷一句
+			if (GetClientTeam(client) == TEAM_SPECTATOR)
+				PrintToChat(client, "\x04[队伍修正]\x01 你的队伍记录是生还者，正在把你从特感移回生还者队（中间会先经过旁观）。");
+
 			TurnClientToSurvivors(client, false);
 		}
 	}
@@ -1299,7 +1363,8 @@ bool IsNewChapterSwitch()
 	return L4D_IsFirstMapInScenario();
 }
 
-// final_map_disable=2/3：不按记录归位，而是按记录的人数规模随机重排。
+// final_map_disable=2/3：不按记录归位，而是把参与分队的玩家完全随机重排，
+// 并按"两队平均"划分（人数奇数时长队多 1 人）。
 //   模式 2：只在切换到"新章节"时打乱（同战役内换关、同图重开、c6↔c7 与 c9↔c14 混图链内换图都不打乱）
 //   模式 3：除同一张图重开外，任何换关都打乱（同战役内换关、c6↔c7 / c9↔c14 混图链内换图、跨战役、三方图换图）
 void PrepareShuffleMode()
@@ -1315,8 +1380,8 @@ void PrepareShuffleMode()
 		return;
 
 	/* 模式 2 只认"换到新章节"；模式 3 放宽到"同一战役内换小关也打乱"。
-	   两道闸门只差这一条判定，其余流程（BuildShuffleTargets 的人数规模、旁观者保持旁观、
-	   公告、native/forward）完全复用，不另写一套。 */
+	   两道闸门只差这一条判定，其余流程（BuildShuffleTargets 的随机与平均分配、
+	   旁观者保持旁观、公告、native/forward）完全复用，不另写一套。 */
 	bool bAllow = (g_iCvarFinalMapDisable == 2) ? IsNewChapterSwitch() : IsSmallLevelShuffleAllowed();
 	if (!bAllow)
 		return;
@@ -1343,8 +1408,8 @@ bool IsSmallLevelShuffleAllowed()
 	return true;
 }
 
-// 以记录表为基准：旁观者继续旁观；非旁观玩家按记录时的生还者/特感人数规模
-// 重新随机分配，而不是回到各自的原始队伍位置。
+// 以记录表为基准：旁观者继续旁观；非旁观玩家全部重新随机分配，并按"两队平均"划分
+// （人数为奇数时长队多 1 人），而不是回到各自记录时的队伍位置。
 void BuildShuffleTargets()
 {
 	char aAuths[MAXPLAYERS + 1][MAX_AUTHID_LENGTH];
@@ -1394,17 +1459,17 @@ void BuildShuffleTargets()
 		strcopy(aAuths[j], MAX_AUTHID_LENGTH, sTemp);
 	}
 
-	// 记录时有多少生还者，打乱后就保留多少个生还者名额，其余为特感
-	int iSurvivorCount = 0;
+	/* 两队平均分配，而不是沿用"记录时有多少生还者"：
+	   旧逻辑按记录人数统计，上一关 8 生还 / 12 特感时打乱后还是 8/12，
+	   人数多的那边几乎永远是特感。现在改成 (总数 + 1) / 2：
+	     20 人 -> 10 生还 / 10 特感（旧逻辑 8/12）
+	     19 人 -> 10 生还 /  9 特感（奇数时长队多 1 人）
+	   同时不能超过引擎/多人插件允许的生还者上限，超出部分一律去特感。 */
+	int iSurvivorCount = (iTotal + 1) / 2;
 
-	snapshot = g_hTeamRecords.Snapshot();
-	for (int i = 0; i < snapshot.Length; i++)
-	{
-		snapshot.GetKey(i, sAuth, sizeof(sAuth));
-		if (g_hTeamRecords.GetValue(sAuth, iTeam) && iTeam == TEAM_SURVIVOR)
-			iSurvivorCount++;
-	}
-	delete snapshot;
+	int iSurvivorLimit = GetRestoreTeamLimit(TEAM_SURVIVOR);
+	if (iSurvivorLimit > 0 && iSurvivorCount > iSurvivorLimit)
+		iSurvivorCount = iSurvivorLimit;
 
 	// 生还者名额不能超过参与打乱的人数
 	if (iSurvivorCount > iTotal)
@@ -1421,15 +1486,15 @@ void BuildShuffleTargets()
 	g_iShuffleSurvivors = iSurvivorCount;
 	CreateTimer(5.0, Timer_AnnounceShuffle, _, TIMER_FLAG_NO_MAPCHANGE);
 
-	LogMessage("[队伍修正] %s，随机分队：%d 人，生还者名额 %d（final_map_disable=%d）",
-		g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", iTotal, iSurvivorCount, g_iCvarFinalMapDisable);
+	LogMessage("[队伍修正] %s，随机分队：%d 人平均分配，生还者 %d / 特感 %d（final_map_disable=%d）",
+		g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", iTotal, iSurvivorCount, iTotal - iSurvivorCount, g_iCvarFinalMapDisable);
 
 	// 独立日志：这次打乱给每个玩家分配的目标队伍（此时玩家多半还没进游戏，只有 SteamID）
 	if (g_bCvarLog)
 	{
 		FixLog("===== 随机分队（%s，final_map_disable=%d）=====",
 			g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", g_iCvarFinalMapDisable);
-		FixLog("[打乱] 参与 %d 人，生还者名额 %d 个，特感名额 %d 个",
+		FixLog("[打乱] 参与 %d 人，按两队平均分配：生还者名额 %d 个，特感名额 %d 个",
 			iTotal, iSurvivorCount, iTotal - iSurvivorCount);
 
 		for (int i = 0; i < iTotal; i++)
@@ -1461,13 +1526,14 @@ public Action Timer_AnnounceShuffle(Handle timer)
 		return Plugin_Stop;
 
 	/* 模式 3 是"换小关卡就打乱"，文案要和模式 2 的"切换新章节"区分开，
-	   玩家一眼能看出这次是过关换图导致的重新分队 */
+	   玩家一眼能看出这次是过关换图导致的重新分队；
+	   两边人数也一起报出来，方便玩家确认"平均分配"确实生效 */
 	if (g_bShuffleSmallLevel)
-		PrintToChatAll("[队伍修正] 本关换图，%d 人随机重新分队（生还者 %d）",
-			g_iShuffleTotal, g_iShuffleSurvivors);
+		PrintToChatAll("[队伍修正] 本关换图，%d 人随机重新分队（生还者 %d / 特感 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors, g_iShuffleTotal - g_iShuffleSurvivors);
 	else
-		PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d）",
-			g_iShuffleTotal, g_iShuffleSurvivors);
+		PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d / 特感 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors, g_iShuffleTotal - g_iShuffleSurvivors);
 
 	return Plugin_Stop;
 }
@@ -1651,6 +1717,10 @@ void AuditRestoreTargets(const char[] reason)
 		{
 			ChangeClientTeam(client, TEAM_SPECTATOR);
 			bMoved = true;
+
+			// 玩家视角的提示：复查阶段被强制改回旁观同样要说明原因与后续
+			if (GetClientTeam(client) == TEAM_SPECTATOR)
+				PrintToChat(client, "\x04[队伍修正]\x01 分队结束复查：本次分队里你的位置是旁观，先把你放回旁观；解锁后可以自行选队。");
 		}
 		else if (targetTeam == TEAM_INFECTED)
 		{
@@ -1711,10 +1781,18 @@ void ForceToUnlock(const char[] reason = "完成")
 	Call_Finish();
 
 	ClearVars();
+
+	/* 锁队已解除 = 本次分队完成：把被请到旁观的那批人延迟放回队伍。
+	   必须在 ClearVars 之后调度（ClearVars 会清 client 标志），
+	   也必须在解锁之后才动队伍 —— 锁队期间改队会和归位逻辑互相踩。 */
+	ScheduleAutoJoin();
 }
 
 void AbortProcess(bool fireForward, const char[] reason = "提前结束")
 {
+	// 中止 = 本次分队作废：待入队名单一并清掉，不残留到下一个回合
+	ClearAutoJoin();
+
 	if (!g_bTeamLock)
 	{
 		ClearVars();
@@ -1784,8 +1862,248 @@ void ResetClientFlags()
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
-		g_iNoAuthTicks[client] = 0;
+		g_fNoAuthSince[client] = 0.0;
 	}
+}
+
+// ========== 分队结束后自动平均入队（被请到旁观的那批人） ==========
+
+/* 记录一个"被插件请到旁观、分队结束后要自动放回队伍"的玩家。
+   有 SteamID 用 SteamID（断线重连也能对上），拿不到 SteamID 时退回 userid。 */
+void AddAutoJoinCandidate(int client)
+{
+	if (client <= 0 || client > MaxClients || g_hAutoJoin == null)
+		return;
+
+	char sKey[MAX_AUTHID_LENGTH + 8];
+	char sAuth[MAX_AUTHID_LENGTH];
+	if (GetClientAuthId(client, AuthId_Steam2, sAuth, sizeof(sAuth)))
+		strcopy(sKey, sizeof(sKey), sAuth);
+	else
+		FormatEx(sKey, sizeof(sKey), "uid:%d", GetClientUserId(client));
+
+	g_hAutoJoin.SetValue(sKey, true);
+}
+
+// 清空待入队名单并取消尚未触发的入队计时器
+// （换图 / 重新记录 / 中止 / 关闭总开关时调用，避免状态跨回合残留）
+void ClearAutoJoin()
+{
+	if (g_hAutoJoinTimer != INVALID_HANDLE)
+	{
+		KillTimer(g_hAutoJoinTimer);
+		g_hAutoJoinTimer = INVALID_HANDLE;
+	}
+
+	if (g_hAutoJoin != null)
+		g_hAutoJoin.Clear();
+
+	g_iAutoJoinRetry = 0;
+}
+
+// 解锁之后调用：名单非空就延迟 1 秒入队
+// （留出时间给引擎落位、也给 superversus 的 autofill 先跑，入队前还会再核对一次队伍）
+void ScheduleAutoJoin()
+{
+	if (g_hAutoJoin == null || g_hAutoJoin.Size <= 0)
+		return;
+
+	if (g_hAutoJoinTimer != INVALID_HANDLE)
+	{
+		KillTimer(g_hAutoJoinTimer);
+		g_hAutoJoinTimer = INVALID_HANDLE;
+	}
+
+	g_iAutoJoinRetry = 0;
+	g_hAutoJoinTimer = CreateTimer(1.0, Timer_AutoJoin, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// 待入队钥匙 -> 客户端；不在服务器 / 已断线 / 是 Bot 时返回 0
+int ResolveAutoJoinClient(const char[] sKey)
+{
+	int client;
+
+	if (strncmp(sKey, "uid:", 4) == 0)
+	{
+		// 手写解析，避免依赖字符串切片：跳过 "uid:" 前缀后按十进制读
+		int iPos = 4;
+		int iUserId = 0;
+		while (sKey[iPos] >= '0' && sKey[iPos] <= '9')
+		{
+			iUserId = iUserId * 10 + (sKey[iPos] - '0');
+			iPos++;
+		}
+
+		client = GetClientOfUserId(iUserId);
+	}
+	else
+	{
+		client = FindClientBySteamId(sKey);
+	}
+
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+		return 0;
+
+	return client;
+}
+
+/* 平均分配：当前两队真人数量少的那边优先；数量相同则随机；
+   同时尊重名额上限（生还者 survivor_limit / l4d_survivor_limit，
+   特感 z_max_player_zombies / l4d_infected_limit），别把人数撑破。
+   返回 TEAM_NONE 表示两队都没有名额。 */
+int PickAverageJoinTeam()
+{
+	int iSurvivors = CountRestoreTeamPlayers(TEAM_SURVIVOR);
+	int iInfected = CountRestoreTeamPlayers(TEAM_INFECTED);
+
+	int iSurvivorLimit = GetRestoreTeamLimit(TEAM_SURVIVOR);
+	int iInfectedLimit = GetRestoreTeamLimit(TEAM_INFECTED);
+
+	bool bSurvivorRoom = (iSurvivorLimit > 0 && iSurvivors < iSurvivorLimit);
+	bool bInfectedRoom = (iInfectedLimit > 0 && iInfected < iInfectedLimit);
+
+	if (bSurvivorRoom && bInfectedRoom)
+	{
+		if (iSurvivors != iInfected)
+			return (iSurvivors < iInfected) ? TEAM_SURVIVOR : TEAM_INFECTED;
+
+		// 人数相同：随机挑一边（这就是"随机分队"的随机来源）
+		return (GetRandomInt(0, 1) == 0) ? TEAM_SURVIVOR : TEAM_INFECTED;
+	}
+
+	if (bSurvivorRoom)
+		return TEAM_SURVIVOR;
+
+	if (bInfectedRoom)
+		return TEAM_INFECTED;
+
+	return TEAM_NONE;
+}
+
+// 解锁后把一名玩家放进指定队伍：优先走既有的"接管 Bot / 尊重名额"路径
+bool JoinTeamAfterShuffle(int client, int team)
+{
+	// 正挂机托管着生还者 Bot 的玩家：先接管下来（他本来就占着生还者名额，
+	// 直接 L4D_SetHumanSpec 另找一个 Bot 会和现有托管关系打架）
+	bool bIdle = IsClientIdle(client);
+
+	g_bJoinTeamUsed[client] = true;
+
+	bool bMoved;
+	if (team == TEAM_SURVIVOR)
+	{
+		bMoved = TurnClientToSurvivors(client, bIdle);
+
+		// 没有可用 Bot、但生还者确有空格时，直接换队把名额补上
+		if (!bMoved && HasFreeTeamSlot(TEAM_SURVIVOR))
+		{
+			ChangeClientTeam(client, TEAM_SURVIVOR);
+			bMoved = (GetClientTeam(client) == TEAM_SURVIVOR);
+		}
+	}
+	else
+	{
+		bMoved = TurnClientToInfected(client);
+	}
+
+	g_bJoinTeamUsed[client] = false;
+
+	return bMoved && GetClientTeam(client) == team;
+}
+
+/* 解锁后延迟 1 秒执行一次：
+   把本次分队里被插件请到旁观的"不在记录表"玩家，按两队平均放回队伍。
+   - 已经自己回到队伍 / 已被 superversus autofill 拉进队伍的：跳过（不重复处理）
+   - 已断线 / 仍在 team 0 / 不在游戏内：跳过
+   - 两队都满员：跳过并写日志（不撑破名额）
+   执行完（无论成功多少次）立即清空名单，不会重复处理同一人。 */
+public Action Timer_AutoJoin(Handle timer)
+{
+	g_hAutoJoinTimer = INVALID_HANDLE;
+
+	if (g_hAutoJoin == null || g_hAutoJoin.Size <= 0)
+		return Plugin_Stop;
+
+	if (!g_bCvarEnabled || !L4D_IsVersusMode())
+	{
+		ClearAutoJoin();
+		return Plugin_Stop;
+	}
+
+	// 解锁瞬间又被重新锁队（管理员手动 sm_fixteams_start 等）：等这一轮结束再来，最多 3 次
+	if (IsRestoreLocked())
+	{
+		if (g_iAutoJoinRetry < 3)
+		{
+			g_iAutoJoinRetry++;
+			g_hAutoJoinTimer = CreateTimer(1.0, Timer_AutoJoin, _, TIMER_FLAG_NO_MAPCHANGE);
+			return Plugin_Stop;
+		}
+
+		FixLog("[入队] 队伍仍在锁定中，放弃本次自动入队（%d 人）", g_hAutoJoin.Size);
+		ClearAutoJoin();
+		return Plugin_Stop;
+	}
+
+	StringMapSnapshot snapshot = g_hAutoJoin.Snapshot();
+	char sKey[MAX_AUTHID_LENGTH + 8];
+	int iJoined = 0;
+	int iSkipped = 0;
+
+	for (int i = 0; i < snapshot.Length; i++)
+	{
+		snapshot.GetKey(i, sKey, sizeof(sKey));
+
+		int client = ResolveAutoJoinClient(sKey);
+		if (client == 0)
+		{
+			iSkipped++;
+			FixLog("[入队] %s 已不在服务器，跳过", sKey);
+			continue;
+		}
+
+		// 入队前重新读一次队伍：已经回到队伍（含 superversus autofill 帮他选队）就不动他
+		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：跳过（已在队伍中，不再重复分配）");
+			continue;
+		}
+
+		/* 这里不再查记录表：解锁时 ClearVars 已经把记录表清空，查了也永远是空。
+		   也就是说"锁队期间拿不到 SteamID、解锁后才拿到授权"的玩家，会按
+		   "不在记录中"处理并被平均放回队伍——这正是他被挪到旁观的原因，
+		   比让他继续留在旁观更符合玩家预期。 */
+		int team = PickAverageJoinTeam();
+		if (team == TEAM_NONE)
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：跳过（生还者/特感名额都已满）");
+			continue;
+		}
+
+		if (!JoinTeamAfterShuffle(client, team))
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：转移失败，保持旁观（等玩家自行选队）");
+			continue;
+		}
+
+		iJoined++;
+
+		char sLabel[16];
+		GetTeamLabel(team, sLabel, sizeof(sLabel));
+		PrintToChat(client, "\x04[队伍修正]\x01 分队完成，已把你随机放入%s队。", sLabel);
+		FixLogClient(client, "入队：分队完成，随机放入%s（当前生还者 %d / 特感 %d）",
+			sLabel, CountRestoreTeamPlayers(TEAM_SURVIVOR), CountRestoreTeamPlayers(TEAM_INFECTED));
+	}
+
+	delete snapshot;
+
+	FixLog("[入队] 分队后自动入队：成功 %d 人，跳过 %d 人", iJoined, iSkipped);
+	ClearAutoJoin();
+
+	return Plugin_Stop;
 }
 
 // ========== 锁队 / 投票拦截 ==========
@@ -1943,8 +2261,12 @@ bool MakeRoomByEvictingNoAuth(int team, int excludeClient)
 	g_bJoinTeamUsed[intruder] = false;
 	g_iEvictBudget--;
 
-	// 玩家视角的提示：被让出名额同样要说明原因
-	PrintToChat(intruder, "\x04[队伍修正]\x01 队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；解锁后可以自行选队。");
+	// 玩家视角的提示：被让出名额同样要说明原因，并说明之后会被放回
+	PrintToChat(intruder, "\x04[队伍修正]\x01 队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；分队完成后会自动把你随机放进人少的一队。");
+
+	// 同样记入待入队名单（拿不到 SteamID，按 userid 记）
+	if (GetClientTeam(intruder) == TEAM_SPECTATOR)
+		AddAutoJoinCandidate(intruder);
 
 	if (g_bCvarLog)
 	{
@@ -2060,6 +2382,16 @@ bool TryEvictFromTeam(int targetTeam, int excludeClient, int preferTeam)
 			ChangeClientTeam(other, TEAM_SPECTATOR);
 			g_bJoinTeamUsed[other] = false;
 			g_iEvictBudget--;
+
+			// 玩家视角的提示：被临时让出名额的人要知道"为什么"和"之后会被放回哪一边"
+			if (GetClientTeam(other) == TEAM_SPECTATOR)
+			{
+				char sTargetLabel[16];
+				GetTeamLabel(iTarget, sTargetLabel, sizeof(sTargetLabel));
+
+				PrintToChat(other, "\x04[队伍修正]\x01 队伍名额已满，先把你让到旁观腾出位置；随后会自动把你放回%s队。",
+					sTargetLabel);
+			}
 
 			// 被腾位的人必须保证还有人把他放回目标队：
 			// 他的计时器可能早已因重试耗尽而停掉，这里重开一个

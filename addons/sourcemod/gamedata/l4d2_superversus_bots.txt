@@ -1,0 +1,68 @@
+"Games"
+{
+	"#default"
+	{
+		"Offsets"
+		{
+			/* 1 = Windows, 2 = Linux。Windows 的签名指向 `call` 指令本身（操作码 E8），
+			   必须用 (addr+5) + *(addr+1) 解出 rel32 目标才是函数入口；
+			   Linux 走符号名，地址本身就是入口，不能解引用。 */
+			"OS"
+			{
+				"windows"	"1"
+				"linux"		"2"
+			}
+		}
+	}
+
+	"left4dead2"
+	{
+		"Addresses"
+		{
+			"NextBotCreatePlayerBot<SurvivorBot>"
+			{
+				"signature"	"NextBotCreatePlayerBot<SurvivorBot>"
+			}
+		}
+
+		"Signatures"
+		{
+			/* C++: CBaseEntity *__cdecl NextBotCreatePlayerBot<SurvivorBot>(const char *name)
+			 *
+			 * 证据（Windows，本地 client 随包的 server.dll，PE imagebase 0x10000000，
+			 *       .text VA 0x1000 / raw 0x400；这是客户端安装目录里的 server.dll，
+			 *       不是 srcds 专用服文件，同一 build 的签名一致）：
+			 *   - 函数入口 RVA 0x25CF00。定位依据：CDirector::AddSurvivorBot（RVA 0x26CC60）
+			 *     与 RestoreTransitionedSurvivorBots（RVA 0x2B9CF0）都 call 它；
+			 *     该函数内含字符串 "CreatePlayerBot: Unable to create bot %s -
+			 *     CreateFakeClient() returned NULL.\n" 与
+			 *     "CreatePlayerBot: Could not Instance() from the bot edict.\n"，
+			 *     __cdecl、单参数（bot 名），共 5 处 caller。
+			 *   - 函数入口 prologue 对每个模板实例化（TankBot/WitchBot/...）都相同，
+			 *     用入口签名会有 8-9 处歧义命中，所以只能用 call-site 签名。
+			 *   - 下面的 call-site 签名在 0x26CD6B 处唯一命中 1 次（全文件唯一），
+			 *     匹配的正是 `call NextBotCreatePlayerBot<SurvivorBot>` 这条指令，
+			 *     紧接着 add esp,8 / test eax,eax / je。
+			 * 所以必须解 rel32：addr += *(int32*)(addr+1) + 5。
+			 */
+			"NextBotCreatePlayerBot<SurvivorBot>"
+			{
+				"library"	"server"
+				"linux"		"@_Z22NextBotCreatePlayerBotI11SurvivorBotEPT_PKc"
+				"windows"	"\xE8\x2A\x2A\x2A\x2A\x83\xC4\x08\x85\xC0\x74\x1C\x8B\x10\x8B\x92\xC8\x08\x00\x00"
+				/* E8 ? ? ? ? 83 C4 08 85 C0 74 1C 8B 10 8B 92 C8 08 00 00 */
+			}
+
+			/* C++: void __thiscall CTerrorPlayer::RoundRespawn()
+			 * 上游 l4d_CreateSurvivorBot 的 Windows 签名，在当前 build 唯一命中 1 次
+			 * （RVA 0x31C3B0），仍然有效，未做改动。 */
+			"CTerrorPlayer::RoundRespawn"
+			{
+				"library"	"server"
+				"linux"		"@_ZN13CTerrorPlayer12RoundRespawnEv"
+				"windows"	"\x56\x8B\xF1\xE8\x2A\x2A\x2A\x2A\xE8\x2A\x2A\x2A\x2A\x84\xC0\x75"
+				/* 56 8B F1 E8 ? ? ? ? E8 ? ? ? ? 84 C0 75 */
+			}
+		}
+	}
+}

@@ -12,12 +12,15 @@
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.18-12v12"
+#define PLUGIN_VERSION "2.5.19-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
 #define TEAM_INFECTED	               3
 #define DELAY_KICK_NONEEDBOT         0.7
+/* 只给降级分支用：gamedata/签名不可用时退回去的 CreateFakeClient 两段式流程，
+   必须把假客户端踢掉才会由引擎补上一个真正的 bot。主路径（NextBotCreatePlayerBot）
+   完全不经过这里。 */
 #define DELAY_KICK_FAKECLIENT        0.1
 /* 队伍修正插件锁队还原队伍期间，自动进队要无限期等待（不消耗 JoinAttempts 的次数）。
    这里给一个独立的秒数上限，正常换图还原几秒内就结束，120 秒足以覆盖最慢的情况。 */
@@ -96,9 +99,23 @@ bool NewConnection[MAXPLAYERS+1];
 int JoinTarget[MAXPLAYERS+1];
 int JoinAttempts[MAXPLAYERS+1];
 int LockWaitSeconds[MAXPLAYERS+1];	// 因队伍修正锁队而等待的秒数（单独计数，不占 JoinAttempts）
-bool SurvivorPlaceholder[MAXPLAYERS+1];
 bool SurvivorDied[MAXPLAYERS+1];
 bool LateLoad;
+
+// ---------------------------------------------------------------------------
+// 生还者 bot 创建方式（2.5.19）
+//   主路径 = fbef0102 l4dmultislots 的做法：SDKCall NextBotCreatePlayerBot<SurvivorBot>
+//   直接造一个 SurvivorBot，再 ChangeClientTeam(bot, TEAM_SURVIVOR)，
+//   若 !IsPlayerAlive 再 SDKCall CTerrorPlayer::RoundRespawn。
+//   不再有"假客户端 → 踢掉 → 引擎补 bot"的两段式，也没有中间占位状态。
+//   两个 SDKCall 都内建在本插件里，不依赖任何独立 native 插件；
+//   gamedata = addons/sourcemod/gamedata/l4d2_superversus_bots.txt。
+//   任一步准备失败都不 SetFailState，而是退回旧的 CreateFakeClient 流程。
+// ---------------------------------------------------------------------------
+Handle g_hSDK_NextBotCreatePlayerBot = null;	// CBaseEntity* NextBotCreatePlayerBot<SurvivorBot>(const char *name)
+Handle g_hSDK_RoundRespawn = null;				// void CTerrorPlayer::RoundRespawn()
+bool g_bNextBotReady = false;					// true = 走新路径；false = 走 CreateFakeClient 降级路径
+bool g_bNextBotDegradedWarned = false;			// 降级告警只印一次
 
 enum JoinResult
 {
@@ -201,10 +218,17 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_sur", Join_Survivor, "Join Survivor Team");
 	RegConsoleCmd("sm_infected", Join_Infected, "Join Infected Team");
 	RegConsoleCmd("sm_inf", Join_Infected, "Join Infected Team");
-	RegConsoleCmd("sm_spectate", Join_Spectator, "Join Spectator Team");
-	RegConsoleCmd("sm_spec", Join_Spectator, "Join Spectator Team");
-	RegConsoleCmd("sm_s", Join_Spectator, "Join Spectator Team");
-	AllowSpectate = CreateConVar("sm_allow_spectate_command", "1", "Allow !spectate/!spec/!s");
+	/* 旁观指令：本插件只提供 sm_pg（聊天 !pg / /pg）。
+	 *
+	 * 原先注册的 sm_spectate / sm_spec / sm_s 已取消：这几个名字在仓库里被多个插件
+	 * 重复注册（playermanagement.smx、pause.sp 都会注册同一批名字），谁生效取决于加载
+	 * 顺序，导致"点旁观"有时走的是别的插件那套没有门禁的实现。
+	 * 改成一个本插件独占的名字后，行为可预期：一定会经过 RequestJoin ->
+	 * CanVoluntarilySpectate（坦克/被特感控制/开关禁用时拒绝）。
+	 * 注意：其它插件里仍写着 FakeClientCommand(..., "sm_spectate") 的调用点不受影响，
+	 * 它们会落到别家的 sm_spectate 上（见交付报告）。 */
+	RegConsoleCmd("sm_pg", Join_Spectator, "加入旁观队伍（原 sm_spectate/sm_spec/sm_s 已取消）");
+	AllowSpectate = CreateConVar("sm_allow_spectate_command", "1", "Allow the !pg (sm_pg) spectator command");
 	// 自动补位（队伍修复完成 / 开门解禁后把旁观玩家随机拉进队伍）
 	Autofill = CreateConVar("l4d_superversus_autofill", "1", "队伍修复完成或开局门锁解禁后，自动把旁观玩家随机补进队伍. 0=关闭.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	AutofillInfected = CreateConVar("l4d_superversus_autofill_infected", "0", "生还者名额补满后，剩余名额是否继续补进感染者队. 0=只补生还者(默认).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -251,9 +275,7 @@ public void OnPluginStart()
 
 	AddCommandListener(Cmd_spec_next, "spec_next");
 	AddCommandListener(Cmd_JoinTeam, "jointeam");
-	AddCommandListener(Cmd_StaySpectator, "sm_spec");
-	AddCommandListener(Cmd_StaySpectator, "sm_s");
-	AddCommandListener(Cmd_StaySpectator, "sm_spectate");
+	AddCommandListener(Cmd_StaySpectator, "sm_pg");
 	// sm_afk 命令注册已取消，同名监听一并取消；恢复注册时同时恢复此行。
 	//AddCommandListener(Cmd_StaySpectator, "sm_afk");
 	AddCommandListener(Cmd_StaySpectator, "go_away_from_keyboard");
@@ -268,13 +290,18 @@ public void OnPluginStart()
 
 	/* 12v12 容量初始化必须放在本函数最末尾（所有 ConVar 都建好之后）：
 	   给 l4d_survivor_limit 赋值会同步触发 survivor_limit 的变更钩子
-	   （12v12/playermanagement.sp::survivor_limitChanged -> FixBotCount），
+	   （scripting/playermanagement.sp::survivor_limitChanged -> FixBotCount），
 	   而 FixBotCount 里的 CreateFakeClient() 会让引擎立刻回调本插件的
 	   OnClientPostAdminCheck；那一刻 KillRes / AutoJoin 等 ConVar 还没创建（句柄 0），
 	   直接读 .BoolValue 就抛 "Invalid convar handle 0 (error 4)"。
 	   日志证据：OnPluginStart:150 -> Initialize12v12Capacity:229 -> OnSurvivorChanged:223
 	   -> survivor_limitChanged:154 -> FixBotCount:531(CreateFakeClient)
-	   -> OnClientPostAdminCheck:755 (KillRes.BoolValue)。 */
+	   -> OnClientPostAdminCheck:755 (KillRes.BoolValue)。
+	   注意这条同步回调不是本插件的 bot 制造流程引起的（主路径用 SDKCall 造 SurvivorBot，
+	   降级路径才会 CreateFakeClient），但两种方式都会让引擎同步回调
+	   OnClientPutInServer / OnClientPostAdminCheck，所以那边的句柄兜底必须留着。 */
+	// SDKCall 必须在本函数末尾的容量连锁反应之前准备好。
+	InitSurvivorBotSDKCalls();
 	Initialize12v12Capacity();
 }
 
@@ -320,7 +347,6 @@ public void OnClientPutInServer(int client)
 	g_fIdleNoticeAt[client] = 0.0;
 	g_fInGameSince[client] = GetGameTime();
 	CancelJoin(client);
-	SurvivorPlaceholder[client] = false;
 	if (!IsFakeClient(client)) ResumeBotPopulation();
 	else if (!SvBotsAllowed()) QueueEmptyBotCleanup();
 }
@@ -422,7 +448,7 @@ void ReconcileSurvivors()
 	int limit = SurvivorLimit.IntValue;
 	for (int bot = MaxClients; bot >= 1 && count > limit; bot--)
 	{
-		if (!IsValidSurvivorBot(bot) || IsClientInKickQueue(bot) || SurvivorPlaceholder[bot]
+		if (!IsValidSurvivorBot(bot) || IsClientInKickQueue(bot)
 			|| HasIdlePlayer(bot)) continue;
 		// Detach before the asynchronous kick, so repeated checks count it once.
 		ChangeClientTeam(bot, TEAM_SPECTATOR);
@@ -693,7 +719,6 @@ public void OnClientDisconnect(int client)
 {
 	CancelJoin(client);
 	NewConnection[client] = false;
-	SurvivorPlaceholder[client] = false;
 
 	// 2.5.16：清掉闲置处理的后置状态，避免同名/同槽位复用时误判
 	g_fIdleSince[client] = 0.0;
@@ -772,7 +797,10 @@ void SpawnCheck()
 	// iSurvivorMax is the maximum # of survivor we allow - we never kick human survivors
 
 	if (iSurvivor >= cvar_minsurvivor.IntValue)  return;
-	for(; iSurvivor < cvar_minsurvivor.IntValue; iSurvivor++) SpawnFakeSurvivorClient();
+	/* iSurvivor 只在进函数时读一次；每次补位调用内部都会自己重新读 GetSurvivorTeam()
+	   并各自守住 SurvivorLimit。new bot 在 SpawnSurvivorBot() 返回时就已计入生还者队
+	   （ChangeClientTeam 是同步生效的），所以同一帧连续补位既不会超员、也不会重复补同一格。 */
+	for(; iSurvivor < cvar_minsurvivor.IntValue; iSurvivor++) SpawnSurvivorBot();
 }
 
 // ------------------------------------------------------------------------
@@ -788,38 +816,208 @@ stock bool IsValidSurvivorBot(int client)
 	return true;
 }
 // ------------------------------------------------------------------------
-// Spawn a survivor bot
+// 生还者 bot 的 SDKCall 准备
+//   gamedata: addons/sourcemod/gamedata/l4d2_superversus_bots.txt
+//   失败只告警 + 降级，绝不 SetFailState：本插件是 12v12 服的核心，
+//   签名随游戏更新失效时不能连累整个模式掉功能。
 // ------------------------------------------------------------------------
+void InitSurvivorBotSDKCalls()
+{
+	GameData gameData = LoadGameConfigFile("l4d2_superversus_bots");
+	if (gameData == null)
+	{
+		DegradeSurvivorBotCreation("找不到 gamedata 文件 addons/sourcemod/gamedata/l4d2_superversus_bots.txt");
+		return;
+	}
 
-bool SpawnFakeSurvivorClient(const char[] botName = "SurvivorBot", bool manual = false)
+	// CTerrorPlayer::RoundRespawn：新造的 SurvivorBot 若没实体化/没血，用它走引擎自己的复活流程
+	StartPrepSDKCall(SDKCall_Player);
+	bool configured = PrepSDKCall_SetFromConf(gameData, SDKConf_Signature, "CTerrorPlayer::RoundRespawn");
+	Handle respawnCall = EndPrepSDKCall();
+	g_hSDK_RoundRespawn = configured ? respawnCall : null;
+	if (!configured && respawnCall != null) delete respawnCall;
+
+	// NextBotCreatePlayerBot<SurvivorBot>：Windows 的签名落在 `E8 rel32` 这条 call 指令上，
+	// 必须先解出 rel32 目标才是真正的函数入口（入口 prologue 各模板实例相同，无法用入口签名）；
+	// Linux 用符号名，地址本身就是入口，不能解引用。
+	Address addr = gameData.GetAddress("NextBotCreatePlayerBot<SurvivorBot>");
+	if (addr != Address_Null)
+	{
+		if (gameData.GetOffset("OS") == 1) // 1 = windows, 2 = linux
+		{
+			Address rel32 = view_as<Address>(LoadFromAddress(addr + view_as<Address>(1), NumberType_Int32));
+			addr += rel32 + view_as<Address>(5); // 5 = sizeof(E8 rel32)
+		}
+		StartPrepSDKCall(SDKCall_Static);
+		configured = PrepSDKCall_SetAddress(addr);
+		if (configured)
+		{
+			PrepSDKCall_AddParameter(SDKType_String, SDKPass_Pointer);
+			PrepSDKCall_SetReturnInfo(SDKType_CBasePlayer, SDKPass_Pointer);
+		}
+		Handle createCall = EndPrepSDKCall();
+		g_hSDK_NextBotCreatePlayerBot = configured ? createCall : null;
+		if (!configured && createCall != null) delete createCall;
+	}
+	delete gameData;
+
+	if (g_hSDK_NextBotCreatePlayerBot == null)
+	{
+		DegradeSurvivorBotCreation("签名 NextBotCreatePlayerBot<SurvivorBot> 无法解析（call-site 未命中或 rel32 解不出函数入口）");
+		return;
+	}
+	if (g_hSDK_RoundRespawn == null)
+	{
+		DegradeSurvivorBotCreation("签名 CTerrorPlayer::RoundRespawn 无法解析");
+		return;
+	}
+
+	g_bNextBotReady = true;
+	PrintToServer("[SV] 生还者 bot 创建方式: SDKCall NextBotCreatePlayerBot<SurvivorBot> + ChangeClientTeam + RoundRespawn（不再使用 CreateFakeClient 两段式）。");
+}
+
+// 关掉新路径并告警；之后 SpawnSurvivorBot() 会走 CreateFakeClient 降级分支。
+void DegradeSurvivorBotCreation(const char[] reason)
+{
+	g_bNextBotReady = false;
+	if (g_hSDK_NextBotCreatePlayerBot != null)
+	{
+		delete g_hSDK_NextBotCreatePlayerBot;
+		g_hSDK_NextBotCreatePlayerBot = null;
+	}
+	if (g_hSDK_RoundRespawn != null)
+	{
+		delete g_hSDK_RoundRespawn;
+		g_hSDK_RoundRespawn = null;
+	}
+	g_bNextBotDegradedWarned = true;
+	PrintToServer("[SV] 警告: 生还者 bot 的 SDKCall 准备失败（%s）。已退回 CreateFakeClient 两段式造 bot，功能仍可用。", reason);
+	LogError("[SV] NextBotCreatePlayerBot path disabled: %s", reason);
+}
+
+// ------------------------------------------------------------------------
+// Spawn a survivor bot
+//   manual = true 表示来自 sm_createplayer（管理员显式创建）
+//   返回 true = 已造出一个进入生还者队的 AI bot（主路径的实体化/模型校验在下一帧
+//   的 Frame_PlaceNewSurvivorBot 里收尾，不合格会当场收回）。
+// ------------------------------------------------------------------------
+bool SpawnSurvivorBot(const char[] botName = "SurvivorBot", bool manual = false)
 {
 	// Also covers manual/RCON creation and direct join requests.
 	if (!SvBotsAllowed() || !EnsureSurvivorModels()) return false;
-	int ClientsCount = GetSurvivorTeam();
-	
-	bool fakeclientKicked = false;
-	
-	// create fakeclient
-	int fakeclient = 0;
+	// 生还者队已到上限就不再补。新路径下 ChangeClientTeam 同步生效，刚造好的 bot
+	// 立刻会被 GetSurvivorTeam() 计入，所以挡得住同一帧的连续补位。
+	if (GetSurvivorTeam() >= SurvivorLimit.IntValue) return false;
 
-	if (ClientsCount < SurvivorLimit.IntValue)
+	// 主路径：直接让引擎实例化一个 SurvivorBot（没有"假客户端"中间态）
+	if (g_bNextBotReady) return SpawnSurvivorBotNextBot(botName, manual);
+
+	// 降级路径：gamedata / 签名 / SDKCall 不可用时退回原来的两段式
+	if (!g_bNextBotDegradedWarned)
 	{
-		fakeclient = CreateFakeClient(botName);
+		PrintToServer("[SV] 警告: 生还者 bot 的 SDKCall 不可用，继续使用 CreateFakeClient 两段式造 bot。");
+		g_bNextBotDegradedWarned = true;
 	}
-	
+	return SpawnSurvivorBotLegacy(botName, manual);
+}
+
+// ------------------------------------------------------------------------
+// 主路径：NextBotCreatePlayerBot<SurvivorBot> → ChangeClientTeam → 必要时 RoundRespawn
+// ------------------------------------------------------------------------
+bool SpawnSurvivorBotNextBot(const char[] botName, bool manual)
+{
+	// 没有空余 player slot 时 CreatePlayerBot 会直接失败，先挡一次省得拿到无效应答
+	if (GetClientCount(false) >= MaxClients) return false;
+
+	int bot = SDKCall(g_hSDK_NextBotCreatePlayerBot, botName);
+	if (bot <= 0 || bot > MaxClients || !IsValidEntity(bot))
+	{
+		// 返还了无效槽位时不要留半成品客户端占着 player slot
+		if (bot > 0 && bot <= MaxClients && IsClientConnected(bot))
+			KickClient(bot, "Failed to create survivor bot");
+		LogError("[SV bot] NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 %d", bot);
+		return false;
+	}
+
+	ChangeClientTeam(bot, TEAM_SURVIVOR);
+	if (!IsClientInGame(bot) || GetClientTeam(bot) != TEAM_SURVIVOR)
+	{
+		LogError("[SV bot] 新建 bot userid=%d 未能进入生还者队（team=%d）",
+			GetClientUserId(bot), GetClientTeam(bot));
+		KickClient(bot, "Failed to join survivor team");
+		return false;
+	}
+
+	// 刚 Instance() 出来的 SurvivorBot 可能还没实体化/没血 → 走引擎自己的回合复活流程
+	if (!IsPlayerAlive(bot)) SDKCall(g_hSDK_RoundRespawn, bot);
+
+	// 未实体化的 bot 拿不到模型，模型校验留给下一帧（见 Frame_PlaceNewSurvivorBot），
+	// 那样判"这家身体能不能用"时 bot 已经完整 spawn 了。
+	// 本帧只做一件事：把摆位和最终校验排到下一帧。
+	if (manual)
+		LogMessage("[SV bot] 管理员创建生还者 bot: userid=%d name='%s'", GetClientUserId(bot), botName);
+
+	/* 摆位留到下一帧：引擎在创建流程收尾时还会自己摆一次位置，
+	   上游 l4dmultislots 也是 RequestFrame 到下一帧才传送/补状态，
+	   同帧传送可能被引擎覆盖。 */
+	QueueSurvivorBotPlacement(bot);
+	return true;
+}
+
+// 新 bot"传送到队友身边"的下一帧收尾（见 SpawnSurvivorBotNextBot 的说明）
+void QueueSurvivorBotPlacement(int bot)
+{
+	if (!IsValidClient(bot)) return;
+	RequestFrame(Frame_PlaceNewSurvivorBot, GetClientUserId(bot));
+}
+
+public void Frame_PlaceNewSurvivorBot(any userid)
+{
+	int bot = GetClientOfUserId(userid);
+	if (!bot || !IsValidClient(bot) || !IsFakeClient(bot)) return;
+	if (GetClientTeam(bot) != TEAM_SURVIVOR) return;
+	// 这一帧里已经被真人接管/托管，就别再动这具身体
+	if (GetIdlePlayer(bot) > 0) return;
+	// 创建流程收尾时可能还没实体化/没血，补一次复活
+	if (!IsPlayerAlive(bot) && g_hSDK_RoundRespawn != null) SDKCall(g_hSDK_RoundRespawn, bot);
+	if (!IsPlayerAlive(bot))
+	{
+		// 造出来就是个不会活的空位：收回，别让它占着生还者名额
+		LogError("[SV bot] 新建 bot userid=%d 实体化失败（始终不是存活状态），已收回", userid);
+		KickClient(bot, "Survivor bot never became alive");
+		return;
+	}
+	// 到这里 bot 已经完整 spawn，可以判模型了：不可用（未 precache / 角色 ID 非法）就收回，
+	// 不能留一具裸模身体霸占生还者名额（旧路径同样是校验失败即踢）。
+	if (!PrepareSurvivorModel(bot))
+	{
+		KickClient(bot, "Unusable survivor model");
+		return;
+	}
+	TeleportToSurvivor(bot);
+}
+
+// ------------------------------------------------------------------------
+// 降级路径：原来的 CreateFakeClient 两段式（造假客户端 → 踢掉 → 引擎补一个真 bot）
+//   只有 gamedata/签名/SDKCall 失效时才会走到这里；修好 gamedata 之前靠它保底。
+// ------------------------------------------------------------------------
+bool SpawnSurvivorBotLegacy(const char[] botName, bool manual)
+{
+	bool fakeclientKicked = false;
+	int fakeclient = CreateFakeClient(botName);
+
 	// if entity is valid
 	if (fakeclient != 0)
 	{
-		SurvivorPlaceholder[fakeclient] = true;
 		// move into survivor team
 		ChangeClientTeam(fakeclient, TEAM_SURVIVOR);
-		
+
 		// check if entity classname is survivorbot
 		if (DispatchKeyValue(fakeclient, "classname", "survivorbot") == true)
 		{
 			// spawn the client
 			if (DispatchSpawn(fakeclient) == true && PrepareSurvivorModel(fakeclient))
-			{	
+			{
 				if (manual)
 				{
 					if (!IsPlayerAlive(fakeclient)) Respawn(fakeclient);
@@ -829,7 +1027,7 @@ bool SpawnFakeSurvivorClient(const char[] botName = "SurvivorBot", bool manual =
 				CreateTimer(DELAY_KICK_FAKECLIENT, Timer_KickFakeBot, GetClientUserId(fakeclient), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 				fakeclientKicked = true;
 			}
-		}			
+		}
 		// if something went wrong, kick the created FakeClient
 		if (fakeclientKicked == false) KickClient(fakeclient, "Kicking FakeClient");
 	}
@@ -841,10 +1039,13 @@ bool SpawnFakeSurvivorClient(const char[] botName = "SurvivorBot", bool manual =
 // ------------------------------------------------------------------------
 public void OnClientPostAdminCheck(int client)
 {
-	/* 兜底：OnPluginStart 期间（其它插件给 survivor_limit 赋值 -> FixBotCount ->
-	   CreateFakeClient）引擎会同步回调到这里，此时本插件靠后的 ConVar 可能还没创建，
-	   句柄为 0，读 .BoolValue/.IntValue 会抛 "Invalid convar handle 0 (error 4)"。
-	   等 ConVar 齐了以后的正常进服不受影响。 */
+	/* 兜底：任何"造 bot 客户端"的动作（本插件主路径的 SDKCall NextBotCreatePlayerBot、
+	   本插件降级分支和 scripting/playermanagement.sp::FixBotCount 的 CreateFakeClient）
+	   都会让引擎同步回调到这里。若这次回调发生在 OnPluginStart 的 ConVar 创建链里
+	   （Initialize12v12Capacity 赋值 -> survivor_limit 变更钩子 -> 别的插件造 bot），
+	   本插件靠后的 ConVar 可能还没创建、句柄为 0，读 .BoolValue/.IntValue 会抛
+	   "Invalid convar handle 0 (error 4)"。这里直接返回即可：
+	   bot 是 FakeClient，下面本来也不该走真人入队逻辑。 */
 	if (KillRes == null || AutoJoin == null) return;
 
 	// If lobby is full, KillRes is true and l4dt is present, unreserve lobby
@@ -1017,7 +1218,7 @@ bool HasDeadSurvivorSeat()
 
 /* ------------------------------------------------------------------------
 * 脱困处理：新玩家进服时引擎会先按默认把他放进生还者队；如果生还者队只剩死亡身体
-* 占位，SafeTakeOverSurvivor 拿不到活 Bot、SpawnFakeSurvivorClient 也因名额被占满
+* 占位，SafeTakeOverSurvivor 拿不到活 Bot、SpawnSurvivorBot 也因名额被占满
 * 而失败，玩家就一直停在"生还者队 + 已死亡"的槽位反复 Join_Wait。
 * 此时客户端会显示原生的"点击加入游戏"闲置提示，而对抗没有可用闲置键 → 点了没反应、
 * 卡死在那个界面。这里把他退回旁观并清掉残留的跟随观察态，让他能重新 !join / 按 M。
@@ -1401,7 +1602,7 @@ JoinResult TryJoinTeam(int client, int team, bool announce, bool adminTransfer =
 			if (announce) PrintToChat(client, "\x03[SV] \x01本回合已阵亡，不能接管存活的 AI。请等待救援、复活或下一回合。");
 			return Join_Failed;
 		}
-		if (GetSurvivorTeam() < SurvivorLimit.IntValue) SpawnFakeSurvivorClient();
+		if (GetSurvivorTeam() < SurvivorLimit.IntValue) SpawnSurvivorBot();
 		return Join_Wait;
 	}
 	// The original jointeam command has its own four-player checks. Bypass only that
@@ -1452,7 +1653,7 @@ int FindJoinSurvivorBot(bool allowAlive = true)
 	int deadBot = -1;
 	for (int bot = 1; bot <= MaxClients; bot++)
 	{
-		if (!IsBotValid(bot) || GetClientTeam(bot) != TEAM_SURVIVOR || SurvivorPlaceholder[bot]) continue;
+		if (!IsBotValid(bot) || GetClientTeam(bot) != TEAM_SURVIVOR) continue;
 		if (!PrepareSurvivorModel(bot)) continue;
 		if (IsPlayerAlive(bot))
 		{
@@ -1505,8 +1706,9 @@ public Action MultiStatus(int client, int args)
 	ReplyToCommand(client, "[Multi] survivor humans=%d AI=%d | infected humans=%d AI=%d | auto=%d management=%d | round=%d restorelock=%d | waiting=%d auto_waiting=%d",
 		GetTeamPlayers(TEAM_SURVIVOR, false), CountBots(TEAM_SURVIVOR), GetTeamPlayers(TEAM_INFECTED, false),
 		CountBots(TEAM_INFECTED), AutoJoin.IntValue, Management.IntValue, RoundStarted, TeamChangesLocked(), waiting, automatic);
-	ReplyToCommand(client, "[Multi] ready_humans=%d | bots_allowed=%d | empty_cleanup=%d",
-		GetReadyHumanCount(), SvBotsAllowed(), EmptyServerTimer != null);
+	ReplyToCommand(client, "[Multi] ready_humans=%d | bots_allowed=%d | empty_cleanup=%d | bot_create=%s",
+		GetReadyHumanCount(), SvBotsAllowed(), EmptyServerTimer != null,
+		g_bNextBotReady ? "nextbot" : "fakeclient(fallback)");
 	ReplyToCommand(client, "[Multi] survivor_models=%d/%d | map_ready=%d | takeover_blocked=%d | character_repairs=%d",
 		SurvivorModelsReady, L4D1 ? 4 : 8, SurvivorMapReady, TakeoverBlocked, SurvivorCharacterRepairs);
 	return Plugin_Handled;
@@ -1522,11 +1724,13 @@ public Action Create_Player(int client, int args)
 	if (args > 0) GetCmdArg(1, name, sizeof(name));
 	// Named and unnamed requests share the same limit and cleanup. Previously
 	// named bots never joined a team, and failed/double dispatches leaked slots.
-	if (!SpawnFakeSurvivorClient(name, true))
+	if (!SpawnSurvivorBot(name, true))
 		ReplyToCommand(client, "[SV] Could not create survivor: no ready human, team full or bot creation failed.");
 	return Plugin_Handled;
 }
 
+// 只服务降级路径（CreateFakeClient 两段式）：把刚建的假客户端在 DELAY_KICK_FAKECLIENT
+// 之后踢掉，让引擎补上一个真正的 SurvivorBot 接管这个位置。主路径不会走到这里。
 public Action Timer_KickFakeBot(Handle timer, any userid)
 {
 	int Bot = GetClientOfUserId(userid);
@@ -1744,7 +1948,6 @@ stock void SvRecycleSurvivorBots()
 		if (GetClientTeam(i) != TEAM_SURVIVOR) continue;
 		if (GetIdlePlayer(i)) continue;              // 有真人 AFK 接管了这个 bot，别踢
 		if (IsClientInKickQueue(i)) continue;
-		if (SurvivorPlaceholder[i]) continue;        // 正在生成中的占位假客户端由它自己的 Timer 收尾
 		KickClient(i, "空服回收 AI bot");
 	}
 }
@@ -1950,7 +2153,7 @@ void DisplayTeamMenu(int client)
 public int TeamMenuHandler(Handle UpgradePanel, MenuAction action, int client, int param2) {
 	if (action == MenuAction_Select) {
 		if (param2 == 1) {
-			FakeClientCommand(client, "sm_spectate");
+			FakeClientCommand(client, "sm_pg");
 		}
 		else if (param2 == 2) {
 
@@ -2697,7 +2900,7 @@ bool IsTakeoverPairValid(int client, int bot)
 	if (!SurvivorMapReady || !IsValidClient(client) || IsFakeClient(client)
 		|| !IsClientAuthorized(client) || IsClientInKickQueue(client)) return false;
 	if (!IsValidClient(bot) || !IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR
-		|| SurvivorPlaceholder[bot] || IsClientInKickQueue(bot)
+		|| IsClientInKickQueue(bot)
 		|| !HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) return false;
 	int owner = GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID");
 	return owner == 0 || owner == GetClientUserId(client);
@@ -2904,11 +3107,9 @@ int FindTeleportAnchor(int Bot, bool allowBots)
 	{
 		if (i == Bot) continue;
 		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR) continue;
-		// 存活判定沿用插件自己的 IsAlive（m_lifeState == 0，与 IsPlayerAlive 等价）
+		// 存活判定沿用插件自己的 IsAlive（m_lifeState == 0，与 IsPlayerAlive 等价）；
+		// 已被排队踢掉的客户端位置没有意义，上面一并排除。
 		if (!IsAlive(i) || IsClientInKickQueue(i)) continue;
-		// 生成中/待踢的占位假客户端（SpawnFakeSurvivorClient 造出来的那种）不能当落点：
-		// 它 0.1 秒后就被踢掉，它站的位置也不代表任何真实队友的位置。
-		if (SurvivorPlaceholder[i]) continue;
 		if (IsFakeClient(i) != allowBots) continue;
 		// 幽灵状态（m_isGhost）的生还者是不可见/无碰撞的残影，不能当落点
 		if (GetEntProp(i, Prop_Send, "m_isGhost")) continue;
@@ -2925,9 +3126,9 @@ int FindTeleportAnchor(int Bot, bool allowBots)
 	return best;
 }
 
-/* 把 Bot（占位生还者 Bot 或刚复活的真人）传送到队友身边。
- * 只在两处明确需要的地方调用：SpawnFakeSurvivorClient 占位 bot 出生、TryJoinTeam 真人中途加入复活。
- * 不做任何"定期把人传送"的轮询。 */
+/* 把 Bot（刚造出来的生还者 Bot 或刚复活的真人）传送到队友身边。
+ * 只在两处明确需要的地方调用：SpawnSurvivorBot 造出的新 bot（下一帧收尾）、
+ * TryJoinTeam 真人中途加入复活。不做任何"定期把人传送"的轮询。 */
 void TeleportToSurvivor(int Bot) 
 {
 	if (!IsValidClient(Bot)) return;

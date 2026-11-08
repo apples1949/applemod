@@ -200,6 +200,7 @@ bool   g_bVisionDropTried[MAXPLAYERS + 1]; /* 已经尝试过插件强制掉控 
 float  g_fVisionFullAt[MAXPLAYERS + 1];    /* 怒气第一次满 100 的时刻 */
 float  g_fVisionUnseenAt[MAXPLAYERS + 1];  /* 本轮“看不见”开始时刻(0=看得见/未跟踪) */
 bool   g_bVisionPenalty[MAXPLAYERS + 1];   /* 是否已经进入“扣控制权”状态 */
+bool   g_bVisionAnnounced[MAXPLAYERS + 1]; /* 该坦克已经全服播报过“插件接管控制权”(每辆坦克只播一次, 与 penalty 的反复切换无关) */
 bool   g_bVisionTracHit[MAXPLAYERS + 1];   /* 这辆坦克的跟踪石命中过生还者(加成状态) */
 float  g_fVisionTracAt[MAXPLAYERS + 1];    /* 跟踪石命中时刻(tankcontrol_trac_after>0 时用来算到期) */
 int    g_iVisionMeter[MAXPLAYERS + 1];     /* 上次观察到的怒气原始值(不含本插件自己的写入) */
@@ -225,7 +226,7 @@ int	  g_iLastTracTarget[MAXPLAYERS + 1];	  /* 该坦克上一发跟踪石命中�
 /* -----------------------------------------------------------
 	石头轨迹预测(!pred)状态
 ----------------------------------------------------------- */
-/* 坦克出生提示: 一次性推 6 条聊天会被聊天框挤掉(只看到最后一条), 所以按 0.35 秒一条逐条发 */
+/* 坦克出生提示: 一次性推 7 条聊天会被聊天框挤掉(只看到最后一条), 所以按 0.35 秒一条逐条发 */
 int	   g_iHintLine[MAXPLAYERS + 1];
 bool   g_bHintActive[MAXPLAYERS + 1];
 int	   g_iHeldRock[MAXPLAYERS + 1]; /* 该坦克当前握在手里(还没掷出)的 tank_rock 的 entref, 无则 INVALID_ENT_REFERENCE */
@@ -278,6 +279,7 @@ float  g_fPredLastVel[MAXPLAYERS + 1][3];				 /* 上次重算时的初速 */
 float  g_fPredLastAng[MAXPLAYERS + 1][3];				 /* 上次重算时的瞄准角度 */
 ConVar g_hSvGravity;				/* sv_gravity: 石头重力 = sv_gravity * 0.4 */
 ConVar g_hThrowForce;				/* z_tank_throw_force: 石头出石初速 */
+ConVar g_hTankSwapMenuSecs;			/* l4d2_tank_swap 的 l4d_tankswap_menudisplay(选克面板显示秒数), 取不到时按 5 秒 */
 
 public Plugin myinfo =
 {
@@ -758,10 +760,23 @@ void TankHint_Send(int client, int line)
 			CPrintToChat(client, "%s指令{lightgreen}!gz{darkred}开启跟踪石头(扣%d血, 石头未命中则扣%d血)", TAG, Apex[4].IntValue, Apex[5].IntValue);
 		case 5:
 			CPrintToChat(client, "%s指令{lightgreen}!yc{darkred}开启石头轨迹预测(扣%d血)", TAG, Apex[11].IntValue);
+		case 6:
+		{
+			/* “给克”=把坦克移交给队友: 服务器上的 l4d2_tank_swap 在 choicetype=2 时会给每位坦克玩家
+			   自动弹出选克面板(屏幕左侧, 按数字键选人). 面板显示秒数跟着它的
+			   l4d_tankswap_menudisplay(默认 5 秒, 0=不自动关)走, 这里读实时值, 免得改了 cvar 提示还说旧数字;
+			   面板自己标题里也带“剩余 N 秒”, 所以这里只报时长不解释倒计时. */
+			int iPanel = RoundToNearest(VisionControlCvar(g_hTankSwapMenuSecs, "l4d_tankswap_menudisplay", 5.0));
+
+			if (iPanel > 0)
+				CPrintToChat(client, "%s数字键 -> 给克(屏幕左侧面板 %d 秒内选人, 把坦克让给队友)", TAG, iPanel);
+			else
+				CPrintToChat(client, "%s数字键 -> 给克(屏幕左侧面板选人, 把坦克让给队友)", TAG);
+		}
 	}
 }
 
-#define TANK_HINT_LINES 6
+#define TANK_HINT_LINES 7
 
 Action Timer_TankHint(Handle timer, any userid)
 {
@@ -786,7 +801,7 @@ Action Timer_TankHint(Handle timer, any userid)
 	return Plugin_Continue;
 }
 
-/* 坦克出生时逐条发提示(避免一次推 6 条被聊天框挤掉) */
+/* 坦克出生时逐条发提示(避免一次推 7 条被聊天框挤掉) */
 void TankHints_Start(int client)
 {
 	if (g_bHintActive[client])
@@ -2627,6 +2642,7 @@ void VisionClearTracking(int client)
 	g_fVisionRangeMark[client] = -1.0;
 	g_fVisionUnseenAt[client]  = 0.0;
 	g_bVisionPenalty[client]   = false;
+	g_bVisionAnnounced[client] = false; /* 下一辆坦克重新播报一次“插件接管控制权” */
 	g_bVisionTracHit[client]   = false;
 	g_fVisionTracAt[client]    = 0.0;
 	g_iVisionMeter[client]     = 0;
@@ -3264,6 +3280,7 @@ Action Timer_TankVision(Handle timer)
 			g_fVisionRangeMark[i] = -1.0;
 			g_fVisionUnseenAt[i]  = 0.0;
 			g_bVisionPenalty[i]   = false;
+			g_bVisionAnnounced[i] = false; /* 新的控制权段(没走 spawn 的换人): 这一辆坦克要能再播报一次 */
 			g_bVisionTracHit[i]   = false;
 			g_fVisionChatAt[i]    = 0.0;
 			g_fVisionSampleAt[i]  = fNow;
@@ -3413,11 +3430,23 @@ Action Timer_TankVision(Handle timer)
 			g_bVisionPenalty[i] = true;
 			g_fVisionMeterF[i]  = float(iMeter);
 
-			if (Apex[APEX_TV_NOTIFY].BoolValue)
+			/* 全服播报每辆坦克只发一次.
+			   g_bVisionPenalty 会在“重新看见生还者”“接管门槛未到”“游戏自己在掉控(force=0)”几处被清回 false,
+			   坦克“看得见 <-> 看不见”反复切换时就会反复进这个分支 -> 全服反复刷同一条.
+			   所以播报挂在独立的一次性标记 g_bVisionAnnounced 上, 它只在
+			   Reset()/坦克出生/死亡/断线/新的控制权段 里清(见 VisionClearTracking 与 Timer_TankVision 的起点块),
+			   因此同一辆坦克只会播一次, 下一辆坦克仍然照常播报. */
+			if (Apex[APEX_TV_NOTIFY].BoolValue && !g_bVisionAnnounced[i])
+			{
+				g_bVisionAnnounced[i] = true;
+
 				CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活已满 {lightgreen}%d{default} 秒, 插件接管控制权: 每秒 {lightgreen}%d%%{default}{default}%s",
 					TAG, i, RoundToNearest(VisionStartTime()), RoundToNearest(fRate),
 					bGameDeducting ? " (游戏也在掉控, 读数按插件速率覆盖)" : "");
+			}
 
+			/* 日志故意保持“每次进入接管阶段都记”: 只有 debug>=2 才写, 而它正是排查
+			   “penalty 反复切换/速率变化”的唯一证据链, 只记一次反而看不出反复. */
 			VisionLog("%N 存活 %.0f 秒 -> 插件接管控制权: %d%%/秒 (引擎自己在掉控=%s)",
 				i, fAlive, RoundToNearest(fRate), bGameDeducting ? "是" : "否");
 		}

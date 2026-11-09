@@ -47,7 +47,7 @@ stock void HandlePop(int attacker, int victim, int shoveCount, float timeAlive)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★{default} {olive}%N{default} 悄无声息解决了 {olive}%N{default}.", attacker, victim);
 		else if (IsValidClientInGame(attacker))
-			CPrintToChatAll("{green}★{default} {olive}%N{default} 悄无声息解决了一只 boomer.", attacker);
+			CPrintToChatAll("{green}★{default} {olive}%N{default} 悄无声息解决了一只胖子.", attacker);
 	}
 
 	Call_StartForward(g_hForwardBoomerPop);
@@ -67,7 +67,7 @@ stock void HandleLevel(int attacker, int victim)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★★★{default} {olive}%N{default} 使用 {blue}近战满血秒杀{default} {olive}%N{default}", attacker, victim);
 		else if (IsValidClientInGame(attacker))
-			CPrintToChatAll("{green}★★★{default} {olive}%N{default} 使用 {blue}近战满血秒杀{default}{olive} 一只 charger{default}", attacker);
+			CPrintToChatAll("{green}★★★{default} {olive}%N{default} 使用 {blue}近战满血秒杀{default}{olive} 一只牛{default}", attacker);
 	}
 
 	// call forward
@@ -105,7 +105,7 @@ stock void HandleDeadstop(int attacker, int victim)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}推停了{default} {olive}%N{default}", attacker, victim);
 		else if (IsValidClientInGame(attacker))
-			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}推停了{default} {olive}一只 hunter{default}", attacker);
+			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}推停了{default} {olive}一只猎人{default}", attacker);
 	}
 
 	Call_StartForward(g_hForwardHunterDeadstop);
@@ -144,7 +144,7 @@ stock void HandleSkeet(int attacker, int victim, bool bMelee = false, bool bSnip
 			if (IsValidClientInGame(victim) && !IsFakeClient(victim))
 				CPrintToChatAll("{green}★{default} {olive}%N{default} 被 {blue}团队空爆{default}.", victim);
 			else
-				CPrintToChatAll("{green}★{default} {olive}Hunter{default} 被 {blue}团队空爆{default}.");
+				CPrintToChatAll("{green}★{default} {olive}猎人{default} 被 {blue}团队空爆{default}.");
 		}
 		else
 		{
@@ -155,7 +155,7 @@ stock void HandleSkeet(int attacker, int victim, bool bMelee = false, bool bSnip
 			if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 				CPrintToChatAll("{green}★★{default} {olive}%N{default} {blue}%s空爆{default} 了 {olive}%N{default}.", attacker, sType, victim);
 			else if (IsValidClientInGame(attacker))
-				CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}%s空爆{default} 了 {olive}一只hunter{default}.", attacker, sType);
+				CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}%s空爆{default} 了 {olive}一只猎人{default}.", attacker, sType);
 		}
 	}
 
@@ -202,7 +202,7 @@ stock void HandleNonSkeet(int attacker, int victim, int damage, bool bOverKill =
 		if (IsValidClientInGame(victim))
 			CPrintToChatAll("{green}★{default} {olive}%N{default} 被 {green}残血空爆{default} ({blue}%d{default} 伤害).", victim, damage);
 		else
-			CPrintToChatAll("{green}★{default} {olive}Hunter{default} 被 {green}残血空爆{default} ({blue}%d{default} 伤害).", damage);
+			CPrintToChatAll("{green}★{default} {olive}猎人{default} 被 {green}残血空爆{default} ({blue}%d{default} 伤害).", damage);
 	}
 
 	// call forward
@@ -262,7 +262,7 @@ void HandleDrawCrown(int attacker, int damage, int chipdamage)
 		if (IsValidClientInGame(attacker))
 			CPrintToChatAll("{green}★★{default} {olive}%N{default} 引秒了一个女巫 ({blue}%d{default} 伤害, {olive}%d{default} 引秒伤害).", attacker, damage, chipdamage);
 		else
-			CPrintToChatAll("Witch 被引秒 ({blue}%d{default} 伤害, {olive}%d{default} 引秒伤害).", damage, chipdamage);
+			CPrintToChatAll("女巫 被引秒 ({blue}%d{default} 伤害, {olive}%d{default} 引秒伤害).", damage, chipdamage);
 	}
 
 	// call forward
@@ -282,7 +282,7 @@ void HandleTongueCut(int attacker, int victim)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★★★{default} {olive}%N{default} {blue}砍断{default} {olive}%N{default}的舌头", attacker, victim);
 		else if (IsValidClientInGame(attacker))
-			CPrintToChatAll("{green}★★★{default} {olive}%N{default} {blue}砍断{default} smoker 的舌头", attacker);
+			CPrintToChatAll("{green}★★★{default} {olive}%N{default} {blue}砍断{default} 烟鬼 的舌头", attacker);
 	}
 
 	// call forward
@@ -308,7 +308,7 @@ void HandleSmokerSelfClear(int attacker, int victim, bool withShove = false)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★★{default} {olive}%N{default} 从 {olive}%N{default}的舌头下 {blue}%s{default} {blue}自救{default} ", attacker, victim, sShoveText);
 		else if (IsValidClientInGame(attacker))
-			CPrintToChatAll("{green}★★{default} {olive}%N{default} 从 {olive}smoker{default}的舌头下 {blue}%s{default} {blue}自救{default} ", attacker, sShoveText);
+			CPrintToChatAll("{green}★★{default} {olive}%N{default} 从 {olive}烟鬼{default}的舌头下 {blue}%s{default} {blue}自救{default} ", attacker, sShoveText);
 	}
 
 	// call forward
@@ -338,7 +338,7 @@ void HandleRockSkeeted(int attacker, int victim)
 		if (g_cvarRepRockName.BoolValue && IsValidClientInGame(victim) && !IsFakeClient(victim))
 			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}空爆{default} 了 {olive}%N{default} 的 石头.", attacker, victim);
 		else
-			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}空爆{default} 了 tank 石头", attacker);
+			CPrintToChatAll("{green}★{default} {olive}%N{default} {blue}空爆{default} 了 坦克 石头", attacker);
 	}
 
 	Call_StartForward(g_hForwardRockSkeeted);
@@ -356,7 +356,7 @@ stock void HandleHunterDP(int attacker, int victim, int actualDamage, float calc
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(attacker))
 			CPrintToChatAll("{green}★★{default} {olive}%N{default} {red}高扑{default} {olive}%N{default} ({red}%d{default} 伤害, 高度: {red}%d{default})", attacker, victim, RoundFloat(calculatedDamage), RoundFloat(height));
 		else if (IsValidClientInGame(victim))
-			CPrintToChatAll("{green}★★{default} {olive}Hunter{default} {red}高扑{default} {olive}%N{default} ({red}%d{default} 伤害, 高度: {red}%d{default})", victim, RoundFloat(calculatedDamage), RoundFloat(height));
+			CPrintToChatAll("{green}★★{default} {olive}猎人{default} {red}高扑{default} {olive}%N{default} ({red}%d{default} 伤害, 高度: {red}%d{default})", victim, RoundFloat(calculatedDamage), RoundFloat(height));
 	}
 
 	Call_StartForward(g_hForwardHunterDP);
@@ -377,7 +377,7 @@ stock void HandleJockeyDP(int attacker, int victim, float height)
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(attacker))
 			CPrintToChatAll("{green}★★★{default} {olive}%N{default} {red}高处掉下骑了{default} {olive}%N{default} ({red}高度{default}: {red}%d{default})", attacker, victim, RoundFloat(height));
 		else if (IsValidClientInGame(victim))
-			CPrintToChatAll("{green}★★★{default} {olive}Jockey{default} {red}高处掉下骑了{default} {olive}%N{default} ({red}高度{default}: {red}%d{default})", victim, RoundFloat(height));
+			CPrintToChatAll("{green}★★★{default} {olive}猴子{default} {red}高处掉下骑了{default} {olive}%N{default} ({red}高度{default}: {red}%d{default})", victim, RoundFloat(height));
 	}
 
 	Call_StartForward(g_hForwardJockeyDP);
@@ -404,7 +404,7 @@ stock void HandleDeathCharge(int attacker, int victim, float height, float dista
 		if (IsValidClientInGame(attacker) && IsValidClientInGame(victim) && !IsFakeClient(attacker))
 			CPrintToChatAll("{green}★★★★{default} {olive}%N{default} {red}冲锋{default} 造成 {olive}%N 死亡{default} (%s)({red}高度{default}: {red}%d{default})", attacker, victim, sImpactText, RoundFloat(height));
 		else if (IsValidClientInGame(victim))
-			CPrintToChatAll("{green}★★★★{default} {olive}Charger{default} {red}冲锋{default} 造成 {olive}%N{default} 死亡(%s)({red}高度{default}: {red}%d{default})", victim, sImpactText, RoundFloat(height));
+			CPrintToChatAll("{green}★★★★{default} {olive}牛{default} {red}冲锋{default} 造成 {olive}%N{default} 死亡(%s)({red}高度{default}: {red}%d{default})", victim, sImpactText, RoundFloat(height));
 	}
 
 	Call_StartForward(g_hForwardDeathCharge);
@@ -507,16 +507,16 @@ stock void HandleCarAlarmTriggered(int survivor, int infected, int reason)
 					switch (GetEntProp(infected, Prop_Send, "m_zombieClass"))
 					{
 						case ZC_SMOKER:
-							CPrintToChatAll("{green}★{default} {olive}Hunter{default} 让 {olive}%N{default} 触发警报.", survivor);
+							CPrintToChatAll("{green}★{default} {olive}猎人{default} 让 {olive}%N{default} 触发警报.", survivor);
 						case ZC_JOCKEY:
-							CPrintToChatAll("{green}★{default} {olive}Jockey{default} 让 {olive}%N{default} 触发警报.", survivor);
+							CPrintToChatAll("{green}★{default} {olive}猴子{default} 让 {olive}%N{default} 触发警报.", survivor);
 						case ZC_CHARGER:
 							// baseline passed `survivor` where a phrase name belonged (the
 							// "CalarmTouchedCharger" phrase was never printed); restoring the
 							// string that phrase file defined for this branch
-							CPrintToChatAll("{green}★{default} {olive}Charger{default} 让 {olive}%N{default} 触发警报.", survivor);
+							CPrintToChatAll("{green}★{default} {olive}牛{default} 让 {olive}%N{default} 触发警报.", survivor);
 						default:
-							CPrintToChatAll("{green}★{default} {olive}Bot infected{default} 让 {olive}%N{default} 触发警报.", survivor);
+							CPrintToChatAll("{green}★{default} {olive}电脑特感{default} 让 {olive}%N{default} 触发警报.", survivor);
 					}
 				}
 			}
@@ -528,9 +528,9 @@ stock void HandleCarAlarmTriggered(int survivor, int infected, int reason)
 		else if (reason == CALARM_BOOMER)
 		{
 			if (IsValidInfected(infected) && !IsFakeClient(infected))
-				CPrintToChatAll("{green}★{default} {olive}%N{default} 杀了一只 boomer {olive}%N{default} 触发了一辆警报车.", survivor, infected);
+				CPrintToChatAll("{green}★{default} {olive}%N{default} 杀了一只胖子 {olive}%N{default} 触发了一辆警报车.", survivor, infected);
 			else
-				CPrintToChatAll("{green}★{default} {olive}%N{default} 杀了一只 {olive}boomer{default}触发了一辆警报车.", survivor);
+				CPrintToChatAll("{green}★{default} {olive}%N{default} 杀了一只 {olive}胖子{default}触发了一辆警报车.", survivor);
 		}
 		else
 			CPrintToChatAll("{green}★{default} {olive}%N{default} 触发了一辆警报车.", survivor);

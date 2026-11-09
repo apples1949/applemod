@@ -15,13 +15,20 @@
    由 Apex 独占 m_frustration 的写入, 本插件不再每帧补正怒气, 避免两个插件抢同一条属性。
    本插件仍然创建 tankcontrol_trac_base / _step / _after / _longlife_time /
    _longlife_step / _notify 这几个 cvar, 但只是为了让现有 cfg 的 confogl_addcvar 继续
-   有效, 具体数值由 Apex 读取并使用:
-     看不见生还者时, Apex 每秒扣 max(base, 存活满 longlife_time 后的 longlife_step,
-                                      跟踪石命中后的 step)。
+   有效, 实际生效的数值在 Apex 的 l4d2_tankvision_* 里(叠加口径: 基础幅度 + 存活满门限 + 跟踪石命中)。
 
    命名口径提醒: 原版的"控制权/frustration"是 GetTankFrustration = 100 - m_frustration,
    而怒气这边直接操作引擎原始值 m_frustration(与引擎以及 l4d2_tankrage / godframes
    等怒气插件同一口径)。
+
+   2026-11 修复(二控后"按时间"的控制权消耗量失效):
+     * "按时间生效"的扣控规则(存活满 N 秒后的加成 / 阶梯可见范围 / 跟踪石加成)实际执行者
+       与存活计时都在 Apex.sp 的坦克视野模块里, 本插件只创建上面那几个 cvar 供 cfg 使用。
+       二控后失效的根因与修复也在 Apex.sp: 存活计时改成跟着"一辆坦克"走(跨控制者延续),
+       控制权交接只清 per-life 闩锁。
+     * 本插件自己的相关缺陷: 掉线坦克的 dcedTankFrustration / fTankGrace 以前用完不清零,
+       后面任何一次 "AI 坦克 -> 玩家"(给克 / 二控)都会被上一辆坦克的怒气与 grace 覆盖。
+       现在改成一次性交接(见 L4D2_OnTankPassControl 里的说明)。
    ========================================================================= */
 #define TEAM_SPECTATOR          1
 #define TEAM_INFECTED           3
@@ -52,6 +59,12 @@ float
     gotTankAt;
 
 int dcedTankFrustration = -1;
+float dcedTankAt = 0.0;
+
+/* "掉线/换边的坦克把怒气与 grace 交给接手的人"只对紧接着的那一次接手有效:
+   超过这个窗口就作废, 否则上一辆坦克的值会一直挂到回合结束, 污染后面每一次
+   "AI 坦克 -> 玩家"(给克 / 二控)的接手 */
+#define DCED_TANK_INHERIT_WINDOW    90.0
 
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
@@ -142,12 +155,27 @@ public void L4D2_OnTankPassControl(int iOldTank, int iNewTank, int iPassCount)
     * As the Player switches to AI on disconnect/team switch, we have to make sure we're only checking this if the old Tank was AI.
     * Then apply the previous' Tank's Frustration and Grace Period (if it still had Grace)
     * We'll also be keeping the same Tank pass, which resolves Tanks that dc on 1st pass resulting into the Tank instantly going to 2nd pass.
+    *
+    * 注意: 这里必须"用一次就清". 以前 dcedTankFrustration / fTankGrace 只在回合开始和坦克死亡时清,
+    * 于是掉线那位坦克的怒气值和 grace 会一直留着, 后面任何一次 "AI 坦克 -> 玩家"(给克 / 二控)
+    * 都被旧坦克的值强行覆盖: 新坦克一上来就带着上一辆的怒气(掉控飞快), 或者拿到一段莫须有的
+    * grace(引擎按时间的怒气累积被压住) —— 表现就是"二控后控制权消耗量不对/失效".
+    * 玩家 -> AI 的那一跳不能清(那一刻 IsFakeClient(iOldTank) 为假, 代码不进这个分支),
+    * 真正接手的是后面 AI -> 玩家 的那一次.
     */
     if (dcedTankFrustration != -1 && IsFakeClient(iOldTank))
     {
-        SetTankFrustration(iNewTank, dcedTankFrustration);
-        CTimer_Start(GetFrustrationTimer(iNewTank), fTankGrace);
-        L4D2Direct_SetTankPassedCount(L4D2Direct_GetTankPassedCount() - 1);
+        if ((GetGameTime() - dcedTankAt) <= DCED_TANK_INHERIT_WINDOW)
+        {
+            SetTankFrustration(iNewTank, dcedTankFrustration);
+            CTimer_Start(GetFrustrationTimer(iNewTank), fTankGrace);
+            L4D2Direct_SetTankPassedCount(L4D2Direct_GetTankPassedCount() - 1);
+        }
+
+        /* 不论有没有用上, 这一段交接信息到此为止 */
+        dcedTankFrustration = -1;
+        fTankGrace = 0.0;
+        dcedTankAt = 0.0;
     }
 
     gotTankAt = GetGameTime();
@@ -249,6 +277,8 @@ void RoundStart_Event(Event hEvent, const char[] eName, bool dontBroadcast)
 {
     CreateTimer(10.0, newGame);
     dcedTankFrustration = -1;
+    fTankGrace = 0.0;
+    dcedTankAt = 0.0;
     gotTankAt = 0.0;
     tankInitiallyChosen = "";
 }
@@ -316,6 +346,7 @@ void PlayerTeam_Event(Event hEvent, const char[] name, bool dontBroadcast)
             {
                 dcedTankFrustration = GetTankFrustration(client);
                 fTankGrace = CTimer_GetRemainingTime(GetFrustrationTimer(client));
+                dcedTankAt = GetGameTime();
 
                 // Slight fix due to the timer seemingly always getting stuck between 0.5s~1.2s even after Grace period has passed.
                 // CTimer_IsElapsed still returns false as well.
@@ -417,6 +448,8 @@ void PlayerDeath_Event(Event hEvent, const char[] eName, bool dontBroadcast)
             chooseTank(0);
             gotTankAt = 0.0;
             dcedTankFrustration = -1;
+            fTankGrace = 0.0;
+            dcedTankAt = 0.0;
         }
     }
 }

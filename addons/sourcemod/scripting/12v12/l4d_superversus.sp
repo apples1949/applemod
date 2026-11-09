@@ -6,6 +6,12 @@
 #include <l4d2_fix_team_shuffle_edi>
 #define REQUIRE_PLUGIN
 
+/* 可选的 readyup 依赖。readyup-applemod 暴露了 IsInReady native（GetFeatureStatus 探到才调用），
+   只用来实现"准备阶段不要跟准备面板抢屏幕"，readyup 不在时这条分支自动跳过。
+   注意：readyup 另外内部有个 IsPlayerHiddenPanel（!hide/!show 用），它是插件内部函数、没有对外
+   暴露 native，所以这里无法调用；面板兼容性靠下面的 GetClientMenu 判断 + IsInReady 两道门。 */
+native bool IsInReady();
+
 #pragma semicolon 1; // Force strict semicolon mode.
 #pragma newdecls required; 
 
@@ -34,6 +40,38 @@
 #define ZC_CHARGER                     6
 #define ZC_WITCH                       7
 #define ZC_TANK                        8
+
+// ---------------------------------------------------------------------------
+// 特感辅助面板（sm_sihud）常量
+// ---------------------------------------------------------------------------
+#define SIHUD_TITLE              "特感辅助面板"
+#define SIHUD_TXT_HINT           "输入!sihud开关面板"
+#define SIHUD_TXT_SURVIVORS      "生还者："
+#define SIHUD_TXT_INFECTED       "感染者："
+#define SIHUD_TXT_TANK           "坦克已刷出"
+#define SIHUD_TXT_BLANK          " "
+#define SIHUD_PANEL_SECONDS      3      // 面板显示时长（秒）；比刷新间隔长，画面才连续
+#define SIHUD_REFRESH_SECONDS    1.0    // 刷新间隔（秒）：需求 1 秒刷新
+#define SIHUD_TEXT_BUDGET        510    // 面板总预算 511 字节，单行留 1 字节给换行
+#define SIHUD_NAME_CHARS         2      // 玩家名保留的字符数（需求：只显示前两个字符）
+#define SIHUD_SAFE_HEALTH        40     // 生还者行"总血量>40"的门槛
+#define SIHUD_SPAWN_LINES        2      // 刷新点显示几行
+#define SIHUD_MAX_SPAWNS         192    // 缓存的 info_zombie_spawn 上限
+#define SIHUD_SPAWN_SCAN_ATTEMPTS 30    // 全图最大 flow 还没就绪时最多重试多少次（每秒一次）
+#define SIHUD_SPAWN_AHEAD_EPS    1.0    // flow 余量：与最远生还者齐平的点算"已越过"
+#define SIHUD_EARLY_CLOSE_SLACK  0.5    // 面板提前这么多秒消失即认为玩家自己关了
+#define SIHUD_DEFAULT_TANK_DELAY 8      // sm_sihud_tank_delay 默认值（ConVar 句柄为空时兜底）
+#define SIHUD_WPN_AWP            "weapon_sniper_awp"
+#define SIHUD_WPN_SCOUT          "weapon_sniper_scout"
+
+// ---------------------------------------------------------------------------
+// 生还者 bot 创建失败统计（NextBotCreatePlayerBot 返回无效槽位 -1 的防御与日志限频）
+// ---------------------------------------------------------------------------
+#define NEXTBOT_FAIL_LOG_SECONDS   5.0	// "无效槽位"日志最短间隔（秒），需求：每 N 秒最多一条
+#define NEXTBOT_FAIL_DEGRADE_COUNT 10	// 连续失败次数达到这么多……
+#define NEXTBOT_FAIL_DEGRADE_SECS  30.0	// ……且已持续这么久，才彻底降级（避免瞬时失败就降级）
+#define NEXTBOT_LEGACY_RETRY_SECS  10.0	// 走 CreateFakeClient 兜底的最短间隔（秒）
+
 
 char gameMode[16];
 char gameName[16];
@@ -69,7 +107,6 @@ ConVar GhostDelayMax;
 ConVar L4DHooks;
 ConVar L4DTown;
 ConVar GameType;
-ConVar SurvMaxIncap;
 ConVar PainPillsDR;
 ConVar MinionLimit;
 
@@ -91,7 +128,55 @@ ConVar RoundStateCache;
 Handle SubDirector					= null;
 Handle BotsUpdateTimer				= null;
 Handle EmptyServerTimer = null;
-Handle TeamPanelTimer[MAXPLAYERS+1];
+
+// ---------------------------------------------------------------------------
+// 特感辅助面板（sm_sihud / 聊天 !sihud）：状态、ConVar。实现见文件后半段
+// "特感辅助面板"一节。
+// ---------------------------------------------------------------------------
+ConVar SiHudEnable;							// sm_sihud_enable：总开关
+ConVar SiHudForceShow;						// sm_sihud_force_show：首次离开安全区是否自动给所有人开
+ConVar SiHudTankDelay;						// sm_sihud_tank_delay：坦克玩家延迟恢复秒数
+ConVar SiHudDebug;							// sm_sihud_debug：打印诊断日志
+bool g_bSiHudOn[MAXPLAYERS+1];				// 玩家是否开启面板
+bool g_bSiHudSent[MAXPLAYERS+1];			// 上一次发送成功与否（判断屏幕上的面板是不是我们自己的）
+bool g_bSiHudOffByUser[MAXPLAYERS+1];		// 玩家手动关掉过（!sihud / ESC）：本回合自动显示不再强开
+bool g_bSiHudSeen[MAXPLAYERS+1];			// 上一 tick 确实看到过我们自己的面板（防止把"没显示出来"误判成 ESC）
+bool g_bSiHudAutoShownRound = false;		// 本回合"首次离开安全区自动显示"是否已经用掉
+float g_fSiHudTankLockUntil[MAXPLAYERS+1];	// 坦克刷出后，到这一刻为止对该玩家不显示
+float g_fSiHudLastSendAt[MAXPLAYERS+1];		// 上一次成功发送面板的时刻
+// 地图 info_zombie_spawn 的路程缓存（每张图只扫一次，见 SiHud_EnsureSpawnFlows）
+float g_fSiHudSpawnFlow[SIHUD_MAX_SPAWNS];
+int g_iSiHudSpawnCount = 0;
+int g_iSiHudSpawnAttempts = 0;				// 本图已尝试采样次数（flow 没有就绪时的上限保护）
+bool g_bSiHudSpawnScanned = false;
+bool g_bSiHudSpawnWarned = false;
+bool g_bSiHudLimitMissLogged[7];			// 六个 z_versus_*_limit 读不到时"只记一次"
+// Left4DHooks native 可用性：left4dhooks.inc 默认把这些 native 标成 optional，必须先探再用
+bool g_bSiHudMaxFlowNative = false;			// L4D2Direct_GetMapMaxFlowDistance
+bool g_bSiHudClientFlowNative = false;		// L4D2Direct_GetFlowDistance
+bool g_bSiHudHighestNative = false;			// L4D_GetHighestFlowSurvivor
+bool g_bSiHudFurthestFlowNative = false;	// L4D2_GetFurthestSurvivorFlow
+bool g_bSiHudNavFlowNative = false;			// L4D2Direct_GetTerrorNavAreaFlow
+bool g_bSiHudNearestNavNative = false;		// L4D_GetNearestNavArea
+bool g_bSiHudDirectNavNative = false;		// L4D2Direct_GetTerrorNavArea
+bool g_bSiHudReadyUpNative = false;			// readyup 的 IsInReady（准备阶段不抢屏幕）
+
+// ---------------------------------------------------------------------------
+// 生还者 bot 创建失败统计（见 SpawnSurvivorBotNextBot / NextBotNoteFailure）
+// ---------------------------------------------------------------------------
+float g_fNextBotFailLogAt = 0.0;			// 上次输出"无效槽位"日志的时刻
+float g_fNextBotFailSince = 0.0;			// 本轮连续失败开始的时刻
+int g_iNextBotFailStreak = 0;				// 连续失败次数
+int g_iNextBotFailSuppressed = 0;			// 被限频压掉的日志条数
+float g_fNextBotLegacyAt = 0.0;				// 上次走 CreateFakeClient 兜底的时刻
+int g_iNextBotLegacyUses = 0;				// 兜底次数（诊断用）
+
+// ---------------------------------------------------------------------------
+// 六种特感的单类上限 cvar 名（PickSiType 也在用；这里提前声明，因为特感辅助面板要先读它们）
+// ---------------------------------------------------------------------------
+char L4D1_limits[4][] = {"none", "z_gas_limit",			  "z_exploding_limit",	   "z_hunter_limit"};
+char L4D2_limits[7][] = {"none", "z_versus_smoker_limit", "z_versus_boomer_limit", "z_versus_hunter_limit", "z_versus_spitter_limit", "z_versus_jockey_limit", "z_versus_charger_limit"};
+
 Handle JoinTimer[MAXPLAYERS+1];
 bool JoinPending[MAXPLAYERS+1];
 bool JoinAutomatic[MAXPLAYERS+1];
@@ -203,7 +288,6 @@ public void OnPluginStart()
 	L4DHooks = FindConVar("left4dhooks_version");
 	L4DTown = FindConVar("left4downtown_version");
 	GameType = FindConVar("mp_gamemode");
-	SurvMaxIncap = FindConVar("survivor_max_incapacitated_count");
 	PainPillsDR = FindConVar("pain_pills_decay_rate");
 	MinionLimit = FindConVar("z_minion_limit");
 	
@@ -251,8 +335,12 @@ public void OnPluginStart()
 	QueuedPummelOffset = teamData.GetOffset("CTerrorPlayer->m_queuedPummelAttacker");
 	delete teamData;
 	if (QueuedPummelOffset == -1) SetFailState("Missing CTerrorPlayer->m_queuedPummelAttacker offset");
-	//RegConsoleCmd("sm_teams", TeamMenu, "Opens Team Panel with Selection");
-	//RegConsoleCmd("sm_changeteam", TeamMenu, "Opens Team Panel with Selection");
+	/* 特感辅助面板（旧 Team Panel 已删除，这里注册唯一的开关命令 sm_sihud / 聊天 !sihud） */
+	SiHudEnable = CreateConVar("sm_sihud_enable", "1", "特感辅助面板总开关. 0=关闭（所有人都打不开）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SiHudForceShow = CreateConVar("sm_sihud_force_show", "1", "生还者首次离开安全区域时，是否自动给所有非生还者打开特感辅助面板. 1=自动开启(默认，玩家手动关掉的除外); 0=只刷新已开启的人，不强制开启.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SiHudTankDelay = CreateConVar("sm_sihud_tank_delay", "8", "坦克刷出后，坦克玩家的特感辅助面板延迟多少秒才恢复显示（期间输入 !sihud 也不显示）.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
+	SiHudDebug = CreateConVar("sm_sihud_debug", "0", "1=在服务端日志里打印特感辅助面板的诊断信息（ESC 关闭、坦克延迟、刷新点采样等）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	RegConsoleCmd("sm_sihud", Cmd_SiHud, "开关特感辅助面板（聊天 !sihud）");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
 	// 2.5.16：闲置判定体检（谁会被转旁观、谁被"慢加载保护"挡住）
 	RegAdminCmd("sm_svidle", Cmd_IdleStatus, ADMFLAG_GENERIC,
@@ -268,12 +356,15 @@ public void OnPluginStart()
 	HookEvent("finale_vehicle_leaving", Event_FinaleVehicleLeaving);
 	// 自动补位：记录每个玩家进入旁观队的时刻，供"旁观够久才补位"判断
 	HookEvent("player_team", Event_PlayerTeamSpecSince, EventHookMode_Post);
+	// 特感辅助面板：坦克刷出 → 先关面板，坦克玩家延迟 sm_sihud_tank_delay 秒恢复
+	HookEvent("tank_spawn", Event_TankSpawn, EventHookMode_Post);
 	// 常驻轮询用来观察"队伍修复完成"的跳变；句柄不保存（SourceMod 卸载插件时自动回收）
 	CreateTimer(0.5, Timer_AutofillWatch, _, TIMER_REPEAT);
 	// 2.5.15：常驻轮询把闲置（挂机托管）玩家转成旁观；句柄同样不保存
 	CreateTimer(0.5, Timer_IdleToSpec, _, TIMER_REPEAT);
+	// 特感辅助面板：1 秒刷新（句柄不保存，插件卸载时由 SourceMod 统一回收）
+	CreateTimer(SIHUD_REFRESH_SECONDS, Timer_SiHudRefresh, _, TIMER_REPEAT);
 
-	AddCommandListener(Cmd_spec_next, "spec_next");
 	AddCommandListener(Cmd_JoinTeam, "jointeam");
 	AddCommandListener(Cmd_StaySpectator, "sm_pg");
 	// sm_afk 命令注册已取消，同名监听一并取消；恢复注册时同时恢复此行。
@@ -329,6 +420,8 @@ public void OnConfigsExecuted()
 	GameType.GetString(gameMode, sizeof(gameMode));
 	InfectedAllowed = AreInfectedAllowed();
 	SyncTeamLimits();
+	// 所有插件都加载完之后才探得到 Left4DHooks 的可选 native
+	SiHud_CheckNatives();
 	if (LateLoad)
 	{
 		LateLoad = false;
@@ -346,6 +439,7 @@ public void OnClientPutInServer(int client)
 	g_fIdleReleasedAt[client] = 0.0;
 	g_fIdleNoticeAt[client] = 0.0;
 	g_fInGameSince[client] = GetGameTime();
+	SiHud_ResetClient(client);
 	CancelJoin(client);
 	if (!IsFakeClient(client)) ResumeBotPopulation();
 	else if (!SvBotsAllowed()) QueueEmptyBotCleanup();
@@ -392,6 +486,8 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	// 传送后的"卡住就推到有效位置"兜底。这是较新的 Left4DHooks native，
 	// 旧版插件库没有它；标成 optional 才不会让本插件整体加载失败（调用处还会再探一次状态）。
 	MarkNativeAsOptional("L4D_WarpToValidPositionIfStuck");
+	// readyup 的 IsInReady：准备阶段跳过特感辅助面板（readyup 未加载时该 native 保持未绑定）
+	MarkNativeAsOptional("IsInReady");
 	return APLRes_Success;
 }
 
@@ -533,6 +629,7 @@ public void OnMapStart()
 		g_fInGameSince[i] = 0.0;
 	}
 	if (!LateLoad) CacheRoundState(false);
+	SiHud_ResetMap();
 }
 
 // ------------------------------------------------------------------------
@@ -576,7 +673,6 @@ void GameEnd()
 	for(int i = 1; i <= MaxClients; i++)
 	{
 		delete JoinTimer[i];
-		delete TeamPanelTimer[i];
 		if (SurvivorMapReady) TakeOver(i);
 	}
 
@@ -602,6 +698,9 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	g_bAutofillFixDone = false;
 	g_bAutofillDoorDone = false;
 	g_bFixWasRunning = TeamChangesLocked();
+
+	// 特感辅助面板：新回合不继承上一场的坦克延迟窗口
+	SiHud_ResetRound();
 
 	StartRoundTimers();
 }
@@ -726,7 +825,7 @@ public void OnClientDisconnect(int client)
 	g_fIdleNoticeAt[client] = 0.0;
 	g_fInGameSince[client] = 0.0;
 
-	delete TeamPanelTimer[client];			//	Clean up Panel timer
+	SiHud_ResetClient(client);				//	Clean up si-hud panel state
 
 	if(RoundStarted && SvBotsAllowed())
 	{
@@ -930,14 +1029,30 @@ bool SpawnSurvivorBotNextBot(const char[] botName, bool manual)
 	if (GetClientCount(false) >= MaxClients) return false;
 
 	int bot = SDKCall(g_hSDK_NextBotCreatePlayerBot, botName);
-	if (bot <= 0 || bot > MaxClients || !IsValidEntity(bot))
+
+	/* NextBotCreatePlayerBot 内部就是 CreateFakeClient() + Instance()：空位刚被回收
+	   （同一 tick 里刚踢掉的 bot、玩家刚断线）时它会返回无效槽位 -1。这类失败是瞬时的，
+	   所以先立刻重试一次 —— 第二次调用时引擎通常已经把空位放出来了。
+	   旧代码在这里直接 LogError 后返回，于是每次 SpawnCheck 都刷一条同样的日志，
+	   就是用户看到的 "...NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 -1" 刷屏。 */
+	if (!IsNextBotSlotUsable(bot))
 	{
-		// 返还了无效槽位时不要留半成品客户端占着 player slot
-		if (bot > 0 && bot <= MaxClients && IsClientConnected(bot))
-			KickClient(bot, "Failed to create survivor bot");
-		LogError("[SV bot] NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 %d", bot);
-		return false;
+		NextBotReleaseInvalidSlot(bot);
+		bot = SDKCall(g_hSDK_NextBotCreatePlayerBot, botName);
 	}
+
+	if (!IsNextBotSlotUsable(bot))
+	{
+		NextBotReleaseInvalidSlot(bot);
+		NextBotNoteFailure(bot);
+		// 连续失败时退回旧的 CreateFakeClient 两段式，把座位照旧补上（内部限频）
+		return NextBotLegacyFallback(botName, manual);
+	}
+
+	// 成功：清失败统计
+	g_iNextBotFailStreak = 0;
+	g_iNextBotFailSuppressed = 0;
+	g_fNextBotFailSince = 0.0;
 
 	ChangeClientTeam(bot, TEAM_SURVIVOR);
 	if (!IsClientInGame(bot) || GetClientTeam(bot) != TEAM_SURVIVOR)
@@ -961,6 +1076,76 @@ bool SpawnSurvivorBotNextBot(const char[] botName, bool manual)
 	   上游 l4dmultislots 也是 RequestFrame 到下一帧才传送/补状态，
 	   同帧传送可能被引擎覆盖。 */
 	QueueSurvivorBotPlacement(bot);
+	return true;
+}
+
+// 返回值校验：>0 且在 MaxClients 内、还是有效实体。（-1 = 引擎没造出来）
+bool IsNextBotSlotUsable(int bot)
+{
+	if (bot <= 0 || bot > MaxClients) return false;
+	return IsValidEntity(bot);
+}
+
+// 拿到无效槽位时不要留半成品客户端白占着 player slot
+void NextBotReleaseInvalidSlot(int bot)
+{
+	if (bot > 0 && bot <= MaxClients && IsClientConnected(bot))
+		KickClient(bot, "Failed to create survivor bot");
+}
+
+/* 无效槽位统计 + 限频日志（需求：每 N 秒最多一条）。
+   连续失败次数与持续时间同时达标才彻底降级：分批连刷 12 个 bot 时的一次性瞬时失败
+   不该把整条 NextBot 路径废掉。 */
+void NextBotNoteFailure(int bot)
+{
+	float now = GetGameTime();
+	g_iNextBotFailStreak++;
+	if (g_fNextBotFailSince == 0.0) g_fNextBotFailSince = now;
+
+	if (g_fNextBotFailLogAt != 0.0 && (now - g_fNextBotFailLogAt) < NEXTBOT_FAIL_LOG_SECONDS)
+	{
+		g_iNextBotFailSuppressed++;
+	}
+	else
+	{
+		char message[256];
+		FormatEx(message, sizeof(message),
+			"[SV bot] NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 %d"
+			... "（连续第 %d 次；日志已限频=每 5 秒最多一条，本次压掉 %d 条；"
+			... "clients=%d/%d，生还者=%d/%d）",
+			bot, g_iNextBotFailStreak, g_iNextBotFailSuppressed,
+			GetClientCount(false), MaxClients, GetSurvivorTeam(), SurvivorLimit.IntValue);
+		LogError("%s", message);
+		g_fNextBotFailLogAt = now;
+		g_iNextBotFailSuppressed = 0;
+	}
+
+	if (g_iNextBotFailStreak >= NEXTBOT_FAIL_DEGRADE_COUNT
+		&& (now - g_fNextBotFailSince) >= NEXTBOT_FAIL_DEGRADE_SECS)
+	{
+		char reason[192];
+		FormatEx(reason, sizeof(reason),
+			"连续 %d 次 NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位（已持续 %.0f 秒），最近一次=%d",
+			g_iNextBotFailStreak, now - g_fNextBotFailSince, bot);
+		DegradeSurvivorBotCreation(reason);
+	}
+}
+
+/* 兜底：SDKCall 连续失败时退回 CreateFakeClient 两段式，保证 12v12 的座位照旧补上
+   （SpawnCheck 只按 GetSurvivorTeam() 计数，两段式也是先把座位占住再让引擎换成真 bot）。
+   限频：NEXTBOT_LEGACY_RETRY_SECS 内只用一次，避免每个 SpawnCheck 都造一次假客户端。 */
+bool NextBotLegacyFallback(const char[] botName, bool manual)
+{
+	float now = GetGameTime();
+	if (g_fNextBotLegacyAt != 0.0 && (now - g_fNextBotLegacyAt) < NEXTBOT_LEGACY_RETRY_SECS)
+		return false;
+	if (GetClientCount(false) >= MaxClients) return false;
+	if (!SvBotsAllowed() || GetSurvivorTeam() >= SurvivorLimit.IntValue) return false;
+
+	g_fNextBotLegacyAt = now;
+	g_iNextBotLegacyUses++;
+	if (!SpawnSurvivorBotLegacy(botName, manual)) return false;
+	LogMessage("[SV bot] NextBot 路径失败，本次退回 CreateFakeClient 两段式补位（第 %d 次）。", g_iNextBotLegacyUses);
 	return true;
 }
 
@@ -1048,6 +1233,10 @@ public void OnClientPostAdminCheck(int client)
 	   bot 是 FakeClient，下面本来也不该走真人入队逻辑。 */
 	if (KillRes == null || AutoJoin == null) return;
 
+	// 特感辅助面板：本回合已自动显示过时，中途进服的非生还者补一次自动开启
+	// （放在所有 return 之前，别被下面的入队流程提前返回掉）
+	SiHud_OnClientReady(client);
+
 	// If lobby is full, KillRes is true and l4dt is present, unreserve lobby
 	if(KillRes.BoolValue && IsServerLobbyFull() && l4dt())
 	{
@@ -1129,12 +1318,6 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 	JoinResult result = Join_Wait;
 	if (RoundStarted)
 	{
-		if (JoinTarget[client] == 4)
-		{
-			if (!TeamChangesLocked()) DisplayTeamMenu(client);
-			result = TeamChangesLocked() ? Join_Wait : Join_Success;
-		}
-		else
 		{
 			if (JoinAutomatic[client] && JoinTarget[client] == 0 && !TeamChangesLocked())
 			{
@@ -1375,20 +1558,6 @@ void TakeOver(int bot)
 // *********************************************************************************
 // COMMANDS FOR JOINING TEAMS
 // *********************************************************************************
-
-// ------------------------------------------------------------------------
-// If press left mouse button as spectator, show menu to join game. Useful in case of idle bug
-// ------------------------------------------------------------------------
-public Action Cmd_spec_next(int client, char[] command, int argc)
-{
-	if (client > 0 && IsClientInGame(client) && GetClientTeam(client) == TEAM_SPECTATOR && !GetBotOfIdle(client))
-	{
-		// sm_teams 不再注册为控制台命令，直接调用同一入口（TeamMenu 内含
-		// l4d_management < 3 的权限判断与重复面板保护，语义与旧 FakeClientCommand 等价）。
-		TeamMenu(client, 0);
-	}
-	return Plugin_Continue;	
-}
 
 // ------------------------------------------------------------------------
 // Join survivor or infected
@@ -1743,20 +1912,6 @@ public Action Timer_KickFakeBot(Handle timer, any userid)
 	return Plugin_Continue;
 }
 
-public Action TeamMenu(int client, int args)
-{
-	if (Management.IntValue < 3) return Plugin_Continue;
-	if (!IsValidClient(client) || IsFakeClient(client)) return Plugin_Handled;
-	NewConnection[client] = false;
-	CancelJoin(client);
-
-	if(TeamPanelTimer[client] == null)
-	{
-		DisplayTeamMenu(client);
-	}
-	return Plugin_Handled;
-}
-
 // *********************************************************************************
 // RETURN PROPERTIES OF INFECTED/SURVIVOR TEAMS, BOTS, & PLAYERS
 // *********************************************************************************
@@ -1979,20 +2134,6 @@ bool IsBotValid(int client)
 
 
 // ------------------------------------------------------------------------
-// Check if how many alive bots without an idle are available in a team
-// ------------------------------------------------------------------------
-int CountAvailableBots(int team)
-{
-	int num = 0;
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsBotValid(i) && GetClientTeam(i) == team && IsPlayerAlive(i))
-					num++;
-	}
-	return num;
-}
-
-// ------------------------------------------------------------------------
 // Check if how many bots are in a team without idle. Can be dead
 // ------------------------------------------------------------------------
 stock int CountBots(int team)
@@ -2012,207 +2153,827 @@ bool AnySurvivorLeftSafeArea()
 }
 
 // *********************************************************************************
-// TEAM MENU
+// 特感辅助面板（sm_sihud / 聊天 !sihud）
+//
+//   实现方式对齐 readyup-applemod 的面板（panel.inc / doorlock.inc）：
+//     · SourceMod Panel（不是 Menu）：SetTitle + DrawText 逐行画；
+//     · 1 秒重发一次、面板显示时长 3 秒（与 spechud 的 HudDrawTimer 同款做法），
+//       所以玩家开着面板时画面是连续的；
+//     · 发送前跳过"客户端正在看别的菜单"的人（GetClientMenu 非 None），
+//       绝不抢 readyup / 门锁 / 内置投票 / 其它插件的面板；
+//     · 文本总预算 511 字节（Panel.TextRemaining），逐行裁剪且不切坏中文
+//       （SiHud_CopyPanelText 按 UTF-8 字符边界走，与 RU_CopyPanelText 同一套算法）。
+//   工具函数（SiHud_CopyPanelText / SiHud_GetFixedName / SiHud_DummyHandler）在本文件内
+//   各写一份，刻意**不** include readyup 的 inc，避免跨插件耦合。
+//
+//   显示规则（与需求逐条对应）：
+//     B. 只允许非生还者（感染者 / 旁观 / 未分队）打开并显示；生还者输入 !sihud 只提示、不开面板，
+//        已开面板的玩家一旦转成生还者也立刻停掉。
+//     C. 生还者**每回合首次**离开安全区域（player_left_start_area / player_left_checkpoint）时，
+//        自动给所有非生还者打开面板（sm_sihud_force_show=1，默认），不需要他们先输入 !sihud；
+//        但玩家手动关掉过（!sihud 关闭或按 ESC）的用 g_bSiHudOffByUser 记住，本回合内不再强开，
+//        手动开启的保持开启；之后的同类事件只刷新，不重复强开。force_show=0 时退回"只刷新已开启的人"。
+//        本回合已自动显示过之后，中途进服的非生还者也会补一次自动开启（SiHud_OnClientReady）。
+//     D. 坦克刷出（tank_spawn）：所有感染者玩家的面板先关一次；非坦克感染者同一 tick 内立刻恢复，
+//        坦克玩家按 sm_sihud_tank_delay（默认 8 秒）延迟恢复，期间连 !sihud 都不显示。
+//     G. 玩家按 ESC 关掉面板后不再自动重开（旧 Team Panel 会重开）；只有 !sihud 或 lifecycle
+//        事件才改变显示状态。
 // *********************************************************************************
 
-void DisplayTeamMenu(int client)
+// 特感英文名，顺序固定 = m_zombieClass 1..6（需求顺序：smoker/boomer/hunter/spitter/jockey/charger）
+static const char SiHudClassNames[6][16] =
 {
-	Handle TeamPanel = CreatePanel();
+	"Smoker", "Boomer", "Hunter", "Spitter", "Jockey", "Charger"
+};
 
-	SetPanelTitle(TeamPanel, "SuperVersus Team Panel");
+// m_survivorCharacter 0..7 = Nick, Rochelle, Coach, Ellis, Bill, Zoey, Francis, Louis
+// （与文件顶部 SurvivorModels 的模型顺序一致，那边是模型路径，这里是对外显示的名字）
+static const char SiHudCharacterNames[8][16] =
+{
+	"Nick", "Rochelle", "Coach", "Ellis", "Bill", "Zoey", "Francis", "Louis"
+};
 
-	char title_spectator[32];
-	Format(title_spectator, sizeof(title_spectator), "Spectator (%d)", GetTeamPlayers(TEAM_SPECTATOR, false));
-	DrawPanelItem(TeamPanel, title_spectator);
-		
-	// Draw Spectator Group
-	for(int i = 1; i <= MaxClients; i++)
+// ------------------------------------------------------------------------
+// 命令入口：反复输入 !sihud / sm_sihud 开关面板
+// ------------------------------------------------------------------------
+public Action Cmd_SiHud(int client, int args)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+		return Plugin_Handled;
+
+	if (SiHudEnable != null && !SiHudEnable.BoolValue)
 	{
-		if(IsClientInGame(i) && GetClientTeam(i) == TEAM_SPECTATOR)
-		{
-			char text_client[32];
-			char ClientUserName[MAX_TARGET_LENGTH];
-			GetClientName(i, ClientUserName, sizeof(ClientUserName));
-			ReplaceString(ClientUserName, sizeof(ClientUserName), "[", "");
-
-			Format(text_client, sizeof(text_client), "%s", ClientUserName);
-			DrawPanelText(TeamPanel, text_client);
-		}
+		ReplyToCommand(client, "[SV] 特感辅助面板已在本服关闭。");
+		return Plugin_Handled;
 	}
 
-	char title_survivor[32];
-	Format(title_survivor, sizeof(title_survivor), "Survivors (%d/%d) - %d Bot(s)", GetTeamPlayers(TEAM_SURVIVOR, false), SurvivorLimit.IntValue, CountAvailableBots(TEAM_SURVIVOR));
-	DrawPanelItem(TeamPanel, title_survivor);
-	
-	// Draw Survivor Group
-	for(int i = 1; i <= MaxClients; i++)
+	// B：只允许非生还者打开/显示面板（感染者、旁观、未分队都可以）
+	if (GetClientTeam(client) == TEAM_SURVIVOR)
 	{
-		if(IsClientInGame(i) && GetClientTeam(i) == TEAM_SURVIVOR)
-		{
-			char text_client[32];
-			char ClientUserName[MAX_TARGET_LENGTH];
-
-			GetClientName(i, ClientUserName, sizeof(ClientUserName));
-			ReplaceString(ClientUserName, sizeof(ClientUserName), "[", "");
-
-			char m_iHealth[MAX_TARGET_LENGTH];
-			if(IsPlayerAlive(i))
-			{
-				if(GetEntProp(i, Prop_Send, "m_isIncapacitated"))
-				{
-					Format(m_iHealth, sizeof(m_iHealth), "DOWN - %d HP - ", GetEntData(i, FindDataMapInfo(i, "m_iHealth"), 4));
-				}
-				else if(GetEntProp(i, Prop_Send, "m_currentReviveCount") == SurvMaxIncap.IntValue)
-				{
-					Format(m_iHealth, sizeof(m_iHealth), "BLWH - ");
-				}
-				else
-				{
-					Format(m_iHealth, sizeof(m_iHealth), "%d HP - ", GetClientRealHealth(i));
-				}
-	
-			}
-			else
-			{
-				Format(m_iHealth, sizeof(m_iHealth), "DEAD - ");
-			}
-
-			Format(text_client, sizeof(text_client), "%s%s", m_iHealth, ClientUserName);
-			DrawPanelText(TeamPanel, text_client);
-		}
+		PrintToChat(client, "[SV] 特感辅助面板只能由非生还者（特感/旁观）使用。");
+		return Plugin_Handled;
 	}
 
-	char title_infected[32];
-	
-	if (GetClientTeam(client) == TEAM_INFECTED || Management.IntValue == 4)
+	// D：坦克刷出后 tank_delay 秒内对坦克玩家不显示，也不切换开关状态
+	if (SiHud_IsTankLocked(client))
 	{
-		if ( InfectedAllowed) Format(title_infected, sizeof(title_infected), "Infected (%d/%d) - %d Bot(s)", GetTeamPlayers(TEAM_INFECTED, false), InfectedLimit.IntValue, CountAvailableBots(TEAM_INFECTED));
-		if (!InfectedAllowed) Format(title_infected, sizeof(title_infected), "Infected - %d Bot(s)", CountAvailableBots(TEAM_INFECTED));
-	}
-	else if (!InfectedAllowed)
-	{
-		Format(title_infected, sizeof(title_infected), "Infected");
-	}
-	else if ( InfectedAllowed)
-	{
-		Format(title_infected, sizeof(title_infected), "Infected (%d/%d)", GetTeamPlayers(TEAM_INFECTED, false), InfectedLimit.IntValue);  // doesn't show how many bots are alive
-	}
-	
-	DrawPanelItem(TeamPanel, title_infected);
-		
-	// Draw Infected Group
-	for(int i = 1; i <= MaxClients; i++)
-	{
-		if(IsClientInGame(i) && GetClientTeam(i) == TEAM_INFECTED)
-		{
-			if (GetClientTeam(client) != TEAM_INFECTED && IsFakeClient(i) &&  Management.IntValue != 4) continue ;    // Don't show anything about infected bots to survivors
-		
-			char text_client[32];
-			char ClientUserName[MAX_TARGET_LENGTH];
-			
-			GetClientName(i, ClientUserName, sizeof(ClientUserName));
-			ReplaceString(ClientUserName, sizeof(ClientUserName), "[", "");
-
-			if (GetClientTeam(client) == TEAM_INFECTED || Management.IntValue == 4) // Only show HP of infected to infected
-			{
-				char m_iHealth[MAX_TARGET_LENGTH];
-				if(IsPlayerAlive(i))
-				{
-					if(GetEntProp(i, Prop_Send, "m_isIncapacitated"))
-					{
-						Format(m_iHealth, sizeof(m_iHealth), "DOWN - %d HP - ", GetEntData(i, FindDataMapInfo(i, "m_iHealth"), 4));
-					}
-					if(GetEntProp(i, Prop_Send, "m_isGhost"))
-					{
-						Format(m_iHealth, sizeof(m_iHealth), "GHOST - ");
-					}
-					else
-					{
-						Format(m_iHealth, sizeof(m_iHealth), "%d HP - ", GetEntData(i,  FindDataMapInfo(i, "m_iHealth"), 4));
-					}
-				}
-				else
-				{
-					Format(m_iHealth, sizeof(m_iHealth), "DEAD - ");
-				}
-				Format(text_client, sizeof(text_client), "%s%s", m_iHealth, ClientUserName);
-			}
-			else Format(text_client, sizeof(text_client), "%s", ClientUserName);
-			
-			DrawPanelText(TeamPanel, text_client);
-		}
+		PrintToChat(client, "[SV] 你刚刷出坦克，%d 秒后才显示特感辅助面板。",
+			SiHudTankDelay != null ? SiHudTankDelay.IntValue : SIHUD_DEFAULT_TANK_DELAY);
+		return Plugin_Handled;
 	}
 
-	DrawPanelItem(TeamPanel, "Close");
-		
-	SendPanelToClient(TeamPanel, client, TeamMenuHandler, 30);
-	CloseHandle(TeamPanel);
-	TeamPanelTimer[client] = CreateTimer(1.0, Timer_TeamMenuHandler, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	if (g_bSiHudOn[client])
+	{
+		g_bSiHudOn[client] = false;
+		g_bSiHudSent[client] = false;
+		g_bSiHudSeen[client] = false;
+		// 记住"手动关掉过"：本回合后续的自动显示事件不再把它强开回来
+		g_bSiHudOffByUser[client] = true;
+		SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
+		PrintToChat(client, "[SV] 特感辅助面板已关闭。");
+	}
+	else
+	{
+		g_bSiHudOn[client] = true;
+		g_bSiHudOffByUser[client] = false;	// 手动开启 = 取消"手动关掉"标记
+		SiHud_UpdatePanel();	// 立刻画一次，不必等下一个 1 秒刷新
+		if (SiHud_ReadyUpActive())
+			PrintToChat(client, "[SV] 特感辅助面板已开启（准备阶段结束后显示），再次输入 !sihud 关闭。");
+		else
+			PrintToChat(client, "[SV] 特感辅助面板已开启，再次输入 !sihud 关闭。");
+	}
+	return Plugin_Handled;
 }
 
-public int TeamMenuHandler(Handle UpgradePanel, MenuAction action, int client, int param2) {
-	if (action == MenuAction_Select) {
-		if (param2 == 1) {
-			FakeClientCommand(client, "sm_pg");
-		}
-		else if (param2 == 2) {
+// ------------------------------------------------------------------------
+// 1 秒刷新：重画一次面板发给所有开着面板的玩家
+// ------------------------------------------------------------------------
+public Action Timer_SiHudRefresh(Handle timer)
+{
+	SiHud_UpdatePanel();
+	return Plugin_Continue;
+}
 
+// 坦克玩家延迟结束：按原开关状态恢复显示
+public Action Timer_SiHudTankRestore(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (!client || !IsClientInGame(client) || IsFakeClient(client)) return Plugin_Stop;
+	if (!g_bSiHudOn[client]) return Plugin_Stop;			// 期间自己关掉了就别再开
+	if (GetClientTeam(client) == TEAM_SURVIVOR) return Plugin_Stop;
+	if (SiHud_IsTankLocked(client)) return Plugin_Stop;	// 锁又被延长了，交给更晚的 timer
+	SiHud_UpdatePanel();								// 时间到，立即恢复
+	return Plugin_Stop;
+}
 
-				FakeClientCommand(client, "sm_survivor");
+// ------------------------------------------------------------------------
+// 坦克刷出（tank_spawn）
+//   · 所有感染者玩家的面板先"关一次"：Panel 没有"清除"接口，只能发一块新的顶掉旧的；
+//   · 非坦克感染者：同一 tick 内用最新内容重画（= 旧面板被顶掉后立刻恢复，看不到中断）；
+//   · 坦克玩家：只用一行提示顶掉面板，并在 tank_delay 秒内不显示（期间 !sihud 也不显示），
+//     时间到由 Timer_SiHudTankRestore 按原开关状态恢复；
+//   · 旁观者不处理（需求原文只写"所有感染者玩家"）。
+// ------------------------------------------------------------------------
+public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
 
-		}
-		else if (param2 == 3) {
-			FakeClientCommand(client, "sm_infected");
-		}
-		else if (param2 == 4) {
-			delete TeamPanelTimer[client];
+	int tank = GetClientOfUserId(event.GetInt("userid"));
+	if (!IsValidClient(tank) || IsFakeClient(tank))
+	{
+		// AI 坦克：userid 拿不到客户端时用 tankid（玩家实体的 entindex 与 client index 同号）
+		int tankId = event.GetInt("tankid");
+		tank = (tankId > 0 && tankId <= MaxClients) ? tankId : 0;
+	}
+
+	float now = GetGameTime();
+	int delay = (SiHudTankDelay != null) ? SiHudTankDelay.IntValue : SIHUD_DEFAULT_TANK_DELAY;
+	if (delay < 0) delay = 0;
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client)) continue;
+		if (GetClientTeam(client) != TEAM_INFECTED) continue;
+		if (!g_bSiHudOn[client]) continue;
+
+		if (client == tank)
+		{
+			g_fSiHudTankLockUntil[client] = now + float(delay);
+			g_bSiHudSent[client] = false;
+			SiHud_ClosePanel(client, SIHUD_TXT_TANK);
+			/* 不保存 timer 句柄：同一玩家短时间内连着刷两次坦克时，多出来的那个 timer
+			   只会多刷一次面板，不会造成错乱；换图时 TIMER_FLAG_NO_MAPCHANGE 统一回收。 */
+			CreateTimer(float(delay), Timer_SiHudTankRestore, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+			if (SiHudDebug != null && SiHudDebug.BoolValue)
+				LogMessage("[SV sihud] 坦克刷出（tank=%d），该玩家面板关闭 %d 秒。", client, delay);
 		}
 	}
-	else if (action == MenuAction_Cancel) {
-		// Nothing
+
+	// 其它感染者（以及所有已开启者）立刻恢复：一次重画等于"顶掉旧面板 + 显示新面板"
+	SiHud_UpdatePanel();
+}
+
+// ------------------------------------------------------------------------
+// C：生还者离开安全区域（player_left_start_area / player_left_checkpoint）
+//   每回合第一次离开时，按 sm_sihud_force_show（默认 1）自动给**所有**非生还者
+//   （感染者 / 旁观 / 未分队）打开面板，不需要他们先输入 !sihud；
+//     · 手动用 !sihud 关掉（或按 ESC 关掉）的玩家用 g_bSiHudOffByUser 记住，
+//       本回合内后面再触发也不会被强制打开；手动开启的保持开启；
+//     · 之后的离开/检查点事件只做刷新，不再重复强开（g_bSiHudAutoShownRound）。
+//   sm_sihud_force_show=0 时退回"只刷新已开启的人"的旧行为。
+// ------------------------------------------------------------------------
+void SiHud_OnSurvivorLeftSafeArea()
+{
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+
+	// force_show=0 时不做任何强开，也不置"本回合已自动显示过"标记
+	// （否则下面的中途进服补显示会在关掉自动显示时仍然生效）
+	if (!g_bSiHudAutoShownRound && SiHudForceShow != null && SiHudForceShow.BoolValue)
+	{
+		g_bSiHudAutoShownRound = true;
+		for (int client = 1; client <= MaxClients; client++)
+		{
+			if (!IsClientInGame(client) || IsFakeClient(client)) continue;
+			if (GetClientTeam(client) == TEAM_SURVIVOR) continue;	// B：生还者永远不显示
+			if (g_bSiHudOffByUser[client]) continue;				// 玩家自己关掉的，别硬开
+			g_bSiHudOn[client] = true;
+			if (SiHudDebug != null && SiHudDebug.BoolValue)
+				LogMessage("[SV sihud] client=%d 首次离开安全区自动开启面板。", client);
+		}
+	}
+	SiHud_UpdatePanel();
+}
+
+// ------------------------------------------------------------------------
+// C'：中途加入的非生还者补显示
+//   本回合已经"首次离开安全区自动显示"过之后，新进服的非生还者（感染者/旁观/未分队）
+//   也自动开一次面板 —— 让"生还者离开安全区 → 非生还者能看到面板"这条语义对
+//   中途加入的玩家同样成立。仍然尊重：手动关掉标记、坦克延迟锁、准备阶段避让。
+//   还没到首次离开安全区（g_bSiHudAutoShownRound=false）时不处理，那一刻会统一开。
+// ------------------------------------------------------------------------
+void SiHud_OnClientReady(int client)
+{
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+	if (!g_bSiHudAutoShownRound) return;
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client)) return;
+	if (GetClientTeam(client) == TEAM_SURVIVOR) return;		// B：生还者永远不显示
+	if (g_bSiHudOn[client]) return;							// 已经开着（手动开过）就别动
+	if (g_bSiHudOffByUser[client]) return;					// 玩家自己关掉的，别硬开
+	if (SiHud_IsTankLocked(client)) return;					// 坦克 8 秒窗口内不显示
+	if (SiHud_ReadyUpActive()) return;						// 准备阶段不抢屏幕
+
+	g_bSiHudOn[client] = true;
+	SiHud_UpdatePanel();
+	if (SiHudDebug != null && SiHudDebug.BoolValue)
+		LogMessage("[SV sihud] client=%d 中途进服，自动补开面板。", client);
+}
+
+// ------------------------------------------------------------------------
+// 画一帧面板并发送
+// ------------------------------------------------------------------------
+void SiHud_UpdatePanel()
+{
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+	// 准备阶段（readyup / 门锁面板在场）不重画：那些面板是"主界面"，抢过来只会闪屏。
+	// 开关状态照旧保留，准备结束（或生还者离开安全区）后自动显示。
+	if (SiHud_ReadyUpActive()) return;
+
+	int clients[MAXPLAYERS + 1], count = 0;
+	float now = GetGameTime();
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!g_bSiHudOn[client]) continue;
+		if (!IsClientInGame(client) || IsFakeClient(client))
+		{
+			SiHud_ResetClient(client);
+			continue;
+		}
+		// B：生还者永远不显示；有人转成生还者时就地关掉
+		if (GetClientTeam(client) == TEAM_SURVIVOR)
+		{
+			g_bSiHudOn[client] = false;
+			g_bSiHudSent[client] = false;
+			g_bSiHudSeen[client] = false;
+			continue;
+		}
+		// D：坦克玩家的延迟窗口内不显示
+		if (SiHud_IsTankLocked(client)) continue;
+		clients[count++] = client;
+	}
+	if (!count) return;
+
+	Panel panel = new Panel();
+	panel.SetTitle(SIHUD_TITLE);
+	SiHud_DrawSurvivorSection(panel);
+	SiHud_DrawInfectedSection(panel);
+
+	for (int i = 0; i < count; i++)
+	{
+		int client = clients[i];
+		MenuSource source = GetClientMenu(client);
+		// 显示时长（3 秒）比刷新间隔（1 秒）长，所以"屏幕上的面板是我们自己上一块"是常态：
+		// 这种情况允许覆盖重发，否则永远收不到刷新；别的菜单在显示时一律不抢。
+		bool ours = g_bSiHudSent[client] && (now - g_fSiHudLastSendAt[client]) < float(SIHUD_PANEL_SECONDS);
+
+		switch (source)
+		{
+			case MenuSource_External: continue;		// 外部菜单（SourceTV 等），绝不抢
+			case MenuSource_Normal, MenuSource_RawPanel:
+			{
+				if (!ours) continue;				// 别的插件的面板/内置投票还在显示
+				// 还看得到我们自己的面板 → 记下"确实显示过"。这一步是为了不把
+				// "引擎还没把面板画出来（玩家仍在加载）"误判成下面那条 ESC 判定。
+				g_bSiHudSeen[client] = true;
+			}
+		}
+
+		// 面板本该还在显示，却已经从屏幕上没了 → 玩家自己关掉的（ESC）。
+		// 需求 G：ESC 之后不要强制重开，开关就地置关。
+		// 必须"之前确实见到过面板"（g_bSiHudSeen）才这么判，否则刚进服还在加载的玩家
+		// 会被当成按了 ESC，自动补开的面板就永远出不来。
+		if (source == MenuSource_None && ours && g_bSiHudSeen[client]
+			&& (now - g_fSiHudLastSendAt[client]) < float(SIHUD_PANEL_SECONDS) - SIHUD_EARLY_CLOSE_SLACK)
+		{
+			g_bSiHudOn[client] = false;
+			g_bSiHudSent[client] = false;
+			g_bSiHudSeen[client] = false;
+			g_bSiHudOffByUser[client] = true;	// 同上：玩家自己关的，别在自动事件里强开
+			if (SiHudDebug != null && SiHudDebug.BoolValue)
+				LogMessage("[SV sihud] client=%d 面板提前消失（%.2f 秒 < %d 秒），判定为玩家关闭，开关置关。",
+					client, now - g_fSiHudLastSendAt[client], SIHUD_PANEL_SECONDS);
+			continue;
+		}
+
+		g_bSiHudSent[client] = panel.Send(client, SiHud_PanelHandler, SIHUD_PANEL_SECONDS);
+		if (g_bSiHudSent[client]) g_fSiHudLastSendAt[client] = now;
+	}
+	delete panel;
+}
+
+// ------------------------------------------------------------------------
+// 面板回调：只处理"玩家自己按 ESC 退出面板"这一件事（需求 G：ESC 后不强制重开）
+//   MenuCancel_Exit / MenuCancel_ExitBack = 玩家主动退出 → 开关置关；
+//   MenuCancel_Interrupted = 被别的菜单顶掉、MenuCancel_Timeout = 显示时长到期
+//   （我们每秒重发，到期属于正常刷新）、Disconnected → 都不当成"玩家关掉了"。
+// ------------------------------------------------------------------------
+int SiHud_PanelHandler(Handle menu, MenuAction action, int client, int param2)
+{
+	if (action == MenuAction_Cancel && (param2 == MenuCancel_Exit || param2 == MenuCancel_ExitBack))
+	{
+		if (client > 0 && client <= MaxClients && g_bSiHudOn[client])
+		{
+			g_bSiHudOn[client] = false;
+			g_bSiHudSent[client] = false;
+			g_bSiHudOffByUser[client] = true;	// 玩家自己关的 → 本回合自动事件不再强开
+			if (SiHudDebug != null && SiHudDebug.BoolValue)
+				LogMessage("[SV sihud] client=%d 按 ESC 关闭面板（reason=%d），开关置关。", client, param2);
+		}
 	}
 	return 0;
 }
 
-public Action Timer_TeamMenuHandler(Handle hTimer, int userid)
+int SiHud_DummyHandler(Handle menu, MenuAction action, int param1, int param2)
 {
-	int client = GetClientOfUserId(userid);
-	if (!IsValidClient(client) || TeamPanelTimer[client] != hTimer) return Plugin_Stop;
-	TeamPanelTimer[client] = null;
-	DisplayTeamMenu(client);
-	return Plugin_Stop;
+	return 0;
 }
 
-int GetClientRealHealth(int client)
+// ------------------------------------------------------------------------
+// 内容：生还者段（提示行 / 生还者统计 / AWP、Scout / 当前路程百分比）
+// ------------------------------------------------------------------------
+void SiHud_DrawSurvivorSection(Panel panel)
 {
-	if(!client || !IsValidEntity(client) || !IsClientInGame(client) || !IsPlayerAlive(client) || IsClientObserver(client))
+	SiHud_DrawText(panel, SIHUD_TXT_HINT);
+	SiHud_DrawText(panel, SIHUD_TXT_SURVIVORS);
+
+	int meds, healthy, standing, limit;
+	SiHud_CollectSurvivorStats(meds, healthy, standing, limit);
+	char line[128];
+	FormatEx(line, sizeof(line), "持药人数：%d    生还者：%d/%d/%d", meds, healthy, standing, limit);
+	// 预算不够时先保 x/y/z（需求：两个字段放同一行，超预算先保"生还者：x/y/z"）
+	if (strlen(line) + 1 > panel.TextRemaining)
+		FormatEx(line, sizeof(line), "生还者：%d/%d/%d", healthy, standing, limit);
+	SiHud_DrawText(panel, line);
+
+	SiHud_DrawSniperLines(panel);
+
+	int percent;
+	if (SiHud_GetFlowPercent(percent))
 	{
-		return -1;
+		FormatEx(line, sizeof(line), "当前路程：%d%%", percent);
+		SiHud_DrawText(panel, line);
 	}
-	if(GetClientTeam(client) != TEAM_SURVIVOR)
+}
+
+// ------------------------------------------------------------------------
+// 生还者统计（口径已与用户确认）：
+//   N = 持药人数：身上有 药/针/包 任一 的生还者人数（三个武器实体有其一即算 1 个）
+//   x = 未倒地（m_isIncapacitated=0）且真实血量 > 40 的生还者人数
+//       （真实血量见 SiHud_RealHealth：GetClientHealth + 当前有效临时血）
+//   y = 未倒地生还者人数（不看血量）
+//   z = survivor_limit（12v12 = 12）
+// 三个数字都在这一个函数里算，口径要改只改这里。
+// ------------------------------------------------------------------------
+void SiHud_CollectSurvivorStats(int &meds, int &healthy, int &standing, int &limit)
+{
+	meds = 0;
+	healthy = 0;
+	standing = 0;
+	limit = (L4DSurvivorLimit != null) ? L4DSurvivorLimit.IntValue
+		: ((SurvivorLimit != null) ? SurvivorLimit.IntValue : 0);
+
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		return GetClientHealth(client);
+		if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SURVIVOR) continue;
+		if (!IsPlayerAlive(client)) continue;			// 已阵亡的不参与任何一项
+
+		if (SiHud_HasHealingItem(client)) meds++;
+
+		if (GetEntProp(client, Prop_Send, "m_isIncapacitated")) continue;	// 倒地：既不算 x 也不算 y
+		standing++;
+		if (SiHud_RealHealth(client) > SIHUD_SAFE_HEALTH) healthy++;
 	}
-  
+
+	// x 是 y 的子集，数据异常（临时血正在衰减等）时也不让 x 超过 y
+	if (healthy > standing) healthy = standing;
+}
+
+// 药/针/包：三个医疗武器实体，有其一即算 1 个
+bool SiHud_HasHealingItem(int client)
+{
+	for (int slot = 0; slot <= 5; slot++)
+	{
+		int weapon = GetPlayerWeaponSlot(client, slot);
+		if (weapon <= 0 || !IsValidEdict(weapon)) continue;
+		char className[32];
+		GetEdictClassname(weapon, className, sizeof(className));
+		if (StrEqual(className, "weapon_first_aid_kit", false)
+			|| StrEqual(className, "weapon_pain_pills", false)
+			|| StrEqual(className, "weapon_adrenaline", false))
+			return true;
+	}
+	return false;
+}
+
+// 真实血量（"总血量"）= 永久血 + 当前有效的临时血。
+// m_healthBuffer 是临时血缓冲的**起始值**，会按 pain_pills_decay_rate 随时间衰减，
+// 所以直接加 m_healthBuffer 会在药品刚过期时高估。这里按插件原有 GetClientRealHealth
+// 的同一套衰减算法取"现在这一刻"的临时血，和玩家自己屏幕上看到的总血量一致。
+// 若要改成严格的 GetClientHealth + m_healthBuffer（不衰减），只改这一处。
+int SiHud_RealHealth(int client)
+{
+	int permanent = GetClientHealth(client);
 	float buffer = GetEntPropFloat(client, Prop_Send, "m_healthBuffer");
-	float TempHealth;
-	int PermHealth = GetClientHealth(client);
-	if(buffer <= 0.0)
+	float tempHealth = 0.0;
+
+	if (buffer > 0.0)
 	{
-		TempHealth = 0.0;
+		float decay = (PainPillsDR != null) ? PainPillsDR.FloatValue : 0.0;
+		if (decay > 0.0)
+		{
+			float difference = GetGameTime() - GetEntPropFloat(client, Prop_Send, "m_healthBufferTime");
+			tempHealth = buffer - (difference / (1.0 / decay));
+		}
+		else
+		{
+			tempHealth = buffer;		// 拿不到衰减率时退回不衰减
+		}
 	}
-	else
+	if (tempHealth < 0.0) tempHealth = 0.0;
+
+	return permanent + RoundToFloor(tempHealth);
+}
+
+// AWP / Scout：只显示当前持有者的「名字前两字符+* / 角色名」，没人持有就不画这一行
+void SiHud_DrawSniperLines(Panel panel)
+{
+	int awp = 0;
+	int scout = 0;
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		float difference = GetGameTime() - GetEntPropFloat(client, Prop_Send, "m_healthBufferTime");
-		float decay = PainPillsDR.FloatValue;
-		float constant = 1.0/decay;	TempHealth = buffer - (difference / constant);
+		if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SURVIVOR) continue;
+		if (!IsPlayerAlive(client)) continue;
+		int weapon = GetPlayerWeaponSlot(client, 0);
+		if (weapon <= 0 || !IsValidEdict(weapon)) continue;
+		char className[32];
+		GetEdictClassname(weapon, className, sizeof(className));
+		if (StrEqual(className, SIHUD_WPN_AWP, false)) awp = client;
+		else if (StrEqual(className, SIHUD_WPN_SCOUT, false)) scout = client;
 	}
-	
-	if(TempHealth < 0.0)
+	if (awp > 0) SiHud_DrawSniperLine(panel, "AWP", awp);
+	if (scout > 0) SiHud_DrawSniperLine(panel, "Scout", scout);
+}
+
+void SiHud_DrawSniperLine(Panel panel, const char[] label, int client)
+{
+	char shortName[32], character[32], line[96];
+	SiHud_ShortName(client, shortName, sizeof(shortName));
+	SiHud_CharacterName(client, character, sizeof(character));
+	FormatEx(line, sizeof(line), "%s：%s/%s", label, shortName, character);
+	SiHud_DrawText(panel, line);
+}
+
+// 玩家名只显示前两个字符；多于两个字符时第三位起整体缩成一个 '*'（正好两个字符不加 *）。
+// 若要改成"被省掉的每个字符各一个 *"，只改这里的 out[written++] = '*' 那一行。
+void SiHud_ShortName(int client, char[] out, int maxlen)
+{
+	out[0] = '\0';
+	char name[MAX_NAME_LENGTH];
+	SiHud_GetFixedName(client, name, sizeof(name));
+
+	int length = strlen(name);
+	int pos = 0;
+	int chars = 0;
+	int written = 0;
+	while (pos < length && chars < SIHUD_NAME_CHARS && written + 4 < maxlen)
 	{
-		TempHealth = 0.0;
+		int bytes = GetCharBytes(name[pos]);
+		if (bytes < 1 || pos + bytes > length) break;
+		for (int i = 0; i < bytes; i++) out[written++] = name[pos + i];
+		pos += bytes;
+		chars++;
 	}
-	return RoundToFloor(PermHealth + TempHealth);
+	if (pos < length && written + 1 < maxlen) out[written++] = '*';
+	out[written] = '\0';
+}
+
+void SiHud_CharacterName(int client, char[] out, int maxlen)
+{
+	out[0] = '\0';
+	int character = GetEntProp(client, Prop_Send, "m_survivorCharacter");
+	if (character < 0 || character >= sizeof(SiHudCharacterNames)) return;
+	strcopy(out, maxlen, SiHudCharacterNames[character]);
+}
+
+// ------------------------------------------------------------------------
+// 当前路程百分比：最远生还者 flow / 全图最大 flow × 100
+//   首选 L4D2Direct_GetFlowDistance（配合 L4D_GetHighestFlowSurvivor），
+//   退路 L4D2_GetFurthestSurvivorFlow；两者都不可用就不画这一行。
+// ------------------------------------------------------------------------
+bool SiHud_GetFlowPercent(int &percent)
+{
+	percent = 0;
+	if (!g_bSiHudMaxFlowNative) return false;
+
+	float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
+	if (maxFlow <= 0.0) return false;
+
+	float flow;
+	if (!SiHud_GetFurthestFlow(flow)) return false;
+
+	percent = RoundToNearest(flow / maxFlow * 100.0);
+	if (percent < 0) percent = 0;
+	else if (percent > 100) percent = 100;
+	return true;
+}
+
+// 最远生还者的 flow：客户端 flow 优先，退到 Director 的 furthest flow
+bool SiHud_GetFurthestFlow(float &flow)
+{
+	flow = 0.0;
+	if (g_bSiHudClientFlowNative && g_bSiHudHighestNative)
+	{
+		int furthest = L4D_GetHighestFlowSurvivor();
+		if (furthest > 0) flow = L4D2Direct_GetFlowDistance(furthest);
+	}
+	if (flow <= 0.0 && g_bSiHudFurthestFlowNative) flow = L4D2_GetFurthestSurvivorFlow();
+	return flow > 0.0;
+}
+
+// ------------------------------------------------------------------------
+// 内容：感染者段（感染者标题 / 六行职业统计 / 两个刷新点路程百分比）
+// ------------------------------------------------------------------------
+void SiHud_DrawInfectedSection(Panel panel)
+{
+	SiHud_DrawText(panel, SIHUD_TXT_INFECTED);
+	SiHud_DrawClassLines(panel);
+	SiHud_FillSpawnFlowLines(panel);
+}
+
+// 六行：`特感英文名:非灵魂未死亡数/灵魂状态数/该特感上限`
+//   非灵魂未死亡 = team 3 且 m_zombieClass 匹配 且 m_isGhost=0 且活着
+//   灵魂状态     = m_isGhost=1（幽灵状态的等待重生体）
+//   上限         = 实时读 z_versus_<class>_limit
+void SiHud_DrawClassLines(Panel panel)
+{
+	int normal[6];
+	int ghost[6];
+	int limits[6];
+	for (int i = 0; i < 6; i++)
+	{
+		normal[i] = 0;
+		ghost[i] = 0;
+		limits[i] = SiHud_ClassLimit(i + ZC_SMOKER);
+	}
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_INFECTED) continue;
+		int siClass = GetSiType(client);
+		if (siClass < ZC_SMOKER || siClass > ZC_CHARGER) continue;
+		int index = siClass - ZC_SMOKER;
+		if (GetEntProp(client, Prop_Send, "m_isGhost"))
+		{
+			ghost[index]++;
+			continue;
+		}
+		if (!IsPlayerAlive(client)) continue;		// 非灵魂但已死亡：两个数都不算
+		normal[index]++;
+	}
+
+	char line[64];
+	for (int i = 0; i < 6; i++)
+	{
+		FormatEx(line, sizeof(line), "%s:%d/%d/%d", SiHudClassNames[i], normal[i], ghost[i], limits[i]);
+		SiHud_DrawText(panel, line);
+	}
+}
+
+// 单类上限：12v12 加载了 optional/l4d2_nospitterduringtank.smx，坦克在场时它会把
+// z_versus_spitter_limit 置 0、坦克结束后恢复，所以这里实时读 cvar 就自动显示 0，
+// 不需要再对 spitter 做坦克特判。读不到 cvar 时兜底 0 并只记一次日志。
+int SiHud_ClassLimit(int siClass)
+{
+	if (siClass < ZC_SMOKER || siClass > ZC_CHARGER) return 0;
+	ConVar limit = FindConVar(L4D2_limits[siClass]);
+	if (limit == null)
+	{
+		if (!g_bSiHudLimitMissLogged[siClass])
+		{
+			g_bSiHudLimitMissLogged[siClass] = true;
+			LogError("[SV sihud] 找不到 cvar %s，该特感上限按 0 显示。", L4D2_limits[siClass]);
+		}
+		return 0;
+	}
+	return limit.IntValue;
+}
+
+// ------------------------------------------------------------------------
+// 两个特感刷新点的路程百分比
+//   数据源：地图里的 info_zombie_spawn 点（每张图只扫一次，见 SiHud_EnsureSpawnFlows），
+//   每个点用 L4D_GetNearestNavArea（退 L4D2Direct_GetTerrorNavArea）取 nav area，
+//   再用 L4D2Direct_GetTerrorNavAreaFlow 换成 flow，百分比 = flow / 全图最大 flow × 100。
+//   只显示"最远生还者前方最近的两个"点：已越过（flow <= 最远生还者 flow）的不显示。
+//   数据不全时返回 false，一行都不画（不影响面板其它内容）。
+// ------------------------------------------------------------------------
+bool SiHud_FillSpawnFlowLines(Panel panel)
+{
+	SiHud_EnsureSpawnFlows();
+	if (g_iSiHudSpawnCount <= 0) return false;
+	if (!g_bSiHudMaxFlowNative) return false;
+
+	float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
+	if (maxFlow <= 0.0) return false;
+
+	float furthest;
+	if (!SiHud_GetFurthestFlow(furthest)) return false;
+
+	char line[64];
+	int drawn = 0;
+	for (int i = 0; i < g_iSiHudSpawnCount && drawn < SIHUD_SPAWN_LINES; i++)
+	{
+		// g_fSiHudSpawnFlow 已按 flow 升序排好，所以第一次命中的就是"前方最近的"两个点
+		if (g_fSiHudSpawnFlow[i] <= furthest + SIHUD_SPAWN_AHEAD_EPS) continue;
+		int percent = RoundToNearest(g_fSiHudSpawnFlow[i] / maxFlow * 100.0);
+		if (percent < 0) percent = 0;
+		else if (percent > 100) percent = 100;
+		FormatEx(line, sizeof(line), "刷新点%d:%d%%", drawn + 1, percent);
+		SiHud_DrawText(panel, line);
+		drawn++;
+	}
+	return drawn > 0;
+}
+
+// 扫描并缓存地图 info_zombie_spawn 的 flow（每张图一次；nav mesh 没准备好时下次再试）
+void SiHud_EnsureSpawnFlows()
+{
+	if (g_bSiHudSpawnScanned) return;
+
+	if (!g_bSiHudNavFlowNative || (!g_bSiHudNearestNavNative && !g_bSiHudDirectNavNative)
+		|| !g_bSiHudMaxFlowNative)
+	{
+		if (!g_bSiHudSpawnWarned)
+		{
+			g_bSiHudSpawnWarned = true;
+			LogError("[SV sihud] Left4DHooks 缺少 nav area flow 相关 native，刷新点行不显示（面板其它行不受影响）。");
+		}
+		g_bSiHudSpawnScanned = true;	// 本图不再重试
+		return;
+	}
+
+	// nav mesh 还没建好时全图最大 flow 会是 0，隔一秒再试；连续试满上限就放弃本图，
+	// 避免"没有 flow 的地图"上每秒白扫一遍实体。
+	if (L4D2Direct_GetMapMaxFlowDistance() <= 0.0)
+	{
+		if (++g_iSiHudSpawnAttempts < SIHUD_SPAWN_SCAN_ATTEMPTS) return;
+		g_bSiHudSpawnScanned = true;
+		if (SiHudDebug != null && SiHudDebug.BoolValue)
+			LogError("[SV sihud] 本图取不到全图最大 flow，刷新点行不显示。");
+		return;
+	}
+
+	g_iSiHudSpawnCount = 0;
+	float origin[3];
+	for (int entity = FindEntityByClassname(-1, "info_zombie_spawn");
+		entity != -1 && g_iSiHudSpawnCount < SIHUD_MAX_SPAWNS;
+		entity = FindEntityByClassname(entity, "info_zombie_spawn"))
+	{
+		if (!IsValidEntity(entity)) continue;
+		GetEntPropVector(entity, Prop_Send, "m_vecOrigin", origin);
+
+		Address area = Address_Null;
+		// 先用可靠度更高的 L4D_GetNearestNavArea（anyZ=true，保证空中的刷怪点也能落到脚下 nav area）
+		if (g_bSiHudNearestNavNative) area = L4D_GetNearestNavArea(origin, 500.0, true);
+		if (area == Address_Null && g_bSiHudDirectNavNative) area = L4D2Direct_GetTerrorNavArea(origin);
+		if (area == Address_Null) continue;
+
+		float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
+		if (flow <= 0.0) continue;
+		g_fSiHudSpawnFlow[g_iSiHudSpawnCount++] = flow;
+	}
+	if (g_iSiHudSpawnCount > 1) SortFloats(g_fSiHudSpawnFlow, g_iSiHudSpawnCount, Sort_Ascending);
+	g_bSiHudSpawnScanned = true;
+
+	if (SiHudDebug != null && SiHudDebug.BoolValue)
+		LogMessage("[SV sihud] 本图 info_zombie_spawn 采样完成：%d 个有效刷新点。", g_iSiHudSpawnCount);
+}
+
+// ------------------------------------------------------------------------
+// 工具函数
+// ------------------------------------------------------------------------
+// 一行文本：先算剩余预算，再按 UTF-8 字符边界裁剪；预算用完就整行不画。
+// （Panel 自己也会静默截断，但那是按字节切的，会把中文切成半个字。）
+void SiHud_DrawText(Panel panel, const char[] text)
+{
+	int remaining = panel.TextRemaining - 1;	// 留 1 字节给换行
+	if (remaining <= 0) return;
+	int limit = (remaining < SIHUD_TEXT_BUDGET) ? remaining : SIHUD_TEXT_BUDGET;
+	char line[SIHUD_TEXT_BUDGET + 2];
+	SiHud_CopyPanelText(text, line, sizeof(line), limit);
+	panel.DrawText(line);
+}
+
+// 与 readyup panel.inc 的 RU_CopyPanelText 同一套算法：按字符整块拷贝，
+// 放不下时整块丢弃并补一个 '~'，保证不会切出半个 UTF-8 字符。
+void SiHud_CopyPanelText(const char[] source, char[] output, int maxlen, int budget)
+{
+	output[0] = '\0';
+	if (budget > maxlen - 1) budget = maxlen - 1;
+	if (budget <= 0) return;
+
+	int length = strlen(source);
+	bool shortened = length > budget;
+	int limit = shortened ? budget - 1 : budget;
+	int pos = 0;
+	while (pos < length)
+	{
+		int bytes = GetCharBytes(source[pos]);
+		if (bytes < 1 || pos + bytes > length || pos + bytes > limit) break;
+		for (int i = 0; i < bytes; i++) output[pos + i] = source[pos + i];
+		pos += bytes;
+	}
+	if (pos < length && pos < budget) output[pos++] = '~';
+	output[pos] = '\0';
+}
+
+// 去掉名字开头的 '[' 占位（与 readyup player.inc 的 GetClientFixedName 一致）
+void SiHud_GetFixedName(int client, char[] name, int length)
+{
+	GetClientName(client, name, length);
+	if (name[0] == '[')
+	{
+		char temp[MAX_NAME_LENGTH];
+		strcopy(temp, sizeof(temp), name);
+		temp[sizeof(temp)-2] = 0;
+		strcopy(name[1], length-1, temp);
+		name[0] = ' ';
+	}
+}
+
+// 把面板从屏幕上顶掉：Panel 没有"清除"接口，只能发一块新的。
+// 用一行内容 + 1 秒显示时长，最短时间内自动消失。
+void SiHud_ClosePanel(int client, const char[] note)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client)) return;
+	Panel panel = new Panel();
+	panel.DrawText(note);
+	panel.Send(client, SiHud_DummyHandler, 1);
+	delete panel;
+}
+
+bool SiHud_IsTankLocked(int client)
+{
+	if (client <= 0 || client > MaxClients) return false;
+	if (g_fSiHudTankLockUntil[client] <= 0.0) return false;
+	if (GetGameTime() < g_fSiHudTankLockUntil[client]) return true;
+	g_fSiHudTankLockUntil[client] = 0.0;
+	return false;
+}
+
+void SiHud_ResetClient(int client)
+{
+	if (client < 0 || client > MaxClients) return;
+	g_bSiHudOn[client] = false;
+	g_bSiHudSent[client] = false;
+	g_bSiHudOffByUser[client] = false;
+	g_bSiHudSeen[client] = false;
+	g_fSiHudTankLockUntil[client] = 0.0;
+	g_fSiHudLastSendAt[client] = 0.0;
+}
+
+void SiHud_ResetAll()
+{
+	for (int client = 0; client <= MaxClients; client++) SiHud_ResetClient(client);
+}
+
+// 换图：清状态 + 让刷新点缓存失效
+void SiHud_ResetMap()
+{
+	SiHud_ResetAll();
+	g_bSiHudAutoShownRound = false;
+	g_iSiHudSpawnCount = 0;
+	g_iSiHudSpawnAttempts = 0;
+	g_bSiHudSpawnScanned = false;
+	for (int i = 0; i < sizeof(g_bSiHudLimitMissLogged); i++) g_bSiHudLimitMissLogged[i] = false;
+}
+
+// 新回合：坦克延迟窗口不跨回合，"手动关掉"标记与本回合的自动显示机会一起重置
+// （需求：手动关只在"本回合内"生效，下一回合首次离开安全区仍会自动显示）
+void SiHud_ResetRound()
+{
+	g_bSiHudAutoShownRound = false;
+	for (int client = 0; client <= MaxClients; client++)
+	{
+		g_fSiHudTankLockUntil[client] = 0.0;
+		g_bSiHudOffByUser[client] = false;
+	}
+}
+
+// Left4DHooks 的 native 在 left4dhooks.inc 里默认被标成 optional，
+// 必须先探状态再用，否则 Left4DHooks 版本偏旧时会抛 "Native is not bound"。
+void SiHud_CheckNatives()
+{
+	g_bSiHudMaxFlowNative = SiHud_NativeAvailable("L4D2Direct_GetMapMaxFlowDistance");
+	g_bSiHudClientFlowNative = SiHud_NativeAvailable("L4D2Direct_GetFlowDistance");
+	g_bSiHudHighestNative = SiHud_NativeAvailable("L4D_GetHighestFlowSurvivor");
+	g_bSiHudFurthestFlowNative = SiHud_NativeAvailable("L4D2_GetFurthestSurvivorFlow");
+	g_bSiHudNavFlowNative = SiHud_NativeAvailable("L4D2Direct_GetTerrorNavAreaFlow");
+	g_bSiHudNearestNavNative = SiHud_NativeAvailable("L4D_GetNearestNavArea");
+	g_bSiHudDirectNavNative = SiHud_NativeAvailable("L4D2Direct_GetTerrorNavArea");
+	g_bSiHudReadyUpNative = SiHud_NativeAvailable("IsInReady");
+	if (!g_bSiHudMaxFlowNative && SiHudDebug != null && SiHudDebug.BoolValue)
+		LogError("[SV sihud] L4D2Direct_GetMapMaxFlowDistance 不可用：当前路程百分比与刷新点两行都不会显示。");
+}
+
+// 是否处在 readyup 的准备阶段（readyup 没加载时恒为 false）
+bool SiHud_ReadyUpActive()
+{
+	if (!g_bSiHudReadyUpNative) return false;
+	return IsInReady();
+}
+
+bool SiHud_NativeAvailable(const char[] name)
+{
+	return GetFeatureStatus(FeatureType_Native, name) == FeatureStatus_Available;
 }
 
 // *********************************************************************************
@@ -2225,6 +2986,12 @@ int GetClientRealHealth(int client)
 public void Event_PlayerLeftStartArea(Event event, const char[] name, bool dontBroadcast)
 {
 	StartInfectedCounter();
+
+	// C：生还者离开安全区域 → 每回合首次离开时自动给所有非生还者开特感辅助面板
+	// （手动关掉过的玩家除外；之后的同类事件只刷新，见 SiHud_OnSurvivorLeftSafeArea）。
+	int leaver = GetClientOfUserId(event.GetInt("userid"));
+	if (leaver > 0 && IsClientInGame(leaver) && GetClientTeam(leaver) == TEAM_SURVIVOR)
+		SiHud_OnSurvivorLeftSafeArea();
 
 	// 有人离开起点安全区域 = readyup/doorlock 已经解禁、可以自由入队。
 	// 这个事件每名生还者都会触发一次，所以只用第一次（每回合一次）。
@@ -2752,9 +3519,6 @@ void SiSpawn(int type = -1)
 		return;
 	}
 }
-
-char L4D1_limits[4][] = {"none", "z_gas_limit",			  "z_exploding_limit",	   "z_hunter_limit"};
-char L4D2_limits[7][] = {"none", "z_versus_smoker_limit", "z_versus_boomer_limit", "z_versus_hunter_limit", "z_versus_spitter_limit", "z_versus_jockey_limit", "z_versus_charger_limit"};
 
 // ------------------------------------------------------------------------
 //  Find which SI should be spawned

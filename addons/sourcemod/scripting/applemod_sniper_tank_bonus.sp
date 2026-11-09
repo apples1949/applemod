@@ -64,7 +64,7 @@ public void OnPluginStart()
     g_hMultiplier = CreateConVar( \
         "applemod_sniper_tank_bonus_multiplier", \
         "1.5", \
-        "坦克未移动时狙击伤害的倍率。1.5 表示变成原来的 150%。", \
+        "坦克未移动时狙击伤害的倍率。1.5 表示变成原来的 150%。默认 1.5；仅 12v12 配置在 cfg/cfgogl/applemod12v12/applemod12v12.cfg 里由 confogl_addcvar 下发 2.0", \
         FCVAR_NOTIFY, true, 0.0, false, 0.0 \
     );
 
@@ -91,6 +91,26 @@ public void OnPluginStart()
 
 void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
+    ReadCvars();
+}
+
+/**
+ * 时序兜底：cvar 的实际值由 confogl 的 confogl_addcvar / confogl_setcvars 下发，
+ * 而"插件加载"与"配置执行"的先后顺序不由本插件决定（confoglcompmod 的 CvarSettings
+ * 在 confogl_setcvars 与它自己的 OnConfigsExecuted 里用 SetString 写值）。
+ *
+ * 正常路径其实已经覆盖：
+ *   1) 本插件用 AddChangeHook 监听三个 cvar，confogl 写值时回调会立刻触发 ReadCvars()；
+ *   2) 插件晚加载（配置早已执行完）时，OnPluginStart 里的 ReadCvars() 直接读到当前值。
+ * 这里在每次配置执行完后再读一遍，纯粹是防御：两者都不依赖 OnConfigsExecuted 与
+ * confogl_setcvars 的先后顺序，多读一次只是幂等地确认最终值，不会改写任何 cvar。
+ */
+public void OnConfigsExecuted()
+{
+    if (g_hEnabled == null || g_hMultiplier == null || g_hMaxSpeed == null) {
+        return;
+    }
+
     ReadCvars();
 }
 

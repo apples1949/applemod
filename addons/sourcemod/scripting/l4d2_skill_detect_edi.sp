@@ -194,14 +194,14 @@ enum
 
 char g_csSIClassName[][] = {
 	"",
-	"smoker",
-	"boomer",
-	"hunter",
-	"spitter",
-	"jockey",
-	"charger",
-	"witch",
-	"tank"
+	"烟鬼",
+	"胖子",
+	"猎人",
+	"喷吐者",
+	"猴子",
+	"牛",
+	"女巫",
+	"坦克"
 };
 
 char g_sDebugFile[256];	 // debug file name

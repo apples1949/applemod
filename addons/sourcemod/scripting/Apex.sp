@@ -15,6 +15,9 @@
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
 #define IsTank(%1)		   (IsValidClient(%1) && !IsFakeClient(%1) && GetClientTeam(%1) == 3 && GetEntProp(%1, Prop_Send, "m_zombieClass") == 8)
+/* 含 AI 坦克的判定: 坦克视野只接管真人坦克(IsTank), 但"这辆坦克活了多久"必须连 AI 坦克
+   (掉控后引擎接管的那辆)一起累计, 否则二控/给克接手后存活计时会从头开始 */
+#define IsTankEntity(%1)   (IsValidClient(%1) && GetClientTeam(%1) == 3 && GetEntProp(%1, Prop_Send, "m_zombieClass") == 8)
 
 #define BHOPMODE_BLOCK	   0  /* 禁用连跳 */
 #define BHOPMODE_AUTO	   1  /* 自动连跳 */
@@ -211,6 +214,20 @@ float  g_fVisionSampleAt[MAXPLAYERS + 1];  /* 上次结算时刻 */
 float  g_fVisionChatAt[MAXPLAYERS + 1];    /* 每秒一条调试日志的节流 */
 float  g_fVisionRangeOverride;             /* 测试指令强制的可见范围(<=0 = 不强制) */
 float  g_fVisionRangeOverrideUntil;        /* 强制范围的到期时刻(0 = 不过期) */
+
+/* 存活计时的口径是"一辆坦克", 不是"一个控制者":
+   同一辆坦克被给克/二控交给下一位玩家时, 存活秒数必须接着算(否则 start_time /
+   alive_time / 阶梯范围这些"按时间生效"的规则每次交接都从头开始 = 时间相关的
+   控制权消耗量失效); 只有新 spawn 的一辆坦克才从 0 开始。
+   交接信息有两条通道: 交接钩子点名的 carry(控制权交接), 以及"坦克暂时没人控"时
+   留下的孤儿记录(掉控瞬间到下一个控制者接手之间)。 */
+#define VISION_CARRY_WINDOW	 10.0			   /* 交接/孤儿记录的有效窗口(秒), 过期作废 */
+float  g_fVisionCarryAlive[MAXPLAYERS + 1];	   /* 交接钩子交给某个新控制者的"已存活秒数" */
+float  g_fVisionCarryAt[MAXPLAYERS + 1];	   /* 上面这条记录的写入时刻(过期校验用) */
+bool   g_bVisionCarryValid[MAXPLAYERS + 1];	   /* 该玩家有一条待接手的存活秒数 */
+float  g_fVisionOrphanAlive;				   /* 坦克暂时没人控时留下的已存活秒数(等下一个控制者) */
+float  g_fVisionOrphanAt;					   /* 上面这条记录的写入时刻(过期校验用) */
+bool   g_bVisionCarriedOut[MAXPLAYERS + 1];	   /* 这个控制者的存活秒数已经通过交接钩子交出去了, 不要再存孤儿 */
 
 
 /* -----------------------------------------------------------
@@ -818,12 +835,29 @@ void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 
 	if (!IsTank(client)) return;
 
+	/* 坦克视野: 交接过来的存活秒数要在 Reset() 之前读出来 —— Reset -> VisionClearTracking
+	   会把整段坦克视野状态(含存活计时)清空。两种时序都要兜住:
+	     a) 交接钩子先到: carry 还挂在 g_fVisionCarryAlive 里(下面 VisionTakeHandoverAge 取);
+	     b) 交接后本插件已经先跑过一帧: 存活计时已经在 g_fTankCtrlStart/AliveBias 里。 */
+	float fAliveBefore = VisionAliveSeconds(client);
+
 	Reset(client);
 	if (Apex[2].IntValue > 0) CreateTimer(0.1, SetTankHealth, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 
 	/* 坦克视野: 开坦克这一刻记下存活起点, 并兜底启动定时器
-	   (万一 cvar 在本插件加载前就已设好, 不会触发变更钩子) */
-	g_fTankCtrlStart[client] = GetGameTime();
+	   (万一 cvar 在本插件加载前就已设好, 不会触发变更钩子)。
+	   注意: 给克/二控也可能让 tank_spawn 再发一次 —— 那种情况用交接钩子留下的存活秒数,
+	   不能把"这辆坦克已经活了多久"清成 0(存活秒数的口径是一辆坦克, 不是一个控制者)。
+	   这里只认交接钩子明确点名的 carry; 孤儿记录是给"掉控 -> 下一位接手"用的,
+	   新 spawn 的坦克不该继承, 所以不在这里消费。 */
+	float fNow = GetGameTime();
+	bool  bHandover = false;
+
+	float fCarry = VisionTakeHandoverAge(client, fNow, bHandover, false);
+
+	g_fTankCtrlStart[client]   = fNow;
+	g_fVisionAliveBias[client] = (fCarry > fAliveBefore) ? fCarry : fAliveBefore;
+	g_bVisionCarriedOut[client] = false;
 	StartTankVisionTimer();
 
 	TankHints_Start(client);
@@ -836,6 +870,11 @@ public void Event_TankFrustrated(Event event, const char[] name, bool dontBroadc
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (client <= 0 || client > MaxClients)
+		return;
+
+	/* AI 坦克不写怒气, 它的掉控闩锁没有意义; 若记在某个 bot 槽位上,
+	   之后玩家顶替这个槽位当坦克时会带着这个陈旧闩锁(整辆坦克再也不会被扣控) */
+	if (IsFakeClient(client))
 		return;
 
 	g_bVisionDropped[client] = true;
@@ -857,12 +896,17 @@ void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 {
 	for (int i = 1; i <= MaxClients; i++)
 		if (IsClientInGame(i)) Reset(i);
+
+	/* 回合结束: 坦克存活计时/交接记录一律作废(下一个回合的坦克从 0 开始) */
+	VisionResetHandoverState();
 }
 
 public void OnMapEnd()
 {
 	for (int i = 1; i <= MaxClients; i++)
 		if (IsClientInGame(i)) Reset(i);
+
+	VisionResetHandoverState();
 }
 /* -----------------------------------------------------------
 	按键设置
@@ -1446,6 +1490,10 @@ public void OnClientDisconnect(int client)
 	g_bVisionWroteFull[client] = false;
 	g_bVisionDropTried[client] = false;
 	g_fVisionFullAt[client]    = 0.0;
+	g_bVisionCarriedOut[client] = false;
+	g_bVisionCarryValid[client] = false;
+	g_fVisionCarryAlive[client] = 0.0;
+	g_fVisionCarryAt[client]    = 0.0;
 
 
 	/* 跟踪石的连续命中约束(控制权状态已移交 l4d_tank_control_eq 修改版) */
@@ -2663,6 +2711,190 @@ void VisionClearAll()
 		VisionClearTracking(i);
 }
 
+/* ===========================================================================
+	坦克视野: 存活计时跨控制权交接(给克 / 二控)延续
+   ---------------------------------------------------------------------------
+   存活秒数是"这辆坦克活了多久", 不是"这个控制者控了多久":
+     同一辆坦克交给下一位玩家(给克/二控)时, 存活计时必须接着算, 否则
+     l4d2_tankvision_start_time(接管门槛) / l4d2_tankvision_alive_time(存活满门限
+     的扣控加成) / t1~t3_time(范围阶梯) 每次交接都从头开始, 这些"按时间生效"的
+     控制权消耗量就永远看不到效果(用户反馈的"二控后大概率失效")。
+   只有新 spawn 的一辆坦克才从 0 开始。
+   =========================================================================== */
+
+/* 某个控制者身上记着的"这辆坦克已存活秒数"(没在跟踪就是 0) */
+float VisionTankAgeSeconds(int client)
+{
+	if (client < 1 || client > MaxClients)
+		return 0.0;
+
+	if (g_fTankCtrlStart[client] > 0.0)
+		return VisionAliveSeconds(client);
+
+	return 0.0;
+}
+
+/* 坦克暂时没人控(掉控到下一个控制者接手之间): 把这辆坦克已经活了多少秒存成"孤儿",
+   下一位接手的人接着算。窗口外的旧记录自动作废, 免得串到别的坦克上。 */
+void VisionStashTankAge(float fAlive)
+{
+	if (fAlive <= 0.0)
+		return;
+
+	float fNow = GetGameTime();
+
+	/* 同一时刻只留一份: 12v12 多坦克时保留更大的那个(更老的坦克), 小的不覆盖 */
+	if (g_fVisionOrphanAt > 0.0 && (fNow - g_fVisionOrphanAt) <= VISION_CARRY_WINDOW
+		&& g_fVisionOrphanAlive >= fAlive)
+		return;
+
+	g_fVisionOrphanAlive = fAlive;
+	g_fVisionOrphanAt	 = fNow;
+}
+
+/* 回合结束/换图: 所有"交接中的存活计时"作废, 下一回合的坦克从 0 开始 */
+void VisionResetHandoverState()
+{
+	g_fVisionOrphanAlive = 0.0;
+	g_fVisionOrphanAt	 = 0.0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_fVisionCarryAlive[i] = 0.0;
+		g_fVisionCarryAt[i]	   = 0.0;
+		g_bVisionCarryValid[i] = false;
+		g_bVisionCarriedOut[i] = false;
+	}
+}
+
+/* 取出"接手过来的存活秒数"(没有/过期就是 0)。
+   @param bHandover	输出: 这次是不是控制权交接/接手(交接来的控制段要清掉上一任的 per-life 闩锁)
+   @param bAllowOrphan	是否允许使用"孤儿"记录(新 spawn 的坦克不该继承上一辆的孤儿) */
+float VisionTakeHandoverAge(int client, float fNow, bool &bHandover, bool bAllowOrphan = true)
+{
+	bHandover = false;
+
+	if (client < 1 || client > MaxClients)
+		return 0.0;
+
+	float fAlive = 0.0;
+
+	/* 1) 交接钩子点名的存活秒数(给克/二控: 旧控制者 -> 新控制者) */
+	if (g_bVisionCarryValid[client])
+	{
+		if ((fNow - g_fVisionCarryAt[client]) <= VISION_CARRY_WINDOW)
+		{
+			fAlive	 = g_fVisionCarryAlive[client] + (fNow - g_fVisionCarryAt[client]);
+			bHandover = true;
+		}
+
+		g_bVisionCarryValid[client] = false;
+		g_fVisionCarryAlive[client] = 0.0;
+		g_fVisionCarryAt[client]	= 0.0;
+	}
+
+	/* 2) 掉控到接手之间的孤儿记录(没有交接钩子的路径, 例如 AI 坦克 -> 玩家) */
+	if (!bHandover && bAllowOrphan
+		&& g_fVisionOrphanAt > 0.0 && (fNow - g_fVisionOrphanAt) <= VISION_CARRY_WINDOW)
+	{
+		fAlive	 = g_fVisionOrphanAlive + (fNow - g_fVisionOrphanAt);
+		bHandover = true;
+	}
+
+	if (bHandover)
+	{
+		/* 孤儿记录只给下一个接手的人用一次 */
+		g_fVisionOrphanAlive = 0.0;
+		g_fVisionOrphanAt	 = 0.0;
+	}
+
+	return (fAlive > 0.0) ? fAlive : 0.0;
+}
+
+/* 控制权交接(ZombieManager::ReplaceTank): 把"这辆坦克已经活了多久"交给下一个控制者。
+   只记交接信息, 真正的控制段初始化在 VisionBeginControlSegment 里做
+   (那一刻引擎还没完成职业切换, 读不到新坦克的怒气)。 */
+void VisionCarryTankAge(int iOldTank, int iNewTank)
+{
+	if (iNewTank < 1 || iNewTank > MaxClients || iOldTank == iNewTank)
+		return;
+
+	float fNow   = GetGameTime();
+	float fAlive = VisionTankAgeSeconds(iOldTank);
+
+	g_fVisionCarryAlive[iNewTank] = (fAlive > 0.0) ? fAlive : 0.0;
+	g_fVisionCarryAt[iNewTank]	  = fNow;
+	g_bVisionCarryValid[iNewTank] = true;
+
+	/* 旧控制者的存活秒数已经交出去了: 它之后不再是坦克时不要再存一份孤儿(会串到别的坦克) */
+	if (iOldTank >= 1 && iOldTank <= MaxClients)
+		g_bVisionCarriedOut[iOldTank] = true;
+
+	VisionLog("%N -> %N 控制权交接: 存活计时延续 %.0f 秒(二控不重置)", iOldTank, iNewTank, fAlive);
+}
+
+/* 开一个新的"控制权段": 第一次看到这个玩家开坦克 / 交接后接手 / 掉控后再接手都走这里。
+   - 存活计时: 用交接/孤儿记录延续(同一辆坦克跨控制者累计), 没有记录才从 0 开始
+   - per-life 闩锁: 交接过来的新控制段必须清掉(否则上一任的掉控闩锁/写满标记会把
+     这辆坦克剩下的时间全部锁死, 表现就是二控后按时间增加/减少的消耗量一起失效)
+   调用方负责保证 g_fTankCtrlStart[client] <= 0(即"这一段还没开始")。 */
+void VisionBeginControlSegment(int client, float fNow)
+{
+	bool  bHandover = false;
+	float fAlive	= VisionTakeHandoverAge(client, fNow, bHandover);
+	int   iMeter0	= GetEntProp(client, Prop_Send, "m_frustration");
+
+	g_fTankCtrlStart[client]   = fNow;
+	g_fVisionAliveBias[client] = fAlive;
+	g_bVisionCarriedOut[client] = false;
+	g_fVisionRangeMark[client] = -1.0;
+	g_fVisionUnseenAt[client]  = 0.0;
+	g_bVisionPenalty[client]   = false;
+	g_bVisionAnnounced[client] = false; /* 新的控制权段(没走 spawn 的换人): 这一辆坦克要能再播报一次 */
+	g_bVisionTracHit[client]   = false;
+	g_fVisionTracAt[client]	   = 0.0;
+	g_fVisionChatAt[client]	   = 0.0;
+	g_fVisionSampleAt[client]  = fNow;
+	g_iVisionMeter[client]	   = iMeter0;
+	g_fVisionEngineAt[client]  = 0.0;
+	g_fVisionPayAt[client]	   = fNow;
+	g_fVisionMeterF[client]	   = float(iMeter0);
+	g_fVisionFullAt[client]	   = 0.0;
+	g_bVisionWroteFull[client] = false;
+	g_bVisionDropTried[client] = false;
+
+	if (bHandover)
+	{
+		/* 控制权交接: 上一任留下的 per-life 闩锁全部作废(这辆坦克现在归新控制者),
+		   但存活计时不清(见上面的 fAlive) */
+		g_bVisionDropped[client] = false;
+		return;
+	}
+
+	/* 不是交接(插件中途加载 / 同一玩家二次拿到同一辆坦克但没经过交接钩子):
+	   怒气不满说明这不是"已经掉控的那一辆", 把掉控闩锁解开,
+	   否则这一回合就再也不会被本模块惩罚 */
+	if (g_bVisionDropped[client] && iMeter0 < 50)
+		g_bVisionDropped[client] = false;
+}
+
+/*=========================================================================
+|                    坦克视野: 控制权交接 forward                         |
+=========================================================================*/
+
+/* ZombieManager::ReplaceTank(同一辆坦克换控制者) */
+public void L4D_OnReplaceTank(int tank, int newtank)
+{
+	VisionCarryTankAge(tank, newtank);
+}
+
+/* l4d2lib 兼容 forward(由 left4dhooks 发出; 本仓库的 l4d_tank_control_eq 也依赖它):
+   掉控 -> AI -> 给克给下一位 这条"接手 AI 坦克"的路径只有它会报告新旧控制者 */
+public void L4D2_OnTankPassControl(int iOldTank, int iNewTank, int iPassCount)
+{
+	VisionCarryTankAge(iOldTank, iNewTank);
+}
+
 /* 按"坦克存活时长"给出这一档的可见范围(后加的档覆盖前面的, 基准 = l4d2_tankvision_range)。
    阶梯档的 range <= 0 视为"这一档不生效"(保持上一档), 不把范围放开成无限:
    range = 0 在下面表示"无限", 配置写 0 的语义必须是"不收紧"而不是"全图可见"。 */
@@ -3261,38 +3493,69 @@ Action Timer_TankVision(Handle timer)
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		/* 只接管"活着的真人坦克": 尸体也会保留坦克职业, 所以必须判 IsPlayerAlive */
-		if (!IsTank(i) || !IsPlayerAlive(i))
+		/* 只接管"活着的坦克"; 尸体也会保留坦克职业, 所以必须判 IsPlayerAlive。
+		   这里用 IsTankEntity(含 AI 坦克): AI 坦克不写怒气, 但"这辆坦克活了多久"要继续记,
+		   二控/给克交给玩家时存活计时才接得上。 */
+		if (!IsTankEntity(i) || !IsPlayerAlive(i))
 		{
+			/* 掉控(还活着但已经不是坦克): 这辆坦克的存活秒数不丢, 存成孤儿交给下一位控制者;
+			   坦克死了就不存 —— 这辆坦克结束了, 新 spawn 的那辆要从 0 开始算。
+			   已经通过交接钩子交出去的, 不再重复存(否则这份孤儿会串到别的坦克上)。 */
+			if (g_fTankCtrlStart[i] > 0.0 && IsPlayerAlive(i) && !g_bVisionCarriedOut[i])
+				VisionStashTankAge(VisionAliveSeconds(i));
+
 			VisionClearTracking(i);
 			/* 掉控标记故意不在这里清: 掉控后玩家可能短暂变成幽灵, 引擎若又把控制权还回来
 			   而没触发新的 spawn, 每 tick 清标记会让"回控"重新发生。标记只在 Reset() 里清。 */
 			continue;
 		}
 
-		/* 第一次看到这个玩家开坦克 = 记下存活起点; 换人/重开都靠这个自动重算 */
-		if (g_fTankCtrlStart[i] <= 0.0)
+		/* AI 坦克(掉控后引擎接管的那辆): 只延续存活计时, 不写怒气、不判视野 */
+		if (IsFakeClient(i))
 		{
-			int iMeter0 = GetEntProp(i, Prop_Send, "m_frustration");
+			if (g_fTankCtrlStart[i] <= 0.0)
+			{
+				bool bHandover = false;
+				int	 iMeterBot = GetEntProp(i, Prop_Send, "m_frustration");
 
-			g_fTankCtrlStart[i]   = fNow;
-			g_fVisionAliveBias[i] = 0.0;
-			g_fVisionRangeMark[i] = -1.0;
-			g_fVisionUnseenAt[i]  = 0.0;
-			g_bVisionPenalty[i]   = false;
-			g_bVisionAnnounced[i] = false; /* 新的控制权段(没走 spawn 的换人): 这一辆坦克要能再播报一次 */
-			g_bVisionTracHit[i]   = false;
-			g_fVisionChatAt[i]    = 0.0;
-			g_fVisionSampleAt[i]  = fNow;
-			g_iVisionMeter[i]     = iMeter0;
-			g_fVisionEngineAt[i]  = 0.0;
-			g_fVisionPayAt[i]     = fNow;
+				g_fVisionAliveBias[i]	 = VisionTakeHandoverAge(i, fNow, bHandover);
+				g_fTankCtrlStart[i]	   = fNow;
+				g_fVisionSampleAt[i]	 = fNow;
+				g_bVisionCarriedOut[i] = false;
 
-			/* 新的控制权段(控制权交接/换人后没走 spawn): 怒气不满说明这不是"已经掉控的那一辆",
-			   把掉控闩锁解开, 否则这一回合就再也不会被本模块惩罚 */
-			if (g_bVisionDropped[i] && iMeter0 < 50)
-				g_bVisionDropped[i] = false;
+				/* 这一段的状态按"新控制段"初始化: bot 槽位可能随时被加入的玩家顶替,
+				   届时玩家接手的是干净状态(存活计时照旧延续) */
+				g_iVisionMeter[i]	  = iMeterBot;
+				g_fVisionMeterF[i]	  = float(iMeterBot);
+				g_bVisionDropped[i]	  = false;
+				g_bVisionWroteFull[i] = false;
+				g_bVisionDropTried[i] = false;
+				g_fVisionFullAt[i]	  = 0.0;
+				g_fVisionUnseenAt[i]  = 0.0;
+				g_bVisionPenalty[i]	  = false;
+				g_bVisionAnnounced[i] = false;
+				g_bVisionTracHit[i]	  = false;
+				g_fVisionTracAt[i]	  = 0.0;
+				g_fVisionEngineAt[i]  = 0.0;
+			}
+			else if (g_fVisionAliveBias[i] <= 0.0)
+			{
+				/* 接手那一帧孤儿记录还没写下来(同一 tick 内的处理顺序问题): 这里补上 */
+				bool  bHandover = false;
+				float fCarryAge = VisionTakeHandoverAge(i, fNow, bHandover);
+
+				if (fCarryAge > 0.0)
+					g_fVisionAliveBias[i] = fCarryAge;
+			}
+
+			continue;
 		}
+
+		/* 第一次看到这个玩家开坦克 = 开一个新的控制权段; 换人/重开都靠这个自动重算。
+		   存活计时在交接时延续(见 VisionCarryTankAge / VisionStashTankAge),
+		   二控只清这一段的闩锁, 不清存活计时。 */
+		if (g_fTankCtrlStart[i] <= 0.0)
+			VisionBeginControlSegment(i, fNow);
 
 		float fDt = fNow - g_fVisionSampleAt[i];
 		if (fDt < 0.01)

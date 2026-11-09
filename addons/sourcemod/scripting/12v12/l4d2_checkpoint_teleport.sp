@@ -18,8 +18,8 @@
  *
  *  两类区域：倒计时、到齐比例、提示文案互相独立。 ---------------------------------
  *    A) 安全屋 + 救援点：l4d2_cptele_time              （默认 60 秒）
- *                        l4d2_cptele_percent           （默认 66%）
- *                        —— 保持插件原有设定，不做改动
+ *                        l4d2_cptele_percent           （默认 50%）
+ *                        —— 1.2.6 起默认 50%（原 66%），12v12 的 cfg 也显式下发 50
  *    B) 地图中途集合点：l4d2_cptele_checkpoint_time    （默认 30 秒）
  *                        l4d2_cptele_checkpoint_percent（默认 50%）
  *
@@ -139,6 +139,11 @@
  *      「不是全员在屋内」不肯关门，引擎的 CheckpointDoorClosed 也就没来过，
  *      表现为"最后还得自己开关一次门"。现在安全屋类型不再跳过这类人，一律传送进屋。
  *
+ *  1.2.6 12v12 微调（2026-11-09）：
+ *    - 安全屋 / 救援点到齐比例默认值 l4d2_cptele_percent：66% -> 50%。
+ *      中途集合点的 l4d2_cptele_checkpoint_percent 本来就是 50%，未改动。
+ *      模式配置 cfg/cfgogl/applemod12v12/applemod12v12.cfg 同步改成 50（两条路径一致）。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -152,7 +157,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.5"
+#define PLUGIN_VERSION      "1.2.6"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -368,8 +373,8 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// ---- A 组：安全屋 / 救援点（保持插件原有名字与默认值） -----------------
-	g_cvPercent = CreateConVar("l4d2_cptele_percent", "66",
-		"[安全屋/救援点] 触发倒计时所需的到达比例（%）。所需人数 = 向上取整(该比例 × 当前存活生还者数)。默认 66（原有设定）。中途集合点请用 l4d2_cptele_checkpoint_percent",
+	g_cvPercent = CreateConVar("l4d2_cptele_percent", "50",
+		"[安全屋/救援点] 触发倒计时所需的到达比例（%）。所需人数 = 向上取整(该比例 × 当前存活生还者数)。默认 50。中途集合点请用 l4d2_cptele_checkpoint_percent",
 		FCVAR_NOTIFY, true, 1.0, true, 100.0);
 
 	g_cvTime = CreateConVar("l4d2_cptele_time", "60",

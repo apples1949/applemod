@@ -347,7 +347,7 @@ public void Event_PlayerDeath(Event hEvent, const char[] sEventName, bool bDontB
 					GetClientName(g_iBoomerClient, Boomer, sizeof(Boomer));
 				}
 				else {
-					Format(Boomer, sizeof(Boomer), "AI");
+					Format(Boomer, sizeof(Boomer), "电脑");
 				}
 			}
 			else {
@@ -356,7 +356,7 @@ public void Event_PlayerDeath(Event hEvent, const char[] sEventName, bool bDontB
 					GetClientName(victim, Boomer, sizeof(Boomer));
 				}
 				else {
-					Format(Boomer, sizeof(Boomer), "AI");
+					Format(Boomer, sizeof(Boomer), "电脑");
 				}
 			}
 			////////

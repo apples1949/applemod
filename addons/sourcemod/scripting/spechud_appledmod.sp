@@ -36,6 +36,21 @@ public Plugin myinfo =
 // ======================================================================
 #define SPECHUD_DRAW_INTERVAL 1.0
 
+// ---- 多人配置（12v12 等 survivor_limit >= 12）下的面板精简 ----
+// 聊天面板(radio panel)整块只有 511 字节，多人局要同时列出 12 名生还者 + 12 名感染者。
+// 原版每行 "42ms | Nick: 99HP# [Chrome 8/72]" 光延迟和武器就占掉一大半预算，
+// 结果排在后面的感染者列表被引擎静默截断（玩家看不到）。这里：
+//   1) 按面板剩余字节给每行名字定预算，超出用 '~' 收尾（同 readyup 主面板
+//      panel.inc 的 RU_CopyPanelText / doorlock.inc 的 DL_LoadingPanel 做法）；
+//   2) 砍掉延迟、武器这类非关键列，特感职业名缩成 1 个汉字；
+//   3) 血量 / 状态（倒/挂边/死亡/幽灵/冷却计时）全部保留。
+#define MULTIPLAYER_SURVIVOR_LIMIT	12	// 与 l4d2_scripted_hud 的「多人配置」门槛一致
+#define PANEL_TEXT_LIMIT			510	// 511 字节面板，留 1 字节给结束符
+#define MULTI_NAME_MIN				6	// 名字最少保留 6 字节（约 2 个汉字）
+#define MULTI_NAME_MAX				24	// 名字最多 24 字节（约 8 个汉字）
+#define MULTI_ROW_OVERHEAD			12	// 每行除名字外的固定开销（空格/血量/状态/换行）
+#define MULTI_FIXED_RESERVE			150	// 非玩家列表的固定行（头部/两队标题/坦克或配置行）
+
 // ======================================================================
 //  Plugin Vars
 // ======================================================================
@@ -54,6 +69,11 @@ ConVar l4d_tank_percent, l4d_witch_percent, hServerNamer, l4d_ready_cfg_name;
 // Plugin Var
 char sReadyCfgName[64], sHostname[64];
 bool bRoundLive;
+
+// 多人配置（survivor_limit >= MULTIPLAYER_SURVIVOR_LIMIT，如 12v12）：
+// bMultiPlayer 控制面板精简，g_iMultiNameBudget 是当前每行名字可用的字节数（0 = 不缩名）
+bool bMultiPlayer;
+int g_iMultiNameBudget = 0;
 
 // Boss Spawn Scheme
 StringMap hFirstTankSpawningScheme, hSecondTankSpawningScheme;		// eq_finale_tanks (Zonemod, Acemod, etc.)
@@ -147,6 +167,11 @@ void GetGameCvars()
 	fVersusBossBuffer	= versus_boss_buffer.FloatValue;
 	iMaxPlayers			= sv_maxplayers.IntValue;
 	fTankBurnDuration	= tank_burn_duration.FloatValue;
+
+	// 多人配置（12v12 等）判据用游戏自己的 survivor_limit: 12v12 配置是 12, 原版/4v4 是 4。
+	// 不用 l4d_superversus 的 l4d_survivor_limit —— 它默认就是 12, 插件卸载后值还留着,
+	// 会把 4v4 误判成多人局（与 l4d2_scripted_hud 的 IsMultiplayerMode() 口径一致）。
+	bMultiPlayer = (iSurvivorLimit >= MULTIPLAYER_SURVIVOR_LIMIT);
 }
 
 void GetCurrentGameMode()
@@ -580,6 +605,9 @@ Action HudDrawTimer(Handle hTimer)
 	if (IsInReady() || IsInPause())
 		return Plugin_Continue;
 
+	// 每秒重算一次缩名预算（两个面板都用到，所以放在这里统一算，避免拿到上一秒的旧值）
+	PrepareMultiNameBudget();
+
 	int tankHud_total = 0;
 	int[] tankHud_clients = new int[MaxClients];
 	int specHud_total = 0;
@@ -686,8 +714,18 @@ void FillHeaderInfo(Panel hSpecHud)
 		iTickrate = RoundToNearest(1.0 / GetTickInterval());
 	
 	static char buf[64];
-	FormatEx(buf, sizeof(buf), "%s [%i/%i | %iT]", sHostname, GetRealClientCount(), iMaxPlayers, iTickrate);
-	DrawPanelText(hSpecHud, buf);
+	if (bMultiPlayer)
+	{
+		// 多人模式：服务器名按字节截断, 并省掉 tickrate, 把字节让给下面的玩家列表
+		static char host[64];
+		HUD_CopyPanelText(sHostname, host, sizeof(host), 24);
+		FormatEx(buf, sizeof(buf), "%s [%i/%i]", host, GetRealClientCount(), iMaxPlayers);
+	}
+	else
+	{
+		FormatEx(buf, sizeof(buf), "%s [%i/%i | %iT]", sHostname, GetRealClientCount(), iMaxPlayers, iTickrate);
+	}
+	HUD_DrawPanelText(hSpecHud, buf);
 }
 
 void GetMeleePrefix(int client, char[] prefix, int length)
@@ -809,25 +847,27 @@ void FillSurvivorInfo(Panel hSpecHud)
 		case GAMEMODE_SCAVENGE:
 		{
 			int score = GetScavengeMatchScore(SurvivorTeamIndex);
-			FormatEx(info, sizeof(info), "->1. 生还者 [%d / %d]", score, GetScavengeRoundLimit());
+			// 多人模式省掉 "->1. " 的序号前缀（每段省 5 字节）
+			FormatEx(info, sizeof(info), bMultiPlayer ? "生还者 [%d/%d]" : "->1. 生还者 [%d / %d]", score, GetScavengeRoundLimit());
 		}
 		case GAMEMODE_VERSUS:
 		{
 			if (bRoundLive)
 			{
-				FormatEx(info, sizeof(info), "->1. 生还者 [%d]",
+				FormatEx(info, sizeof(info), bMultiPlayer ? "生还者 [%d]" : "->1. 生还者 [%d]",
 							L4D2Direct_GetVSCampaignScore(SurvivorTeamIndex) + GetVersusProgressDistance(SurvivorTeamIndex));
 			}
 			else
 			{
-				FormatEx(info, sizeof(info), "->1. 生还者 [%d]",
+				FormatEx(info, sizeof(info), bMultiPlayer ? "生还者 [%d]" : "->1. 生还者 [%d]",
 							L4D2Direct_GetVSCampaignScore(SurvivorTeamIndex));
 			}
 		}
 	}
 	
-	DrawPanelText(hSpecHud, " ");
-	DrawPanelText(hSpecHud, info);
+	if (!bMultiPlayer)
+		HUD_DrawPanelText(hSpecHud, " ");
+	HUD_DrawPanelText(hSpecHud, info);
 	
 	int total = 0;
 	int[] clients = new int[MaxClients];
@@ -845,6 +885,43 @@ void FillSurvivorInfo(Panel hSpecHud)
 	{
 		int client = clients[i];
 		
+		if (bMultiPlayer)
+		{
+			// 多人模式行：只有 名字 + 血量 + 状态，砍掉延迟和武器（见文件头 MULTIPLAYER_* 注释）。
+			// 状态标记: #=流血(有临时血) / n倒=已倒 n 次 / 挂边 / 死亡
+			GetClientShortName(client, name, sizeof(name));
+			if (!IsPlayerAlive(client))
+			{
+				FormatEx(info, sizeof(info), "%s 死亡", name);
+			}
+			else if (IsHangingFromLedge(client))
+			{
+				FormatEx(info, sizeof(info), "%s %iHP 挂边", name, GetClientHealth(client));
+			}
+			else if (IsIncapacitated(client))
+			{
+				// 当前这次倒地还没记进 m_currentReviveCount, 所以显示 已倒次数+1
+				FormatEx(info, sizeof(info), "%s %iHP %i倒", name, GetClientHealth(client), GetSurvivorIncapCount(client) + 1);
+			}
+			else
+			{
+				int tempHealth = GetSurvivorTemporaryHealth(client);
+				int health = GetClientHealth(client) + tempHealth;
+				int incapCount = GetSurvivorIncapCount(client);
+				if (incapCount == 0)
+				{
+					FormatEx(info, sizeof(info), "%s %iHP%s", name, health, (tempHealth > 0 ? "#" : ""));
+				}
+				else
+				{
+					FormatEx(info, sizeof(info), "%s %iHP# %i倒", name, health, incapCount);
+				}
+			}
+
+			HUD_DrawPanelText(hSpecHud, info);
+			continue;
+		}
+
 		GetClientFixedName(client, name, sizeof(name));
 		GetClientPing(client, latency, sizeof(latency));
 		if (!IsPlayerAlive(client))
@@ -887,7 +964,7 @@ void FillSurvivorInfo(Panel hSpecHud)
 			}
 		}
 		
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 	}
 }
 
@@ -905,10 +982,11 @@ void FillScoreInfo(Panel hSpecHud)
 			float fDuration = GetScavengeRoundDuration(bTeamFlipped);
 			int iMinutes = RoundToFloor(fDuration / 60);
 			
-			DrawPanelText(hSpecHud, " ");
+			if (!bMultiPlayer)
+				HUD_DrawPanelText(hSpecHud, " ");
 				
 			FormatEx(info, sizeof(info), "> 累计时间 [%02d:%02.0f]", iMinutes, fDuration - 60 * iMinutes);
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 			
 			if (bSecondHalf)
 			{
@@ -916,7 +994,7 @@ void FillScoreInfo(Panel hSpecHud)
 				iMinutes = RoundToFloor(fDuration / 60);
 				
 				FormatEx(info, sizeof(info), "> 对方用时 [%02d:%05.2f]", iMinutes, fDuration - 60 * iMinutes);
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 			}
 		}
 		
@@ -937,7 +1015,8 @@ void FillScoreInfo(Panel hSpecHud)
 				int totalBonus		= healthBonus		+ damageBonus		+ pillsBonus;
 				int maxTotalBonus	= maxHealthBonus	+ maxDamageBonus	+ maxPillsBonus;
 				
-				DrawPanelText(hSpecHud, " ");
+				if (!bMultiPlayer)
+					HUD_DrawPanelText(hSpecHud, " ");
 				
 				// > HB: 860 <86%> | DB: 420 <84%> | Pills: 60 <60%>
 				// > Bonus: 1340 <83.8%>
@@ -945,41 +1024,42 @@ void FillScoreInfo(Panel hSpecHud)
 				
 				FormatEx(	info,
 							sizeof(info),
-							"> 血量: %i <%.0f%%> | 伤害: %i <%.0f%%> | 药丸: %i <%.0f%%>",
+							bMultiPlayer ? "血量: %i <%.0f%%> | 伤害: %i <%.0f%%> | 药丸: %i <%.0f%%>" : "> 血量: %i <%.0f%%> | 伤害: %i <%.0f%%> | 药丸: %i <%.0f%%>",
 							healthBonus, L4D2Util_IntToPercentFloat(healthBonus, maxHealthBonus),
 							damageBonus, L4D2Util_IntToPercentFloat(damageBonus, maxDamageBonus),
 							pillsBonus, L4D2Util_IntToPercentFloat(pillsBonus, maxPillsBonus));
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 				
-				FormatEx(info, sizeof(info), "> 总加成: %i <%.1f%%>", totalBonus, L4D2Util_IntToPercentFloat(totalBonus, maxTotalBonus));
-				DrawPanelText(hSpecHud, info);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "总加成: %i <%.1f%%>" : "> 总加成: %i <%.1f%%>", totalBonus, L4D2Util_IntToPercentFloat(totalBonus, maxTotalBonus));
+				HUD_DrawPanelText(hSpecHud, info);
 				
-				FormatEx(info, sizeof(info), "> 距离: %i", iMaxDistance);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "距离: %i" : "> 距离: %i", iMaxDistance);
 				//if (InSecondHalfOfRound())
 				//{
 				//	Format(info, sizeof(info), "%s | R#1: %i <%.1f%%>", info, iFirstHalfScore, L4D2Util_IntToPercentFloat(iFirstHalfScore, L4D_GetVersusMaxCompletionScore() + maxTotalBonus));
 				//}
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 			}
 			
 			else if (bScoremod)
 			{
 				int healthBonus = HealthBonus();
 				
-				DrawPanelText(hSpecHud, " ");
+				if (!bMultiPlayer)
+					HUD_DrawPanelText(hSpecHud, " ");
 				
 				// > HB: 860
 				// > Dist: 400
 				
-				FormatEx(info, sizeof(info), "> 血量: %i", healthBonus);
-				DrawPanelText(hSpecHud, info);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "血量: %i" : "> 血量: %i", healthBonus);
+				HUD_DrawPanelText(hSpecHud, info);
 				
-				FormatEx(info, sizeof(info), "> 距离: %i", iMaxDistance);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "距离: %i" : "> 距离: %i", iMaxDistance);
 				//if (InSecondHalfOfRound())
 				//{
 				//	Format(info, sizeof(info), "%s | R#1: %i", info, iFirstHalfScore);
 				//}
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 			}
 			
 			else if (bNextScoremod)
@@ -991,7 +1071,8 @@ void FillScoreInfo(Panel hSpecHud)
 				int totalBonus		= permBonus		+ tempBonus		+ pillsBonus;
 				int maxTotalBonus	= maxPermBonus	+ maxTempBonus	+ maxPillsBonus;
 				
-				DrawPanelText(hSpecHud, " ");
+				if (!bMultiPlayer)
+					HUD_DrawPanelText(hSpecHud, " ");
 				
 				// > Perm: 114 | Temp: 514 | Pills: 810
 				// > Bonus: 114514 <100.0%>
@@ -1000,19 +1081,19 @@ void FillScoreInfo(Panel hSpecHud)
 				
 				FormatEx(	info,
 							sizeof(info),
-							"> 永久: %i | 临时: %i | 药丸: %i",
+							bMultiPlayer ? "永久: %i | 临时: %i | 药丸: %i" : "> 永久: %i | 临时: %i | 药丸: %i",
 							permBonus, tempBonus, pillsBonus);
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 				
-				FormatEx(info, sizeof(info), "> 总加成: %i <%.1f%%>", totalBonus, L4D2Util_IntToPercentFloat(totalBonus, maxTotalBonus));
-				DrawPanelText(hSpecHud, info);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "总加成: %i <%.1f%%>" : "> 总加成: %i <%.1f%%>", totalBonus, L4D2Util_IntToPercentFloat(totalBonus, maxTotalBonus));
+				HUD_DrawPanelText(hSpecHud, info);
 				
-				FormatEx(info, sizeof(info), "> 距离: %i", iMaxDistance);
+				FormatEx(info, sizeof(info), bMultiPlayer ? "距离: %i" : "> 距离: %i", iMaxDistance);
 				//if (InSecondHalfOfRound())
 				//{
 				//	Format(info, sizeof(info), "%s | R#1: %i <%.1f%%>", info, iFirstHalfScore, ToPercent(iFirstHalfScore, L4D_GetVersusMaxCompletionScore() + maxTotalBonus));
 				//}
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 			}
 		}
 	}
@@ -1032,17 +1113,18 @@ void FillInfectedInfo(Panel hSpecHud)
 		case GAMEMODE_SCAVENGE:
 		{
 			int score = GetScavengeMatchScore(InfectedTeamIndex);
-			FormatEx(info, sizeof(info), "->2. 感染者 [%d / %d]", score, GetScavengeRoundLimit());
+			FormatEx(info, sizeof(info), bMultiPlayer ? "感染者 [%d/%d]" : "->2. 感染者 [%d / %d]", score, GetScavengeRoundLimit());
 		}
 		case GAMEMODE_VERSUS:
 		{
-			FormatEx(info, sizeof(info), "->2. 感染者 [%d]",
+			FormatEx(info, sizeof(info), bMultiPlayer ? "感染者 [%d]" : "->2. 感染者 [%d]",
 						L4D2Direct_GetVSCampaignScore(InfectedTeamIndex));
 		}
 	}
 	
-	DrawPanelText(hSpecHud, " ");
-	DrawPanelText(hSpecHud, info);
+	if (!bMultiPlayer)
+		HUD_DrawPanelText(hSpecHud, " ");
+	HUD_DrawPanelText(hSpecHud, info);
 
 	int infectedCount = 0;
 	for (int client = 1; client <= MaxClients; ++client)
@@ -1050,6 +1132,67 @@ void FillInfectedInfo(Panel hSpecHud)
 		if (!IsClientInGame(client) || GetClientTeam(client) != L4D2Team_Infected)
 			continue;
 		
+		if (bMultiPlayer)
+		{
+			// 多人模式行：名字 + 1 字职业 + 血量/状态，冷却计时保留（计时是关键信息）。
+			// 职业名从 "Charger"(7 字节) 缩成 1 个汉字，12 行就能省下 60~70 字节。
+			GetClientShortName(client, name, sizeof(name));
+			if (!IsPlayerAlive(client))
+			{
+				int timeLeft = RoundToFloor(L4D_GetPlayerSpawnTime(client));
+				if (timeLeft > 0)
+					FormatEx(info, sizeof(info), "%s 死 %i秒", name, timeLeft);
+				else
+					FormatEx(info, sizeof(info), "%s 死", name);
+			}
+			else
+			{
+				int zClass = GetInfectedClass(client);
+				if (zClass == L4D2Infected_Tank)
+					continue;
+
+				char zShort[4];
+				GetShortInfectedClassName(zClass, zShort, sizeof(zShort));
+
+				int iHP = GetClientHealth(client), iMaxHP = GetEntProp(client, Prop_Send, "m_iMaxHealth");
+				if (IsInfectedGhost(client))
+				{
+					// 幽灵(含带伤复活的残血幽灵)
+					if (iHP < iMaxHP)
+						FormatEx(info, sizeof(info), "%s %s 幽灵%i", name, zShort, iHP);
+					else
+						FormatEx(info, sizeof(info), "%s %s 幽灵", name, zShort);
+				}
+				else
+				{
+					buffer[0] = '\0';
+					
+					float fTimestamp, fDuration;
+					if (GetInfectedAbilityTimer(client, fTimestamp, fDuration))
+					{
+						int iCooldown = RoundToCeil(fTimestamp - GetGameTime());
+						
+						if (iCooldown > 0
+							&& fDuration > 1.0
+							&& fDuration != 3600
+							&& GetInfectedVictim(client) <= 0)
+						{
+							FormatEx(buffer, sizeof(buffer), " %i秒", iCooldown);
+						}
+					}
+					
+					FormatEx(info, sizeof(info), "%s %s %i%s%s",
+						name, zShort, iHP,
+						(GetEntityFlags(client) & FL_ONFIRE) ? " 火" : "",
+						buffer);
+				}
+			}
+
+			infectedCount++;
+			HUD_DrawPanelText(hSpecHud, info);
+			continue;
+		}
+
 		GetClientFixedName(client, name, sizeof(name));
 		GetClientPing(client, latency, sizeof(latency));
 		if (!IsPlayerAlive(client))
@@ -1132,12 +1275,12 @@ void FillInfectedInfo(Panel hSpecHud)
 		}
 
 		infectedCount++;
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 	}
 	
 	if (!infectedCount)
 	{
-		DrawPanelText(hSpecHud, "无特感");
+		HUD_DrawPanelText(hSpecHud, "无特感");
 	}
 }
 
@@ -1213,32 +1356,33 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	{
 		FormatEx(info, sizeof(info), "%s :: 坦克面板", sReadyCfgName);
 		ValvePanel_ShiftInvalidString(info, sizeof(info));
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 
 		int len = strlen(info);
 		for (int i = 0; i < len; ++i) info[i] = '-';
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 
 		FormatEx(info, sizeof(info), " [拳 %i] [石 %i] [铁 %i] [伤害 %i]", g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage);
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 
 		GetRockBlockStatus(info, sizeof(info));
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 
 		if (bApex)
 		{
 			GetApexSkillStatus(tank, info, sizeof(info));
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 		}
 
 		int dlen = strlen(info);
 		for (int i = 0; i < dlen; ++i) info[i] = '-';
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 	}
 	else
 	{
-		DrawPanelText(hSpecHud, " ");
-		DrawPanelText(hSpecHud, "->3. 坦克");
+		if (!bMultiPlayer)
+			HUD_DrawPanelText(hSpecHud, " ");
+		HUD_DrawPanelText(hSpecHud, bMultiPlayer ? "坦克" : "->3. 坦克");
 	}
 
 	// Draw owner & pass counter
@@ -1257,14 +1401,14 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 
 	if (!IsFakeClient(tank))
 	{
-		GetClientFixedName(tank, name, sizeof(name));
+		GetClientShortName(tank, name, sizeof(name));
 		Format(info, sizeof(info), "控制: %s (%s) [%s]", name, info, sAlive);
 	}
 	else
 	{
 		Format(info, sizeof(info), "控制: 电脑 (%s) [%s]", info, sAlive);
 	}
-	DrawPanelText(hSpecHud, info);
+	HUD_DrawPanelText(hSpecHud, info);
 
 	// Draw health
 	int health = GetClientHealth(tank);
@@ -1280,7 +1424,7 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	{
 		FormatEx(info, sizeof(info), "血量: %i / %i%%", health, L4D2Util_GetMax(1, RoundFloat(healthPercent)));
 	}
-	DrawPanelText(hSpecHud, info);
+	HUD_DrawPanelText(hSpecHud, info);
 
 	// Draw frustration
 	if (!IsFakeClient(tank))
@@ -1291,7 +1435,7 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	{
 		info = "怒气: 电脑";
 	}
-	DrawPanelText(hSpecHud, info);
+	HUD_DrawPanelText(hSpecHud, info);
 
 	// Draw network
 	if (!IsFakeClient(tank))
@@ -1302,21 +1446,17 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 	{
 		info = "延迟: 电脑";
 	}
-	DrawPanelText(hSpecHud, info);
+	HUD_DrawPanelText(hSpecHud, info);
 
 	// Draw fire status
 	if (!isIncapacitated && GetEntityFlags(tank) & FL_ONFIRE)
 	{
 		int timeleft = RoundToCeil(healthPercent / 100.0 * fTankBurnDuration);
 		FormatEx(info, sizeof(info), "燃烧: %i秒", timeleft);
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 	}
 
-	if (bTankHUD)
-	{
-		FormatEx(info, sizeof(info), "!gk给克");
-		DrawPanelText(hSpecHud, info);
-	}
+	// 需求：tankhud 里原来那行 "!gk给克" 的提示整段删除（保留下面 bTankHUD && bApex 的技能提示块）
 
 	if (bTankHUD && bApex)
 	{
@@ -1325,21 +1465,21 @@ bool FillTankInfo(Panel hSpecHud, bool bTankHUD = false)
 		if ((cvar = FindConVar("tank_bohp_hp")) != null)
 		{
 			FormatEx(info, sizeof(info), "!lt开启自动连跳(扣%d)", cvar.IntValue);
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 		}
 		if ((cvar = FindConVar("tank_trac_hp")) != null)
 		{
 			FormatEx(info, sizeof(info), "!gz开启跟踪石头(扣%d)", cvar.IntValue);
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 		}
 		if ((cvar = FindConVar("tank_pred_hp")) != null)
 		{
 			FormatEx(info, sizeof(info), "!yc/开启石头轨迹预测(扣%d)", cvar.IntValue);
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 		}
 
 		FormatEx(info, sizeof(info), "开启后再次执行相同指令可关闭技能");
-		DrawPanelText(hSpecHud, info);
+		HUD_DrawPanelText(hSpecHud, info);
 	}
 
 	return true;
@@ -1350,25 +1490,34 @@ void FillGameInfo(Panel hSpecHud)
 	// Turns out too much info actually CAN be bad, funny ikr
 	static char info[64];
 	static char buffer[10];
+	// 多人模式：配置名按字节裁剪，并省掉 "->3. " 前缀和 " " 空行，把字节让给玩家列表
+	static char cfg[64];
+
+	if (bMultiPlayer)
+		HUD_CopyPanelText(sReadyCfgName, cfg, sizeof(cfg), 20);
+	else
+		strcopy(cfg, sizeof(cfg), sReadyCfgName);
 
 	switch (g_Gamemode)
 	{
 		case GAMEMODE_SCAVENGE:
 		{
-			FormatEx(info, sizeof(info), "->3. %s (第%i局)", sReadyCfgName, GetScavengeRoundNumber());
+			FormatEx(info, sizeof(info), bMultiPlayer ? "%s 第%i局" : "->3. %s (第%i局)", cfg, GetScavengeRoundNumber());
 			
-			DrawPanelText(hSpecHud, " ");
-			DrawPanelText(hSpecHud, info);
+			if (!bMultiPlayer)
+				HUD_DrawPanelText(hSpecHud, " ");
+			HUD_DrawPanelText(hSpecHud, info);
 			
 			FormatEx(info, sizeof(info), "共%i局", GetScavengeRoundLimit());
-			DrawPanelText(hSpecHud, info);
+			HUD_DrawPanelText(hSpecHud, info);
 		}
 		
 		case GAMEMODE_VERSUS:
 		{
-			FormatEx(info, sizeof(info), "->3. %s (第%d局)", sReadyCfgName, 1 + view_as<int>(InSecondHalfOfRound()));
-			DrawPanelText(hSpecHud, " ");
-			DrawPanelText(hSpecHud, info);
+			FormatEx(info, sizeof(info), bMultiPlayer ? "%s 第%d局" : "->3. %s (第%d局)", cfg, 1 + view_as<int>(InSecondHalfOfRound()));
+			if (!bMultiPlayer)
+				HUD_DrawPanelText(hSpecHud, " ");
+			HUD_DrawPanelText(hSpecHud, info);
 			
 			if (l4d_tank_percent != null && l4d_witch_percent != null)
 			{
@@ -1377,44 +1526,83 @@ void FillGameInfo(Panel hSpecHud)
 					survivorFlow = GetFurthestSurvivorFlow();
 				
 				bool bDivide = false;
-						
-				// tank percent
-				if (iTankCount > 0)
-				{
-					bDivide = true;
-					FormatEx(buffer, sizeof(buffer), "%i%%", iTankFlow);
-					
-					if ((bFlowTankActive && bRoundHasFlowTank) || bCustomBossSys)
-					{
-						FormatEx(info, sizeof(info), "坦克: %s", buffer);
-					}
-					else
-					{
-						FormatEx(info, sizeof(info), "坦克: %s", (bStaticTank ? "静态" : "事件"));
-					}
-				}
 				
-				// witch percent
-				if (iWitchCount > 0)
+				if (bMultiPlayer)
 				{
-					FormatEx(buffer, sizeof(buffer), "%i%%", iWitchFlow);
-					
-					if (bDivide) {
-						Format(info, sizeof(info), "%s | 女巫: %s", info, ((bRoundHasFlowWitch || bCustomBossSys) ? buffer : (bStaticWitch ? "静态" : "事件")));
-					} else {
+					// 多人模式：三段用空格分隔，省掉 " | " 与 ":" 这些分隔符
+					if (iTankCount > 0)
+					{
 						bDivide = true;
-						FormatEx(info, sizeof(info), "女巫: %s", ((bRoundHasFlowWitch || bCustomBossSys) ? buffer : (bStaticWitch ? "静态" : "事件")));
+						FormatEx(buffer, sizeof(buffer), "%i%%", iTankFlow);
+						
+						if ((bFlowTankActive && bRoundHasFlowTank) || bCustomBossSys)
+							FormatEx(info, sizeof(info), "坦克%s", buffer);
+						else
+							FormatEx(info, sizeof(info), "坦克%s", (bStaticTank ? "静态" : "事件"));
+					}
+					
+					if (iWitchCount > 0)
+					{
+						char witchVal[10];
+						FormatEx(buffer, sizeof(buffer), "%i%%", iWitchFlow);
+						strcopy(witchVal, sizeof(witchVal), ((bRoundHasFlowWitch || bCustomBossSys) ? buffer : (bStaticWitch ? "静态" : "事件")));
+						
+						if (bDivide)
+						{
+							Format(info, sizeof(info), "%s 女巫%s", info, witchVal);
+						}
+						else
+						{
+							bDivide = true;
+							FormatEx(info, sizeof(info), "女巫%s", witchVal);
+						}
+					}
+					
+					if (bDivide)
+						Format(info, sizeof(info), "%s 当前%i%%", info, survivorFlow);
+					else
+						FormatEx(info, sizeof(info), "当前%i%%", survivorFlow);
+				}
+				else
+				{
+					// tank percent
+					if (iTankCount > 0)
+					{
+						bDivide = true;
+						FormatEx(buffer, sizeof(buffer), "%i%%", iTankFlow);
+						
+						if ((bFlowTankActive && bRoundHasFlowTank) || bCustomBossSys)
+						{
+							FormatEx(info, sizeof(info), "坦克: %s", buffer);
+						}
+						else
+						{
+							FormatEx(info, sizeof(info), "坦克: %s", (bStaticTank ? "静态" : "事件"));
+						}
+					}
+					
+					// witch percent
+					if (iWitchCount > 0)
+					{
+						FormatEx(buffer, sizeof(buffer), "%i%%", iWitchFlow);
+						
+						if (bDivide) {
+							Format(info, sizeof(info), "%s | 女巫: %s", info, ((bRoundHasFlowWitch || bCustomBossSys) ? buffer : (bStaticWitch ? "静态" : "事件")));
+						} else {
+							bDivide = true;
+							FormatEx(info, sizeof(info), "女巫: %s", ((bRoundHasFlowWitch || bCustomBossSys) ? buffer : (bStaticWitch ? "静态" : "事件")));
+						}
+					}
+					
+					// current
+					if (bDivide) {
+						Format(info, sizeof(info), "%s | 当前: %i%%", info, survivorFlow);
+					} else {
+						FormatEx(info, sizeof(info), "当前: %i%%", survivorFlow);
 					}
 				}
 				
-				// current
-				if (bDivide) {
-					Format(info, sizeof(info), "%s | 当前: %i%%", info, survivorFlow);
-				} else {
-					FormatEx(info, sizeof(info), "当前: %i%%", survivorFlow);
-				}
-				
-				DrawPanelText(hSpecHud, info);
+				HUD_DrawPanelText(hSpecHud, info);
 			}
 			
 			// tank selection
@@ -1423,8 +1611,17 @@ void FillGameInfo(Panel hSpecHud)
 				int tankClient = GetTankSelection();
 				if (tankClient > 0 && IsClientInGame(tankClient))
 				{
-					FormatEx(info, sizeof(info), "坦克: %N", tankClient);
-					DrawPanelText(hSpecHud, info);
+					if (bMultiPlayer)
+					{
+						static char tankName[MAX_NAME_LENGTH];
+						GetClientShortName(tankClient, tankName, sizeof(tankName));
+						FormatEx(info, sizeof(info), "坦克: %s", tankName);
+					}
+					else
+					{
+						FormatEx(info, sizeof(info), "坦克: %N", tankClient);
+					}
+					HUD_DrawPanelText(hSpecHud, info);
 				}
 			}
 		}
@@ -1434,6 +1631,116 @@ void FillGameInfo(Panel hSpecHud)
 /**
  *	Stocks
 **/
+// ----------------------------------------------------------------------
+//  多人模式面板精简工具
+//  HUD_CopyPanelText / HUD_DrawPanelText 的做法与 readyup-applemod/panel.inc 的
+//  RU_CopyPanelText / RU_DrawPanelText、doorlock.inc 的 DL_LoadingPanel 缩名一致：
+//  聊天面板(radio panel)整块只有 511 字节(含换行)，UTF-8 中文一个字 3 字节，
+//  所以按"字节预算"裁剪，多字节字符必须整字保留，超出预算用 '~' 收尾。
+// ----------------------------------------------------------------------
+stock void HUD_CopyPanelText(const char[] source, char[] output, int maxlen, int budget)
+{
+	output[0] = '\0';
+	if (budget > maxlen - 1) budget = maxlen - 1;
+	if (budget <= 0) return;
+
+	int length = strlen(source);
+	bool shortened = length > budget;
+	int limit = shortened ? budget - 1 : budget;
+	int pos = 0;
+	while (pos < length)
+	{
+		int bytes = GetCharBytes(source[pos]);
+		if (bytes < 1 || pos + bytes > length || pos + bytes > limit) break;
+		for (int i = 0; i < bytes; i++) output[pos + i] = source[pos + i];
+		pos += bytes;
+	}
+	if (pos < length && pos < budget) output[pos++] = '~';
+	output[pos] = '\0';
+}
+
+// 按面板剩余字节安全地画一行：面板满了就丢掉这一行，避免引擎把一个汉字切一半。
+stock void HUD_DrawPanelText(Panel panel, const char[] text, int limit = PANEL_TEXT_LIMIT)
+{
+	int remaining = panel.TextRemaining;
+	if (remaining < 0)	// 非 radio 面板(没有字节预算概念)时保持原样绘制
+	{
+		if (text[0]) panel.DrawText(text);
+		return;
+	}
+
+	remaining -= 1;		// 留 1 字节给结束符
+	if (remaining <= 0) return;
+	if (limit > remaining) limit = remaining;
+
+	static char line[512];
+	HUD_CopyPanelText(text, line, sizeof(line), limit);
+	if (line[0]) panel.DrawText(line);
+}
+
+// 多人模式下按面板字节预算给每行名字定长度：
+// 511 字节要装 12 生还者 + 12 感染者，名字只能按人头均分剩下的空间。
+// 预算 = (面板总字节 - 固定行预留 - 每行固定开销 × 行数) / 行数，再夹到 [MIN, MAX]。
+// 非多人模式或没人时置 0（=不缩名）。
+void PrepareMultiNameBudget()
+{
+	g_iMultiNameBudget = 0;
+
+	if (!bMultiPlayer)
+		return;
+
+	int rows = 0;
+	for (int client = 1; client <= MaxClients; ++client)
+	{
+		if (!IsClientInGame(client))
+			continue;
+
+		int team = GetClientTeam(client);
+		if (team == L4D2Team_Survivor || team == L4D2Team_Infected)
+			rows++;
+	}
+	if (rows <= 0)
+		return;
+
+	int available = PANEL_TEXT_LIMIT - MULTI_FIXED_RESERVE - rows * MULTI_ROW_OVERHEAD;
+	g_iMultiNameBudget = available / rows;
+
+	if (g_iMultiNameBudget < MULTI_NAME_MIN)
+		g_iMultiNameBudget = MULTI_NAME_MIN;
+	else if (g_iMultiNameBudget > MULTI_NAME_MAX)
+		g_iMultiNameBudget = MULTI_NAME_MAX;
+}
+
+// 名字绘制统一入口：多人模式下按 g_iMultiNameBudget 缩短（超出用 '~' 收尾）
+stock void GetClientShortName(int client, char[] name, int length)
+{
+	GetClientFixedName(client, name, length);
+
+	if (g_iMultiNameBudget <= 0)
+		return;
+
+	static char shortName[MAX_NAME_LENGTH];
+	HUD_CopyPanelText(name, shortName, sizeof(shortName), g_iMultiNameBudget);
+	strcopy(name, length, shortName);
+}
+
+// 多人模式的特感职业名：只留 1 个汉字，省掉 "Charger"(7 字节) 这类英文名的空间
+stock void GetShortInfectedClassName(int zClass, char[] buffer, int maxlen)
+{
+	switch (zClass)
+	{
+		case L4D2Infected_Smoker:	strcopy(buffer, maxlen, "烟");
+		case L4D2Infected_Boomer:	strcopy(buffer, maxlen, "胖");
+		case L4D2Infected_Hunter:	strcopy(buffer, maxlen, "猎");
+		case L4D2Infected_Spitter:	strcopy(buffer, maxlen, "喷");
+		case L4D2Infected_Jockey:	strcopy(buffer, maxlen, "猴");
+		case L4D2Infected_Charger:	strcopy(buffer, maxlen, "冲");
+		case L4D2Infected_Witch:	strcopy(buffer, maxlen, "巫");
+		case L4D2Infected_Tank:		strcopy(buffer, maxlen, "坦");
+		default:					strcopy(buffer, maxlen, "特");
+	}
+}
+
 /* Reads the reserve slot through the weapon's own ammo type, so every gun
  * (MP5, M60, and any added later) resolves without a hand-kept table. */
 stock int GetWeaponExtraAmmo(int client, int weapon)

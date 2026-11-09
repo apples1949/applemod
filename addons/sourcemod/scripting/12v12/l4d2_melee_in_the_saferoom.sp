@@ -94,7 +94,7 @@ public void OnPluginStart()
 	CreateConVar("l4d2_mitsr_version", VERSION, "The version of Melee In The Saferoom"); 
 	g_hEnabled = CreateConVar("l4d2_mitsr_enabled", "1", "是否启用插件", _, true, 0.0, true, 1.0);
 	g_hSpawnType = CreateConVar("l4d2_mitsr_spawn_type", "1", "0 = 自定义生成, 1 = 随机近战武器 2 = 基于地图设定的近战武器", _, true, 0.0, true, 2.0);
-	g_hRandomAmount	= CreateConVar("l4d2_mitsr_random_amount", "4","如果l4d2_mitsr_spawn_type为1，则随机在安全区生成多少近战武器", _, true, 0.0, true, 32.0);
+	g_hRandomAmount	= CreateConVar("l4d2_mitsr_random_amount", "12","如果l4d2_mitsr_spawn_type为1，则随机在安全区生成多少近战武器（12v12 默认 12 把）", _, true, 0.0, true, 32.0);
 	g_hMapBaseAmount = CreateConVar("l4d2_mitsr_mapbase_amount", "4", "如果l4d2_mitsr_spawn_type为2，则在安全区生成多少近战武器", _, true, 0.0, true, 32.0);
 		
 	g_hMeleeItems[0] = CreateConVar("l4d2_mitsr_fireaxe", "1", "安全区生成多少斧头(l4d2_mitsr_spawn_type必须为0)", _, true, 0.0, true, 10.0);

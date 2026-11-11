@@ -22,7 +22,7 @@
 	}
 	"Crashed"
 	{
-		"chi"	"{olive}游戏 {default}因玩家 {blue}掉线{default}被 {green}强制暂停{default}。"
+		"chi"	"{olive}游戏 {default}因玩家 {blue}崩溃{default}被 {green}强制暂停{default}。"
 	}
 	"ForcePause"
 	{
@@ -102,19 +102,19 @@
 	}
 	"SurvivorUnPaused"
 	{
-		"chi"	"->1. 生还者: [√]"
+		"chi"	"->1. 生还方: [√]"
 	}
 	"SurvivorPaused"
 	{
-		"chi"	"->1. 生还者: [X]"
+		"chi"	"->1. 生还方: [X]"
 	}
 	"InfectedUnPaused"
 	{
-		"chi"	"->2. 感染者: [√]"
+		"chi"	"->2. 特感方: [√]"
 	}
 	"InfectedPaused"
 	{
-		"chi"	"->2. 感染者: [X]"
+		"chi"	"->2. 特感方: [X]"
 	}
 	"InitiatorUnPaused"
 	{
@@ -126,7 +126,7 @@
 	}
 	"AutoPauseCrash"
 	{
-		"chi"	"▸ 自动暂停 -> 掉线"
+		"chi"	"▸ 强制自动暂停 -> 崩溃"
 	}
 	"ForcePauseAdmin"
 	{
@@ -146,7 +146,7 @@
 	}
 	"GameisLive"
 	{
-		"chi"		"游戏开始！"
+		"chi"		"比赛开始！"
 	}
 	"CountdownReadyDelay"
 	{

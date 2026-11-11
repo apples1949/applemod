@@ -111,7 +111,7 @@
 	}
 	"Unchipped"
 	{
-		"chi"		"(如果hunter在空中被击杀，就是空爆!)"
+		"chi"		"(如果hunter没被打残，这就是空爆！)"
 	}
     // crown
 	"CrownedWitch"

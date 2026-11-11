@@ -2,7 +2,92 @@
 {
 	"1"
 	{
-		"mapinfo"		"msd1_town"
-		"mapname"		"再见了晨茗"
+		"mapinfo"		"l4d2_diescraper1_apartment_361"
+		"mapname"		"喋血危楼"
+	}
+	"2"
+	{
+		"mapinfo"		"cdta_01detour"
+		"mapname"		"迂回前进"
+	}
+	"3"
+	{
+		"mapinfo"		"hf01_theforest"
+		"mapname"		"颤栗森林"
+	}
+	"4"
+	{
+		"mapinfo"		"cwm1_intro"
+		"mapname"		"绝境逢生"
+	}
+	"5"
+	{
+		"mapinfo"		"l4d_dbd2dc_anna_is_gone"
+		"mapname"		"活死人黎明2 DC"
+	}
+	"6"
+	{
+		"mapinfo"		"x1m1_cliffs"
+		"mapname"		"绝命公路"
+	}
+	"7"
+	{
+		"mapinfo"		"l4d2_stadium1_apartment"
+		"mapname"		"闪电突袭2"
+	}
+	"8"
+	{
+		"mapinfo"		"ccr1_alleys"
+		"mapname"		"坠机险途：改航"
+	}
+	"9"
+	{
+		"mapinfo"		"dkr_m1_motel"
+		"mapname"		"黑色狂欢节：重制"
+	}
+	"10"
+	{
+		"mapinfo"		"l4d2_daybreak01_hotel"
+		"mapname"		"黎明"
+	}
+	"11"
+	{
+		"mapinfo"		"dprm1_milltown_a"
+		"mapname"		"暴风骤雨：暴雨"
+	}
+	"12"
+	{
+		"mapinfo"		"l4d_ihm01_forest"
+		"mapname"		"我恨山2"
+	}
+	"13"
+	{
+		"mapinfo"		"pr1_waterfront_f"
+		"mapname"		"教区：蔓延"
+	}
+	"14"
+	{
+		"mapinfo"		"snowtown_m1"
+		"mapname"		"冰雪小镇"
+	}
+	"15"
+	{
+		"mapinfo"		"uz_crash"
+		"mapname"		"亡灵区"
+	}
+	"16"
+	{
+		"mapinfo"		"dc2025_1"
+		"mapname"		"死亡中心 2025"
+	}
+	"17"
+	{
+		"mapinfo"		"tripday_new_m1"
+		"mapname"		"旅行日"
+	}
+	"18"
+	{
+		"mapinfo"		"fos1m1_hill"
+		"mapname"		"生还之锋"
 	}
 }

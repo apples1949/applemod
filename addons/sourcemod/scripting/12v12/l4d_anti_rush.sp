@@ -16,7 +16,7 @@
 *	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define PLUGIN_VERSION 		"1.23.2-12v12"
+#define PLUGIN_VERSION 		"1.23.3-12v12"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark logic function.
 
 /*======================================================================================
@@ -30,6 +30,17 @@
 
 ========================================================================================
 	Change Log:
+
+12v12 1.23.3 修改 (需求: 玩家跑图被限速时, 往回退的过程中不再限制速度):
+	- 被限速(l4d_anti_rush_type=1)期间, 若该生还者正在「往回退」(flow 距离朝队伍方向变小),
+	  暂停施加限速并把速度上限写回「施加限速之前引擎自己的那个值」; 重新往前跑后自动恢复限速.
+	- 恢复用的原值取自限速生效前的 m_flMaxspeed, 绝不硬编码 250/300, 所以不会留下永久加速 buff.
+	- 判据只看 flow 距离的趋势(TimerTest 每秒一次的采样), 不看视角/速度向量:
+	  被 Smoker 拖、被 Charger 撞、被 Tank 打飞这些瞬时位移不会误判(而且被控状态本来就被
+	  CanPunishSurvivor 挡掉了). 滞回: 要连续 2 个采样点(≈2 秒)都在回退才撤限速,
+	  但只要 1 个采样点确认在往前跑就立刻恢复限速 —— 易出难进, 不会给跑图的人白送速度.
+	- 与 lead <= l4d_anti_rush_range_lead 的原有解除路径互不干扰: 回到队伍附近仍走原来那条路.
+	- 新增 cvar: l4d_anti_rush_retreat_free(默认 1; 0=旧行为, 回退也照样限速).
 
 12v12 1.23.2 修改:
 	- "AI 生还者离队自动传送"新增"传送冷却": 同一个 AI 生还者两次落后/离队传送之间至少间隔
@@ -215,11 +226,21 @@ float g_iBenchTicks;
 #define BOT_TELEPORT_OFFSET	20.0		// AI 生还者传送落点相对队友的小偏移(Hammer 单位, 20 约 0.5 米), 避免与队友完全同点互相推挤.
 #define BOT_MIN_SAMPLES		2			// AI 传送规则最少采样人数(含该 bot 自己): 少于 2 人说明没有队友可传, 规则不动作.
 #define BOT_TELEPORT_COOLDOWN_MIN	30.0	// AI 传送冷却下限(秒): 需求是"两次传送至少间隔半分钟", 用 CreateConVar 的 min 参数钳死, 管理员只能调大.
+// 12v12 1.23.3: 「回退时不限速」的判定参数(长度单位 Hammer 单位, 时间单位秒).
+// 采样节拍就是 TimerTest 的 1.0 秒, 所以下面的秒数实际按"几个采样点"生效:
+//   RETREAT_HOLD_MIN 1.2 秒 → 连续 2 个采样点都在往回走才算真回退
+//     (滤掉 Charger 撞飞 / Tank 一拳 / 单次击退这种一次性位移);
+//   RETREAT_FORWARD_MIN 0.5 秒 → 1 个采样点确认在往前跑就立刻恢复限速.
+#define RETREAT_DROP_MIN		80.0	// 相对本次限速期间的 flow 峰值至少往回走这么远才算「在回退」(约 2 米; 限速期间速度只有 85/秒, 80 正好是 1 个采样点的量级)
+#define RETREAT_HOLD_MIN		1.2		// 「在回退」必须持续这么久才真正撤限速
+#define RETREAT_FORWARD_MIN		0.5		// 「重新往前跑」持续这么久就恢复限速
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarFinale, g_hCvarFlags, g_hCvarIgnore, g_hCvarPlayers, g_hCvarRangeLast, g_hCvarRangeLead, g_hCvarSlow, g_hCvarTank, g_hCvarType, g_hCvarWarnLast, g_hCvarWarnLead, g_hCvarWarnTime, g_hCvarLimpSpeed;
 ConVar g_hCvarHint, g_hCvarSound, g_hCvarNotifyTime, g_hCvarTeamNotify, g_hCvarTeamNotifyTime;
 // 12v12 新增: AI 生还者(没被玩家接管)离队自动传送的 cvar.
 ConVar g_hCvarBotTeleport, g_hCvarBotRange, g_hCvarBotInterval, g_hCvarBotCooldown;
+// 12v12 1.23.3 新增: 回退时不限速的开关.
+ConVar g_hCvarRetreatFree;
 float g_fCvarRangeLast, g_fCvarRangeLead, g_fCvarSlow, g_fCvarWarnLast, g_fCvarWarnLead, g_fCvarWarnTime;
 float g_fCvarNotifyTime, g_fCvarTeamNotifyTime;
 int g_iCvarFinale, g_iCvarFlags, g_iCvarIgnore, g_iCvarPlayers, g_iCvarTank, g_iCvarType;
@@ -228,6 +249,8 @@ int g_iCvarHint, g_iCvarSound, g_iCvarTeamNotify;
 int g_iCvarBotTeleport;
 float g_fCvarBotRange, g_fCvarBotInterval;
 float g_fCvarBotCooldown;				// 传送冷却(秒): 同一个 AI 生还者两次传送之间的最短间隔, 最小被 cvar 钳到 BOT_TELEPORT_COOLDOWN_MIN.
+// 12v12 1.23.3 新增: 回退时不限速.
+int g_iCvarRetreatFree;					// 1=被限速期间回退就撤限速(默认), 0=旧行为(回退也照样限速)
 bool g_bNtvCheckpoint, g_bNtvWarp;
 bool g_bCvarAllow, bCvarAllow, g_bMapStarted, g_bLeft4Dead2;
 
@@ -250,6 +273,16 @@ float g_fBotNextCheck[MAXPLAYERS+1];	// 该 AI 生还者下次允许检测的游
 // 分开存的原因: 若复用同一个变量, 冷却期会把检测也一起停掉, 队伍移动后 bot 该被拉回时反而判不出来.
 float g_fBotNextTeleport[MAXPLAYERS+1];	// 该 AI 生还者下次允许被传送的最早游戏时间
 float g_fBotNotifyTime;				// AI 传送提示的全局上次发送时间(与全队提示分开计时, 但共用同一个间隔 cvar)
+// 12v12 1.23.3 新增: 「回退时不限速」的状态.
+// 判定素材全部复用 TimerTest 每秒那一次 flow 采样, 不额外扫玩家、也不看视角/速度向量.
+float g_fSpeedBase[MAXPLAYERS+1];	// 施加限速前引擎自己的 m_flMaxspeed 原值(0=还没记录), 恢复时写回它, 绝不硬编码 250/300
+float g_fFlowPeak[MAXPLAYERS+1];	// 本次被限速期间该玩家 flow 的最高点(回退 = 相对峰值往回走)
+float g_fFlowLast[MAXPLAYERS+1];	// 上一个采样点的 flow 值
+float g_fFlowAt[MAXPLAYERS+1];		// 上一个采样点的游戏时间(算 dt 用; 0=还没有采样点)
+float g_fRetreatHold[MAXPLAYERS+1];	// 连续观察到「在往回退」的累计秒数
+float g_fForwardHold[MAXPLAYERS+1];	// 回退状态下连续观察到「重新往前跑」的累计秒数
+bool g_bRetreat[MAXPLAYERS+1];		// 已确认在回退: PreThinkPost 期间不施加任何限速
+bool g_bSpeedRestored[MAXPLAYERS+1];// 本次回退是否已经把原值写回去过(只写一次, 不跟引擎抢每一 tick)
 
 char g_sMap[PLATFORM_MAX_PATH];
 bool g_bFoundMap;
@@ -304,6 +337,7 @@ public void OnPluginStart()
 	g_hCvarRangeLead =	CreateConVar("l4d_anti_rush_range_lead",	"1500.0",						"跑图判定距离: 某人领先队伍平均流距离超过多少即判定为跑图. 0.0=关闭跑图判定; 非 0 值最小 1500. 默认 1500.", CVAR_FLAGS);
 	g_hCvarSlow =		CreateConVar("l4d_anti_rush_slow",			"85.0",							"被判定跑图后立即限制到的最大移动速度. 默认 85.0 = 黄血瘸腿速度(引擎 cvar \"survivor_limp_walk_speed\"). 实际生效值不会超过 survivor_limp_walk_speed. 最小 20.0.", CVAR_FLAGS, true, 20.0);
 	g_hCvarTank =		CreateConVar("l4d_anti_rush_tanks",			"0",							"坦克存活时是否照常判定. 0=坦克存活时暂停防跑图并解除已有减速(默认), 1=坦克在场也照常限速/传送.", CVAR_FLAGS);
+	g_hCvarRetreatFree =	CreateConVar("l4d_anti_rush_retreat_free",	"1",							"被限速期间该生还者正在往回退(朝队伍方向走)时, 是否撤销这次限速: 1=撤销(默认, 回退过程按引擎原本的速度上限走, 重新往前跑后立刻恢复限速), 0=旧行为(回退也照样限速).", CVAR_FLAGS);
 	g_hCvarType =		CreateConVar("l4d_anti_rush_type",			"1",							"跑图处罚方式: 1=立即限速到 l4d_anti_rush_slow(默认), 2=传送回队伍. 两种都不影响落后判定.", CVAR_FLAGS);
 	g_hCvarWarnLast =	CreateConVar("l4d_anti_rush_warn_last",		"0.0",							"落后预提示距离: 落后超过该值但未达 range_last 时先发聊天提示. 0.0=关闭(默认); 由于 range_last 默认 0.0, 落后判定默认整体关闭, 本项也随之无效.", CVAR_FLAGS);
 	g_hCvarWarnLead =	CreateConVar("l4d_anti_rush_warn_lead",		"0.0",							"跑图预提示距离: 领先超过该值但未达 range_lead 时先发聊天提示. 0.0=关闭(默认); 若 range_lead 用默认 1500, 预提示区间不存在, 无提示.", CVAR_FLAGS);
@@ -403,6 +437,9 @@ void GetCvars()
 	g_fCvarWarnLast = g_hCvarWarnLast.FloatValue;
 	g_fCvarWarnLead = g_hCvarWarnLead.FloatValue;
 	g_fCvarWarnTime = g_hCvarWarnTime.FloatValue;
+
+	// 12v12 1.23.3: 回退时不限速
+	g_iCvarRetreatFree = g_hCvarRetreatFree.IntValue;
 
 	// 12v12 新增提示输出
 	g_iCvarHint = g_hCvarHint.IntValue;
@@ -829,6 +866,8 @@ void ResetClient(int i, bool keepBotTeleportCooldown = false)
 	if (!keepBotTeleportCooldown)
 		g_fBotNextTeleport[i] = 0.0;
 	g_fHintWarn[i] = 0.0;
+	// 12v12 1.23.3: 回退跟踪状态一并清掉(断线/换边/死亡/新回合/本次不再跑图都走这里).
+	ClearRetreatState(i);
 	ResetNotifyState(i);
 }
 
@@ -951,6 +990,9 @@ Action TimerTest(Handle timer)
 						g_bInhibit[client] = true;
 						SDKHook(client, SDKHook_PreThinkPost, PreThinkPost);
 					}
+
+					// 12v12 1.23.3: 先更新「他是不是在往回退」, PreThinkPost 据此决定这一 tick 要不要限速.
+					UpdateRetreatState(client, flows[i], now);
 					PreThinkPost(client);
 					if (g_fCvarWarnTime > 0.0 && g_fExecute[client] < now)
 					{
@@ -1043,9 +1085,152 @@ void PreThinkPost(int client)
 		ResetClient(client);
 		return;
 	}
+
+	// 12v12 1.23.3: 已确认他在往回退 → 这一 tick 完全不施加限速.
+	// 只在刚进入回退状态时把引擎原值写回去一次, 之后完全交给引擎:
+	// 引擎每个 tick 都会按当前状态(健康/瘸腿/水中/...)重算 m_flMaxspeed,
+	// 我们不插这一脚, 也就不会覆盖掉引擎或其它插件设的更低速度.
+	if (g_bRetreat[client])
+	{
+		if (!g_bSpeedRestored[client])
+		{
+			g_bSpeedRestored[client] = true;
+			RestoreMaxSpeed(client);
+		}
+
+		return;
+	}
+
+	g_bSpeedRestored[client] = false;
+
 	// A cap must not raise an engine/other-plugin speed that is already lower.
-	if (GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") > g_fCvarSlow)
+	float fMaxSpeed = GetEntPropFloat(client, Prop_Send, "m_flMaxspeed");
+
+	if (fMaxSpeed > g_fCvarSlow)
+	{
+		// 每次压上限之前先记下引擎自己给的值: 回退撤限速时按这个原值写回, 不硬编码 250/300.
+		// 引擎每 tick 都会重算这个属性, 所以这里记到的永远是「他此刻本该有的上限」.
+		g_fSpeedBase[client] = fMaxSpeed;
 		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", g_fCvarSlow);
+	}
+}
+
+/**
+ * 12v12 1.23.3: 把速度上限写回「施加限速之前引擎自己的那个值」.
+ * 必须用记录值, 不能写死 250/300 —— 生还者的正常上限本来就不是常量
+ * (瘸腿 85 / 水中 / 梯子 / 其它插件改过), 写死一个值会留下永久加速(或永久减速)的 buff.
+ * 当前值已经不低于原值时什么都不做, 绝不主动抬速.
+ */
+void RestoreMaxSpeed(int client)
+{
+	float fBase = g_fSpeedBase[client];
+
+	if (fBase <= 0.0)
+		return;		// 没记到原值(限速其实从未生效过) → 保持引擎当前值, 不猜
+
+	if (GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") < fBase)
+		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", fBase);
+}
+
+/**
+ * 12v12 1.23.3: 清掉某个玩家的「回退」跟踪状态(断线 / 换边 / 死亡 / 新回合 / 本次不再跑图).
+ */
+void ClearRetreatState(int client)
+{
+	g_fSpeedBase[client] = 0.0;
+	g_fFlowPeak[client] = 0.0;
+	g_fFlowLast[client] = 0.0;
+	g_fFlowAt[client] = 0.0;
+	g_fRetreatHold[client] = 0.0;
+	g_fForwardHold[client] = 0.0;
+	g_bRetreat[client] = false;
+	g_bSpeedRestored[client] = false;
+}
+
+/**
+ * 12v12 1.23.3: 更新「这个被限速的玩家是不是在往回退」.
+ * 只在 TimerTest 判定 type=1(限速) 的分支里调用, 每个 flow 采样点一次(节拍 1.0 秒).
+ *
+ * 判据(两条同时成立才算这一拍「在回退」):
+ *   ① 和上一拍比 flow 在变小(方向是朝队伍那边);
+ *   ② 相对本次限速期间的 flow 峰值已经往回走了至少 RETREAT_DROP_MIN.
+ * 连续满足 RETREAT_HOLD_MIN 秒才真正撤限速; 撤了之后再连续 RETREAT_FORWARD_MIN 秒
+ * 观察到「flow 在变大」就恢复限速 —— 易出难进, 不会给跑图的人白送一段路.
+ *
+ * 为什么不用视角/速度向量: 被 Smoker 拖、被 Charger 撞、被 Tank 打飞时瞬时速度和朝向都会乱,
+ * 那是「被别人推动」而不是「自己在往回走」; 而 flow 距离只反映他在关卡里的真实推进方向,
+ * 加上「必须连续两拍 + 相对峰值后退一段距离」的滞回, 一次性位移不会被误判.
+ * (另外这些被控状态本来就被 CanPunishSurvivor 挡掉了, 根本走不到这里.)
+ */
+void UpdateRetreatState(int client, float flow, float now)
+{
+	// 开关关闭 = 旧行为(回退也照样限速), 顺手把状态清干净, 切 cvar 不留残影.
+	if (!g_iCvarRetreatFree)
+	{
+		ClearRetreatState(client);
+		return;
+	}
+
+	// 第一次采样(或状态刚被清过): 只建立基准, 不做判定.
+	if (g_fFlowAt[client] <= 0.0)
+	{
+		g_fFlowPeak[client] = flow;
+		g_fFlowLast[client] = flow;
+		g_fFlowAt[client] = now;
+		return;
+	}
+
+	float dt = now - g_fFlowAt[client];
+
+	if (dt < 0.0)
+		dt = 0.0;
+
+	float fPrev = g_fFlowLast[client];
+
+	g_fFlowLast[client] = flow;
+	g_fFlowAt[client] = now;
+
+	if (flow > g_fFlowPeak[client])
+		g_fFlowPeak[client] = flow;
+
+	bool bBacking = (flow < fPrev) && (flow <= g_fFlowPeak[client] - RETREAT_DROP_MIN);
+	bool bAdvancing = (flow > fPrev);
+
+	if (g_bRetreat[client])
+	{
+		// 已在回退状态: 只看「是不是重新往前跑了」, 别的都不改.
+		if (bAdvancing)
+		{
+			g_fForwardHold[client] += dt;
+
+			if (g_fForwardHold[client] >= RETREAT_FORWARD_MIN)
+			{
+				g_bRetreat[client] = false;
+				g_fForwardHold[client] = 0.0;
+				g_fRetreatHold[client] = 0.0;
+				g_fFlowPeak[client] = flow;	// 以当前位置为新的峰值基准
+			}
+		}
+		else
+		{
+			g_fForwardHold[client] = 0.0;
+		}
+
+		return;
+	}
+
+	// 还没进入回退: 累计「连续在往回退」的时长, 中间只要有一拍不是回退就清零重来.
+	if (bBacking)
+		g_fRetreatHold[client] += dt;
+	else
+		g_fRetreatHold[client] = 0.0;
+
+	if (g_fRetreatHold[client] >= RETREAT_HOLD_MIN)
+	{
+		g_bRetreat[client] = true;
+		g_bSpeedRestored[client] = false;
+		g_fForwardHold[client] = 0.0;
+	}
 }
 
 // ====================================================================================================
@@ -1086,7 +1271,11 @@ void NotifyIntercept(int client, float lead, int type, float now)
 				if (need < 1)
 					need = 1;
 
-				PrintHintText(client, "已被限速\n领先队伍约 %d 米, 已持续 %d 秒\n请后退约 %d 米等待队友", meters, elapsed, need);
+				// 12v12 1.23.3: 回退期间限速已经撤掉, 提示要如实说明, 否则玩家会以为还被卡着.
+				if (g_bRetreat[client])
+					PrintHintText(client, "限速已暂停(正在回退)\n领先队伍约 %d 米, 已持续 %d 秒\n请继续后退约 %d 米等待队友", meters, elapsed, need);
+				else
+					PrintHintText(client, "已被限速\n领先队伍约 %d 米, 已持续 %d 秒\n请后退约 %d 米等待队友", meters, elapsed, need);
 			}
 			else
 			{

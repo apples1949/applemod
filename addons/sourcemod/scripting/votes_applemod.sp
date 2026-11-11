@@ -99,6 +99,17 @@ int	 g_iCount;
 char g_sMapinfo[MAX_CAMPAIGN_LIMIT][MAX_NAME_LENGTH];
 char g_sMapname[MAX_CAMPAIGN_LIMIT][MAX_NAME_LENGTH];
 
+// ====================================================
+// 内置投票接管: 战役表 (votesmap / l4d2_callvote 转交用)
+// ====================================================
+// 顺序 == 游戏内战役菜单顺序 == 内置"更换战役"投票传过来的序号
+// (L4D2 内置投票用"战役在菜单里的序号"而不是地图名, 见 AlliedMods Left 4 Voting 2).
+// 每项存: 该战役第一章的地图名 + 菜单显示名(和 Command_VotemapsMenu 里的条目一致).
+#define MAX_CAMPAIGN_TABLE	32
+int  g_iCampaignTableCount = 0;
+char g_sCampaignStart[MAX_CAMPAIGN_TABLE][MAX_NAME_LENGTH];
+char g_sCampaignLabel[MAX_CAMPAIGN_TABLE][MAX_NAME_LENGTH];
+
 int		MapRestartDelay;
 Handle	MapCountdownTimer;
 bool	isMapRestartPending = false;
@@ -147,8 +158,13 @@ public void OnPluginStart()
 	RegConsoleCmd("votesforcedellobby", Command_Votesforcedellobby);
 	RegConsoleCmd("votesforcestartgame", Command_Votesforcestartgame);
 	RegConsoleCmd("voteshud", Command_VoteHud);
+	RegConsoleCmd("votesmap", Command_VotesMap, "votesmap <地图名|战役序号|关键字> - 直接发起更换到指定地图的投票");
 	RegAdminCmd("sm_restartmap", CommandRestartMap, ADMFLAG_CHANGEMAP, "sm_restartmap - changelevels to the current map");
 	RegAdminCmd("sm_rs", CommandRestartMap, ADMFLAG_CHANGEMAP, "sm_restartmap - changelevels to the current map");
+
+	//l4d2_callvote 用 LibraryExists("votes_applemod") 判断投票后端在不在, 不在就退回"已禁用"提示.
+	RegPluginLibrary("votes_applemod");
+	BuildCampaignTable();
 
 	g_Cvar_Limits		   = CreateConVar("sm_votes_s", "0.51", "超过这个百分比才能投票通过", 0, true, 0.05, true, 1.0);
 	VotensHpED			   = CreateConVar("l4d_VotenshpED", "1", "如果为1，则开启回血投票选项", FCVAR_NOTIFY);
@@ -1098,6 +1114,274 @@ void DisplayVoteMapsMenu(int client, const char[] votesmaps, const char[] votesm
 	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", votesmapsname);
 	if (!IsMapValid(votesmaps)) return;
 	StartVote(client, map, sArgument, sPassText, VoteBroadcast_NotSpec, BuiltinVoteType_ChgCampaign, 0, "", "", votesmaps);
+}
+
+// ====================================================
+// votesmap <地图名|战役序号|关键字> : 直接发起更换到指定地图的投票
+// ====================================================
+// 用途: l4d2_callvote 接管游戏内置的 changemission / changechapter 投票时, 把内置投票带上来的
+//       参数换成真实地图名, 再走这里既有的发起链路(TestVoteDelay / CanStartVotes / 日志 /
+//       广播范围 / map 投票 + 通过后 5 秒 changelevel), 而不是只丢给玩家一个菜单.
+// 参数形态(三种都收):
+//   1) 章节/地图名: c2m3_coaster / l4d_vs_hospital01_apartment   -> 直接用
+//   2) 战役序号:   "5" 或 "C5" 或 "#L4D360UI_CampaignName_C5"     -> 查战役表取第一章
+//   3) 关键字:     hotel / highway / hospital / garage ...        -> 在战役表里模糊找
+public Action Command_VotesMap(int client, int args)
+{
+	if (client == 0)
+		return Plugin_Handled;
+
+	if (!g_bEnable || (!VotensMapE_D && !VotensMap2E_D))
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]地图投票已被服务器禁用");
+		return Plugin_Handled;
+	}
+
+	char sArg[PLATFORM_MAX_PATH];
+	sArg[0] = '\0';
+	if (args >= 1)
+		GetCmdArg(1, sArg, sizeof(sArg));
+
+	char sMap[PLATFORM_MAX_PATH];
+	char sLabel[MAX_NAME_LENGTH];
+	if (ResolveMapArgument(sArg, sMap, sizeof(sMap), sLabel, sizeof(sLabel)))
+	{
+		//官图 / 三方图分别受 l4d_VotensmapED / l4d_Votensmap2ED 控制, 和菜单入口保持一致
+		if (IsOfficialCampaignMap(sMap) && !VotensMapE_D)
+		{
+			CPrintToChat(client, "[{olive}VOTE{default}]官图投票已被服务器禁用");
+			return Plugin_Handled;
+		}
+		if (!IsOfficialCampaignMap(sMap) && !VotensMap2E_D)
+		{
+			CPrintToChat(client, "[{olive}VOTE{default}]三方图投票已被服务器禁用");
+			return Plugin_Handled;
+		}
+
+		//复用既有链路: 冷却 / 人数 / 投票进行中判断 / 记录日志 / 投票界面参数都在这里
+		DisplayVoteMapsMenu(client, sMap, sLabel);
+		return Plugin_Handled;
+	}
+
+	//解析不出来(没带参数 / 不是服务器上真实存在且在白名单里的图) -> 退回插件自己的地图菜单
+	if (sArg[0] != '\0')
+		CPrintToChat(client, "[{olive}VOTE{default}]无法识别地图 {blue}%s{default}, 请在弹出的菜单里选择", sArg);
+	else
+		CPrintToChat(client, "[{olive}VOTE{default}]请选择要更换的地图");
+
+	if (VotensMapE_D)
+		Command_VotemapsMenu(client, 0);
+	else
+		Command_Votemaps2Menu(client, 0);
+
+	return Plugin_Handled;
+}
+
+//把内置投票的参数解析成真实地图名. 成功返回 true 并填 sOutMap / sOutLabel(投票界面显示名).
+bool ResolveMapArgument(const char[] sRaw, char[] sOutMap, int iMapLen, char[] sOutLabel, int iLabelLen)
+{
+	char sArg[PLATFORM_MAX_PATH];
+	strcopy(sArg, sizeof(sArg), sRaw);
+	TrimString(sArg);
+	if (sArg[0] == '\0')
+		return false;
+
+	//1)完整地图名 / 章节地图名: changechapter c2m3_coaster 走这里
+	if (IsMapAllowed(sArg))
+	{
+		strcopy(sOutMap, iMapLen, sArg);
+		if (!FindCampaignByMap(sArg, sOutLabel, iLabelLen))
+			strcopy(sOutLabel, iLabelLen, sArg);
+		return true;
+	}
+
+	//2)剥掉内置投票的本地化前缀: #L4D360UI_CampaignName_C5 -> C5
+	char sTail[MAX_NAME_LENGTH];
+	strcopy(sTail, sizeof(sTail), sArg);
+	int iPos = StrContains(sTail, "CampaignName", false);
+	if (iPos >= 0)
+	{
+		char sRest[MAX_NAME_LENGTH];
+		strcopy(sRest, sizeof(sRest), sTail[iPos + 12]);
+		strcopy(sTail, sizeof(sTail), sRest);
+		TrimString(sTail);
+	}
+
+	//3)战役序号: 纯数字 或 C5 / c5
+	int iIndex = -1;
+	if (IsAllDigits(sTail))
+		iIndex = StringToInt(sTail);
+	else if ((sTail[0] == 'c' || sTail[0] == 'C') && IsAllDigits(sTail[1]))
+		iIndex = StringToInt(sTail[1]);
+
+	if (iIndex > 0 && iIndex <= g_iCampaignTableCount)
+	{
+		strcopy(sOutMap, iMapLen, g_sCampaignStart[iIndex - 1]);
+		strcopy(sOutLabel, iLabelLen, g_sCampaignLabel[iIndex - 1]);
+		return IsMapAllowed(sOutMap);
+	}
+
+	//4)关键字: 至少 3 个字符才做模糊匹配, 免得单个字母乱命中
+	if (strlen(sTail) >= 3)
+	{
+		for (int i = 0; i < g_iCampaignTableCount; i++)
+		{
+			if (StrContains(g_sCampaignStart[i], sTail, false) == -1
+				&& StrContains(g_sCampaignLabel[i], sTail, false) == -1)
+			{
+				continue;
+			}
+
+			strcopy(sOutMap, iMapLen, g_sCampaignStart[i]);
+			strcopy(sOutLabel, iLabelLen, g_sCampaignLabel[i]);
+			return IsMapAllowed(sOutMap);
+		}
+	}
+
+	//5)三方图列表: 地图名或显示名
+	for (int i = 0; i < g_iCount; i++)
+	{
+		if (!StrEqual(g_sMapinfo[i], sTail, false) && !StrEqual(g_sMapname[i], sTail, false))
+			continue;
+
+		strcopy(sOutMap, iMapLen, g_sMapinfo[i]);
+		strcopy(sOutLabel, iLabelLen, g_sMapname[i]);
+		return IsMapAllowed(sOutMap);
+	}
+
+	return false;
+}
+
+//地图白名单: 必须真实存在(IsMapValid) + 属于官图章节 或 三方图列表里登记过的图
+bool IsMapAllowed(const char[] sMap)
+{
+	if (sMap[0] == '\0')
+		return false;
+
+	//存在性: 引擎确认台服上真有这张图
+	if (!IsMapValid(sMap))
+		return false;
+
+	if (IsOfficialCampaignMap(sMap))
+		return true;
+
+	for (int i = 0; i < g_iCount; i++)
+	{
+		if (StrEqual(g_sMapinfo[i], sMap, false))
+			return true;
+	}
+
+	return false;
+}
+
+//官方战役章节图: L4D2 = c<战役号>m<章节号>_xxx 且战役号在战役表范围内; L4D1 = l4d 前缀
+bool IsOfficialCampaignMap(const char[] sMap)
+{
+	if (sMap[0] == '\0')
+		return false;
+
+	if (game_l4d2)
+	{
+		if (sMap[0] != 'c' && sMap[0] != 'C')
+			return false;
+
+		int iPos = 1;
+		int iNum = 0;
+		while (IsCharNumeric(sMap[iPos]))
+		{
+			iNum = iNum * 10 + (sMap[iPos] - '0');
+			iPos++;
+		}
+
+		if (iNum <= 0 || iNum > g_iCampaignTableCount)
+			return false;
+
+		if (sMap[iPos] != 'm' && sMap[iPos] != 'M')
+			return false;
+
+		iPos++;
+		if (!IsCharNumeric(sMap[iPos]))
+			return false;
+
+		return true;
+	}
+
+	//L4D1: 官方图都以 l4d 开头(含 l4d_vs_ 对战版), 章节号写在地图名里
+	return (strncmp(sMap, "l4d", 3, false) == 0);
+}
+
+//在战役表里按"第一章地图名"反查菜单显示名
+bool FindCampaignByMap(const char[] sMap, char[] sLabel, int iLabelLen)
+{
+	for (int i = 0; i < g_iCampaignTableCount; i++)
+	{
+		if (!StrEqual(g_sCampaignStart[i], sMap, false))
+			continue;
+
+		strcopy(sLabel, iLabelLen, g_sCampaignLabel[i]);
+		return true;
+	}
+
+	return false;
+}
+
+//是否全由数字组成
+bool IsAllDigits(const char[] sText)
+{
+	if (sText[0] == '\0')
+		return false;
+
+	for (int i = 0; sText[i] != '\0'; i++)
+	{
+		if (!IsCharNumeric(sText[i]))
+			return false;
+	}
+
+	return true;
+}
+
+//战役表: 顺序必须和游戏内战役菜单一致(内置投票传的是菜单序号),
+//条目和 Command_VotemapsMenu 里的菜单项一一对应.
+void BuildCampaignTable()
+{
+	g_iCampaignTableCount = 0;
+
+	if (game_l4d2)
+	{
+		AddCampaignEntry("c1m1_hotel", "死亡中心 C1");
+		AddCampaignEntry("c2m1_highway", "黑色嘉年华 C2");
+		AddCampaignEntry("c3m1_plankcountry", "沼泽激战 C3");
+		AddCampaignEntry("c4m1_milltown_a", "暴风骤雨 C4");
+		AddCampaignEntry("c5m1_waterfront", "教区 C5");
+		AddCampaignEntry("c6m1_riverbank", "短暂时刻 C6");
+		AddCampaignEntry("c7m1_docks", "牺牲 C7");
+		AddCampaignEntry("c8m1_apartment", "毫不留情 C8");
+		AddCampaignEntry("c9m1_alleys", "坠机险途 C9");
+		AddCampaignEntry("c10m1_caves", "死亡丧钟 C10");
+		AddCampaignEntry("c11m1_greenhouse", "寂静时分 C11");
+		AddCampaignEntry("c12m1_hilltop", "血腥收获 C12");
+		AddCampaignEntry("c13m1_alpinecreek", "刺骨寒溪 C13");
+		AddCampaignEntry("c14m1_junkyard", "背水一战 C14");
+	}
+	else
+	{
+		AddCampaignEntry("l4d_vs_hospital01_apartment", "毫不留情 No Mercy");
+		AddCampaignEntry("l4d_garage01_alleys", "坠机险途 Crash Course");
+		AddCampaignEntry("l4d_vs_smalltown01_caves", "死亡丧钟 Death Toll");
+		AddCampaignEntry("l4d_vs_airport01_greenhouse", "寂静时分 Dead Air");
+		AddCampaignEntry("l4d_vs_farm01_hilltop", "血腥收获 Bloody Harvest");
+		AddCampaignEntry("l4d_river01_docks", "牺牲 The Sacrifice");
+	}
+}
+
+void AddCampaignEntry(const char[] sMap, const char[] sLabel)
+{
+	if (g_iCampaignTableCount < 0 || g_iCampaignTableCount >= MAX_CAMPAIGN_TABLE)
+		return;
+
+	strcopy(g_sCampaignStart[g_iCampaignTableCount], MAX_NAME_LENGTH, sMap);
+	strcopy(g_sCampaignLabel[g_iCampaignTableCount], MAX_NAME_LENGTH, sLabel);
+	g_iCampaignTableCount++;
 }
 
 // 强制玩家旁观

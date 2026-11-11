@@ -98,11 +98,7 @@ void SetClientFrozen(int client, bool freeze)
 
 bool IsPlayer(int client)
 {
-<<<<<<< HEAD
 	if (client < 1 || client > MaxClients || !IsClientInGame(client))
-=======
-	if (!client || !IsClientInGame(client))
->>>>>>> 2e955dcca58f98df8e5b1bccdb45b77d5b5bd049
 		return false;
 
 	int team = GetClientTeam(client);

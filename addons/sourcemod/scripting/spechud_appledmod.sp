@@ -109,12 +109,29 @@ int g_iTankPunch, g_iTankRock, g_iTankHittable, g_iTankDamage;
 // Hud Toggle & Hint Message
 bool bSpecHudActive[MAXPLAYERS+1], bTankHudActive[MAXPLAYERS+1];
 bool bSpecHudHintShown[MAXPLAYERS+1], bTankHudHintShown[MAXPLAYERS+1];
+// 本回合坦克事件（刷出 / 接管）已经把 tankhud 强制关掉了：只用于"掉线把槽位重置回开"那一处，
+// 见 Event_PlayerTeam / Native_TankHudDisable。每回合开始清掉。
+bool g_bTankHudForceOff = false;
 
 // Tank real-time alive tracking
 float g_fTankAliveTimestamp = 0.0;	// game time when that tank became alive
 bool g_bTankTimerInitialized = false;	// whether the alive-timer has been started for the current tank
 
 /**********************************************************************************************/
+
+// ======================================================================
+//  Plugin Load：对外接口
+// ======================================================================
+// 坦克HUD（tankhud）是本插件画的那块 Panel。l4d_superversus 的 sihud 需要
+// "坦克刷出 / 被接管时关掉所有玩家的 tankhud"，走下面这个 native 通知本插件：
+//   client = 0 → 所有玩家；client > 0 → 指定玩家。
+// 只动 bTankHudActive（玩家自己的 !tankhud 开关），完全不碰旁观面板 bSpecHudActive。
+public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
+{
+	RegPluginLibrary("spechud_appledmod");
+	CreateNative("SpecHud_TankHudDisable", Native_TankHudDisable);
+	return APLRes_Success;
+}
 
 // ======================================================================
 //  Plugin Start
@@ -466,6 +483,9 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 
 	g_fTankAliveTimestamp = 0.0;
 	g_bTankTimerInitialized = false;
+
+	// 新回合：坦克事件带下来的"tankhud 已强制关闭"标记作废（见 Native_TankHudDisable）
+	g_bTankHudForceOff = false;
 }
 
 void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -503,7 +523,9 @@ void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 	if (team == L4D2Team_None) // Player disconnecting
 	{
 		bSpecHudActive[client] = false;
-		bTankHudActive[client] = true;
+		// 坦克事件已经强制关掉过 tankhud 的回合里，别把槽位重置回"开" —— 否则下一个
+		// 坐进这个槽位的玩家会在坦克还在场时又看到坦克面板（需求：坦克刷出/接管时关闭 tankhud）
+		bTankHudActive[client] = !g_bTankHudForceOff;
 	}
 
 	//if (team == L4D2Team_Infected) storedClass[client] = ZC_None;
@@ -596,6 +618,59 @@ Action ToggleTankHudCmd(int client, int args)
 }
 
 /**********************************************************************************************/
+
+// ======================================================================
+//  Native：坦克HUD 强制关闭（供 l4d_superversus 的 sihud 调用）
+// ======================================================================
+// 关掉 tankhud：client = 0 → 所有玩家；client > 0 → 指定玩家。
+//   · bTankHudActive 就是玩家自己的 "!tankhud" 开关，置 false 之后 HudDrawTimer 不再给他发
+//     坦克面板；之后玩家仍然可以用 !tankhud 自己重新打开（本 native 不改这个语义）；
+//   · 屏幕上已经显示的那块坦克面板用一行空面板顶掉（Panel 没有"清除"接口）；
+//   · 只顶"确实在收坦克面板"的人：旁观者开着 !spechud 旁观面板时，屏幕上那块是旁观面板，
+//     拿空面板去顶会把旁观面板打掉（两者共用同一块聊天面板位置），所以跳过。
+any Native_TankHudDisable(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	// 只要 sihud 那边来调用，就说明本回合已经有过坦克事件；掉线重置槽位时不要再把 tankhud 打开
+	g_bTankHudForceOff = true;
+
+	if (client <= 0)
+	{
+		for (int i = 1; i <= MaxClients; ++i)
+		{
+			if (!IsClientInGame(i) || IsFakeClient(i)) continue;
+			TankHud_Disable(i);
+		}
+	}
+	else if (client <= MaxClients)
+	{
+		if (IsClientInGame(client) && !IsFakeClient(client)) TankHud_Disable(client);
+	}
+	return 0;
+}
+
+void TankHud_Disable(int client)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client)) return;
+
+	bool bWasActive = bTankHudActive[client];
+	bTankHudActive[client] = false;
+	if (!bWasActive) return;						// 本来就没开，屏幕上不会有坦克面板
+
+	// 只有"屏幕上那块确实是坦克面板"的人才顶屏（同一块聊天面板位置，顶错会打掉别的面板）：
+	//   · 感染者：一直收坦克面板（除非开着别的东西，那也不是我们该管的）；
+	//   · 旁观者：只有没开 !spechud 旁观面板时才收坦克面板；
+	//   · 生还者 / SourceTV：根本不会收到坦克面板。
+	if (IsClientSourceTV(client)) return;
+	if (GetClientTeam(client) == L4D2Team_Infected) { /* 继续顶屏 */ }
+	else if (GetClientTeam(client) == L4D2Team_Spectator && !bSpecHudActive[client]) { /* 继续顶屏 */ }
+	else return;
+
+	Panel blank = new Panel();
+	blank.DrawText(" ");
+	blank.Send(client, DummyTankHudHandler, 1);
+	delete blank;
+}
 
 // ======================================================================
 //  HUD Handle

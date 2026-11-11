@@ -281,26 +281,6 @@ void KillAllDeathModels()
 	int i = INVALID_ENT_REFERENCE;
 	while((i = FindEntityByClassname(i, "survivor_death_model")) != INVALID_ENT_REFERENCE)
 	{
-		KillEntNextFrame(i);
+		AcceptEntityInput(i, "Kill");
 	}
-}
-
-// ===========================================================================
-//  延迟删除：把删实体推迟到下一帧，避免在引擎回调/实体遍历中途删（崩溃排查用）
-//  RequestFrame 在 SM 1.12 支持带 any data 参数，比 CreateTimer(0.0) 更贴近"下一帧"，
-//  也不会额外创建 timer 对象。
-// ===========================================================================
-void KillEntNextFrame(int entity)
-{
-	if (entity <= 0 || !IsValidEntity(entity))
-		return;
-
-	RequestFrame(Frame_KillEntNextFrame, EntIndexToEntRef(entity));
-}
-
-public void Frame_KillEntNextFrame(any ref)
-{
-	int ent = EntRefToEntIndex(ref);
-	if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
-		AcceptEntityInput(ent, "Kill");
 }

@@ -52,6 +52,33 @@ ConVar g_cvDebug;
 ConVar g_cvPoolMode;
 ConVar director_allow_infected_bots, z_max_player_zombies;
 
+/* EDI 新增：第一波特感保障
+ *
+ * 需求：生还者离开安全屋后的第一波 Special Infected 里，6 种特感（Smoker / Boomer /
+ *       Hunter / Spitter / Jockey / Charger）每种至少出现 1 个。
+ *
+ * 做法（低风险路线，不替换实体、不踢人重建）：
+ *   本插件的池子本来就是"把职业交给引擎"的唯一出口，两条路径都已经存在：
+ *     * Director 生成 AI 特感 -> L4D_OnSpawnSpecial 返回 Plugin_Changed 改职业
+ *     * 人类玩家进入 ghost   -> L4D_OnEnterGhostState 里 L4D_SetClass 改职业
+ *   所以只需要在"弹池子"这一步加一层优先级：本回合还没出现过的职业优先交出去，
+ *   直到覆盖够 l4d2_fix_spawn_order_first_wave_types 种（默认 6）为止。
+ *
+ * 为什么比"改实体 zombieClass"安全：
+ *   改职业只发生在 SI 还是 ghost / 还没实体化的时刻（引擎认可的时机），
+ *   实体建好之后再改 m_zombieClass 会导致模型/骨骼/技能对不上，本方案完全不碰那一步。
+ *
+ * 为什么比"只靠 FillQueue 轮次入池"更稳：
+ *   FillQueue() 第一轮确实已经把 1..6 各排了一个，但池子只在 versus_round_start
+ *   且 L4D_HasPlayerControlledZombies() 为真时才建立；在本回合池子建立之前（或者
+ *   Director 的 AI 生成走了 !g_isLive 的放行分支）交出去的职业不受池子控制。
+ *   这里按"实际出现了哪些职业"计数补缺，和池子是否及时建立解耦。
+ */
+bool g_bFirstWave;             // 本回合是否还处于"第一波保障"期
+int  g_iWaveSeen[SI_MAX_SIZE]; // 第一波里各职业是否已经出现过（0/1）
+ConVar g_cvFirstWave;          // 第一波保障总开关
+ConVar g_cvFirstWaveTypes;     // 第一波至少要覆盖几种特感
+
 public void OnPluginStart()
 {
 	HookEvent("round_start", Event_RoundStart);
@@ -68,6 +95,10 @@ public void OnPluginStart()
 	
 	director_allow_infected_bots = FindConVar("director_allow_infected_bots");
 	z_max_player_zombies = FindConVar("z_max_player_zombies");
+
+	// EDI 新增：第一波 6 种特感保障（默认开，见文件上方"第一波特感保障"注释）
+	g_cvFirstWave = CreateConVar("l4d2_fix_spawn_order_first_wave", "1", "1 = 保证生还者出门后的第一波特感里 6 种特感每种至少 1 个; 0 = 关闭", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvFirstWaveTypes = CreateConVar("l4d2_fix_spawn_order_first_wave_types", "6", "第一波至少要覆盖几种特感类型 (0 = 关闭, 最大 6)", FCVAR_NONE, true, 0.0, true, 6.0);
 	
 	g_SpawnsArray = new ArrayList();
 
@@ -102,6 +133,7 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	ToggleEvents(false);
 	g_SpawnsArray.Clear();
 	g_isLive = false;
+	ResetFirstWave();
 }
 
 void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -109,6 +141,7 @@ void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 	ToggleEvents(false);
 	g_SpawnsArray.Clear();
 	g_isLive = false;
+	ResetFirstWave();
 }
 
 void Event_RealRoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -122,6 +155,7 @@ void Event_RealRoundStart(Event event, const char[] name, bool dontBroadcast)
 	ToggleEvents(true);
 	FillQueue();
 	g_isLive = true;
+	StartFirstWave();
 }
 
 void ToggleEvents(bool isEnable)
@@ -163,6 +197,10 @@ public Action L4D_OnMaterializeFromGhostPre(int client)
 	PrintDebug("\x05%N \x05materialized \x01as (\x04%s\x01)", client, L4D2_InfectedNames[GetInfectedClass(client)]);
 
 	g_bPlayerSpawned[client] = true;
+
+	// EDI 新增：第一波保障按"实际出现的职业"记账（人类玩家真正实体化的这一刻）
+	RecordWaveClass(GetInfectedClass(client));
+
 	return Plugin_Continue;
 }
 
@@ -400,6 +438,9 @@ public void L4D_OnSpawnSpecial_Post(int client, int zombieClass, const float vec
 	g_ZombieClass = SI_None;
 	g_iStoredClass[client] = zombieClass;
 	g_bPlayerSpawned[client] = true;
+
+	// EDI 新增：第一波保障按"实际出现的职业"记账（Director 的 AI 特感真正生成成功的这一刻）
+	RecordWaveClass(zombieClass);
 }
 
 public void L4D_OnSpawnSpecial_PostHandled(int client, int zombieClass, const float vecPos[3], const float vecAng[3])
@@ -448,6 +489,17 @@ void QueueSI(int SI, bool front)
 int PopQueuedSI(int skip_client)
 {
 	int size = g_SpawnsArray.Length;
+
+	// EDI 新增：第一波保障优先 —— 先把本回合还没出现过的职业交给引擎。
+	// NOTE: 这一步故意放在 !size 判断之前：合成路径不依赖池子里有没有条目，
+	//       池子被清空/某个职业上限特别低时仍然能补齐第一波。
+	if (g_bFirstWave)
+	{
+		int unseen = PopUnseenWaveClass(skip_client);
+		if (unseen != SI_None)
+			return unseen;
+	}
+
 	if (!size)
 		return SI_None;
 	
@@ -541,6 +593,130 @@ void FillQueue()
 	if (idx < 0) idx = 0;
 	classString[idx] = '\0';
 	PrintDebug("Filled queue (%s)", classString);
+}
+
+//--------------------------------------------------------------------------------- First Wave
+//
+// EDI 新增：第一波特感保障（6 种特感每种至少 1 个）。
+//
+// 只改"交给引擎的职业"，不改已经建好的实体，所以不存在模型/骨骼/技能对不上的风险：
+//   1) Director 的 AI 特感走 L4D_OnSpawnSpecial -> PopQueuedSI() -> Plugin_Changed
+//   2) 人类玩家进入 ghost 走 L4D_OnEnterGhostState -> PopQueuedSI() -> L4D_SetClass
+// 记账在"真正出现"的一刻（L4D_OnMaterializeFromGhostPre / L4D_OnSpawnSpecial_Post），
+// 所以即使本回合池子建立得晚，也不影响判定。
+
+void StartFirstWave()
+{
+	for (int SI = 0; SI < SI_MAX_SIZE; ++SI)
+		g_iWaveSeen[SI] = 0;
+
+	g_bFirstWave = g_cvFirstWave.BoolValue && g_cvFirstWaveTypes.IntValue > 0;
+
+	if (g_bFirstWave)
+		PrintDebug("First wave: guaranteeing %d distinct SI classes", g_cvFirstWaveTypes.IntValue);
+}
+
+void ResetFirstWave()
+{
+	for (int SI = 0; SI < SI_MAX_SIZE; ++SI)
+		g_iWaveSeen[SI] = 0;
+
+	g_bFirstWave = false;
+}
+
+/**
+ * 第一波记账：只关心"这个职业出现过没有"，重复出现不累加。
+ * 覆盖到 l4d2_fix_spawn_order_first_wave_types 种后解除保障，后面的生成完全按池子走。
+ */
+void RecordWaveClass(int SI)
+{
+	if (!g_bFirstWave)
+		return;
+
+	if (SI < SI_GENERIC_BEGIN || SI >= SI_GENERIC_END)
+		return;
+
+	if (g_iWaveSeen[SI] > 0)
+		return;
+
+	g_iWaveSeen[SI] = 1;
+
+	int seen = 0;
+	for (int i = SI_GENERIC_BEGIN; i < SI_GENERIC_END; ++i)
+	{
+		if (g_iWaveSeen[i] > 0)
+			++seen;
+	}
+
+	int required = GetFirstWaveRequiredTypes();
+	if (seen >= required)
+	{
+		g_bFirstWave = false;
+		PrintDebug("First wave: covered %d distinct SI classes, guarantee released", seen);
+	}
+}
+
+int GetFirstWaveRequiredTypes()
+{
+	int required = g_cvFirstWaveTypes.IntValue;
+	int maxTypes = SI_GENERIC_END - SI_GENERIC_BEGIN;
+
+	if (required > maxTypes)
+		required = maxTypes;
+
+	return required;
+}
+
+/**
+ * 第一波保障专用：挑一个本回合还没出现过、且当前不超上限的职业。
+ *   1) 池子里有这个职业 -> 从池子里弹出来（保持池子的轮换语义）
+ *   2) 池子里没有（该职业上限被配成 0、池子被清空过等）-> 直接合成一个
+ * NOTE: 合成路径不消耗池子元素，所以不会让池子提前见底；真正的配额仍由
+ *       IsClassOverLimit()（z_versus_*_limit + dominator 上限）兜底。
+ */
+int PopUnseenWaveClass(int skip_client)
+{
+	int nTypes = SI_GENERIC_END - SI_GENERIC_BEGIN;
+	if (nTypes <= 0)
+		return SI_None;
+
+	// 随机旋转起点：不要每回合都按 Smoker->Boomer->Hunter... 的固定顺序出人，
+	// 否则前 6 个特感的位置/顺序变成可预判的。
+	int startIdx = GetRandomInt(0, nTypes - 1);
+
+	for (int n = 0; n < nTypes; ++n)
+	{
+		int SI = SI_GENERIC_BEGIN + ((startIdx + n) % nTypes);
+
+		if (g_iWaveSeen[SI] > 0)
+			continue;
+
+		if (IsClassOverLimit(SI, skip_client) != OverLimit_OK)
+			continue;
+
+		// 1) 池子里已经有这个职业 -> 从池子里弹出来（保持池子的轮换语义）
+		int size = g_SpawnsArray.Length;
+		for (int i = 0; i < size; ++i)
+		{
+			if (g_SpawnsArray.Get(i) != SI)
+				continue;
+
+			g_SpawnsArray.Erase(i);
+			PrintDebug("First wave: popped (%s) from pool", L4D2_InfectedNames[SI]);
+			return SI;
+		}
+
+		// 2) 池子里没有（该职业上限被配成 0、池子被清空过等）-> 直接合成一个。
+		//    合成路径不消耗池子元素，所以不会让池子提前见底；真正的配额仍由
+		//    IsClassOverLimit()（z_versus_*_limit + dominator 上限）兜底。
+		if (g_iInitialSILimits[SI] <= 0)
+			continue;
+
+		PrintDebug("First wave: synthesized (%s)", L4D2_InfectedNames[SI]);
+		return SI;
+	}
+
+	return SI_None;
 }
 
 /**
@@ -788,6 +964,40 @@ void DumpSpawnPool(int client)
 		FormatEx(aiBotsBuf, sizeof(aiBotsBuf), "n/a");
 
 	PoolReply(client, "==== Proper Sack Order: pool state ====");
+
+	// EDI 新增：第一波保障状态（缺哪些职业，会优先补哪个）
+	if (g_bFirstWave)
+	{
+		char missingBuf[128];
+		missingBuf[0] = 0;
+
+		for (int SI = SI_GENERIC_BEGIN; SI < SI_GENERIC_END; ++SI)
+		{
+			if (g_iWaveSeen[SI] > 0)
+				continue;
+
+			if (strlen(missingBuf) > 0)
+				StrCat(missingBuf, sizeof(missingBuf), ",");
+
+			StrCat(missingBuf, sizeof(missingBuf), L4D2_InfectedNames[SI]);
+		}
+
+		if (strlen(missingBuf) == 0)
+			StrCat(missingBuf, sizeof(missingBuf), "none");
+
+		PoolReply(client, "first_wave=on required=%d missing=[%s]", GetFirstWaveRequiredTypes(), missingBuf);
+	}
+	else
+	{
+		int seen = 0;
+		for (int SI = SI_GENERIC_BEGIN; SI < SI_GENERIC_END; ++SI)
+		{
+			if (g_iWaveSeen[SI] > 0)
+				++seen;
+		}
+
+		PoolReply(client, "first_wave=off required=%d covered=%d (已解除保障，完全按池子轮换)", GetFirstWaveRequiredTypes(), seen);
+	}
 	PoolReply(client, "live=%s pool_mode=%d pool_len=%d SI_alive=%d SI_slots=%d z_max=%s ai_bots=%s player_ctrl=%s",
 		g_isLive ? "yes" : "no",
 		g_cvPoolMode.IntValue,

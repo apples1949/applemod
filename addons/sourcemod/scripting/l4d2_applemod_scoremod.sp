@@ -286,7 +286,7 @@ int Native_GetMaxPillsBonus(Handle plugin, int numParams)
 
 Action CmdBonus(int client, int args)
 {
-	if (bRoundOver || !client)
+	if (bRoundOver || !client || !IsClientInGame(client))
 		return Plugin_Handled;
 
 	char sCmdType[64];
@@ -322,8 +322,24 @@ Action CmdBonus(int client, int args)
 
 Action CmdMapInfo(int client, int args)
 {
+	if (client && !IsClientInGame(client))
+		return Plugin_Handled;
+
 	float fMaxPillsBonus = float(iMaxPillScore * iTeamSize);
 	float fTotalBonus = fMapBonus + fMaxPillsBonus;
+
+	if (!client)
+	{
+		PrintToServer("[Applemod Bonus :: %iv%i] Map Info", iTeamSize, iTeamSize);
+		PrintToServer("Distance: %d", iMapDistance);
+		PrintToServer("Total Bonus: %d <100.0%%>", RoundToFloor(fTotalBonus));
+		PrintToServer("Health Bonus: %d <%.1f%%>", RoundToFloor(fMapHealthBonus), CalculateBonusPercent(fMapHealthBonus, fTotalBonus));
+		PrintToServer("Damage Bonus: %d <%.1f%%>", RoundToFloor(fMapDamageBonus), CalculateBonusPercent(fMapDamageBonus, fTotalBonus));
+		PrintToServer("Pills Bonus: %d(base) %d(max/survivor, team %d) <%.1f%%>", iPillWorth, iMaxPillScore, RoundToFloor(fMaxPillsBonus), CalculateBonusPercent(fMaxPillsBonus, fTotalBonus));
+		PrintToServer("Tiebreaker: %d", iPillWorth);
+		return Plugin_Handled;
+	}
+
 	PrintToChat(client, "\x01[\x04Applemod Bonus\x01 :: \x03%iv%i\x01] Map Info", iTeamSize, iTeamSize);
 	PrintToChat(client, "\x01Distance: \x05%d\x01", iMapDistance);
 	PrintToChat(client, "\x01Total Bonus: \x05%d\x01 <\x03100.0%%\x01>", RoundToFloor(fTotalBonus));

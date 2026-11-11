@@ -326,7 +326,7 @@ int CreateGlowClone(int iProp)
 	// 这个类没有发光属性（极少数自定义道具）：不生成垃圾实体
 	if (!HasEntProp(iClone, Prop_Send, "m_iGlowType"))
 	{
-		KillEntNextFrame(iClone);
+		RemoveEntity(iClone);
 
 		return -1;
 	}
@@ -384,7 +384,7 @@ void ClearAllClones()
 
 		if (iEnt > 0 && iEnt != INVALID_ENT_REFERENCE && IsValidEntity(iEnt))
 		{
-			KillEntNextFrame(iEnt);
+			RemoveEntity(iEnt);
 		}
 	}
 
@@ -484,45 +484,4 @@ int GetColorValue(const char[] sValue)
 bool IsColorDigit(const char c)
 {
 	return (c >= '0' && c <= '9');
-}
-
-// ===========================================================================
-//  延迟删除：把删实体推迟到下一帧（RequestFrame），并对同一实体去重。
-//  目的：避免在引擎回调/实体遍历中途删实体；同时避免同一帧把同一实体重复入队
-//  （引擎 release 版的入队去重被编掉了，重复入队会在 CleanupDeleteList 里二次 delete）。
-// ===========================================================================
-static int g_iKillPending[64];
-static int g_iKillPendingCount;
-
-void KillEntNextFrame(int entity)
-{
-	if (entity <= 0 || !IsValidEntity(entity))
-		return;
-
-	int ref = EntIndexToEntRef(entity);
-	for (int i = 0; i < g_iKillPendingCount; i++)
-	{
-		if (g_iKillPending[i] == ref)
-			return;   // 已经在队列里，去重
-	}
-
-	if (g_iKillPendingCount >= sizeof(g_iKillPending))
-	{
-		AcceptEntityInput(entity, "Kill");   // 队列满：退回当帧删，避免漏删
-		return;
-	}
-
-	g_iKillPending[g_iKillPendingCount++] = ref;
-	RequestFrame(Frame_KillEntNextFrame);
-}
-
-public void Frame_KillEntNextFrame()
-{
-	for (int i = 0; i < g_iKillPendingCount; i++)
-	{
-		int ent = EntRefToEntIndex(g_iKillPending[i]);
-		if (ent != INVALID_ENT_REFERENCE && ent > 0 && IsValidEntity(ent))
-			AcceptEntityInput(ent, "Kill");
-	}
-	g_iKillPendingCount = 0;
 }

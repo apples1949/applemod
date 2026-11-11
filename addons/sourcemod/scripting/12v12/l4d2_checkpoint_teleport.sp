@@ -144,6 +144,23 @@
  *      中途集合点的 l4d2_cptele_checkpoint_percent 本来就是 50%，未改动。
  *      模式配置 cfg/cfgogl/applemod12v12/applemod12v12.cfg 同步改成 50（两条路径一致）。
  *
+ *  1.2.7 需求「有玩家进入集合区域时，向所有玩家提示可触发传送」（2026-11-11）：
+ *    - Timer_Monitor 里新增「进入跳变侦测」（UpdateEnterNotices）：
+ *      逐区域 × 逐玩家记录上一 tick 是否在区域内，只在「不在 -> 在」这一次
+ *      跳变时播报，绝不每 tick 刷屏；同一玩家同一次进入只播一次。
+ *    - 播报内容严格按用户给定格式（两个通道同文案）：
+ *        \x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名触发传送）
+ *      参数 = 已进入人数 / 当前存活生还者数 / 区域名（安全屋·救援点·集合点）/
+ *             触发所需人数（AreaRequiredCount，与倒计时判定同一口径）。
+ *    - 通道：聊天框 PrintToChatAll（受 l4d2_cptele_chat 控制）+
+ *            屏幕下方居中 PrintHintTextToAll（沿用本插件既有 HUD 通道）。
+ *      新开关 l4d2_cptele_enter_notice（默认 1）。
+ *    - StartCountdown 里原来那条「%d/%d 名生还者已进入…，N 秒后…」的长句
+ *      按用户要求拆成两条：第一条是上面那个严格格式，第二条只留倒计时信息。
+ *    - 边界：逃离阶段 / 救援车未到位 / 区域已触发或实体消失时不播报，
+ *      但仍静默记录在场状态（区域恢复可用时不会「集体进入」）；
+ *      换图 / round_start / round_end / 玩家断线都会清状态。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -157,7 +174,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.6"
+#define PLUGIN_VERSION      "1.2.7"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -166,6 +183,9 @@
 
 #define MAX_AREAS           32          // 一张图最多同时监控的区域数
 #define MONITOR_INTERVAL    1.0         // 区域监控间隔（秒）
+// 1.2.7：同一玩家短时间内反复进出同一区域（站在触发体积 / 半径边界上来回抖）
+// 只播报第一次，避免聊天框刷屏。秒。
+#define ENTER_NOTICE_REPEAT 3.0
 #define INIT_DELAY          3.0         // round_start 后延迟多久侦测实体
 #define CANCEL_COOLDOWN     10.0        // 倒计时被取消后，该区域的冷静期
 #define INFECTED_CLEAR_RADIUS 300.0     // 清理传送点周围特感的半径
@@ -235,6 +255,7 @@ ConVar g_cvResetOnLeave;
 ConVar g_cvSkipSeen;
 ConVar g_cvSound;
 ConVar g_cvChat;
+ConVar g_cvEnterNotice;         // 1.2.7：有人首次进入集合区域时向全服提示
 ConVar g_cvSaferoom;
 ConVar g_cvSaferoomDoor;        // 关底安全门关闭时，传送后发 Open 让引擎能过关（1.2.1）
 ConVar g_cvSaferoomForceDoor;   // 门开不了/开过之后仍不过关时，补发一次 CheckpointDoorClosed（1.2.2）
@@ -316,6 +337,14 @@ bool   g_bSettleEventFired;     // 已经向 info_changelevel 发过 CheckpointD
 // 本次倒计时期间「到过该区域」的生还者。倒计时结束时只传送「一次都没到过」的人，
 // 已经到过、随后离开继续推进的人不再被传送回来（1.2.0 修复）。
 bool   g_bSeen[MAXPLAYERS+1];
+
+// 1.2.7「有人进入区域」提示的逐区域 × 逐玩家状态：
+//   g_bAreaPresence[i][client]  上一 tick 该生还者是否在区域 i 内（只用来抓「不在 -> 在」的跳变）
+//   g_fAreaEnterAt[i][client]   该玩家上次被播报「进入区域 i」的时刻（抑制边界抖动刷屏）
+//   g_bAreaNoticePrimed[i]      区域 i 是否已经做过第一次静默登记
+bool   g_bAreaPresence[MAX_AREAS][MAXPLAYERS+1];
+float  g_fAreaEnterAt[MAX_AREAS][MAXPLAYERS+1];
+bool   g_bAreaNoticePrimed[MAX_AREAS];
 
 bool   g_bMapStarted;
 bool   g_bLateLoad;
@@ -418,6 +447,11 @@ public void OnPluginStart()
 
 	g_cvChat = CreateConVar("l4d2_cptele_chat", "1",
 		"1=倒计时开始与结束时在聊天框输出一行提示（HUD 提示不受此开关影响）。0=只留 HUD 提示",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.2.7 需求：有生还者「首次进入」集合区域时，向所有玩家提示可触发传送。
+	g_cvEnterNotice = CreateConVar("l4d2_cptele_enter_notice", "1",
+		"1=有生还者首次进入安全屋/救援点/集合点区域时，向所有玩家在聊天框和屏幕下方提示可触发传送（只在进入那一刻播报，不会每 tick 刷屏）。0=不播报",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSaferoom = CreateConVar("l4d2_cptele_saferoom", "1",
@@ -611,6 +645,9 @@ public void OnClientConnected(int client)
 	if (client > 0 && client <= MaxClients)
 	{
 		g_bSeen[client] = false;
+
+		// 1.2.7：client 槽位可能是被复用的，进入区域提示的状态也要一起清
+		ClearEnterNoticeForClient(client);
 	}
 }
 
@@ -619,6 +656,8 @@ public void OnClientDisconnect(int client)
 	if (client > 0 && client <= MaxClients)
 	{
 		g_bSeen[client] = false;
+
+		ClearEnterNoticeForClient(client);
 	}
 }
 
@@ -1448,16 +1487,22 @@ public Action Timer_Monitor(Handle timer)
 		return Plugin_Continue;
 	}
 
+	// 是否处于逃离阶段：安全屋 / 集合点没必要再集合。
+	// 但救援关正是「逃离阶段车辆到位后」才需要把掉队的传过去，
+	// 所以这一条只对非救援区域生效（在下面的循环里逐区域判断）。
+	// 1.2.7：这一行提到守卫之前算，因为下面的「进入区域提示」也要用它判断可见性。
+	bool bEscape = g_bNtvEscape && L4D_IsFinaleEscapeInProgress();
+
+	// 1.2.7 需求：有生还者「首次进入」某个集合区域时，向全服提示可触发传送。
+	// 必须放在「倒计时期间直接返回」之前——集合过程中人还在陆续走进来，
+	// 人数变化同样要提示。本函数只做提示，不碰倒计时 / 传送逻辑。
+	UpdateEnterNotices(bEscape);
+
 	// 倒计时期间由倒计时 timer 负责，这里不重复判
 	if (g_bCountingDown || g_iAreaCount == 0)
 	{
 		return Plugin_Continue;
 	}
-
-	// 已经在逃离阶段：安全屋 / 集合点没必要再集合。
-	// 但救援关正是「逃离阶段车辆到位后」才需要把掉队的传过去，
-	// 所以这一条只对非救援区域生效（在下面的循环里逐区域判断）。
-	bool bEscape = g_bNtvEscape && L4D_IsFinaleEscapeInProgress();
 
 	int total = CountAliveSurvivors();
 
@@ -1520,6 +1565,151 @@ public Action Timer_Monitor(Handle timer)
 	return Plugin_Continue;
 }
 
+/**
+ * 1.2.7：有人「首次进入」集合区域时的全服提示。
+ *
+ * 只做状态跟踪 + 播报，不做任何传送 / 计时：
+ *   - 逐区域 × 逐玩家记录上一 tick 是否在区域内，只在「不在 -> 在」跳变那一次播报，
+ *     所以不会每 tick 刷屏，同一玩家同一次进入也只播一次。
+ *   - 多人几乎同时进入时，本 tick 只要有新人进来就用「当前已进入人数」播一次，
+ *     天然就是「按人数变化逐次提示」。
+ *   - 同一玩家 3 秒内反复进出同一区域（站在触发体积 / 半径边界上抖动）只播第一次。
+ *   - 区域刚被侦测出来的那一刻，已经在里面的人算「侦测前就在场」，只静默登记不播报。
+ *
+ * 由 Timer_Monitor 每秒调用一次（g_bCountingDown 期间也调用）。
+ *
+ * @param bEscape   本帧是否处于逃离阶段（与 Timer_Monitor 的可见性规则共用）
+ */
+void UpdateEnterNotices(bool bEscape)
+{
+	if (!g_cvEnterNotice.BoolValue || g_iAreaCount == 0)
+	{
+		return;
+	}
+
+	int total = CountAliveSurvivors();
+
+	if (total <= 0)
+	{
+		return;
+	}
+
+	float fNow = GetGameTime();
+
+	for (int i = 0; i < g_iAreaCount; i++)
+	{
+		// 已经触发过（倒计时结束 / 传送完毕）或区域实体已经消失：不再提示。
+		// 但下面仍然静默记录在场状态，区域恢复可用时不会出现「全员集体进入」。
+		bool bQuiet = g_bAreaFired[i] || !IsAreaAlive(i);
+
+		if (!bQuiet)
+		{
+			// 与 Timer_Monitor 的可见性规则保持一致：
+			// 逃离阶段不提示非救援区域；救援车没到位时不提示救援区域。
+			if (g_iAreaType[i] == AREA_RESCUE)
+			{
+				bQuiet = (!g_bRescueReady && !bEscape);
+			}
+			else
+			{
+				bQuiet = bEscape;
+			}
+		}
+
+		// 区域第一次参与判定：这一刻已经在区域里的人属于「侦测前就在场」，
+		// 不是「走进来」，只静默登记。
+		if (!g_bAreaNoticePrimed[i])
+		{
+			g_bAreaNoticePrimed[i] = true;
+			bQuiet = true;
+		}
+
+		int reached = 0;
+		int announced = 0;
+
+		for (int c = 1; c <= MaxClients; c++)
+		{
+			bool bIn = IsAliveSurvivor(c) && IsClientInArea(c, i);
+
+			if (bIn)
+			{
+				reached++;
+			}
+
+			if (!bIn)
+			{
+				g_bAreaPresence[i][c] = false;
+				continue;
+			}
+
+			if (g_bAreaPresence[i][c])
+			{
+				continue;
+			}
+
+			// 这一刻是「不在 -> 在」的跳变 = 一次进入
+			g_bAreaPresence[i][c] = true;
+
+			if (bQuiet)
+			{
+				continue;
+			}
+
+			// 边界抖动抑制：同一玩家短时间内重复「进入」同一区域不重复播报
+			if (fNow - g_fAreaEnterAt[i][c] < ENTER_NOTICE_REPEAT)
+			{
+				continue;
+			}
+
+			g_fAreaEnterAt[i][c] = fNow;
+			announced++;
+		}
+
+		if (announced > 0)
+		{
+			AnnounceAreaEnter(i, reached, total);
+		}
+	}
+}
+
+/**
+ * 播报「有生还者进入集合区域」：聊天框 + 屏幕下方居中提示，内容格式固定。
+ *
+ *   聊天：\x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名触发传送）
+ *   屏幕：同文案纯文本（PrintHintTextToAll 不支持颜色转义）
+ *
+ * %d/%d = 已进入人数 / 当前存活生还者数（与倒计时判定同一口径）；
+ * %s     = 区域名（安全屋 / 救援点 / 集合点，取 GetAreaTypeName）；
+ * 末尾 %d = 触发传送所需人数（AreaRequiredCount）。
+ */
+void AnnounceAreaEnter(int index, int reached, int total)
+{
+	int type = g_iAreaType[index];
+	int need = AreaRequiredCount(type, total);
+
+	char sName[32];
+	char sMsg[192];
+
+	GetAreaTypeName(type, sName, sizeof(sName));
+
+	if (g_cvChat.BoolValue)
+	{
+		PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名触发传送）",
+			reached, total, sName, need);
+	}
+
+	Format(sMsg, sizeof(sMsg), "[集合点] %d/%d 名生还者已进入%s（需要 %d 名触发传送）",
+		reached, total, sName, need);
+
+	PrintHintTextToAll("%s", sMsg);
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 进入提示：区域 #%d (type=%d) reached=%d total=%d need=%d",
+			index, type, reached, total, need);
+	}
+}
+
 void StartCountdown(int index, int reached, int total)
 {
 	if (g_bCountingDown)
@@ -1566,10 +1756,14 @@ void StartCountdown(int index, int reached, int total)
 	if (IsSafeAreaType(type))
 	{
 		// ---- A 组文案：安全屋 / 救援点 ----
+		// 1.2.7：按用户要求把原来那条「进入 + 倒计时」长句拆成两条 ——
+		// 第一条严格使用用户给定格式（不夹带任何倒计时信息），
+		// 第二条只留倒计时信息。
 		if (g_cvChat.BoolValue)
 		{
-			PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名），%d 秒后把未进入的生还者传送进来。",
-				reached, total, sName, need, seconds);
+			PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名触发传送）",
+				reached, total, sName, need);
+			PrintToChatAll("\x05[集合点]\x01 %d 秒后把未进入%s的生还者传送进来。", seconds, sName);
 		}
 
 		Format(sHint, sizeof(sHint), "%d 秒后把未进入%s的生还者传送进来", seconds, sName);
@@ -1577,10 +1771,12 @@ void StartCountdown(int index, int reached, int total)
 	else
 	{
 		// ---- B 组文案：地图中途集合点 ----
+		// 同上：第一条严格用户格式，第二条只留倒计时信息。
 		if (g_cvChat.BoolValue)
 		{
-			PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已到达集合点（需要 %d 名），%d 秒后传送未到的生还者并开启机关。",
-				reached, total, need, seconds);
+			PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已进入%s（需要 %d 名触发传送）",
+				reached, total, sName, need);
+			PrintToChatAll("\x05[集合点]\x01 %d 秒后传送未到集合点的生还者并开启机关。", seconds);
 		}
 
 		Format(sHint, sizeof(sHint), "%d 秒后传送未到集合点的生还者", seconds);
@@ -2892,6 +3088,37 @@ void ClearSeenFlags()
 }
 
 /**
+ * 1.2.7：清掉「进入区域提示」的全部状态（换图 / 换回合）。
+ * 不清会残留「该玩家已经在区域里」的判断，导致下回合第一次进入不再提示。
+ */
+void ClearEnterNoticeState()
+{
+	for (int i = 0; i < MAX_AREAS; i++)
+	{
+		g_bAreaNoticePrimed[i] = false;
+
+		for (int c = 0; c <= MaxClients; c++)
+		{
+			g_bAreaPresence[i][c] = false;
+			g_fAreaEnterAt[i][c] = 0.0;
+		}
+	}
+}
+
+/**
+ * 1.2.7：清掉某个 client 槽位在「进入区域提示」里的状态（连接 / 断线时用）。
+ * client index 会被新玩家或 bot 复用，不清会漏掉「复用者」的第一次进入提示。
+ */
+void ClearEnterNoticeForClient(int client)
+{
+	for (int i = 0; i < MAX_AREAS; i++)
+	{
+		g_bAreaPresence[i][client] = false;
+		g_fAreaEnterAt[i][client] = 0.0;
+	}
+}
+
+/**
  * 把当前站在区域里的存活生还者标记为「本次倒计时期间到过」。
  * 每秒调用一次，标记后不会再被清掉（离开区域也算到过）。
  */
@@ -3577,6 +3804,9 @@ void ResetRound()
 	g_bSiteAuthority = false;
 
 	ClearSeenFlags();
+
+	// 1.2.7：进入区域提示的在场/播报状态也要清（换图、换回合）
+	ClearEnterNoticeState();
 
 	for (int i = 0; i < MAX_AREAS; i++)
 	{

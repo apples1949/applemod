@@ -6,8 +6,6 @@
 #include <left4dhooks>
 #include <colors>
 
-#define DEBUG 0
-
 #define APPID_L4D2			 550
 #define STATS_PLAYTIME_KEY	 "Stat.TotalPlayTime.Total"
 #define SECONDS_PER_HOUR	 3600
@@ -16,12 +14,27 @@
 // Steam Web API: 玩家主页(Steam 个人资料)游戏时长
 #define PROFILE_GAMETIME_URL "http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?format=json&appids_filter[0]=550"
 
+/*
+ * 变更记录
+ * 1.6.1 (2026-11-11)
+ *   修复: 时长限制在"双数据源"下实际只按一路判定。
+ *         旧实现把两路结果汇总进 i_PlayerTime(成就统计优先), 而 LimitPlayer/CheckPlayerGametime
+ *         只看 i_PlayerTime 这一个值, 所以两路都开启时主页时长命中也拦不住;
+ *         两路都开启、其中一路先失败时, 判定还会一直挂着不收敛。
+ *         现在 i_ProfileTime / i_StatTime 分别保存两路时长, 限制判定改为联合判定:
+ *         任意一路落在 (LimitPlayerMinGametime, LimitPlayerMaxGametime) 区间内就限制;
+ *         先到的那一路命中就立即限制(不等另一路), 未命中则等另一路到了再判一次,
+ *         每个连接只执行一次限制动作(b_LimitHandled), 不重复踢/不重复转旁观。
+ *   修复: 调试输出改由 GetPlayerGametimeDebug(默认 0)控制, 且只写服务器控制台, 不再刷全体玩家聊天。
+ *   新增: 时长查询看门狗, 某一路卡住(HTTP 无回调等)时到点按获取失败收尾, 保证判定一定收敛。
+ */
+
 public Plugin myinfo =
 {
 	name		= "get player gametime",
 	author		= "apples1949 , 豆瓣酱な , deepseek",
 	description = "",
-	version		= "1.6.0",
+	version		= "1.6.1",
 	url			= "https://github.com/apples1949",
 };
 
@@ -61,6 +74,11 @@ bool   b_ConfigsExecuted = false;
 bool   b_SteamCheck;
 bool   b_ClientAuthorized[MAXPLAYERS + 1];	// 已经过 OnClientAuthorized(SteamID 验证成功)
 bool   b_ClientPostAdminCheck[MAXPLAYERS + 1];	// 已经过 OnClientPostAdminCheck
+// 本连接是否已经执行过"因时长而限制"(踢出/转旁观): 防止管理员把玩家转回生还者后又被反复处理
+bool   b_LimitHandled[MAXPLAYERS + 1];
+// 本连接是否已经向全服播报过"正在获取时长"/"获取失败"提示: 防止每次重试都刷屏
+bool   b_RequestNotified[MAXPLAYERS + 1];
+bool   b_FailureNotified[MAXPLAYERS + 1];
 int	   i_LastSourceState = 0;
 int	   i_ShowGametimeMode;
 int	   i_CheckPlayerGameCount;
@@ -77,6 +95,7 @@ bool   b_LPLateload;
 int	   i_LPMWFailureGet;
 bool   b_SPLMode;
 bool   b_IfNeedLogKickMsg;
+bool   b_Debug;					// 调试输出开关(GetPlayerGametimeDebug, 默认关闭)
 bool   hasTranslations;
 ConVar c_ShowGametimeMode;
 ConVar c_CheckPlayerGameCount;
@@ -95,6 +114,7 @@ ConVar c_QueryMode;
 ConVar c_CheckPlayerProfileCount;
 ConVar c_SteamCheck;
 ConVar c_APIKey;
+ConVar c_Debug;
 
 char   chatFile[128];
 char   s_APIKey[128];
@@ -126,6 +146,18 @@ public void OnClientDisconnect(int client)
 	{
 		b_ClientAuthorized[client]	   = false;
 		b_ClientPostAdminCheck[client] = false;
+		// 断线清理限制状态: 否则索引复用给下一个玩家时会带着"已限制过/已提示过"的残留标记
+		b_LimitHandled[client]	= false;
+		b_RequestNotified[client] = false;
+		b_FailureNotified[client] = false;
+		i_StatTime[client]		= 0;
+		i_ProfileTime[client]	= 0;
+		i_PlayerTime[client]	= 0;
+		i_StatState[client]		= SOURCE_PENDING;
+		i_ProfileState[client]	= SOURCE_PENDING;
+		i_StatsUserID[client]	= 0;
+		i_ProfileUserID[client] = 0;
+		b_Announced[client]		= false;
 	}
 }
 
@@ -200,7 +232,7 @@ public void OnPluginStart()
 
 	c_Enable				 = CreateConVar("GetPlayerGametimeEnable", "1", "启用插件？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_ShowGametimeMode		 = CreateConVar("ShowGametimeMode", "2", "向玩家显示什么类型的游戏时长？1:小时和分钟 2=四舍五入到两位小数的小时", FCVAR_NOTIFY, true, 1.0, true, 2.0);
-	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "如果由于任何可能的原因未能获取到玩家的成就统计时长，应重复多少次以获取玩家的成就统计时长？0:不重试", FCVAR_NOTIFY, true, 0.0);
+	c_CheckPlayerGameCount	 = CreateConVar("CheckPlayerGameCount", "8", "如果由于任何可能的原因未能获取到玩家的成就统计时长，应重复多少次以获取玩家的成就统计时长？0=禁用成就统计时长查询", FCVAR_NOTIFY, true, 0.0);
 	c_LPWRequesting			 = CreateConVar("LPWRequesting", "0", "正在反复获取玩家的游戏时长时，是否将玩家移动到旁观？0:禁用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_LPMWFailureGet		 = CreateConVar("LPMWFailureGet", "0", "反复获取玩家游戏时长失败时如何处理玩家？0:禁用，1:踢出 2=移动到旁观", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 	c_LPLateload			 = CreateConVar("LPLateload", "1", "如果 LimitPlayer=1 且插件未正常启动，是否取消各种因游戏时长而限制玩家的插件行为？0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -215,6 +247,9 @@ public void OnPluginStart()
 	c_CheckPlayerProfileCount = CreateConVar("CheckPlayerProfileCount", "3", "查询玩家主页游戏时长的次数？0=禁用玩家主页查询", FCVAR_NOTIFY, true, 0.0);
 	c_SteamCheck				 = CreateConVar("GetPlayerGametimeSteamCheck", "1", "开启后检测玩家 SteamID 是否验证成功：必须经过 OnClientAuthorized 和 OnClientPostAdminCheck 两个验证流程，否则不返回获取的玩家游戏时长。0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	c_APIKey				 = CreateConVar("GetPlayerGametimeAPIKey", "", "Steam Web API Key(查询玩家主页游戏时长用)，留空则禁用玩家主页查询，申请: https://steamcommunity.com/dev/apikey", FCVAR_NOTIFY);
+
+	// 调试输出开关: 只写服务器控制台, 不进玩家聊天; 默认关闭(以前是 #if DEBUG 编译期硬编码刷全体聊天)
+	c_Debug					 = CreateConVar("GetPlayerGametimeDebug", "0", "调试模式: 是否在服务器控制台打印时长查询与限制判定的内部信息? 0:禁用 1:启用", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvMinUpdateRate		 = FindConVar("sv_minupdaterate");
 	g_cvMaxUpdateRate		 = FindConVar("sv_maxupdaterate");
@@ -239,6 +274,7 @@ public void OnPluginStart()
 	c_CheckPlayerProfileCount.AddChangeHook(ConVarChanged);
 	c_SteamCheck.AddChangeHook(ConVarChanged);
 	c_APIKey.AddChangeHook(ConVarChanged);
+	c_Debug.AddChangeHook(ConVarChanged);
 
 	HookEvent("player_team", Event_PlayerTeam);
 
@@ -263,14 +299,43 @@ void ConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	// 换图时 AutoExecConfig 生成的 cfg 会重复执行, 值没变就不用重新查询所有玩家(否则每次换图都会刷一遍时长播报)
 	if (StrEqual(oldValue, newValue)) return;
-#if DEBUG
-	CPrintToChatAll("cvar is change,requite all player gametime");
-#endif
 	GetCvars();
+	DebugMsg("cvar 变更, 重新查询所有玩家的游戏时长");
+	// 只有"影响时长获取或限制判定"的 cvar 变化才清掉"已限制/已提示"标记(相当于管理员主动要求重新判定);
+	// 改 ShowPlayerLerp 这类显示用 cvar 时不要重新判定, 否则会把已经处理过的玩家再处理一遍
+	bool bResetLimitState = IsLimitRelevantConVar(convar);
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsClientAuthorized(i) && IsClientInGame(i)) OnClientPostAdminCheck(i);
+		if (IsClientAuthorized(i) && IsClientInGame(i))
+		{
+			if (bResetLimitState)
+			{
+				b_LimitHandled[i]	 = false;
+				b_RequestNotified[i] = false;
+				b_FailureNotified[i] = false;
+			}
+			OnClientPostAdminCheck(i);
+		}
 	}
+}
+
+// 该 cvar 是否影响"时长获取 / 限制判定"
+bool IsLimitRelevantConVar(ConVar convar)
+{
+	if (convar == c_LimitPlayer) return true;
+	if (convar == c_LimitPlayerMinGametime) return true;
+	if (convar == c_LimitPlayerMaxGametime) return true;
+	if (convar == c_LimitPlayerMode) return true;
+	if (convar == c_LPMWFailureGet) return true;
+	if (convar == c_LPWRequesting) return true;
+	if (convar == c_LPLateload) return true;
+	if (convar == c_QueryMode) return true;
+	if (convar == c_CheckPlayerGameCount) return true;
+	if (convar == c_CheckPlayerProfileCount) return true;
+	if (convar == c_APIKey) return true;
+	if (convar == c_SteamCheck) return true;
+	if (convar == c_Enable) return true;
+	return false;
 }
 
 void GetCvars()
@@ -293,8 +358,10 @@ void GetCvars()
 	b_SteamCheck			  = c_SteamCheck.BoolValue;
 	c_APIKey.GetString(s_APIKey, sizeof(s_APIKey));
 
-	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0);
+	// CheckPlayerGameCount=0 / CheckPlayerProfileCount=0 都表示"该数据源禁用", 两路对称处理
+	b_StatsSourceEnabled   = b_SteamWorksAvailable && ((i_QueryMode & QUERY_STATS) != 0) && (i_CheckPlayerGameCount > 0);
 	b_ProfileSourceEnabled = b_SteamWorksAvailable && ((i_QueryMode & QUERY_PROFILE) != 0) && (i_CheckPlayerProfileCount > 0) && (s_APIKey[0] != '\0');
+	b_Debug				   = c_Debug.BoolValue;
 
 	// 配置还没执行完时(OnPluginStart 阶段)读到的还是 cvar 默认值, 此时不做判断也不报错,
 	// 否则服务器每次启动都会先误报一次"未设置 GetPlayerGametimeAPIKey"
@@ -392,6 +459,9 @@ public void OnClientPostAdminCheck(int client)
 	if (b_StatsSourceEnabled) StartStatsQuery(client);
 	if (b_ProfileSourceEnabled) RequestProfileGametime(client);
 
+	// 查询看门狗: 某一路卡死时到点收尾, 保证"双源都不返回"也能收敛出判定结果
+	StartLimitWatchdog(client);
+
 	OnSourceUpdate(client);
 }
 
@@ -475,15 +545,9 @@ void StartStatsQuery(int client)
 
 	i_StatTime[client] = 0;
 
-	if (i_CheckPlayerGameCount > 0)
-	{
-		i_StatsUserID[client] = userid;
-		CreateTimer(1.0, MoreGetPlayerGameTime, userid, TIMER_FLAG_NO_MAPCHANGE);
-	}
-	else
-	{
-		i_StatState[client] = SOURCE_FAILED;
-	}
+	// i_CheckPlayerGameCount=0 时 b_StatsSourceEnabled 为 false, 这里不会再被调用, 故不再需要 count=0 的分支
+	i_StatsUserID[client] = userid;
+	CreateTimer(1.0, MoreGetPlayerGameTime, userid, TIMER_FLAG_NO_MAPCHANGE);
 }
 
 Action MoreGetPlayerGameTime(Handle timer, any userid)
@@ -600,9 +664,7 @@ public void OnProfileHTTPCompleted(Handle hRequest, bool bFailure, bool bRequest
 	// 一个响应只走一条结局: 成功已处理, 否则按失败重试
 	if (!bHandled && client && IsClientInGame(client))
 	{
-#if DEBUG
-		PrintToServer("[GetPlayerGametime] %N 主页时长查询失败 (http:%d failure:%d successful:%d)", client, eStatusCode, bFailure, bRequestSuccessful);
-#endif
+		DebugMsg("%N 主页时长查询失败 (http:%d failure:%d successful:%d)", client, eStatusCode, bFailure, bRequestSuccessful);
 		OnProfileQueryFailed(client);
 	}
 
@@ -657,9 +719,7 @@ Action TimerProfileRetry(Handle timer, any userid)
 
 Action cmdplayertime(int client, int args)
 {
-#if DEBUG
-	CPrintToChatAll("Command executed successfully");
-#endif
+	DebugMsg("sm_playertime 指令已执行");
 	if (b_SPLMode)
 	{
 		int survivorCount  = 0;
@@ -734,62 +794,80 @@ bool IsValidClient(int client)
 	return client > 0 && client <= MaxClients && IsClientInGame(client);
 }
 
-bool CheckPlayerGametime(int client)
+// 双时长联合判定: 只要"玩家主页时长"或"成就统计时长"任意一路落在
+// (LimitPlayerMinGametime, LimitPlayerMaxGametime) 开区间内, 就判定该玩家符合限制条件。
+// 命中时通过 iUsedTime/iUsedSource 回带"命中哪一路、多少秒", 供踢出提示与日志使用。
+// 返回 false 只表示"目前已知的时长都不在区间内", 不代表另一路将来不会有值。
+bool CheckPlayerGametime(int client, int &iUsedTime, int &iUsedSource)
 {
-#if DEBUG
-	PrintToChatAll("Check Player %N Gametime", client);
-#endif
-	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime)
+	iUsedTime   = 0;
+	iUsedSource = 0;
+
+	// 成就统计时长(SteamWorks stat: Stat.TotalPlayTime.Total)
+	if (i_StatTime[client] > 0
+		&& i_StatTime[client] > i_LimitPlayerMinGametime
+		&& i_StatTime[client] < i_LimitPlayerMaxGametime)
 	{
-#if DEBUG
-		CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
-#endif
+		iUsedTime   = i_StatTime[client];
+		iUsedSource = 2;
+		DebugMsg("玩家 %N 命中成就统计时长 %d 秒 (限制区间 %d - %d 秒)", client, iUsedTime, i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime);
 		return true;
 	}
-#if DEBUG
-	CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
-#endif
+
+	// 玩家主页(Steam 个人资料)时长
+	if (i_ProfileTime[client] > 0
+		&& i_ProfileTime[client] > i_LimitPlayerMinGametime
+		&& i_ProfileTime[client] < i_LimitPlayerMaxGametime)
+	{
+		iUsedTime   = i_ProfileTime[client];
+		iUsedSource = 1;
+		DebugMsg("玩家 %N 命中主页时长 %d 秒 (限制区间 %d - %d 秒)", client, iUsedTime, i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime);
+		return true;
+	}
+
 	return false;
 }
 
-/*
-void CheckPlayerGametime(int client)
+// 是否已经拿到任意一路时长
+bool HasAnyGametime(int client)
 {
-	#if DEBUG
-	PrintToChatAll("Check Player %N Gametime",client);
-	#endif
-	if (i_PlayerTime[client] > i_LimitPlayerMinGametime && i_PlayerTime[client] < i_LimitPlayerMaxGametime && (i_LimitPlayerMode != 0))
-	{
-		if(b_LPLateload && CheckPluginLate)return;
-		#if DEBUG
-		CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is ture", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
-		#endif
-		if (i_LimitPlayerMode == 1)
-		{
-			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / 3600;
-			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / 3600;
-			// KickClient(client, "你因游戏时长不符合服务器规则(%.2f - %.2f)而被自动踢出!",i_LimitPlayerMinGametime,i_LimitPlayerMaxGametime);
-			KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
-			LogKickPlayer(client, 2);
-		}
-		else
-		{
-			ChangeClientToSpec(client);
-			// CPrintToChatAll("{green}[{olive}!{green}]{default}玩家{olive} %N 因游戏时长不符合服务器规则而被强制移动到旁观!", client);
-			CPrintToChatAll("%t", "forcespecplayerUnqualified", client);
-		}
-	}
-	#if DEBUG
-	CPrintToChatAll("%d %d %d %N,CheckPlayerGametime is false", i_PlayerTime[client], i_LimitPlayerMinGametime, i_LimitPlayerMaxGametime, client);
-	#endif
+	return (i_StatTime[client] > 0 || i_ProfileTime[client] > 0);
 }
-*/
+
+// 调试输出: 由 GetPlayerGametimeDebug(默认 0)控制, 只写服务器控制台, 不刷玩家聊天
+void DebugMsg(const char[] fmt, any ...)
+{
+	if (!b_Debug) return;
+	char buffer[512];
+	VFormat(buffer, sizeof(buffer), fmt, 2);
+	PrintToServer("[GetPlayerGametime] %s", buffer);
+}
+
+// 按 LimitPlayerMode 执行限制动作: 1=踢出 2=移动到旁观
+void ApplyPlayerLimit(int client, int iUsedTime, int iUsedSource)
+{
+	if (i_LimitPlayerMode == 1)
+	{
+		float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
+		float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / SECONDS_PER_HOUR;
+		KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
+		LogKickPlayer(client, 2, iUsedTime, iUsedSource);
+	}
+	else
+	{
+		ChangeClientToSpec(client);
+		CPrintToChatAll("%t", "forcespecplayerUnqualified", client);
+	}
+}
+
 void LimitPlayer(int client)
 {
 	// 防重入: ChangeClientToSpec 移动玩家时会触发 player_team 事件重入本函数,无限递归导致栈溢出
 	if (b_IsProcessingLimitPlayer[client]) return;
 	if (!IsValidClient(client)) return;
-	if (!b_Enable || !b_LimitPlayer || i_PlayerTime[client] == 0) return;
+	if (!b_Enable || !b_LimitPlayer) return;
+	// i_PlayerTime 为 0 表示本连接还没初始化过判定状态(PostAdminCheck 之后恒为 -1/-2/时长), 此时不判定
+	if (i_PlayerTime[client] == 0) return;
 	// SteamID 未通过两个验证流程的玩家, 不返回时长也不做限制(不误判为获取失败)
 	if (!IsClientSteamVerified(client)) return;
 	// 无可用数据源时不做任何限制
@@ -800,68 +878,139 @@ void LimitPlayer(int client)
 	b_IsProcessingLimitPlayer[client] = false;
 }
 
+// 限制判定的状态机(数据源每变化一次、玩家换队一次都会走到这里):
+//   [1] 任意一路命中限制区间        → 立即限制(不等另一路), 置 b_LimitHandled 后不再重复处理
+//   [2] 一路时长都没有 + 还有源在请求 → 等待(LPWRequesting 时压旁观), 提示只发一次
+//   [3] 一路时长都没有 + 全部源结束  → 按 LPMWFailureGet 处理(踢/转旁观/只提示), 置 b_LimitHandled
+//   [4] 已有数据但都不在区间 + 另一路还在路上 → 等另一路到了再判一次
+//   [5] 已有数据但都不在区间 + 全部源结束    → 放行, 不做任何处理
 void LimitPlayerInner(int client)
 {
-#if DEBUG
-	PrintToChatAll("%N i_PlayerTime=%d", client, i_PlayerTime[client]);
-#endif
-	if (i_PlayerTime[client] == -1)
+	// 本连接已经执行过限制动作: 管理员把玩家转回生还者、player_team 再次触发都不重复处理
+	if (b_LimitHandled[client]) return;
+
+	int iUsedTime   = 0;
+	int iUsedSource = 0;
+
+	// [1] 任一路命中 → 立即限制
+	if (CheckPlayerGametime(client, iUsedTime, iUsedSource) && (i_LimitPlayerMode != 0))
 	{
-		if (GetRequestCount(client) < GetRequestMaxCount())
-		{
-			if (!b_LPWRequesting || (b_LPLateload && CheckPluginLate)) return;
-			ChangeClientToSpec(client);
-			CPrintToChatAll("%t", "forcespecplayerRequesting", client, GetRequestCount(client), GetRequestMaxCount());
-		}
-		else
-		{
-			CPrintToChatAll("%t", "RequestingPlayerGametime", client, GetRequestCount(client) + 1, GetRequestMaxCount());
-		}
+		// 插件中途加载 + LPLateload=1: 取消一切因游戏时长产生的限制行为
+		if (b_LPLateload && CheckPluginLate) return;
+
+		char sSource[16];
+		if (iUsedSource == 1) strcopy(sSource, sizeof(sSource), "主页");
+		else strcopy(sSource, sizeof(sSource), "成就");
+		DebugMsg("限制玩家 %N: 来源=%s, 时长=%d 秒, LimitPlayerMode=%d", client, sSource, iUsedTime, i_LimitPlayerMode);
+
+		b_LimitHandled[client]	  = true;
+		b_RequestNotified[client] = true;
+		b_FailureNotified[client] = true;
+		ApplyPlayerLimit(client, iUsedTime, iUsedSource);
+		return;
 	}
-	else if (i_PlayerTime[client] == -2)
+
+	// [2][3] 一路时长都还没拿到
+	if (!HasAnyGametime(client))
 	{
-		if ((GetRequestCount(client) >= GetRequestMaxCount()) && (i_LPMWFailureGet != 0))
+		if (!AllSourcesFinished(client))
 		{
-			if (b_LPLateload && CheckPluginLate) return;
-			if (i_LPMWFailureGet == 1)
-			{
-				KickClient(client, "%t", "kickplayerFailureGet");
-				LogKickPlayer(client, 1);
-			}
-			else if (i_LPMWFailureGet == 2)
+			// 还有源在请求/重试: LPWRequesting=1 时每次进来都压回旁观(玩家可能又占了位置), 提示只发一次
+			if (b_LPWRequesting && !(b_LPLateload && CheckPluginLate))
 			{
 				ChangeClientToSpec(client);
-				CPrintToChatAll("%t", "forcespecplayerFailureGet", client);
+				if (!b_RequestNotified[client])
+				{
+					b_RequestNotified[client] = true;
+					CPrintToChatAll("%t", "forcespecplayerRequesting", client, GetRequestCount(client), GetRequestMaxCount());
+				}
 			}
+			else if (!b_RequestNotified[client] && (GetRequestCount(client) >= GetRequestMaxCount()))
+			{
+				b_RequestNotified[client] = true;
+				CPrintToChatAll("%t", "RequestingPlayerGametime", client, GetRequestCount(client) + 1, GetRequestMaxCount());
+			}
+			DebugMsg("玩家 %N 时长获取中: 已请求 %d/%d 次", client, GetRequestCount(client), GetRequestMaxCount());
+			return;
 		}
-		else if ((GetRequestCount(client) >= GetRequestMaxCount()) && (i_LPMWFailureGet == 0))
+
+		// 所有已启用数据源都已结束(失败)且一路都没有值
+		if (i_LPMWFailureGet == 0)
 		{
-			CPrintToChatAll("%t", "FailureGetPlayerGametime", client);
+			if (!b_FailureNotified[client])
+			{
+				b_FailureNotified[client] = true;
+				CPrintToChatAll("%t", "FailureGetPlayerGametime", client);
+			}
+			DebugMsg("玩家 %N 两路时长都获取失败(LPMWFailureGet=0, 不做处理)", client);
+			return;
 		}
-	}
-	else if (CheckPlayerGametime(client) && (i_LimitPlayerMode != 0))
-	{
-#if DEBUG
-		PrintToChatAll("Check b_LPLateload && CheckPluginLate: %d&&%d", b_LPLateload, CheckPluginLate);
-#endif
 		if (b_LPLateload && CheckPluginLate) return;
-#if DEBUG
-		PrintToChatAll("LimitPlayerMode is %d", i_LimitPlayerMode);
-		PrintToChatAll("try to handle %N", client);
-#endif
-		if (i_LimitPlayerMode == 1)
+
+		b_LimitHandled[client]	  = true;
+		b_FailureNotified[client] = true;
+		if (i_LPMWFailureGet == 1)
 		{
-			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
-			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / SECONDS_PER_HOUR;
-			KickClient(client, "%t", "kickplayerUnqualified", f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
-			LogKickPlayer(client, 2);
+			KickClient(client, "%t", "kickplayerFailureGet");
+			LogKickPlayer(client, 1);
 		}
 		else
 		{
 			ChangeClientToSpec(client);
-			CPrintToChatAll("%t", "forcespecplayerUnqualified", client);
+			CPrintToChatAll("%t", "forcespecplayerFailureGet", client);
 		}
+		return;
 	}
+
+	// [4][5] 已有数据但都不在限制区间
+	if (!AllSourcesFinished(client))
+	{
+		// 另一路可能还在路上: 等它到了 OnSourceUpdate 会再判一次
+		DebugMsg("玩家 %N 已到手的时长都不在限制区间, 继续等另一个来源(成就状态=%d 主页状态=%d)", client, i_StatState[client], i_ProfileState[client]);
+		return;
+	}
+
+	// 全部来源都结束了, 结论是放行(不设 b_LimitHandled: 换图/cvar 变更重新查询后仍可再判)
+	DebugMsg("玩家 %N 时长判定完成(放行): 成就=%d 秒, 主页=%d 秒", client, i_StatTime[client], i_ProfileTime[client]);
+}
+
+// 查询看门狗: 某一路查询卡住(HTTP 一直不回调等)时, 到点把没回来的源按"获取失败"收尾,
+// 保证"两路都不返回"时也能收敛到 LPMWFailureGet 分支, 而不是永远停在"获取中"
+void StartLimitWatchdog(int client)
+{
+	if (!b_Enable || !b_LimitPlayer) return;
+	if (!b_StatsSourceEnabled && !b_ProfileSourceEnabled) return;
+
+	// 估算: 成就每次重试间隔 1 秒; 主页每次请求最多 10 秒超时 + 1 秒重试间隔
+	float fSeconds = float(i_CheckPlayerGameCount) + (float(i_CheckPlayerProfileCount) * 11.0) + 10.0;
+	CreateTimer(clamp(fSeconds, 20.0, 120.0), TimerLimitWatchdog, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+Action TimerLimitWatchdog(Handle timer, any userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (!client || !IsValidClient(client) || IsFakeClient(client)) return Plugin_Stop;
+	if (b_LimitHandled[client]) return Plugin_Stop;
+	if (AllSourcesFinished(client)) return Plugin_Stop;
+
+	bool bChanged = false;
+	if (b_StatsSourceEnabled && i_StatState[client] == SOURCE_PENDING)
+	{
+		i_StatState[client]   = SOURCE_FAILED;
+		i_StatsUserID[client] = 0;
+		bChanged			  = true;
+	}
+	if (b_ProfileSourceEnabled && i_ProfileState[client] == SOURCE_PENDING)
+	{
+		i_ProfileState[client] = SOURCE_FAILED;
+		i_ProfileUserID[client] = 0;
+		bChanged			   = true;
+	}
+	if (!bChanged) return Plugin_Stop;
+
+	LogMessage("[GetPlayerGametime] 玩家 %N 的时长查询超时, 未返回的来源已按获取失败处理", client);
+	OnSourceUpdate(client);
+	return Plugin_Stop;
 }
 
 void AnnouncePlayerTime(int client)
@@ -891,9 +1040,7 @@ void AnnouncePlayerTime(int client)
 
 			CPrintToChat(receiver, "%t", "announcegametime", client, g_playertime, g_lerp);
 		}
-#if DEBUG
-		PrintToChatAll("%N stat:%d profile:%d", client, i_StatTime[client], i_ProfileTime[client]);
-#endif
+		DebugMsg("%N 成就=%d 秒, 主页=%d 秒", client, i_StatTime[client], i_ProfileTime[client]);
 	}
 	else
 	{
@@ -986,7 +1133,8 @@ float clamp(float inc, float low, float high)
 	return (inc > high) ? high : ((inc < low) ? low : inc);
 }
 
-void LogKickPlayer(int client, int Mode)
+// 记一条自动踢出的日志; iUsedTime/iUsedSource 由 CheckPlayerGametime 回带(-1/0 = 用 i_PlayerTime 的口径)
+void LogKickPlayer(int client, int Mode, int iUsedTime = -1, int iUsedSource = 0)
 {
 	if (b_IfNeedLogKickMsg)
 	{
@@ -999,8 +1147,14 @@ void LogKickPlayer(int client, int Mode)
 		{
 			float f_LimitPlayerMinGametime = float(i_LimitPlayerMinGametime) / SECONDS_PER_HOUR;
 			float f_LimitPlayerMaxGametime = float(i_LimitPlayerMaxGametime) / SECONDS_PER_HOUR;
-			float gametime				   = float(i_PlayerTime[client]) / SECONDS_PER_HOUR;
-			Format(KickMsg, sizeof(KickMsg), "%N kicked : %.2fh (%.2f h - %.2f h)!", client, gametime, f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
+			int   iGametime				   = (iUsedTime > 0) ? iUsedTime : i_PlayerTime[client];
+			float gametime				   = float(iGametime) / SECONDS_PER_HOUR;
+			// 日志里用英文来源名, 避免日志文件编码差异导致中文乱码
+			char  sSource[16];
+			if (iUsedSource == 1) strcopy(sSource, sizeof(sSource), "profile");
+			else if (iUsedSource == 2) strcopy(sSource, sizeof(sSource), "stats");
+			else strcopy(sSource, sizeof(sSource), "current");
+			Format(KickMsg, sizeof(KickMsg), "%N kicked : %.2fh (source: %s / %.2f h - %.2f h)!", client, gametime, sSource, f_LimitPlayerMinGametime, f_LimitPlayerMaxGametime);
 		}
 		Format(Msg, sizeof(Msg), "[%s] %s", Time, KickMsg);
 		IsSaveMessage(Msg);

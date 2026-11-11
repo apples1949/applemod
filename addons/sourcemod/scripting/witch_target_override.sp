@@ -1,3 +1,20 @@
+// 1.10.0 修复记录：
+//  1) 目标接力（本版本核心）：原来只有 player_incapacitated / player_death 两个事件会换目标，
+//     而"主动跟随"这条线一旦被以下任意一件事打断就永久失效 —— 被生还者打中、受惊
+//     (witch_harasser_set)、硬直/燃烧动作序列 —— 之后就只剩引擎 AI。引擎在目标倒地/死亡后
+//     会让女巫进入"无仇恨"状态，她就站起来走开（玩家反馈的"击倒两人后丢仇恨跑路"）。
+//     现在：ThinkPost 对每只女巫无条件常驻，每帧检查"她恨的那个人"是否还是可追目标
+//     （在游戏内、活着、生还者、没倒/没挂边），不是就立刻换下一个站着的生还者。
+//  2) 本插件自己发的那记 0 伤害 DMG_BURN 会同步触发 witch_harasser_set，原来会把
+//     bWitchScared 置真 ⇒ 每次换目标都顺手把跟随/接力一起关掉。现在用 g_bFakeBurnHit 挡住。
+//  3) 同一记假伤害也会走 OnTakeDamageWitchPost 的"被生还者打中就停跟随"分支，同样用
+//     g_bFakeBurnHit 挡住（原来那个判断在假伤害之后才做，等于每次换目标都自杀一次跟随）。
+//  4) 新增 witch_target_override_skip_incapped（默认 1）：换目标时跳过倒地/挂边的生还者，
+//     12v12 倒地仍算存活，不跳过的话女巫会围着倒地的人转，不去追站着的人。
+//  5) 主动跟随还剩一层：看不见人（Enemy == 0）但仍有有效仇恨目标时，朝那个目标继续走，
+//     不再原地不动等引擎把她带回"坐下/走开"。
+//  6) 新增 witch_target_override_keep_aggro / _retarget_delay 控制目标接力的开关与冷却。
+//
 //Harry @ 2021~2022
 //原作者: xZk, BHaType, HarryPotter
 //
@@ -28,7 +45,7 @@
 
 #pragma semicolon 1
 #pragma newdecls required
-#define PLUGIN_VERSION "1.9.0"
+#define PLUGIN_VERSION "1.10.0"
 #define DEBUG 0
 
 #include <sourcemod>
@@ -85,6 +102,11 @@ bool g_bCvarAllow, g_bCvarIncapOverride, g_bCvarKillOverride, g_bCvarReCalculate
 float g_fRequiredRange, g_fWitchFollowRange, g_fWitchFollowSpeed;
 float witch_burn_time;
 
+// 1.10.0 新增 ConVar：目标接力（不丢仇恨）
+ConVar g_hCvarKeepAggro, g_hCvarSkipIncapped, g_hCvarRetargetDelay;
+bool g_bKeepAggro, g_bSkipIncapped;
+float g_fRetargetDelay;
+
 int Enemy[MAXENTITY+1];
 float ActionTime[MAXENTITY+1], EnemyTime[MAXENTITY+1], StuckTime[MAXENTITY+1], PauseTime[MAXENTITY+1], LastTime[MAXENTITY+1], 
     TargetDir[MAXENTITY+1][3], LastPos[MAXENTITY+1][3], LastSetPos[MAXENTITY+1][3];
@@ -92,6 +114,11 @@ bool bWitchScared[MAXENTITY+1], bWitchSit[MAXENTITY+1], bWitchFollowing[MAXENTIT
 Handle BurnWitchTimer[MAXENTITY+1] = {null};
 bool ge_bInvalidTrace[MAXENTITY+1];
 bool g_bFakeBurnHit[MAXENTITY+1];   // 本插件自己发出去的那一记 0 伤害 DMG_BURN，不算真着火
+// 1.10.0 新增状态：目标接力（不丢仇恨）
+int   g_iAggroTarget[MAXENTITY+1];     // 当前"她恨谁"（witch_harasser_set / 本插件换目标时维护）
+float g_fRetargetAt[MAXENTITY+1];      // 下次允许补换目标/补换仇恨的引擎时间（冷却，防同帧重复）
+bool  g_bFollowAllowed[MAXENTITY+1];   // 这只女巫是否允许"主动跟随"（witch_spawn 时按几率决定）
+
 float  g_fVPlayerMins[3] = {-16.0, -16.0,  0.0};
 float  g_fVPlayerMaxs[3] = { 16.0,  16.0, 71.0};
 static bool   g_bTracesMarked;
@@ -109,6 +136,11 @@ public void OnPluginStart()
 	g_hWitchFollowRange = CreateConVar("witch_target_override_followsurvivor_range", "500.0", "生还者距离女巫的一定可见范围内，女巫会跟踪生还者 [100.0, 9999.0] ", FCVAR_NOTIFY, true, 100.0, true, 9999.0);
 	g_hWitchFollowSpeed = CreateConVar("witch_target_override_followsurvivor_speed", "55.0", "女巫的跟踪速度", FCVAR_NOTIFY, true, 1.0);
 
+	// 目标接力：目标倒地/死亡/挂边后立刻换下一个站着的生还者，避免引擎把她放回"无仇恨"状态后自己走开
+	g_hCvarKeepAggro = CreateConVar("witch_target_override_keep_aggro", "1", "1=女巫目标失效(倒地/死亡/挂边/掉线)时立刻换下一个站着的生还者, 0=只在目标倒地(incap)事件里换", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvarSkipIncapped = CreateConVar("witch_target_override_skip_incapped", "1", "1=换目标时跳过已倒地/挂边的生还者(12v12 倒地仍算存活, 不跳过会围着倒地的人转), 0=允许把倒地者当目标(旧行为)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvarRetargetDelay = CreateConVar("witch_target_override_retarget_delay", "0.6", "两次换目标之间的最小间隔(秒), 防止同一帧重复补伤害 [0.1, 5.0]", FCVAR_NOTIFY, true, 0.1, true, 5.0);
+
 	z_witch_burn_time = FindConVar("z_witch_burn_time");
 
 	GetCvars();
@@ -122,6 +154,9 @@ public void OnPluginStart()
 	g_hWitchChanceFollowsurvivor.AddChangeHook(ConVarChanged_Cvars);
 	g_hWitchFollowRange.AddChangeHook(ConVarChanged_Cvars);
 	g_hWitchFollowSpeed.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarKeepAggro.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarSkipIncapped.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarRetargetDelay.AddChangeHook(ConVarChanged_Cvars);
 	z_witch_burn_time.AddChangeHook(ConVarChanged_Cvars);
 
 	#if DEBUG
@@ -176,6 +211,9 @@ void GetCvars()
 	g_iWitchChanceFollowsurvivor = g_hWitchChanceFollowsurvivor.IntValue;
 	g_fWitchFollowRange = g_hWitchFollowRange.FloatValue;
 	g_fWitchFollowSpeed = g_hWitchFollowSpeed.FloatValue;
+	g_bKeepAggro = g_hCvarKeepAggro.BoolValue;
+	g_bSkipIncapped = g_hCvarSkipIncapped.BoolValue;
+	g_fRetargetDelay = g_hCvarRetargetDelay.FloatValue;
 	witch_burn_time = z_witch_burn_time.FloatValue;
 }
 
@@ -232,6 +270,13 @@ void WitchAttackTarget(int witch, int target, int addHealth)
 	if (!IsWitch(witch)) return;
 	if (target <= 0 || target > MaxClients) return;
 	if (GetEntProp(witch, Prop_Data, "m_iHealth") <= 0) return;   // 0 血 = 已死，不要再动
+
+	// 1.10.0：记录"她此刻恨谁" + 换目标冷却。
+	// 目标接力（WitchKeepAggro）靠这两个值判断要不要补换，有了冷却就不会在
+	// 同一帧里被事件回调与 Think 各换一次。
+	g_iAggroTarget[witch] = target;
+	g_fRetargetAt[witch] = GetEngineTime() + g_fRetargetDelay;
+
 	#if DEBUG
 		PrintToChatAll("witch attacking new target %N, her max health: %d, now health: %d", target, GetEntProp(witch, Prop_Data, "m_iMaxHealth"), GetEntProp(witch, Prop_Data, "m_iHealth"));
 	#endif
@@ -316,6 +361,11 @@ int GetNearestSurvivorDist(int entity)
             {
                 if(IsPlayerIncapOrHanging(i))
                 {
+                    // 1.10.0：默认跳过倒地/挂边的人。12v12 倒地仍算存活，不跳过的话
+                    // 女巫会一直围着倒地的人转（或把倒地者当新目标反复爪），
+                    // 而不是去追还站着的那个人。
+                    if (g_bSkipIncapped) continue;
+
                     if (fMinIncapDistance == 0.0 || fMinIncapDistance > distance)
                     {
                         fMinIncapDistance = distance;
@@ -337,6 +387,19 @@ int GetNearestSurvivorDist(int entity)
     if(target == 0) return IncapTarget;
 
     return target;
+}
+
+// 1.10.0：这个生还者还能不能当她"当前要追的人"。
+// 只认站着、活着、在游戏内的生还者——倒地/挂边的交给引擎处理，不重复当目标。
+bool IsValidChaseTarget(int client)
+{
+	if (client <= 0 || client > MaxClients) return false;
+	if (!IsClientInGame(client)) return false;
+	if (GetClientTeam(client) != L4D_TEAM_SURVIVORS) return false;
+	if (!IsPlayerAlive(client)) return false;
+	if (g_bSkipIncapped && IsPlayerIncapOrHanging(client)) return false;
+
+	return true;
 }
 
 bool IsSurvivor(int client)
@@ -365,6 +428,15 @@ public void WitchHarasserSet_Event(Event event, const char[] name, bool dontBroa
 	int witchid = event.GetInt("witchid");
 	if (witchid <= MaxClients || !IsValidEntityIndex(witchid)) return;
 
+	// 1.10.0：记下"她此刻恨谁"，目标接力要用这个值判断当前目标还有没有效
+	int harasser = GetClientOfUserId(event.GetInt("userid"));
+	if (IsSurvivor(harasser)) g_iAggroTarget[witchid] = harasser;
+
+	// 本插件为了换目标发的那记 0 伤害 DMG_BURN 会同步触发这个事件（引擎在
+	// SetHarasser 里抛事件），不能把它当"生还者惊动了女巫"——否则每次换目标都会
+	// 顺手把主动跟随一起关掉，女巫换完目标就不动了。
+	if (g_bFakeBurnHit[witchid]) return;
+
 	bWitchScared[witchid] = true;
 }
 
@@ -380,6 +452,7 @@ public void witch_spawn(Event event, const char[] event_name, bool dontBroadcast
 	bWitchSit[witchid] = false;
 	bWitchFollowing[witchid] = false;
 	g_bFakeBurnHit[witchid] = false;
+	ResetWitchAggro(witchid);   // 实体号会被复用：仇恨目标/冷却/跟随许可都要重新开始
 
 	// 实体号可能被复用：新刷出的女巫不该继承上一个实体的燃烧计时器
 	delete BurnWitchTimer[witchid];
@@ -406,7 +479,16 @@ public Action DelayHookWitch(Handle timer, DataPack dp)
 
 	SDKHook(witch, SDKHook_OnTakeDamageAlivePost, OnTakeDamageWitchPost);
 
-	if (bFollow && g_bCvarAllow) StartHookWitch(witch);
+	// 1.10.0：目标接力(不丢仇恨)必须对每只女巫都成立，所以 ThinkPost 无条件常驻；
+	// "主动跟随"只是 ThinkWitch 里的一个子模式，由 bWitchFollowing 单独开关。
+	// （原来只有抽中"跟随"几率的女巫才挂 ThinkPost，抽不中的女巫一旦丢了目标就没人管了）
+	SDKHook(witch, SDKHook_ThinkPost, ThinkWitch);
+	ResetWitchAggro(witch);
+
+	// NOTE: ResetWitchAggro() 会把 g_bFollowAllowed 清成 false，所以赋值必须在它之后
+	g_bFollowAllowed[witch] = (bFollow && g_bCvarAllow);
+
+	if (g_bFollowAllowed[witch]) StartHookWitch(witch);
 
 	return Plugin_Continue;
 }
@@ -460,11 +542,13 @@ public void OnEntityDestroyed(int entity)
 	if (!IsValidEntityIndex(entity))
 		return;
 
+	SDKUnhook(entity, SDKHook_ThinkPost, ThinkWitch);   // 1.10.0：ThinkPost 现在常驻，销毁时必须显式解掉
 	StopHookWitch(entity);
 	bWitchScared[entity] = false;
 	bWitchSit[entity] = false;
 	bWitchFollowing[entity] = false;
 	g_bFakeBurnHit[entity] = false;
+	ResetWitchAggro(entity);
 	delete BurnWitchTimer[entity];
 	BurnWitchTimer[entity] = null;   // delete 之后槽位里仍残留旧句柄值，必须显式清掉
 
@@ -500,7 +584,10 @@ public void StartHookWitch(int witch)
 
 public void StopHookWitch(int witch)
 {
-    SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);		
+    // 1.10.0：这里不再 Unhook ThinkPost。目标接力（WitchKeepAggro）必须一直跑，
+    // 否则"被生还者打中 / 受惊 / 硬直"之后她丢了目标也没人补，就回到引擎的
+    // "无仇恨 -> 站起来走开"（玩家反馈的跑路）。现在只关闭"主动跟随"这一层，
+    // 把搬运权交回引擎，但仇恨接力继续。
     DeleteWitch(witch);
 }
 
@@ -518,19 +605,121 @@ public void DeleteWitch(int witch)
     LastSetPos[witch][0] = LastSetPos[witch][1] = LastSetPos[witch][2] = 0.0;
 }
 
+//---------------------------------------------------------------------------------
+// 1.10.0：目标接力（不丢仇恨 / 不跑路）
+//
+// 现象：女巫把目标击倒或击杀之后，引擎会让 harasser 失效、m_rage 慢慢归零，随后她自己
+//       站起来走开（玩家反馈的"击倒两人后掉仇恨跑路"）。
+// 原因：
+//   1) 原来只有 player_incapacitated / player_death 两个事件会换目标，而且必须先满足
+//      "攻击者是女巫"；目标以别的方式消失（掉线、挂边、被别的特感顶掉、事件没打中）
+//      就没人补；
+//   2) "主动跟随"这条线一旦被 受惊(witch_harasser_set) / 被生还者打中 / 硬直动作序列
+//      打断就永久失效，第二次击倒之后她已经完全交给引擎，而引擎此刻没有可用的目标。
+// 做法：ThinkPost 对每只女巫常驻，每帧检查"她恨的那个人"是否还是可追目标
+//      （在游戏内 / 活着 / 生还者 / 没倒地没挂边），不是就立刻换成本回合最近的站着的人。
+// 换目标仍然走插件原有的机制：对他做一记 0 伤害 DMG_BURN，骗引擎把 harasser 认成他。
+// 证据：DT_Witch 的 netprop 里没有可写的 target 字段（只有 m_rage / m_wanderrage /
+//       m_mobRush / m_bIsBurning / m_nSequence 等），Left4DHooks 也没有 witch target
+//       native，所以"骗引擎换 harasser"是当前唯一可用的路线，本插件原本就是这么做的。
+
+void ResetWitchAggro(int witch)
+{
+    g_iAggroTarget[witch] = 0;
+    g_fRetargetAt[witch] = 0.0;
+    g_bFollowAllowed[witch] = false;
+}
+
+// 引擎是否正在自己驱动她（激怒 / 硬直 / 扑击动作）：这种时刻不要插手搬运
+bool WitchIsEngineAggro(int witch)
+{
+    if(GetRage(witch) > 0.5) return true;
+
+    int seq = GetEntProp(witch, Prop_Send, "m_nSequence");
+    if(L4D2Version)
+    {
+        // 39: no target burn, 44 ~ 51: stumble
+        if(seq == 39 || (44 <= seq && seq <= 51)) return true;
+    }
+    else
+    {
+        if(seq == 31 || (36 <= seq && seq <= 39)) return true;
+    }
+
+    return false;
+}
+
+// 目标失效的原因决定能不能接力：倒地看 incap 开关、死亡看 kill 开关、
+// 掉线/换边/换图不算失效（直接接力）。这样两个既有 ConVar 的语义不会被破坏。
+bool AllowRetargetFor(int old)
+{
+    if (old <= 0 || old > MaxClients) return true;
+    if (!IsClientInGame(old)) return true;
+    if (GetClientTeam(old) != L4D_TEAM_SURVIVORS) return true;
+    if (!IsPlayerAlive(old)) return g_bCvarKillOverride;
+    if (IsPlayerIncapOrHanging(old)) return g_bCvarIncapOverride;
+
+    return true;
+}
+
+void WitchKeepAggro(int witch, float time)
+{
+    if(!g_bCvarAllow || !g_bKeepAggro) return;
+    if(time < g_fRetargetAt[witch]) return;
+
+    // 只在"已经被惹上"之后才接力。
+    // g_iAggroTarget 只会被 witch_harasser_set（生还者成为她的 harasser）和本插件的换目标
+    // 写入，从没被惹过的女巫这里是 0 —— 不能把她叫起来从地图另一头追人。
+    int old = g_iAggroTarget[witch];
+    if(old == 0) return;
+
+    // 她现在恨的人还能追 -> 不打扰，引擎自己会带她过去
+    if(IsValidChaseTarget(old)) return;
+
+    // 旧目标倒地/死亡时，是否继续追由原来的 incap / kill 开关决定
+    if(!AllowRetargetFor(old)) return;
+
+    int next = GetNearestSurvivorDist(witch);
+    if(next == 0) return;   // 没有站着的生还者了（全倒地 / 全灭）-> 交回引擎，别硬追
+
+    // 先上冷却：即使下面 WitchAttackTarget 因为条件不满足提前 return，
+    // 也不会变成每帧重试。
+    g_fRetargetAt[witch] = time + g_fRetargetDelay;
+
+    #if DEBUG
+        PrintToChatAll("witch %d keep aggro: %d -> %N", witch, old, next);
+    #endif
+
+    WitchAttackTarget(witch, next, 0);
+
+    // 主动跟随被"受惊 / 中弹 / 硬直"打断过的话，在安全时机重新接上，
+    // 免得她换完目标还是站着不动（引擎正处在激怒/硬直动作时不要插手）。
+    if(g_bFollowAllowed[witch] && !bWitchFollowing[witch] && !bWitchScared[witch] && !WitchIsEngineAggro(witch))
+    {
+        StartHookWitch(witch);
+    }
+}
+
 public Action ThinkWitch(int witch)
 {
-	if(bWitchScared[witch])
-	{
-		SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
-		bWitchFollowing[witch] = false;
-		return Plugin_Continue;
-	}
-
 	float time = GetEngineTime();
 	float duration = time-LastTime[witch];
 	if(duration>0.1) duration = 0.1;
 	LastTime[witch] = time;
+
+	// 1.10.0：不管"主动跟随"还在不在，每帧都先跑目标接力。
+	// 这是"击倒两人后不丢仇恨、不跑路"的关键：目标一失效就换下一个站着的人，
+	// 让引擎始终有 harasser 可用，不会退回"无仇恨 -> 站起来走开"。
+	WitchKeepAggro(witch, time);
+
+	if(!bWitchFollowing[witch])
+		return Plugin_Continue;
+
+	if(bWitchScared[witch])
+	{
+		bWitchFollowing[witch] = false;
+		return Plugin_Continue;
+	}
 	
 	if(time-ActionTime[witch]>5.0)
 	{	
@@ -557,7 +746,7 @@ public Action ThinkWitch(int witch)
 		// 39: no target burn, 44 ~ 51: stumble 
 		if( m_nSequence == 39 || ( 44 <= m_nSequence && m_nSequence <= 51) )
 		{		
-			SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
+			// 1.10.0：只停"主动跟随"这一层，ThinkPost 留着继续跑目标接力
 			bWitchFollowing[witch] = false;
 			return Plugin_Continue;
 		}
@@ -566,7 +755,7 @@ public Action ThinkWitch(int witch)
 	{
 		if( m_nSequence == 31 || ( 36 <= m_nSequence && m_nSequence <= 39) )
 		{		
-			SDKUnhook(witch, SDKHook_ThinkPost, ThinkWitch);
+			// 1.10.0：只停"主动跟随"这一层，ThinkPost 留着继续跑目标接力
 			bWitchFollowing[witch] = false;
 			return Plugin_Continue;
 		}
@@ -608,6 +797,15 @@ public Action ThinkWitch(int witch)
 	} 
 	PauseTime[witch] -= duration; 
 	Enemy[witch] = FreshEnemy(Enemy[witch], targetPos);
+
+	// 1.10.0：看不见人（Enemy == 0）时，退回"无视线要求"的仇恨目标继续朝他走。
+	// 原来是直接返回/坐下，等于把人交给引擎 AI；引擎在目标丢失后会让她站在原地，
+	// 然后慢慢走开（跑路）。这里保证只要还有站着的仇人，她就一直在往那边磨。
+	if(Enemy[witch] == 0 && g_bKeepAggro && IsValidChaseTarget(g_iAggroTarget[witch]))
+	{
+		Enemy[witch] = g_iAggroTarget[witch];
+		GetClientAbsOrigin(Enemy[witch], targetPos);
+	}
 	if(Enemy[witch] > 0)
 	{ 
 		#if DEBUG
@@ -856,16 +1054,19 @@ void RotateVector(float direction[3], float vec[3], float alfa, float result[3])
 
 public void OnTakeDamageWitchPost(int witch, int attacker, int inflictor, float damage, int damagetype)
 {
+	// 本插件自己发的那记 0 伤害 DMG_BURN 只是为了让引擎把她换成 target 的攻击者，
+	// 既不是真的着火（不能拿它建燃烧计时器，否则换完目标 15 秒后她会被自己打死），
+	// 也不是"被生还者打中"（不能拿它停跟随，否则每次换目标都会顺手把跟随关掉）。
+	// 1.10.0：这个判断必须在下面两个分支之前做。
+	if(g_bFakeBurnHit[witch]) return;
+
 	// 被生还者打中 ⇒ 停掉"主动跟随"，把控制权交回引擎 AI
 	// （原来是借用 EnemyTime > 0 当"曾跟随"的标志，现在用显式状态位，意图明确）
+	// NOTE: 只停"主动跟随"，目标接力(WitchKeepAggro)继续在 ThinkPost 里跑。
 	if(bWitchFollowing[witch] && attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && GetClientTeam(attacker) == L4D_TEAM_SURVIVORS)
 	{
 		StopHookWitch(witch);
 	}
-
-	// 本插件自己发的那记 0 伤害 DMG_BURN 只是为了让引擎把她换成 target 的攻击者，
-	// 不是真的着火 —— 不能再拿它来建燃烧计时器（否则换完目标 15 秒后她会被自己打死）
-	if(g_bFakeBurnHit[witch]) return;
 
 	if( (damagetype & DMG_BURN) && BurnWitchTimer[witch] == null && witch_burn_time > 0.0 )
 	{
@@ -952,14 +1153,15 @@ void ResetWitchStates()
 
 	for (int entity = MaxClients + 1; entity <= maxents; entity++)
 	{
-		if (bWitchFollowing[entity])
-			SDKUnhook(entity, SDKHook_ThinkPost, ThinkWitch);
+		// 1.10.0：ThinkPost 现在对每只女巫常驻，不能再靠 bWitchFollowing 判断要不要解
+		SDKUnhook(entity, SDKHook_ThinkPost, ThinkWitch);
 
 		bWitchScared[entity] = false;
 		bWitchSit[entity] = false;
 		bWitchFollowing[entity] = false;
 		g_bFakeBurnHit[entity] = false;
 		ge_bInvalidTrace[entity] = false;
+		ResetWitchAggro(entity);
 		Enemy[entity] = 0;
 		EnemyTime[entity] = 0.0;
 		LastTime[entity] = 0.0;

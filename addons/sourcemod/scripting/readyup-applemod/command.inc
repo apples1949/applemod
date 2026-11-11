@@ -53,7 +53,7 @@ Action Unready_Cmd(int client, int args)
 		return Plugin_Handled;
 	}
 
-	if (inReadyUp && client)
+	if (inReadyUp && client && IsClientInGame(client))
 	{
 		bool hasflag = CheckCommandAccess(client, "sm_ban", ADMFLAG_BAN); // Check for specific admin flag
 		
@@ -132,6 +132,9 @@ Action ForceStart_Cmd(int client, int args)
 
 Action Hide_Cmd(int client, int args)
 {
+	if (!client || !IsClientInGame(client))
+		return Plugin_Handled;
+
 	if (inReadyUp)
 	{
 		SetPlayerHiddenPanel(client, true);
@@ -142,6 +145,9 @@ Action Hide_Cmd(int client, int args)
 
 Action Show_Cmd(int client, int args)
 {
+	if (!client || !IsClientInGame(client))
+		return Plugin_Handled;
+
 	if (inReadyUp)
 	{
 		SetPlayerHiddenPanel(client, false);
@@ -153,7 +159,8 @@ Action Show_Cmd(int client, int args)
 Action Return_Cmd(int client, int args)
 {
 	if (inReadyUp
-			&& client > 0
+			&& client
+			&& IsClientInGame(client)
 			&& GetClientTeam(client) == L4D2Team_Survivor)
 	{
 		ReturnPlayerToSaferoom(client, false);

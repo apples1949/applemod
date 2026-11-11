@@ -757,6 +757,39 @@ void DL_Trace(const char[] fmt, any ...)
 	LogToFileEx(DL_TRACE_FILE, "[%9.3f] %s", GetGameTime(), buf);
 }
 
+/**
+ * 只读：距离「放弃等待连接中的玩家」还剩多少秒，用于面板顶部「连接中」那一行行尾的 ：%d。
+ *
+ * 数据来源是真实的等待计时，不是拍脑袋的数字：
+ *   DL_IsFinishedLoading()（由 DL_tmrLoading 每秒调用一次）会给每个
+ *   「已连接但还没进游戏」的真人客户 DL_g_iTimeout[i]++，累计到
+ *   l4d2_dlock_timeout（DL_g_iClientTimeOut，默认 45）就停止等他。
+ *   所以「还要等多久」= DL_g_iClientTimeOut - 当前最慢那个加载中玩家的已等待秒数。
+ *
+ * 返回 -1 表示"现在不该显示"：
+ *   - DL_g_iCountDown >= 0：已经等到全员、进入开门倒计时（或已开门）了；
+ *   - 准备计时器已经停了（DL_g_hTimer 为空，换图/回合结束/流程取消）；
+ *   - 当前没有任何玩家在加载（没人可等）。
+ *
+ * 注意：本函数只读状态，绝不修改 DL_g_iTimeout —— 每帧多画一次面板不会让等待时间白走。
+ */
+int DL_ConnectingWaitRemainSeconds()
+{
+	if (DL_g_iCountDown >= 0) return -1;   // 已过"等加载"阶段
+	if (DL_g_hTimer == null) return -1;    // 准备流程没在跑
+
+	int worst = -1;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!DL_g_bIsLoading[i]) continue;
+		if (DL_g_iTimeout[i] > worst) worst = DL_g_iTimeout[i];
+	}
+	if (worst < 0) return -1;              // 没有人在加载
+
+	int left = DL_g_iClientTimeOut - worst;
+	return (left > 0) ? left : 0;
+}
+
 void DL_LoadingPanel()
 {
 	// 面板按 4 类分栏：连接中 / 生还者 / 感染者 / 旁观者，每栏标题带该类人数。
@@ -835,7 +868,18 @@ void DL_LoadingPanel()
 	{
 		if (!totals[group]) continue;
 		if (group == DL_PANEL_GROUP_CONNECTING)
-			FormatEx(headings[group], sizeof(headings[]), "%s (%d)", DL_TXT_MENU_CONNECTING, totals[group]);
+		{
+			// 「连接中」= 顶部那行「还在等几个玩家连进来」。用户要求在行尾额外显示等待倒计时，
+			// 格式固定为「中文冒号 + 剩余秒数」：  连接中 (3)：25
+			// 秒数来自 DL_ConnectingWaitRemainSeconds()（真实等待计时 DL_g_iTimeout / l4d2_dlock_timeout），
+			// 计时器停了 / 已进入开门倒计时 / 没人在加载 时该函数返回 -1，这里就不追加。
+			// 追加的字节数会计进 headingBytes，因此不会撑爆面板 511 字节预算。
+			int remain = DL_ConnectingWaitRemainSeconds();
+			if (remain >= 0)
+				FormatEx(headings[group], sizeof(headings[]), "%s (%d)：%d", DL_TXT_MENU_CONNECTING, totals[group], remain);
+			else
+				FormatEx(headings[group], sizeof(headings[]), "%s (%d)", DL_TXT_MENU_CONNECTING, totals[group]);
+		}
 		else if (group == DL_PANEL_GROUP_SURVIVOR)
 			FormatEx(headings[group], sizeof(headings[]), "%s (%d)", DL_TXT_MENU_SURVIVOR, totals[group]);
 		else if (group == DL_PANEL_GROUP_INFECTED)

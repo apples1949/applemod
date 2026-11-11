@@ -41,6 +41,20 @@
  *       离开守护/插件卸载时恢复原值；并新增 L4D2_OnSlammedSurvivor 前置拦截，
  *       挡掉牛把守护中的生还者撞墙致残的那条路径。
  *
+ *   1.3.4 变更（按需求）：计算「在场未倒地生还者」时排除终点安全屋内的生还者
+ *     - 旧口径：未倒地生还者数 = 存活生还者总数 - 倒地人数（全队 team 2）。
+ *     - 新口径：未倒地生还者数 = 存活 + 未倒地 + **不在本关终点安全屋**。
+ *       终点安全屋用 Left4DHooks 的 L4D_IsInLastCheckpoint(client) 判定
+ *       （left4dhooks.inc:3977-3984：用 info_changelevel 实体的 mins/maxs 做体积判定），
+ *       它判的是"结束安全屋"，起点安全屋是另一个 native（L4D_IsInFirstCheckpoint），不会混淆。
+ *     - 只改 ratio 的**分子**，分母仍是「存活生还者总数」（用户字面要求只排除这一项）。
+ *       因此 ratio 只会持平或变小 → 可守护数只会持平或变少，不会因为这次改动变大。
+ *     - 开关 l4d2_bot_guard_exclude_end_saferoom（默认 1），=0 完全回到旧口径。
+ *     - 救援关（终局图）没有 info_changelevel 也就没有终点安全屋 → 一律不排除；
+ *       native 拿不到时同样自动退回旧口径，不会出现"所有人都在安全屋、守护数为 0"的误判。
+ *     - 已经进屋的人只是**不参与名额计算**，不会被强行取消守护（名额缩小时仍按
+ *       UpdateGuardSet 的"已守护优先保留"规则处理，不额外踢人）。
+ *
  *   1.3.3 变更（按需求）：守护中的 AI 生还者不得自行使用医疗物品
  *     - 接 Actions 扩展（可选依赖，缺失时插件照常工作、只跳过拦截）拦两个引擎 action：
  *         SurvivorTakePills —— 吃药(weapon_pain_pills) 与打针(weapon_adrenaline) 共用这一个
@@ -135,7 +149,7 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
-#define PLUGIN_VERSION		"1.3.3"
+#define PLUGIN_VERSION		"1.3.4"
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -160,6 +174,7 @@ ConVar g_cvProtectInterval;	// 1.2.3：守护中 bot 的解控/血量回锁节�
 ConVar g_cvInvincible;		// 免疫任何伤害
 ConVar g_cvBlockControl;	// 免疫特感控制 + 已控则解控
 ConVar g_cvMaxCount;		// 1.2.0：同时处于守护状态的未接管生还者数量硬上限（原 max_bots）
+ConVar g_cvExcludeEndSaferoom;	// 1.3.4：计算守护名额时排除终点安全屋内的生还者
 ConVar g_cvBotSpeed;		// 1.2.0：未接管生还者移速（游戏单位，默认 330）
 ConVar g_cvBaseSpeed;		// 1.2.0：正常走路速度基数（默认 220），倍率 = bot_speed / base_speed
 ConVar g_cvReviveTimes;		// 每回合自动救起次数
@@ -210,11 +225,20 @@ Handle	g_hTickTimer;
 Handle	g_hProtectTimer;					// 1.2.3：高频保护定时器（守护中的 bot 每 0.1s 解控 + 血量回锁）
 int		g_iGuardHealth[MAXPLAYERS + 1];		// 守护期间锁定的实血值（挡住不走 OnTakeDamage 的掉血，例如 spitter 酸液）
 
+// 1.3.4：终点安全屋排除的运行期状态
+//   g_bNtvLastCheckpoint   L4D_IsInLastCheckpoint 是否可用（inc 里是 MarkNativeAsOptional）
+//   g_bHasEndSaferoom      本图是否存在终点安全屋（存在 info_changelevel 实体才算）
+//   g_bEndSaferoomChecked  本回合是否已经算过上面两项（换图 / round_start 会重置）
+bool g_bNtvLastCheckpoint;
+bool g_bHasEndSaferoom;
+bool g_bEndSaferoomChecked;
+bool g_bNtvLastCheckpointWarned;	// "native 不可用"的控制台提示只打一次
+
 public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -296,6 +320,13 @@ public void OnPluginStart()
 		"3",
 		"同时处于守护状态的未接管生还者数量硬上限（1.2.0 由 l4d2_bot_guard_max_bots 改名而来）。默认 3.",
 		FCVAR_NOTIFY, true, 0.0, true, 24.0);
+
+	// 1.3.4：计算「在场未倒地生还者」时排除已经进入终点安全屋的人
+	// （只影响分子，分母仍是存活生还者总数；关掉即完全回到 1.3.3 的口径）
+	g_cvExcludeEndSaferoom = CreateConVar("l4d2_bot_guard_exclude_end_saferoom",
+		"1",
+		"计算可守护名额时，是否把「已经进入本关终点安全屋」的生还者从『未倒地生还者数』里排除. 1=排除(默认): 进屋的人不再计入分子(分母仍是存活生还者总数), 可守护数只会持平或变少; 0=旧口径(存活 - 倒地). 救援关/终局图没有终点安全屋时自动不排除.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// 1.2.1：可守护数改为"按比例"计算（见 ComputeAllowedGuards），
 	// 1.2.0 的三条固定阶梯 cvar（down_tier1/2/3）已删除
@@ -413,6 +444,9 @@ public void OnPluginStart()
 	RegAdminCmd("sm_botguard_warntest", Cmd_WarnTest, ADMFLAG_GENERIC,
 		"演示一次守护拦截提示(提示音+三渠道文字), 不节流: sm_botguard_warntest [目标 #userid|名字]，默认发给自己");
 
+	// 1.3.4：终点安全屋排除的运行期条件先算一次（换图/每回合由 OnMapStart + round_start 重算）
+	RefreshEndSaferoomState();
+
 	StartTickTimer();
 	StartProtectTimer();
 }
@@ -444,6 +478,10 @@ public void OnMapStart()
 	g_iDownCount = 0;
 	g_iGuardAllowed = 0;
 	g_iGuardCount = 0;
+
+	// 1.3.4：换图后终点安全屋实体重建，等下一次 round_start 重新判定
+	g_bHasEndSaferoom = false;
+	g_bEndSaferoomChecked = false;
 
 	// 1.3.0：解析 + 预缓存提示音（换图后重置节流时间戳）
 	RefreshWarnSound(true);
@@ -622,6 +660,11 @@ public Action Timer_Protect(Handle timer)
 
 public Action Timer_Tick(Handle timer)
 {
+	// 1.3.4：本回合还没判定过「终点安全屋」（插件晚加载 / 漏接 round_start）→ 这里补一次，
+	// 每回合只会真正扫一次实体（g_bEndSaferoomChecked 为 true 后直接跳过）。
+	if (!g_bEndSaferoomChecked)
+		RefreshEndSaferoomState();
+
 	// 1.2.1：先统计"存活未接管生还者数量"与"倒地人数"，再按比例算出可守护名额。
 	// 1.1.0 的"AI 生还者数量 > max_bots 就全部关掉"规则与 1.2.0 的固定阶梯都已删除。
 	g_iAiSurvivors = CountAiSurvivors();
@@ -779,6 +822,132 @@ int CountAliveHumanSurvivors()
 
 	return iCount;
 }
+
+// ============================================================================
+// 1.3.4：终点安全屋排除
+// ============================================================================
+
+// 该客户端此刻是否在「本关终点安全屋」的体积内。
+//
+// 判定用 Left4DHooks 的 L4D_IsInLastCheckpoint(client)
+// （left4dhooks.inc:3977-3984：@brief Returns true when the specified Survivor or Special
+//   Infected is in the ending checkpoint area；@remarks This uses the "info_changelevel"
+//   entity, and checks the player is within the vector mins and vector maxs of the entity）。
+// 也就是关卡终点安全屋的触发体积：站在门口体积外、门还没开、还没走进去都不算在屋里。
+// 起点安全屋是另一个 native（L4D_IsInFirstCheckpoint），两者不会混淆。
+//
+// 三层安全门（任何一条不满足就退回旧口径，绝不硬判）：
+//   ① cvar l4d2_bot_guard_exclude_end_saferoom = 0；
+//   ② 运行期拿不到 L4D_IsInLastCheckpoint（inc 里 MarkNativeAsOptional，left4dhooks 缺失/太旧）；
+//   ③ 本图没有 info_changelevel → 是救援关/终局图，没有"终点安全屋"这个概念。
+bool IsInEndSaferoom(int client)
+{
+	if (!g_cvExcludeEndSaferoom.BoolValue)
+		return false;
+
+	if (!g_bNtvLastCheckpoint || !g_bHasEndSaferoom)
+		return false;
+
+	return L4D_IsInLastCheckpoint(client);
+}
+
+// 1.3.4：新口径「在场未倒地生还者数」= 存活 + 未倒地 + 不在终点安全屋。
+// 它就是 ComputeAllowedGuards() 里 ratio 的分子（旧写法是 CountAliveSurvivors() - CountDownedSurvivors()）。
+// cvar 关掉 / native 不可用 / 本图没有终点安全屋时，结果与旧写法完全一致。
+//
+// 注意：这里**不**把已经进屋的人从守护状态里踢出去 —— 本函数只决定名额，
+// 名额分配仍走 UpdateGuardSet（已守护者优先保留）。见开头 1.3.4 的说明。
+int CountStandingSurvivors()
+{
+	int iCount = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i))
+			continue;
+
+		if (GetClientTeam(i) != TEAM_SURVIVOR)
+			continue;
+
+		if (!IsPlayerAlive(i))
+			continue;
+
+		// 倒地："未倒地"的定义与旧口径完全一致（只看 m_isIncapacitated，挂边不算倒地）
+		if (IsIncapacitated(i))
+			continue;
+
+		// 1.3.4：已经进了终点安全屋的人不算"在场"，不参与名额计算
+		if (IsInEndSaferoom(i))
+			continue;
+
+		iCount++;
+	}
+
+	return iCount;
+}
+
+// 1.3.4：只给 sm_botguard_status 用 —— 有多少"存活未倒地"的人被终点安全屋排除掉了。
+// 与 CountStandingSurvivors 的跳过条件严格对应，保证 存活未倒地 - 排除 = 在场未倒地。
+int CountExcludedInEndSaferoom()
+{
+	int iCount = 0;
+
+	if (!g_cvExcludeEndSaferoom.BoolValue || !g_bNtvLastCheckpoint || !g_bHasEndSaferoom)
+		return 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i))
+			continue;
+
+		if (GetClientTeam(i) != TEAM_SURVIVOR)
+			continue;
+
+		if (!IsPlayerAlive(i) || IsIncapacitated(i))
+			continue;
+
+		if (L4D_IsInLastCheckpoint(i))
+			iCount++;
+	}
+
+	return iCount;
+}
+
+// 1.3.4：刷新「native 在不在 / 本图有没有终点安全屋」这两个运行期条件。
+// 每回合（round_start）重算一次即可：那时地图实体一定已经加载完（和 1.2.1 的区域侦测同理）。
+//
+// 为什么用 info_changelevel 来判断"有没有终点安全屋"：
+//   L4D_IsInLastCheckpoint 本身就是拿 info_changelevel 的 mins/maxs 做体积判定
+//   （见上面 native 的 @remarks），所以图里没有这个实体时它必然对所有人返回 false。
+//   救援关/终局图只有 trigger_finale / 救援载具，没有 info_changelevel，在这里被识别出来，
+//   于是不排除任何人 —— 避免"全员被判成在安全屋 → 可守护数变 0"的误判。
+void RefreshEndSaferoomState()
+{
+	g_bEndSaferoomChecked = true;
+	g_bHasEndSaferoom = false;
+
+	// native 可用性每回合复核一次：left4dhooks 可能比本插件晚注册 native，
+	// OnPluginStart 那一刻查不到，等它注册完成后这里就能拿到。
+	g_bNtvLastCheckpoint = (GetFeatureStatus(FeatureType_Native, "L4D_IsInLastCheckpoint") == FeatureStatus_Available);
+
+	if (!g_bNtvLastCheckpoint)
+	{
+		// 只有真的要用"排除"功能时才提示；cvar=0 的服不该看到这条噪音
+		if (g_cvExcludeEndSaferoom.BoolValue && !g_bNtvLastCheckpointWarned)
+		{
+			g_bNtvLastCheckpointWarned = true;
+			PrintToServer("[BotGuard] 未检测到 L4D_IsInLastCheckpoint（Left4DHooks 缺失或版本太旧）：l4d2_bot_guard_exclude_end_saferoom 不生效，仍按旧口径（存活 - 倒地）计算守护名额。");
+		}
+
+		return;
+	}
+
+	// 不管 cvar 当前开没开都记下"本图有没有终点安全屋"，
+	// 这样管理员运行中把 cvar 从 0 改成 1 也能立刻生效（不用等下一回合）。
+	if (FindEntityByClassname(-1, "info_changelevel") != -1)
+		g_bHasEndSaferoom = true;
+}
+
 // 1.2.1：可守护数 —— 按比例算（取代 1.2.0 的三条固定阶梯）
 //
 //   基础名额 base = min(max_count, 当前存活未接管生还者数量)
@@ -795,8 +964,11 @@ int CountAliveHumanSurvivors()
 int ComputeAllowedGuards()
 {
 	int iAlive = CountAliveSurvivors();
-	int iDown = CountDownedSurvivors();
-	int iStanding = iAlive - iDown;
+
+	// 1.3.4：分子从「存活 - 倒地」改成「在场未倒地」（= 存活 + 未倒地 + 不在终点安全屋）。
+	// 分母 iAlive 保持「存活生还者总数」不变 —— 用户只要求排除"未倒地生还者"这一项。
+	// 这样 ratio 只会持平或变小，可守护数只会持平或变少，不会出现守护数异常变大。
+	int iStanding = CountStandingSurvivors();
 	int iBots = CountAiSurvivors();
 
 	int iBase = g_cvMaxCount.IntValue;
@@ -1543,6 +1715,10 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	// 回合开始时重置每名客户端的自动救起次数
 	for (int i = 0; i <= MaxClients; i++)
 		g_iReviveLeft[i] = g_cvReviveTimes.IntValue;
+
+	// 1.3.4：本回合重新判定「终点安全屋」的运行期条件
+	// （native 可用性 + 本图有没有 info_changelevel；救援关会自动识别成"没有"）。
+	RefreshEndSaferoomState();
 }
 
 public void Event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcast)
@@ -1842,14 +2018,21 @@ public Action Cmd_Status(int client, int args)
 	if (iGuardNameCount == 0)
 		strcopy(sGuardList, sizeof(sGuardList), "（无）");
 
-	ReplyToCommand(client, "\x04[BotGuard]\x01 倒地人数=%d / 存活生还者=%d（未倒地 %d）→ 可守护数=%d；存活未接管生还者=%d；当前守护人数=%d 名单: %s",
+	ReplyToCommand(client, "\x04[BotGuard]\x01 倒地人数=%d / 存活生还者=%d（在场未倒地 %d，终点安全屋内已排除 %d）→ 可守护数=%d；存活未接管生还者=%d；当前守护人数=%d 名单: %s",
 		g_iDownCount,
 		CountAliveSurvivors(),
-		CountAliveSurvivors() - g_iDownCount,
+		CountStandingSurvivors(),
+		CountExcludedInEndSaferoom(),
 		g_iGuardAllowed,
 		g_iAiSurvivors,
 		g_iGuardCount,
 		sGuardList);
+
+	// 1.3.4：终点安全屋排除的生效条件（排查用）
+	ReplyToCommand(client, "\x04[BotGuard]\x01 终点安全屋排除: 开关=%d native可用=%d 本图有终点安全屋=%d（救援关/终局图没有 info_changelevel，自动不排除）",
+		g_cvExcludeEndSaferoom.IntValue,
+		g_bNtvLastCheckpoint ? 1 : 0,
+		g_bHasEndSaferoom ? 1 : 0);
 
 	for (int i = 1; i <= MaxClients; i++)
 	{

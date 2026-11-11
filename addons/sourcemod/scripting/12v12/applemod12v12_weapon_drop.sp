@@ -43,6 +43,34 @@
  *
  * 其余行为（生成时机 / 位置 / 弹药 / 清理 / 日志）与 1.0.0 完全一致；
  * am12v12_wdrop_glow_enable=0 时仍然一个 netprop 都不写、一个实体都不建。
+ *
+ * ===========================================================================
+ * 1.3.0（2026-11-11）需求：有生还者离开安全区域之后，不再闪耀发光
+ * ---------------------------------------------------------------------------
+ * 语义改成「只在安全区内发光」：
+ *   · 发光本来只在回合开始那一刻给「刚生成在地上的枪」加，而那时全员都在开局安全屋里；
+ *   · 一旦检测到「有生还者离开安全区」，立刻 ① 把现存发光全部关掉
+ *     （武器实体的 5 个发光 netprop + 隐形假模型代理实体一起清，走的还是原来的
+ *      ClearAllGlow → DestroyGlowSlot → ClearGlowProps 那条路），
+ *     ② 之后本回合不再给任何新武器加发光（QueueGlow / ApplyGlowToWeapon 双双挡住）；
+ *   · 开关 am12v12_wdrop_glow_saferoom_only（默认 1）。=0 时完全不订阅「离开安全区」，
+ *     行为回到 1.2.0 的「永久发光」。
+ *
+ * 检测手段（先确认过可用 API）：
+ *   · 本插件原本不涉及任何安全区判定，也没有 left4dhooks 依赖。可用的信号里：
+ *       - 引擎事件 player_left_start_area（userid）     —— 零依赖，本仓库 20+ 个插件在用；
+ *       - 引擎事件 player_left_safe_area（userid/count）—— 语义更宽（含关底安全区）；
+ *       - left4dhooks L4D_HasAnySurvivorLeftSafeArea() / L4D_IsInFirstCheckpoint(client)
+ *         —— 要么多一个运行期依赖，要么在对抗模式「安全门自动打开」时就变 true
+ *            （left4dhooks.inc:3937 的说明），比玩家真的走出去更早，与需求不符。
+ *     所以这里用 player_left_start_area：它就是「某个玩家离开了出生/开局安全区」，
+ *     和用户说的「有生还者离开安全区域时」完全对应，也不给插件新增任何运行期依赖。
+ *     另外同时订阅语义更宽的 player_left_safe_area（同字段 userid），两个事件共用一个处理器
+ *     （本仓库 hdf.sp 也是成对订阅的），谁先来算谁，g_bLeftSafeArea 只允许置一次。
+ *   · 已知坑（本仓库 hdf.sp 踩过）：换图 / 读图 / 出生点重定位时该事件可能误发，
+ *     会让「根本没离开安全屋」的回合提前关掉发光。这里用「回合开始后 2 秒内的事件一律不采信」
+ *     挡住这一类误发（武器本身是 round_start+1.0 秒才生成，2 秒窗口内不可能有真人走出去）。
+ *   · 发光 netprop 的双保险（直接写 + 隐形代理）、5 个属性、捡枪撤发光等逻辑一行没动。
  * ===========================================================================
  */
 #pragma semicolon 1
@@ -52,13 +80,24 @@
 #include <sdktools>
 #include <sdkhooks>          // OnEntityDestroyed / SDKHook_WeaponEquipPost
 
-#define PLUGIN_VERSION "1.2.0"
+#define PLUGIN_VERSION "1.3.0"
 
 ConVar g_hEnable, g_hWeapons, g_hMode, g_hDelay, g_hSpread, g_hDebug;
 ConVar g_hAmmoRifle, g_hAmmoChainsaw, g_hAmmoSniper;
 ConVar g_hGlowEnable, g_hGlowColor, g_hGlowRange, g_hGlowMinRange, g_hGlowFlashing, g_hGlowProxy;
+// 1.3.0：只在安全区内发光（默认 1）；=0 回到 1.2.0 的永久发光
+ConVar g_hGlowSaferoomOnly;
 
 bool g_bRoundStart, g_bPlayerSpawn, g_bSpawned;
+
+// 1.3.0：「本回合已经有生还者离开安全区」。
+// 一旦置 true 就保持到本回合结束 —— 需求是「离开之后就不再发光」，
+// 玩家后来又退回安全屋也不恢复（ClearAllGlow 已经在那一刻把发光撤掉了）。
+bool   g_bLeftSafeArea;
+// 回合开始时刻（GetGameTime），用来挡「换图/读图/出生点重定位」误发的 player_left_start_area
+float  g_fRoundStartAt;
+// 1.3.0 误发窗口：回合开始后这么多秒内的 player_left_start_area 一律不采信
+#define LEFT_SAFEAREA_GRACE 2.0
 
 public Plugin myinfo =
 {
@@ -157,6 +196,11 @@ public void OnPluginStart()
 								   "发光的实现方式：0=双保险（武器实体自己发光 + 再挂一个隐形假模型代理，最稳）, 1=只挂假模型代理, 2=只给武器实体发光（不额外生成实体，但武器实体在部分版本不会渲染轮廓）",
 								   FCVAR_NOTIFY, true, 0.0, true, 2.0);
 
+	// 1.3.0：只在安全区内发光。=0 时完全不订阅「离开安全区」，行为回到 1.2.0 的永久发光。
+	g_hGlowSaferoomOnly = CreateConVar("am12v12_wdrop_glow_saferoom_only", "1",
+								   "1=只在安全区内发光(默认): 一旦有生还者离开开局安全区域, 立刻关掉场上所有掉落武器的发光(武器实体属性+假模型代理一起清), 并且本回合不再给新武器加发光. 0=旧的永久发光行为(不管玩家走到哪都一直发光)",
+								   FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	// 注意：这里**不**注册任何 cvar 变更钩子。
 	// 颜色在 ApplyGlowToWeapon() 里按需解析（每次生成武器时读一次当前值），
 	// 这样 glow_enable=0 时本插件注册的 event/hook 与 1.0.0 完全一致，
@@ -170,6 +214,13 @@ public void OnPluginStart()
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_PostNoCopy);
 	HookEvent("round_end", Event_RoundEnd, EventHookMode_PostNoCopy);
+
+	// 1.3.0：有生还者离开开局安全区 → 关掉全场发光，并且本回合不再加发光。
+	// 用 PostNoCopy 沿袭本文件其它事件钩子；事件只有 userid 一个字段，不需要广播数据。
+	// 同时订阅 player_left_safe_area（语义更宽的「离开安全区域」，字段同样有 userid），
+	// 两个事件走同一个处理器、互斥（g_bLeftSafeArea 只允许置一次），本仓库 hdf.sp 也是这么成对订阅的。
+	HookEvent("player_left_start_area", Event_PlayerLeftStartArea, EventHookMode_PostNoCopy);
+	HookEvent("player_left_safe_area", Event_PlayerLeftStartArea, EventHookMode_PostNoCopy);
 
 	RegAdminCmd("sm_wdropglow", Cmd_GlowStatus, ADMFLAG_CONFIG,
 				"查看开局丢枪的发光状态（每个槽位的武器/代理/发光属性）。加参数 reapply 会把当前武器重新发光一次");
@@ -197,8 +248,73 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	// 先全量撤掉旧发光，避免槽位表和实体状态对不上。
 	ClearAllGlow();
 
+	// 1.3.0：「有人离开安全区」的标志与误发窗口都按回合重置
+	g_bLeftSafeArea = false;
+	g_fRoundStartAt = GetGameTime();
+
 	g_bRoundStart = true;
 	TrySchedule();
+}
+
+/**
+ * 1.3.0 需求：有生还者离开安全区之后，掉落武器不再闪耀发光。
+ * 事件只在「安全区限定发光」开启时处理；=0 时直接返回，行为与 1.2.0 的永久发光一致。
+ *
+ * 误发防护：换图 / 读图 / 出生点重定位时引擎可能乱发这个事件（本仓库 hdf.sp 踩过），
+ * 所以回合开始后 LEFT_SAFEAREA_GRACE 秒内的事件一律不采信 —— 武器本身是
+ * round_start + am12v12_wdrop_delay(默认 1.0) 秒才生成，那个窗口里不可能有真人走出去。
+ */
+public void Event_PlayerLeftStartArea(Event event, const char[] name, bool dontBroadcast)
+{
+	if (!g_hGlowSaferoomOnly.BoolValue)
+		return;
+
+	if (g_bLeftSafeArea)
+		return;
+
+	if (GetGameTime() - g_fRoundStartAt < LEFT_SAFEAREA_GRACE)
+	{
+		if (g_hDebug.BoolValue)
+			PrintToServer("[12v12 wdrop] glow: 忽略回合开始 %.1f 秒内的 player_left_start_area（疑似换图/出生点重定位误发）", GetGameTime() - g_fRoundStartAt);
+		return;
+	}
+
+	int client = GetClientOfUserId(event.GetInt("userid"));
+
+	if (client <= 0 || !IsClientInGame(client) || GetClientTeam(client) != 2)
+		return;
+
+	MarkLeftSafeArea("player_left_start_area");
+}
+
+/**
+ * 1.3.0：标记「本回合已有生还者离开安全区」，并把场上发光全部撤掉。
+ * 撤发光走的还是原来那条 ClearAllGlow 链（DestroyGlowSlot → ClearGlowProps +
+ * 代理实体 KillEntNextFrame），所以武器实体的 5 个发光 netprop 和假模型代理都会被清。
+ */
+void MarkLeftSafeArea(const char[] sReason)
+{
+	if (g_bLeftSafeArea)
+		return;
+
+	g_bLeftSafeArea = true;
+
+	if (g_hDebug.BoolValue)
+		PrintToServer("[12v12 wdrop] glow: 有生还者离开安全区（%s），关闭全部发光并停止本回合加发光", sReason);
+
+	ClearAllGlow();
+}
+
+/**
+ * 1.3.0：此刻还该不该给武器加发光。
+ * saferoom_only=1 且本回合已经有人离开安全区 → 不再加；其余情况照旧。
+ */
+bool ShouldGlowNow()
+{
+	if (g_hGlowSaferoomOnly.BoolValue && g_bLeftSafeArea)
+		return false;
+
+	return true;
 }
 
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
@@ -218,6 +334,10 @@ void ResetRound()
 	g_bRoundStart = false;
 	g_bPlayerSpawn = false;
 	g_bSpawned = false;
+
+	// 1.3.0：新回合重新允许「安全区内发光」
+	g_bLeftSafeArea = false;
+	g_fRoundStartAt = 0.0;
 }
 
 // round_start 与 player_spawn 都发生后才排定生成（两者顺序在 L4D2 里不固定）
@@ -986,6 +1106,10 @@ void QueueGlow(int iWeapon)
 	if (!g_hGlowEnable.BoolValue)
 		return;
 
+	// 1.3.0：本回合已经有生还者离开安全区 → 新武器也不再加发光
+	if (!ShouldGlowNow())
+		return;
+
 	if (iWeapon <= 0 || !IsValidEntity(iWeapon))
 		return;
 
@@ -1022,6 +1146,10 @@ void ApplyGlowToWeapon(int iWeapon)
 {
 	// 关掉发光时第一句就返回：不建实体、不写任何 netprop、不挂 hook（行为与 1.0.0 一致）
 	if (!g_hGlowEnable.BoolValue)
+		return;
+
+	// 1.3.0：本回合已经有生还者离开安全区 → 不再加发光（现存发光已在那一刻被清掉）
+	if (!ShouldGlowNow())
 		return;
 
 	if (iWeapon <= 0 || !IsValidEntity(iWeapon))
@@ -1215,6 +1343,10 @@ public Action Cmd_GlowStatus(int client, int args)
 		PLUGIN_VERSION, g_hEnable.IntValue, g_hGlowEnable.IntValue, g_hGlowProxy.IntValue,
 		RoundToNearest(g_hGlowRange.FloatValue), RoundToNearest(g_hGlowMinRange.FloatValue),
 		g_hGlowFlashing.IntValue, sColor, g_bGlowActive ? 1 : 0);
+
+	// 1.3.0：安全区限定发光的当前状态
+	ReplyToCommand(client, "[12v12 wdrop] saferoom_only=%d 已有生还者离开安全区=%d（离开之后本回合不再加发光）",
+		g_hGlowSaferoomOnly.IntValue, g_bLeftSafeArea ? 1 : 0);
 
 	char sHostClass[64];
 	for (int i = 0; i < GLOW_SLOTS; i++)

@@ -216,7 +216,7 @@ int Native_GetMaxPillsBonus(Handle:plugin, numParams)
 
 Action:CmdBonus(client, args)
 {
-	if (bRoundOver || !client)
+	if (bRoundOver || !client || !IsClientInGame(client))
 		return Plugin_Handled;
 
 	decl String:sCmdType[64];
@@ -255,8 +255,24 @@ Action:CmdBonus(client, args)
 
 Action:CmdMapInfo(client, args)
 {
+	if (client && !IsClientInGame(client))
+		return Plugin_Handled;
+
 	new Float:fMaxPillsBonus = float(iPillWorth * iTeamSize);
 	new Float:fTotalBonus = fMapBonus + fMaxPillsBonus;
+
+	if (!client)
+	{
+		PrintToServer("[混合奖励分 :: %iv%i] 地图信息", iTeamSize, iTeamSize);
+		PrintToServer("推进距离: %d", iMapDistance);
+		PrintToServer("总奖励分: %d <100.0%%>", RoundToFloor(fTotalBonus));
+		PrintToServer("生命加成: %d <%.1f%%>", RoundToFloor(fMapHealthBonus), CalculateBonusPercent(fMapHealthBonus, fTotalBonus));
+		PrintToServer("伤害加成: %d <%.1f%%>", RoundToFloor(fMapDamageBonus), CalculateBonusPercent(fMapDamageBonus, fTotalBonus));
+		PrintToServer("药丸加成: %d(上限 %d) <%.1f%%>", iPillWorth, RoundToFloor(fMaxPillsBonus), CalculateBonusPercent(fMaxPillsBonus, fTotalBonus));
+		PrintToServer("决胜分: %d", iPillWorth);
+		return Plugin_Handled;
+	}
+
 	PrintToChat(client, "\x01[\x04混合奖励分\x01 :: \x03%iv%i\x01] 地图信息", iTeamSize, iTeamSize);
 	PrintToChat(client, "\x01推进距离: \x05%d\x01", iMapDistance);
 	PrintToChat(client, "\x01总奖励分: \x05%d\x01 <\x03100.0%%\x01>", RoundToFloor(fTotalBonus));

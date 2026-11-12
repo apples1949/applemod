@@ -1,0 +1,38 @@
+"Games"
+{
+	"left4dead2"
+	{
+		"Addresses"
+		{
+			//引擎的公网地址读取函数, status里"[ public x.x.x.x:端口 ]"就是它给的.
+			//插件里对应 l4d2_hostname_engine 1 (默认0=不调用).
+			"NET_GetPublicAdr"
+			{
+				"signature"		"NET_GetPublicAdr"
+			}
+		}
+		"Signatures"
+		{
+			/**
+			 * bool NET_GetPublicAdr(netadr_t &adr)   -- cdecl, 1个指针参数, 返回bool
+			 *
+			 * 出处: 私人文件/reports/status-public-ip-逆向报告.md
+			 *   调用方: status (engine_srv.so RVA 0x0016D400, 调用点 0x0016D523)
+			 *   内部逻辑: net_public_adr 非空就用它 -> 否则调 Steam ISteamGameServer014 vtable slot 33
+			 *            -> 都不行返回 false (status 打印 "[ public n/a ]")
+			 *
+			 * 样本: engine_srv.so (ELF32/i386), 游戏 build 2.2.4.3 10097,
+			 *       sha256 5fa15f28...09b7, 函数 RVA 0x001B53A0, 大小 425 字节.
+			 *
+			 * 只提供 linux: windows (engine.dll) 没有分析, 所以 windows 服不会命中这条签名,
+			 * 插件会自动退回 net_public_adr/ip/hostip/status 这些取值方式.
+			 */
+			"NET_GetPublicAdr"
+			{
+				"library"		"engine"
+				"linux"			"\x55\x89\xE5\x57\x56\x53\x83\xEC\x4C\x65\xA1\x14\x00\x00\x00\x89\x45\xE4\x31\xC0\xC7\x04\x24\x01\x00\x00\x00\x8B\x5D\x08\xE8\x2A\x2A\x2A\x2A"
+								/* 55 89 E5 57 56 53 83 EC 4C 65 A1 14 00 00 00 89 45 E4 31 C0 C7 04 24 01 00 00 00 8B 5D 08 E8 ? ? ? ?  -- 35字节,31个固定字节 */
+			}
+		}
+	}
+}

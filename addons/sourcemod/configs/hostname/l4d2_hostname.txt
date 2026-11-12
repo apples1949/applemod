@@ -1,1 +1,47 @@
-苹果果的抽象进阶包抗服
+"hostname"
+{
+	// 按"IP:端口"分服: 同一份文件可以给多台服务器用, 每台服只取自己那一段.
+	// 查找顺序: "IP:端口" -> status里本地绑定地址的"IP:端口" -> "*:端口" -> "default"
+	//
+	// IP和端口的识别顺序(前3步都不执行任何控制台指令):
+	//   1. l4d2_hostname_ip 变量(手动指定, 应急用)
+	//   2. 引擎签名直读 NET_GetPublicAdr  (变量 l4d2_hostname_engine, 默认1=开启;
+	//      签名在 addons/sourcemod/gamedata/l4d2_hostname.txt, 取到的就是status里public那段)
+	//   3. net_public_adr 变量
+	//   4. 上面都失败才执行 status 指令, 从
+	//      "udp/ip  : x.x.x.x:端口 [ public x.x.x.x:端口 ]" 里收集(公网优先, 其次本地绑定)
+	//   5. 最后才用 ip / hostip 这两个绑定地址兜底
+	//
+	// 不知道当前服务器用哪个键: 游戏里输入 !host, 提示里会显示"当前配置键";
+	// 也可以看 addons/sourcemod/logs/ 下当天的 SourceMod 日志(搜索"当前配置键").
+
+	"default"
+	{
+		"ServerName"		"苹果果的抽象进阶包抗服"
+	}
+
+	"1.15.122.209:27015"
+	{
+		"ServerName"		"抽象进阶包抗服1服"
+	}
+
+	"1.15.62.95:27015"
+	{
+		"ServerName"		"抽象进阶包抗服2服"
+	}
+
+	"180.188.24.113:24085"
+	{
+		"ServerName"		"抽象进阶包抗服3服"
+	}
+
+	"180.188.21.24:27030"
+	{
+		"ServerName"		"抽象进阶包抗服4服"
+	}
+
+	"180.188.21.24:27031"
+	{
+		"ServerName"		"抽象进阶包抗服5服"
+	}
+}

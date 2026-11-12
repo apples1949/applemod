@@ -2853,7 +2853,12 @@ bool VisionOrphanHandoffEvidence()
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsFakeClient(i) && IsTankEntity(i) && g_fTankCtrlStart[i] > 0.0 && g_fVisionAliveBias[i] > 0.0)
+		/* 必须先判"在游戏"再判 IsFakeClient: IsFakeClient 对未连接槽位会抛
+		   "Client %d is not connected"(SourceMod 核心: !IsConnected 就报错), 而本服
+		   MaxClients 被多槽位扩展放大、空槽远多于在线人数, 0.2 秒一轮的 Timer_TankVision
+		   每轮都会踩到空槽, 于是每次判定都刷一条同样的异常。
+		   AI 坦克是已连接且在游戏里的, 这个顺序不会把它挡掉。 */
+		if (IsClientInGame(i) && IsFakeClient(i) && IsTankEntity(i) && g_fTankCtrlStart[i] > 0.0 && g_fVisionAliveBias[i] > 0.0)
 			return true;
 	}
 
@@ -2876,7 +2881,10 @@ bool VisionOrphanSourceOkForLateAdopt(int client, float fNow)
 	if (g_iVisionOrphanSrc == client)
 		return true;
 
-	if (IsFakeClient(g_iVisionOrphanSrc))
+	/* g_iVisionOrphanSrc 只保证是"存进来时的槽位号": 留下记录的那位可能已经掉线,
+	   而 IsFakeClient 对未连接槽位会抛 "Client %d is not connected"(与上面同一处证据)。
+	   不在游戏里就按"来源不是 AI"处理, 落到下面更严格的"窗口 + 换人旁证"分支。 */
+	if (IsClientInGame(g_iVisionOrphanSrc) && IsFakeClient(g_iVisionOrphanSrc))
 		return true;
 
 	return ((fNow - g_fVisionOrphanAt) <= VISION_ORPHAN_WINDOW && VisionOrphanHandoffEvidence());

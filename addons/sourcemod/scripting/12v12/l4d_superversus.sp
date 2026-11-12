@@ -213,6 +213,25 @@ bool SurvivorDied[MAXPLAYERS+1];
 bool LateLoad;
 
 // ---------------------------------------------------------------------------
+// 2.5.20：禁止自动入队名单（l4d_superversus_nojoin_steamids）
+//   暖服客户端这类"只站旁观、不该被拉进队伍"的账号写在这里：本插件的
+//   连接后自动入队 / 平衡补位 / 入队重试（Join_Wait 每秒重试）都不会再碰它们。
+//   支持 SteamID64 / STEAM_X:Y:Z / [U:1:accountid] 三种写法，逗号分隔。
+// ---------------------------------------------------------------------------
+ConVar NoJoinSteamIds;						// l4d_superversus_nojoin_steamids：名单原文
+ConVar NoJoinBlockJoinTeam;					// l4d_superversus_nojoin_block_jointeam：是否连客户端 jointeam 也拦
+ConVar NoJoinIps;							// l4d_superversus_nojoin_ips：IP 兜底（前缀匹配）
+ConVar NoJoinNames;							// l4d_superversus_nojoin_names：显示名兜底
+char g_sNoJoinIds[512];						// 名单原文缓存
+char g_sNoJoinIps[256];						// IP 名单缓存
+char g_sNoJoinNames[256];					// 名字名单缓存
+bool g_bNoJoinClient[MAXPLAYERS+1];			// 该 client 是否命中名单
+bool g_bChurnNoJoin[MAXPLAYERS+1];			// 由"反复被搬去旁观"自动判定（身份验证失败时的兜底）
+int g_iSpecBounce[MAXPLAYERS+1];			// 10 秒窗口内被搬去旁观的次数
+float g_fSpecBounceSince[MAXPLAYERS+1];		// 该窗口的起点
+float g_fNoJoinHintAt[MAXPLAYERS+1];		// 提示节流
+
+// ---------------------------------------------------------------------------
 // 生还者 bot 创建方式（2.5.19）
 //   主路径 = fbef0102 l4dmultislots 的做法：SDKCall NextBotCreatePlayerBot<SurvivorBot>
 //   直接造一个 SurvivorBot，再 ChangeClientTeam(bot, TEAM_SURVIVOR)，
@@ -352,6 +371,25 @@ public void OnPluginStart()
 	//   0 = 关闭本功能；1 = 释放托管（默认，身体交回 AI，人转成真旁观）；2 = 连身体一起移出并回收。
 	IdleToSpec = CreateConVar("l4d_superversus_idle_to_spec", "1", "闲置(挂机托管)玩家处理: 0=关闭; 1=释放托管链接并转旁观(默认); 2=连托管的身体一起移出生还者队并回收.", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 	IdleToSpecDelay = CreateConVar("l4d_superversus_idle_to_spec_delay", "1.0", "玩家进入闲置(托管身体)后等多少秒才处理（默认 1.0，避开接管瞬间的正常短暂托管）.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
+	// 2.5.20：禁止自动入队名单（暖服客户端等）。默认值就是暖服机器人账号，可由 cfg 覆盖成空来关闭。
+	NoJoinSteamIds = CreateConVar("l4d_superversus_nojoin_steamids", "76561198760610101",
+		"名单内的玩家不会被本插件自动加入任何队伍（连接后自动入队 / 平衡补位 / Join_Wait 每秒重试 全部跳过）。SteamID64 / STEAM_X:Y:Z / [U:1:x]，逗号分隔；留空=关闭。",
+		FCVAR_NOTIFY);
+	NoJoinBlockJoinTeam = CreateConVar("l4d_superversus_nojoin_block_jointeam", "0",
+		"1=名单内玩家自己发的 jointeam(2/3) 也一并拦掉（只能留旁观）；0=只拦本插件的自动入队（默认）。",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	// 身份兜底：SteamID 未验证/NoSteam 客户端时按 IP 与显示名识别（AFK 插件同款思路）
+	NoJoinIps = CreateConVar("l4d_superversus_nojoin_ips", "",
+		"按 IP 识别禁止自动入队的玩家（逗号分隔，支持前缀如 202.189.15.）。给 SteamID 取不到的暖服客户端兜底；留空=不用。",
+		FCVAR_NOTIFY);
+	NoJoinNames = CreateConVar("l4d_superversus_nojoin_names", "",
+		"按显示名识别禁止自动入队的玩家（逗号分隔，精确匹配）。最后一层兜底：名字玩家可改，安全性低于 SteamID/IP；留空=不用。",
+		FCVAR_NOTIFY);
+	NoJoinSteamIds.AddChangeHook(OnNoJoinListChanged);
+	NoJoinIps.AddChangeHook(OnNoJoinListChanged);
+	NoJoinNames.AddChangeHook(OnNoJoinListChanged);
+	AddCommandListener(Cmd_NoJoinTeam, "jointeam");
+	ReloadNoJoinList();
 	// 2.5.17：引擎会把新玩家先放进生还者队（活着、拿着手枪），随后平衡器才把他换到感染者；
 	// 换队时引擎不清武器，玩家就会"人在感染者队却带着生还者的枪"。换到感染者时统一清一遍。
 	StripInfWeapons = CreateConVar("l4d_superversus_strip_infected_weapons", "1", "真人换到感染者队时，清掉身上残留的生还者武器（防止新玩家先被放进生还者队拿枪、随后被换到特感时把枪带过去）. 0=关闭.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -853,6 +891,13 @@ public void OnClientDisconnect(int client)
 	CancelJoin(client);
 	NewConnection[client] = false;
 
+	// 2.5.20：清掉禁止自动入队名单的后置状态
+	g_bNoJoinClient[client] = false;
+	g_bChurnNoJoin[client] = false;
+	g_iSpecBounce[client] = 0;
+	g_fSpecBounceSince[client] = 0.0;
+	g_fNoJoinHintAt[client] = 0.0;
+
 	// 2.5.16：清掉闲置处理的后置状态，避免同名/同槽位复用时误判
 	g_fIdleSince[client] = 0.0;
 	g_fIdleReleasedAt[client] = 0.0;
@@ -1279,6 +1324,15 @@ public void OnClientPostAdminCheck(int client)
 	
 	if (IsFakeClient(client)) return;
 	ResumeBotPopulation();
+
+	// 2.5.20：命中"禁止自动入队"名单的账号（暖服客户端等）不参与任何自动入队。
+	// 注意 ResumeBotPopulation() 必须放在前面：这个账号在场同样应该取消"空服清 bot"计时。
+	RefreshNoJoinFlag(client);
+	if (IsNoJoinClient(client))
+	{
+		NewConnection[client] = false;
+		return;
+	}
 	
 	char auth[MAX_AUTHID_LENGTH];
 	int returningPlayer;
@@ -1311,6 +1365,15 @@ public Action Timer_AutoJoinTeam(Handle timer, int userid)
 	if (client <= 0 || JoinTimer[client] != timer) return Plugin_Stop;
 	JoinTimer[client] = null;
 	if (!JoinPending[client] || IsFakeClient(client)) return Plugin_Stop;
+
+	// 2.5.20：命中禁止自动入队名单 —— 无论请求从哪条路径进来，立刻收手，不再每秒重试
+	if (IsNoJoinClient(client))
+	{
+		NewConnection[client] = false;
+		CancelJoin(client);
+		return Plugin_Stop;
+	}
+
 	if (!IsClientInGame(client))
 	{
 		if (++JoinAttempts[client] < 120)
@@ -1531,6 +1594,13 @@ void CancelJoin(int client)
 
 void QueueJoin(int client, int team, bool automatic, float delay)
 {
+	// 2.5.20：禁止自动入队名单内的账号，本插件不主动把它塞进队伍（也不会产生每秒重试）
+	if (IsNoJoinClient(client))
+	{
+		CancelJoin(client);
+		return;
+	}
+
 	CancelJoin(client);
 	JoinPending[client] = true;
 	JoinAutomatic[client] = automatic;
@@ -3700,6 +3770,39 @@ public void Event_PlayerTeamSpecSince(Event event, const char[] name, bool dontB
 	else
 		g_fSpecSince[client] = 0.0;
 
+	/* 2.5.20：身份取不到时的行为兜底。
+	   同一玩家 10 秒内被"从可玩队伍搬去旁观"≥4 次，说明"进队 → 被搬走 → 再进队"的拉锯
+	   已经开始（AFK 插件强制旁观 + 客户端秒重连就是这种形态）；一旦拉锯成环，实体模型会在
+	   hunter.mdl ↔ survivor_*.mdl 之间反复热切换，而 m_nSequence 不随模型复位，最终可能在
+	   命中盒测试里让 SlerpBones() 越界崩服。这里直接对本次连接禁用自动入队，从源头掐环。
+	   即使 SteamID 没验证成功、IP/名字也对不上，这条兜底依然生效。 */
+	if (!IsFakeClient(client) && event.GetInt("team") == TEAM_SPECTATOR)
+	{
+		int oldTeam = event.GetInt("oldteam");
+		if (oldTeam == TEAM_SURVIVOR || oldTeam == TEAM_INFECTED)
+		{
+			float fNow = GetGameTime();
+			if (g_fSpecBounceSince[client] <= 0.0 || fNow - g_fSpecBounceSince[client] > 10.0)
+			{
+				g_fSpecBounceSince[client] = fNow;
+				g_iSpecBounce[client] = 1;
+			}
+			else
+			{
+				g_iSpecBounce[client]++;
+			}
+
+			if (g_iSpecBounce[client] >= 4 && !g_bChurnNoJoin[client])
+			{
+				g_bChurnNoJoin[client] = true;
+				g_bNoJoinClient[client] = true;
+				CancelJoin(client);
+				LogMessage("[SV nojoin] %L 在 %.1f 秒内被搬去旁观 %d 次（疑似 AFK/旁观插件与重连拉锯），本次连接已禁用自动入队",
+					client, fNow - g_fSpecBounceSince[client], g_iSpecBounce[client]);
+			}
+		}
+	}
+
 	// 2.5.17：换到感染者时清掉身上残留的生还者武器（进服时引擎先给生还者席位、随后被换到特感的竞态）
 	if (!IsFakeClient(client) && event.GetInt("team") == TEAM_INFECTED)
 		StripSurvivorWeapons(client);
@@ -3766,6 +3869,10 @@ void RunAutofill()
 			continue;
 
 		if (GetClientTeam(i) != TEAM_SPECTATOR)
+			continue;
+
+		// 2.5.20：禁止自动入队的账号（暖服客户端等）永不参与补位
+		if (IsNoJoinClient(i))
 			continue;
 
 		// 正在入队流程里的不动
@@ -4500,4 +4607,180 @@ bool IsAlive(int client)
 {
 	if (!GetEntProp(client, Prop_Send, "m_lifeState")) return true;
 	return false;
+}
+
+// *********************************************************************************
+// 2.5.20：禁止自动入队名单（暖服客户端）
+//
+//   背景：暖服客户端账号（STEAM_1:1:400172186）本来只该站在旁观"暖服"，
+//   但它每次被拉进 / 自己进生还者队后又被 AFK 插件搬回旁观，形成毫秒级的
+//   "进队 → 换模型 → 被搬走 → 再进队"循环；这个循环里实体模型在
+//   hunter.mdl ↔ survivor_*.mdl 之间反复切换，而 m_nSequence 不随模型复位，
+//   最终一次命中盒测试让 SlerpBones() 用越界序列号索引虚拟模型序列表 → 崩服。
+//
+//   这里把该账号拉进"禁止自动入队"名单：连接后自动入队、平衡补位、
+//   Join_Wait 每秒重试都不再碰它，从源头掐掉这个循环。
+//   名单可由 l4d_superversus_nojoin_steamids 覆盖（留空 = 关闭本功能）。
+// *********************************************************************************
+
+bool IsNoJoinClient(int client)
+{
+	return (client > 0 && client <= MaxClients && g_bNoJoinClient[client]);
+}
+
+public void OnNoJoinListChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	ReloadNoJoinList();
+}
+
+void ReloadNoJoinList()
+{
+	if (NoJoinSteamIds == null)
+		return;
+
+	NoJoinSteamIds.GetString(g_sNoJoinIds, sizeof(g_sNoJoinIds));
+	NoJoinIps.GetString(g_sNoJoinIps, sizeof(g_sNoJoinIps));
+	NoJoinNames.GetString(g_sNoJoinNames, sizeof(g_sNoJoinNames));
+
+	for (int i = 1; i <= MaxClients; i++)
+		RefreshNoJoinFlag(i);
+}
+
+/**
+ * 在逗号分隔的名单里查找 value。
+ * prefixOk = true 时同时接受"value 以该条目开头"（IP 段写法，如 202.189.15.）。
+ */
+bool MatchAnyEntry(const char[] list, const char[] value, bool prefixOk)
+{
+	if (list[0] == '\0' || value[0] == '\0')
+		return false;
+
+	char entries[16][64];
+	int n = ExplodeString(list, ",", entries, sizeof(entries), sizeof(entries[]));
+	for (int i = 0; i < n; i++)
+	{
+		TrimString(entries[i]);
+		if (entries[i][0] == '\0')
+			continue;
+
+		if (StrEqual(entries[i], value, false))
+			return true;
+
+		if (prefixOk && StrContains(value, entries[i], false) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * 重新判定某玩家是否命中名单。
+ * 同时比对 SteamID64 / STEAM_X:Y:Z / [U:1:accountid] 三种写法，方便直接照抄日志里的 auth 串。
+ */
+void RefreshNoJoinFlag(int client)
+{
+	if (client <= 0 || client > MaxClients)
+		return;
+
+	// "反复被搬去旁观"的自动判定只对本次连接有效，重算身份时不能被清掉
+	g_bNoJoinClient[client] = g_bChurnNoJoin[client];
+
+	if (!IsClientConnected(client) || IsFakeClient(client))
+		return;
+
+	// 第 1 层：SteamID64 / STEAM_X:Y:Z / [U:1:x] 三种写法
+	if (g_sNoJoinIds[0] != '\0')
+	{
+		char auth64[32], auth2[32], authU[32];
+
+		if (GetClientAuthId(client, AuthId_SteamID64, auth64, sizeof(auth64), false)
+			&& MatchAnyEntry(g_sNoJoinIds, auth64, false))
+		{
+			g_bNoJoinClient[client] = true;
+			return;
+		}
+
+		if (GetClientAuthId(client, AuthId_Steam2, auth2, sizeof(auth2), false)
+			&& MatchAnyEntry(g_sNoJoinIds, auth2, false))
+		{
+			g_bNoJoinClient[client] = true;
+			return;
+		}
+
+		if (GetClientAuthId(client, AuthId_Steam3, authU, sizeof(authU), false)
+			&& MatchAnyEntry(g_sNoJoinIds, authU, false))
+		{
+			g_bNoJoinClient[client] = true;
+			return;
+		}
+	}
+
+	// 第 2 层：IP（SteamID 还没验证完 / NoSteam 客户端时的兜底；支持前缀）
+	if (g_sNoJoinIps[0] != '\0')
+	{
+		char ip[64];
+		GetClientIP(client, ip, sizeof(ip), true);
+		if (MatchAnyEntry(g_sNoJoinIps, ip, true))
+		{
+			g_bNoJoinClient[client] = true;
+			return;
+		}
+	}
+
+	// 第 3 层：显示名（最后一层兜底；玩家可改名，安全性最低）
+	if (g_sNoJoinNames[0] != '\0')
+	{
+		char name[MAX_NAME_LENGTH];
+		GetClientName(client, name, sizeof(name));
+		if (MatchAnyEntry(g_sNoJoinNames, name, false))
+		{
+			g_bNoJoinClient[client] = true;
+			return;
+		}
+	}
+}
+
+/**
+ * 认证到达后重算一次名单。
+ * 引擎的 auth 可能晚到（或验证失败后又回填），只靠 OnClientPostAdminCheck 那一次会漏，
+ * 这里补一次；SteamID 始终取不到时还有 IP / 名字 / 行为三层兜底。
+ */
+public void OnClientAuthorized(int client, const char[] auth)
+{
+	RefreshNoJoinFlag(client);
+}
+
+/**
+ * l4d_superversus_nojoin_block_jointeam = 1 时，连客户端自己发的 jointeam(2/3) 也拦掉，
+ * 让名单内的账号只能留在旁观。默认 0（只拦本插件的自动入队）。
+ */
+public Action Cmd_NoJoinTeam(int client, const char[] command, int argc)
+{
+	if (!NoJoinBlockJoinTeam.BoolValue)
+		return Plugin_Continue;
+
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+		return Plugin_Continue;
+
+	if (!IsNoJoinClient(client))
+		return Plugin_Continue;
+
+	if (argc < 1)
+		return Plugin_Continue;
+
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+
+	int team = StringToInt(arg);
+	if (team != TEAM_SURVIVOR && team != TEAM_INFECTED)
+		return Plugin_Continue;
+
+	float fNow = GetGameTime();
+	if (g_fNoJoinHintAt[client] <= 0.0 || fNow - g_fNoJoinHintAt[client] >= 10.0)
+	{
+		g_fNoJoinHintAt[client] = fNow;
+		PrintToChat(client, "\x03[SV] \x01此账号已设置为不自动加入队伍，请留在旁观。");
+	}
+
+	return Plugin_Handled;
 }

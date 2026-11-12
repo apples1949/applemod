@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.5.2",
+    version     = "1.6.0",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -21,9 +21,6 @@ public Plugin myinfo =
 #include <witch_and_tankifier>
 #include <l4d2_hybrid_scoremod>
 #include <l4d2_fix_team_shuffle_edi>
-
-#undef REQUIRE_EXTENSIONS
-#include <sendproxy> //core.inc 已定义 AUTOLOAD_EXTENSIONS; 这里让扩展成为可选依赖, 缺失时插件仍可加载.
 
 // ====================================================================================================
 // Pragmas
@@ -125,12 +122,6 @@ static bool   g_bhybridScoringAvailable;
 static ConVar g_hVsBossBuffer;
 static Handle g_hTimerHUD;
 
-// Left4SendProxy (SendProxy_HookGameRules) 逐客户端 HUD 隐藏支持.
-static bool   g_bSendProxyAvailable;
-static bool   g_bHUDSendProxyHooked;
-static int    g_iHookHUDAttempts;
-static bool   g_bHUDHidden[MAXPLAYERS + 1];
-
 // l4d2_fix_team_shuffle_edi 修复队伍 HUD_TICKER 状态.
 static bool   g_bFixTeamShuffleAvailable;
 static bool   g_bFixTeamShuffleInProgress;
@@ -204,12 +195,7 @@ public void OnPluginStart()
             _, true, 0.0, true, 1.0);
     }
 
-    LoadTranslations("common.phrases");
-
     RegConsoleCmd("sm_hud", CommandSwitchHud, "管理员全局开启或关闭HUD显示.");
-    RegConsoleCmd("sm_offhud", CommandOffHud, "关闭自己的HUD显示. ROOT管理员可带玩家名关闭指定玩家.");
-    RegConsoleCmd("sm_onhud", CommandOnHud, "开启自己的HUD显示. ROOT管理员可带玩家名开启指定玩家.");
-    RegConsoleCmd("sm_hud_debug", CommandHudDebug, "调试: 输出SendProxy状态.");
 
     // 按需更新: 这些事件发生后立即检查HUD内容是否有变化.
     HookEvent("round_start",  Event_HUDRefresh, EventHookMode_PostNoCopy);
@@ -227,10 +213,6 @@ public void OnAllPluginsLoaded()
     g_bWitchAndTankSystemAvailable = LibraryExists("witch_and_tankifier");
     g_bhybridScoringAvailable = LibraryExists("l4d2_hybrid_scoremod");
 
-    g_bSendProxyAvailable = LibraryExists("sendproxy2");
-    if (g_bSendProxyAvailable)
-        TryHookHUDSendProxy();
-
     g_bFixTeamShuffleAvailable = LibraryExists("l4d2_fix_team_shuffle_edi");
     UpdateFixTeamShuffleHUD();
 }
@@ -241,12 +223,6 @@ public void OnLibraryAdded(const char[] name)
         g_bWitchAndTankSystemAvailable = true;
     else if (StrEqual(name, "l4d2_hybrid_scoremod"))
         g_bhybridScoringAvailable = true;
-    else if (StrEqual(name, "sendproxy2"))
-    {
-        g_bSendProxyAvailable = true;
-        g_iHookHUDAttempts = 0;
-        TryHookHUDSendProxy();
-    }
     else if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
     {
         g_bFixTeamShuffleAvailable = true;
@@ -262,15 +238,6 @@ public void OnLibraryRemoved(const char[] name)
         g_bWitchAndTankSystemAvailable = false;
     else if (StrEqual(name, "l4d2_hybrid_scoremod"))
         g_bhybridScoringAvailable = false;
-    else if (StrEqual(name, "sendproxy2"))
-    {
-        g_bSendProxyAvailable = false;
-        g_bHUDSendProxyHooked = false;
-
-        //扩展卸载后所有隐藏状态失效, 清空避免扩展重新加载后玩家被意外重新隐藏.
-        for (int i = 1; i <= MaxClients; i++)
-            g_bHUDHidden[i] = false;
-    }
     else if (StrEqual(name, "l4d2_fix_team_shuffle_edi"))
     {
         g_bFixTeamShuffleAvailable = false;
@@ -282,19 +249,13 @@ public void OnLibraryRemoved(const char[] name)
 }
 
 // ====================================================================================================
-// 每张地图重新注册 SendProxy 的 GameRules hooks（扩展在 map end 时会清空 hooks）.
-// ====================================================================================================
 public void OnMapStart()
 {
     g_bHUDDirty = true;
-    g_bHUDSendProxyHooked = false;
-    g_iHookHUDAttempts = 0;
-    TryHookHUDSendProxy();
 }
 
 public void OnMapEnd()
 {
-    g_bHUDSendProxyHooked = false;
     HideFixHUD();
 
     // 诊断: 换图把还在展示的趣文清掉了(最后一张图那回合常见"没看到就没了").
@@ -316,11 +277,6 @@ public void OnClientPutInServer(int client)
     UpdateHUD(); //人数(在线)变化, 立即刷新.
 }
 
-public void OnClientDisconnect(int client)
-{
-    g_bHUDHidden[client] = false;
-}
-
 public void OnClientDisconnect_Post(int client)
 {
     UpdateHUD(); //此时代客户端已真正移除, 人数计算才是正确的.
@@ -340,8 +296,6 @@ public void OnConfigsExecuted()
 // 事件触发: 重新计算并仅在内容变化时发包.
 public void Event_HUDRefresh(Event event, const char[] name, bool dontBroadcast)
 {
-    // OnMapStart 时实体可能还没创建, 借事件再次尝试 hook.
-    TryHookHUDSendProxy();
     UpdateFixTeamShuffleHUD();
     UpdateHUD();
 
@@ -405,184 +359,12 @@ public Action CommandSwitchHud(int client, int args)
     return Plugin_Handled;
 }
 
-// ====================================================================================================
-// sm_offhud / sm_onhud - 所有玩家可用, 开关自己的HUD.
-//   sm_offhud [name|#userid]   : 无参数=自己; ROOT管理员带参数=指定单个玩家.
-//   sm_onhud  [name|#userid]   : 同上.
-// ====================================================================================================
-public Action CommandOffHud(int client, int args)
-{
-    return CommandSetHud(client, args, false);
-}
-
-public Action CommandOnHud(int client, int args)
-{
-    return CommandSetHud(client, args, true);
-}
-
-Action CommandSetHud(int admin, int args, bool bVisible)
-{
-    if (args > 0)
-    {
-        if (admin != 0 && !(GetUserFlagBits(admin) & ADMFLAG_ROOT))
-        {
-            ReplyToCommand(admin, "\x04[提示]\x05你无权指定其他玩家, 只能开关自己的HUD.");
-            return Plugin_Handled;
-        }
-
-        return CommandSetHudTarget(admin, bVisible);
-    }
-
-    if (admin == 0)
-    {
-        PrintToServer("[提示] 用法: sm_onhud <name|#userid> / sm_offhud <name|#userid>");
-        return Plugin_Handled;
-    }
-
-    if (!CheckHUDHookReady(admin))
-        return Plugin_Handled;
-
-    bool bNewHidden = !bVisible;
-    if (g_bHUDHidden[admin] == bNewHidden)
-    {
-        ReplyToCommand(admin, "\x04[提示]\x05你的HUD已经是%s状态.", bVisible ? "开启" : "关闭");
-        return Plugin_Handled;
-    }
-
-    g_bHUDHidden[admin] = bNewHidden;
-    if (bVisible)
-        RestorePlayerHUD(admin);
-    ForceHUDUpdate();
-
-    ReplyToCommand(admin, "\x04[提示]\x03已%s\x05 你的HUD显示.", bVisible ? "开启" : "关闭");
-    LogAction(admin, admin, "\"%N\" %s了自己的HUD显示", admin, bVisible ? "开启" : "关闭");
-
-    return Plugin_Handled;
-}
-
-// ROOT管理员/服务端控制台: 只开关指定单个玩家的HUD显示.
-Action CommandSetHudTarget(int admin, bool bVisible)
-{
-    if (!CheckHUDHookReady(admin))
-        return Plugin_Handled;
-
-    char sTarget[64];
-    GetCmdArg(1, sTarget, sizeof(sTarget));
-
-    char sTargetName[MAX_TARGET_LENGTH];
-    int iTargetList[MAXPLAYERS];
-    int iTargetCount;
-    bool bTnIsMl;
-
-    if ((iTargetCount = ProcessTargetString(
-            sTarget,
-            admin,
-            iTargetList,
-            MAXPLAYERS,
-            COMMAND_FILTER_NO_BOTS | COMMAND_FILTER_NO_MULTI,
-            sTargetName,
-            sizeof(sTargetName),
-            bTnIsMl)) <= 0)
-    {
-        ReplyToTargetError(admin, iTargetCount);
-        return Plugin_Handled;
-    }
-
-    int target = iTargetList[0];
-    bool bNewHidden = !bVisible;
-
-    if (g_bHUDHidden[target] == bNewHidden)
-    {
-        ReplyToCommand(admin, "\x04[提示]\x03%s\x05 的HUD已经是%s状态.", sTargetName, bVisible ? "开启" : "关闭");
-        return Plugin_Handled;
-    }
-
-    g_bHUDHidden[target] = bNewHidden;
-    if (bVisible)
-        RestorePlayerHUD(target);
-    ForceHUDUpdate();
-
-    if (bVisible)
-    {
-        ReplyToCommand(admin, "\x04[提示]\x03%s\x05 的HUD显示已开启.", sTargetName);
-        LogAction(admin, target, "\"%N\" 开启了 \"%N\" 的HUD显示", admin, target);
-        if (admin != target)
-            PrintToChat(target, "\x04[提示]\x05管理员已为你开启HUD显示.");
-    }
-    else
-    {
-        ReplyToCommand(admin, "\x04[提示]\x03%s\x05 的HUD显示已关闭.", sTargetName);
-        LogAction(admin, target, "\"%N\" 关闭了 \"%N\" 的HUD显示", admin, target);
-        if (admin != target)
-            PrintToChat(target, "\x04[提示]\x05管理员已为你关闭HUD显示.");
-    }
-
-    return Plugin_Handled;
-}
-
-bool CheckHUDHookReady(int client)
-{
-    if (!g_bSendProxyAvailable)
-    {
-        ReplyToCommand(client, "\x04[提示]\x05此功能需要 SendProxy 扩展 (sendproxy.ext), 请先安装 Left4SendProxy.");
-        return false;
-    }
-
-    if (GetFeatureStatus(FeatureType_Native, "SendProxy_HookGameRules") != FeatureStatus_Available)
-    {
-        ReplyToCommand(client, "\x04[提示]\x05SendProxy 扩展尚未完全加载, 请稍后再试.");
-        return false;
-    }
-
-    if (!g_bHUDSendProxyHooked)
-    {
-        ReplyToCommand(client, "\x04[提示]\x05SendProxy 的 HUD hook 尚未就绪, 请稍后再试.");
-        return false;
-    }
-
-    return true;
-}
-
-public Action CommandHudDebug(int client, int args)
-{
-    if (client != 0 && !(GetUserFlagBits(client) & ADMFLAG_ROOT))
-    {
-        ReplyToCommand(client, "\x04[提示]\x05无权使用.");
-        return Plugin_Handled;
-    }
-
-    ReplyToCommand(client,
-        "[ScriptedHUD] FeatureStatus=%d | LibExists(sendproxy2)=%d | hooked=%d | attempts=%d | myHidden=%d",
-        GetFeatureStatus(FeatureType_Native, "SendProxy_HookGameRules"),
-        LibraryExists("sendproxy2") ? 1 : 0,
-        g_bHUDSendProxyHooked ? 1 : 0,
-        g_iHookHUDAttempts,
-        g_bHUDHidden[client]);
-
-    return Plugin_Handled;
-}
-
-// 标记内容已变并立即发送一次 (用于开关HUD, 即使文字内容没变也要让客户端重收 flags).
-void ForceHUDUpdate()
-{
-    g_bHUDDirty = true;
-
-    if (g_bHUDEnabled)
-        UpdateHUD();
-}
-
 //延迟一帧清除HUD.
 public void OnNextFrameClearHUD(any data)
 {
     //同一帧内可能先关后开, 此时不能清除重新开启后的HUD.
     if (!g_bHUDEnabled)
         ClearHUD();
-}
-
-// 仅用于恢复之前 hidehud 测试可能隐藏的原生UI; 不再用它隐藏.
-void RestorePlayerHUD(int client)
-{
-    ClientCommand(client, "hidehud 0");
 }
 
 // ====================================================================================================
@@ -614,66 +396,7 @@ void ClearHUD()
     GameRules_SetPropString("m_szScriptedHUDStringSet", "", _, HUD2);
 }
 
-// ====================================================================================================
-// Left4SendProxy 逐客户端 hook: 只给被标记的客户端发送 HUD_FLAG_NOTVISIBLE.
-// ====================================================================================================
-public Action SendProxy_HUDFlagsChanged(const char[] prop, int &value, int element, int client)
-{
-    if (client >= 1 && client <= MaxClients && g_bHUDHidden[client])
-    {
-        value = HUD_FLAG_NOTVISIBLE;
-        return Plugin_Changed;
-    }
-
-    return Plugin_Continue;
-}
-
-void TryHookHUDSendProxy()
-{
-    if (!g_bSendProxyAvailable || g_bHUDSendProxyHooked)
-        return;
-
-    // 扩展刚注册 library 时 natives 可能还没注册完, 稍后重试.
-    if (GetFeatureStatus(FeatureType_Native, "SendProxy_HookGameRules") != FeatureStatus_Available)
-    {
-        ScheduleHUDHookRetry();
-        return;
-    }
-
-    // 防止扩展在 GameRules proxy 尚未创建时调用 native 报错.
-    if (FindGameRulesEntity() == INVALID_ENT_REFERENCE)
-    {
-        ScheduleHUDHookRetry();
-        return;
-    }
-
-    bool bHooked1 = SendProxy_HookGameRules("m_iScriptedHUDFlags", Prop_Int, SendProxy_HUDFlagsChanged, HUD1);
-    bool bHooked2 = SendProxy_HookGameRules("m_iScriptedHUDFlags", Prop_Int, SendProxy_HUDFlagsChanged, HUD2);
-
-    if (bHooked1 && bHooked2)
-    {
-        g_bHUDSendProxyHooked = true;
-        return;
-    }
-
-    ScheduleHUDHookRetry();
-}
-
-void ScheduleHUDHookRetry()
-{
-    if (g_iHookHUDAttempts++ >= 20)
-        return;
-
-    CreateTimer(1.0, Timer_RetryHookHUDSendProxy, _, TIMER_FLAG_NO_MAPCHANGE);
-}
-
-public Action Timer_RetryHookHUDSendProxy(Handle timer)
-{
-    TryHookHUDSendProxy();
-    return Plugin_Stop;
-}
-
-// 找到 L4D2 的 CTerrorGameRulesProxy 实体（SendProxy 的 GameRules hook 需要它存在）.
+// 找到 L4D2 的 CTerrorGameRulesProxy 实体（GameRules_SetProp* / GameRules_GetProp* 需要它存在）.
 int FindGameRulesEntity()
 {
     int entity = FindEntityByClassname(-1, "terror_gamerules");
@@ -1553,18 +1276,10 @@ void GetHUD2_Text(char[] output, int size)
 
     // 第二行按模式给对应的指令提示（第一行永远是 服务器名(玩家/在线/上限)）：
     //   - 多人配置（12v12）：!jg / !sur / !inf 是 l4d_superversus（多人插件）的指令，只有这种配置才有；
-    //   - 其它配置（原版/4v4）：这些指令不存在，敲了没反应，改为提示本插件的开关 HUD 指令
-    //     （!onhud / !offhud 始终注册，任何模式都能用）；
-    //   - 若 SendProxy 扩展缺失，开关 HUD 指令会被拒绝执行（见 CheckHUDHookReady），
-    //     此时不能给无效提示，第二行只留时间。
+    //   - 其它配置（原版/4v4）：这些指令不存在，敲了没反应，第二行只留时间。
     if (IsMultiplayerMode())
     {
         FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者",
-            hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
-    }
-    else if (g_bSendProxyAvailable)
-    {
-        FormatEx(output, size, "%s(%d/%d/%d)\n%s !onhud/!offhud开关HUD",
             hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);
     }
     else

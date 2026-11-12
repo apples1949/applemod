@@ -55,13 +55,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *     - 胆汁状态对所有槽位（含 bot）记录：bot 被喷期间玩家加入并接管，也能正确失明。
 *     - 断线时保留胆汁状态、清掉计时器与位记录，并在实体还在游戏里时先还原 HUD。
 *     - 死亡 / 胆汁干掉 / 回合重开 / 换图时，同时清理 bot 身体的隐藏位与胆汁记录。
+* Version 1.2.2 (apples1949)
+*     - 胆汁失明期间不再隐藏聊天框：bl_hud_to_apply 里的 HIDEHUD_CHAT(128) 位一律被剔除，
+*       默认值相应由 200 降为 72（= 8|64，生命显示 + 杂项状态）。
+*       理由：喷中后看不到聊天会直接断掉队伍沟通（局末趣文在没有 l4d2_scripted_hud 时也走聊天框轮播）。
+*     - l4d2_scripted_hud 的脚本 HUD（HUD1/HUD2/趣文槽位）由 GameRules 的 m_iScriptedHUDFlags /
+*       m_szScriptedHUDStringSet 驱动、最终由客户端自己绘制；本插件没有"取消隐藏"它的手段，
+*       默认掩码 72 不含 HIDEHUD_ALL(4)，因此默认配置下不会波及脚本 HUD。
 */
 
 #pragma semicolon 1
 #pragma newdecls required
 
 // Define constants
-#define PLUGIN_VERSION    "1.2.1"
+#define PLUGIN_VERSION    "1.2.2"
 #define PLUGIN_NAME       "Blind Luck"
 #define CVAR_FLAGS        FCVAR_NOTIFY
 #define BLIND_TIME_MIN    5.0      // bl_blind_time 下限（秒）
@@ -79,21 +86,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define HIDEHUD_WEAPONSELECTION     (1 << 0)   // 1     隐藏弹药数 / 武器选择栏（L4D2 未实测）
 #define HIDEHUD_FLASHLIGHT          (1 << 1)   // 2     隐藏手电筒（L4D2 未实测）
 #define HIDEHUD_ALL                 (1 << 2)   // 4     隐藏整个 HUD（通用"全隐藏"位，L4D2 需进服实测）
-#define HIDEHUD_HEALTH              (1 << 3)   // 8     隐藏生命 / 电池显示（默认 200 含此位；L4D2 可用：vi-l4d2 胆汁遮罩、l4d_fix_deathfall_cam 都在用）
+#define HIDEHUD_HEALTH              (1 << 3)   // 8     隐藏生命 / 电池显示（默认 72 含此位；L4D2 可用：vi-l4d2 胆汁遮罩、l4d_fix_deathfall_cam 都在用）
 #define HIDEHUD_PLAYERDEAD          (1 << 4)   // 16    本地玩家死亡时隐藏（L4D2 未实测）
 #define HIDEHUD_NEEDSUIT            (1 << 5)   // 32    没有 HEV 防护服时隐藏（L4D2 没有防护服 → 无意义）
-#define HIDEHUD_MISCSTATUS          (1 << 6)   // 64    隐藏杂项状态（拾取提示 / 死亡提示等；默认 200 含此位）
-#define HIDEHUD_CHAT                (1 << 7)   // 128   隐藏通讯元素（聊天 / 语音图标；默认 200 含此位）
+#define HIDEHUD_MISCSTATUS          (1 << 6)   // 64    隐藏杂项状态（拾取提示 / 死亡提示等；默认 72 含此位）
+#define HIDEHUD_CHAT                (1 << 7)   // 128   隐藏通讯元素（聊天 / 语音图标）；1.2.2 起本插件永远不施加此位
 #define HIDEHUD_CROSSHAIR           (1 << 8)   // 256   隐藏准星（L4D2 可用：fortnite_emotes_extended 在用）
 #define HIDEHUD_VEHICLE_CROSSHAIR   (1 << 9)   // 512   隐藏载具准星（L4D2 没有可驾驶载具 → 无意义）
 #define HIDEHUD_INVEHICLE           (1 << 10)  // 1024  在载具内时隐藏（L4D2 没有可驾驶载具 → 无意义）
 #define HIDEHUD_BONUS_PROGRESS      (1 << 11)  // 2048  奖励进度（l4d_fix_deathfall_cam 在 L4D2 里也在用）
 #endif
 
+// 胆汁失明期间也必须保持可见的位：聊天框（HIDEHUD_CHAT 隐藏的"通讯元素"）。
+// 喷中后看不到聊天会直接断掉队伍沟通；局末趣文在没有 l4d2_scripted_hud 时也是走聊天框轮播的。
+// 因此 bl_hud_to_apply 里即使写了 HIDEHUD_CHAT(128)，RefreshSettings 也会把它剔掉——写进来不生效。
+#define HIDEHUD_KEEP_ALWAYS         HIDEHUD_CHAT
+
+// 关于 l4d2_scripted_hud 的脚本 HUD（HUD1 / HUD2 / 趣文槽位）：
+//   它由 GameRules 的 m_iScriptedHUDFlags / m_szScriptedHUDStringSet 等网络属性驱动，最终由客户端自己绘制。
+//   本插件只能用 m_iHideHUD 的位去"遮"，没有让客户端把脚本 HUD 显示出来的手段
+//   （l4d2_scripted_hud 自己也是靠 SendProxy 改写 m_iScriptedHUDFlags 来逐客户端隐藏，而不是靠 hidehud）。
+//   默认掩码 72 不含 HIDEHUD_ALL(4)，所以默认配置下不会把它整片遮掉；
+//   若服主把 bl_hud_to_apply 改成含 4 的值，脚本 HUD 会跟着被遮，且本插件无法单独恢复。
+
 // 常用 bl_hud_to_apply 取值（数值 = 需要隐藏的位相加）：
-//   200   8|64|128 = 生命显示 + 杂项状态 + 聊天（本插件默认值；vi-l4d2 的 Bile Mask 也用这个值，已在 L4D2 实机验证）
-//   456   200|256 = 上面三项再加上准星
-//   4     HIDEHUD_ALL：通用"整个 HUD"位，L4D2 下效果需进服实测
+//   72    8|64 = 生命显示 + 杂项状态（本插件 1.2.2 起的默认值，聊天框保持可见）
+//   200   8|64|128 = 上面两项再加上聊天；128 会被剔除 → 实际等同 72（旧版默认值，仍然兼容）
+//   328   72|256 = 默认值再加上准星
+//   456   200|256 = 默认值 + 聊天 + 准星；128 会被剔除 → 实际等同 328
+//   4     HIDEHUD_ALL：通用"整个 HUD"位，L4D2 下效果需进服实测（连脚本 HUD 也会一起遮掉）
 //   64    只隐藏杂项状态（原版 1.1.2 的默认值）
 
 // Create ConVar handles
@@ -125,7 +146,7 @@ public void OnPluginStart()
 	blindluck_on = CreateConVar("bl_plugin_on", "1", "总开关：1 = 玩家被胆汁喷中后隐藏其 HUD，0 = 关闭本插件效果。", CVAR_FLAGS, true, 0.0, true, 1.0);
 	blind_time = CreateConVar("bl_blind_time", "10.0", "被胆汁喷中后隐藏 HUD 的秒数（仅在 bl_hide_until_dry = 0 时生效，范围 5-25）。", CVAR_FLAGS, true, BLIND_TIME_MIN, true, BLIND_TIME_MAX);
 	hide_until_dry = CreateConVar("bl_hide_until_dry", "0", "恢复方式：1 = 一直隐藏到胆汁被吹干（时间不确定）；0 = 只隐藏 bl_blind_time 秒。", CVAR_FLAGS, true, 0.0, true, 1.0);
-	hud_to_apply = CreateConVar("bl_hud_to_apply", "200", "要隐藏的 HUD 位掩码，多个位可相加（取值 0-4095）；默认 200 = 生命显示 + 杂项状态 + 聊天，各位含义见源码中的 HIDEHUD_* 注释。", CVAR_FLAGS, true, 0.0, true, HUD_MASK_MAX);
+	hud_to_apply = CreateConVar("bl_hud_to_apply", "72", "要隐藏的 HUD 位掩码，多个位可相加（取值 0-4095）；默认 72 = 生命显示 + 杂项状态。注意：聊天框位 128 恒被忽略（1.2.2 起不隐藏聊天框），写进 200 也只等同于 72；各位含义见源码中的 HIDEHUD_* 注释。", CVAR_FLAGS, true, 0.0, true, HUD_MASK_MAX);
 
 	blindluck_on.AddChangeHook(ConVarPluginOnChanged);
 	blind_time.AddChangeHook(ConVarChanged);
@@ -151,7 +172,11 @@ public void OnPluginStart()
 void RefreshSettings()
 {
 	fBlindTime = blind_time.FloatValue;
-	iHudToApply = hud_to_apply.IntValue;
+
+	// 聊天框永不由本插件隐藏（见 HIDEHUD_KEEP_ALWAYS）：
+	// 即使 server.cfg 里还写着旧值 200，这里也会把 128 位剔掉，保证喷中后仍能看聊天。
+	iHudToApply = hud_to_apply.IntValue & ~HIDEHUD_KEEP_ALWAYS;
+
 	bHideUntilDry = hide_until_dry.BoolValue;
 	bPluginOn = blindluck_on.BoolValue;
 }

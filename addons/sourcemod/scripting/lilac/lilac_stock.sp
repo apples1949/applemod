@@ -516,6 +516,11 @@ void lilac_ban_client(int client, int cheat)
 	if (!lilac_ban_active(cheat))
 		return;
 
+	/* 封禁后端（basebans 的 BanClient 默认就带踢人，见 BANFLAG_NOKICK）会把玩家
+	 * 当场踢下线，所以 userid 必须在封禁之前取。放到下面那个 kick 定时器里现取会
+	 * 抛 "Client X is not connected"，把 error log 刷一条并打断这个回调。 */
+	int userid = GetClientUserId(client);
+
 	if (icvar[CVAR_BAN_LANGUAGE])
 		lang = client;
 
@@ -565,7 +570,7 @@ void lilac_ban_client(int client, int cheat)
 	}
 	}
 
-	CreateTimer(5.0, timer_kick, GetClientUserId(client));
+	CreateTimer(5.0, timer_kick, userid);
 }
 
 /* Which plugin bans go through, in priority order: MaterialAdmin,

@@ -6,7 +6,7 @@ public Plugin myinfo =
     name        = "[L4D2] Scripted HUD",
     author      = "Mart,apples1949",
     description = "Display boss progress and server info using the scripted HUD",
-    version     = "1.6.0",
+    version     = "1.6.1",
     url         = "https://forums.alliedmods.net/showthread.php?t=331212"
 }
 
@@ -37,6 +37,7 @@ public Plugin myinfo =
 
 // 「多人配置」门槛：survivor_limit 达到这个值才算多人局（12v12=12，原版/4v4=4）。
 // 人数行、!jg/!sur/!inf 指令提示只在这种配置下显示。
+// 1.6.1 起 HUD2 的时间写法也用它分流：多人配置只显示 时:分:秒，4v4 及以下显示完整日期时间。
 #define MULTIPLAYER_SURVIVOR_LIMIT    12
 
 // ====================================================================================================
@@ -1270,14 +1271,25 @@ void GetHUD2_Text(char[] output, int size)
     FormatEx(output, size, "\0");
     int PlayerLimit = GetConVarInt(FindConVar("sv_maxplayers"));
     char hostname[64];
-    char sTime[16];
+    char sTime[32];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
-    FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
+
+    // 1.6.1：时间部分按配置分两种写法（判据统一走 survivor_limit，见 IsMultiplayerMode）：
+    //   - 4v4 对抗（survivor_limit < MULTIPLAYER_SURVIVOR_LIMIT）：显示完整日期时间，
+    //     例如 "2026/11/14 20:21:23"，方便玩家直接看到现实日期/时间；
+    //   - 多人配置（12v12 等）：那一行后面还要接 !jg/!sur/!inf 指令提示，位置不够，
+    //     保持只显示 "时:分:秒"。
+    bool bMultiplayer = IsMultiplayerMode();
+
+    if (bMultiplayer)
+        FormatTime(sTime, sizeof(sTime), "%H:%M:%S", GetTime());
+    else
+        FormatTime(sTime, sizeof(sTime), "%Y年%m月%d日 %H时%M分%S秒", GetTime());
 
     // 第二行按模式给对应的指令提示（第一行永远是 服务器名(玩家/在线/上限)）：
     //   - 多人配置（12v12）：!jg / !sur / !inf 是 l4d_superversus（多人插件）的指令，只有这种配置才有；
-    //   - 其它配置（原版/4v4）：这些指令不存在，敲了没反应，第二行只留时间。
-    if (IsMultiplayerMode())
+    //   - 其它配置（原版/4v4）：这些指令不存在，敲了没反应，第二行只留日期时间。
+    if (bMultiplayer)
     {
         FormatEx(output, size, "%s(%d/%d/%d)\n%s !jg 随机加入 !sur 生还者 !inf 感染者",
             hostname, GetPlayerNumber(), GetConnectedNumber(), PlayerLimit, sTime);

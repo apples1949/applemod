@@ -64,7 +64,7 @@ public void OnPluginStart()
     g_hMultiplier = CreateConVar( \
         "applemod_sniper_tank_bonus_multiplier", \
         "1.5", \
-        "坦克未移动时狙击伤害的倍率。1.5 表示变成原来的 150%。默认 1.5；仅 12v12 配置在 cfg/cfgogl/applemod12v12/applemod12v12.cfg 里由 confogl_addcvar 下发 2.0", \
+        "坦克未移动时狙击伤害的倍率。1.5 表示变成原来的 150%。默认 1.5；12v12 配置在 cfg/cfgogl/applemod12v12/applemod12v12.cfg 里由 confogl_addcvar 显式下发 1.5", \
         FCVAR_NOTIFY, true, 0.0, false, 0.0 \
     );
 

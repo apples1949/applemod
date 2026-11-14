@@ -1,5 +1,9 @@
 /*
- *	v1.3.3
+ *	v1.3.4
+ *
+ *	1:配置键新增 IP:* 通配(这台IP上的所有端口共用同一个服名),查找顺序: IP:端口 -> 本地IP:端口 -> IP:* -> *:端口 -> default.
+ *	   (以下是 v1.3.3 记录)
+ *
  *
  *	1:修正引擎直读报错/崩坏: SDKCall_Raw会先把第1个参数解引用当this指针(普通C函数必须用SDKCall_Static),
  *	  参数改用SDKType_String+SDKPass_Pointer(会传插件缓冲区的真实指针), 缓冲给24字节.
@@ -19,7 +23,7 @@
 #undef REQUIRE_PLUGIN
 #include <confogl>
 
-#define PLUGIN_VERSION	"1.3.3"
+#define PLUGIN_VERSION	"1.3.4"
 #define MAX_SIZEOF		128	//服名字符串大小.
 #define DEFAULT_NAME	"猜猜这个是谁的萌新服?"	//默认服名.
 #define KV_ROOT			"hostname"	//配置文件根节点.
@@ -37,6 +41,7 @@ char g_sBaseName[MAX_SIZEOF];		//配置文件里属于当前服务器的服名.
 char g_sServerKey[MAX_SIZEOF];		//当前服务器的配置键(IP:端口).
 char g_sLocalKey[MAX_SIZEOF];		//status里本地绑定地址的配置键(IP:端口).
 char g_sWildcardKey[MAX_SIZEOF];	//通配配置键(*:端口).
+char g_sIpWildcardKey[MAX_SIZEOF];	//通配配置键(IP:*),这台IP上的所有端口共用.
 char g_sStatusIP[64];				//status里的公网地址.
 char g_sStatusPort[16];				//status里的端口.
 char g_sLocalIP[64];				//status里的本地绑定地址.
@@ -184,7 +189,7 @@ public Action Addhostname(int client, int args)
 	return Plugin_Handled;
 }
 
-//读取当前服务器的服名:按"IP:端口"->本地IP:端口->*:端口->default的顺序查找.
+//读取当前服务器的服名:按"IP:端口"->本地IP:端口->IP:*->*:端口->default的顺序查找.
 void LoadServerName()
 {
 	char sName[MAX_SIZEOF];
@@ -236,12 +241,17 @@ void LoadServerName()
 		strcopy(sSource, sizeof(sSource), g_sLocalKey);
 		bFound = true;
 	}
-	else if(g_sWildcardKey[0] != '\0' && kv.JumpToKey(g_sWildcardKey, false))//3:同一端口的通配键(*:端口).
+	else if(g_sIpWildcardKey[0] != '\0' && kv.JumpToKey(g_sIpWildcardKey, false))//3:这台IP上所有端口的通配键(IP:*).
+	{
+		strcopy(sSource, sizeof(sSource), g_sIpWildcardKey);
+		bFound = true;
+	}
+	else if(g_sWildcardKey[0] != '\0' && kv.JumpToKey(g_sWildcardKey, false))//4:同一端口的通配键(*:端口).
 	{
 		strcopy(sSource, sizeof(sSource), g_sWildcardKey);
 		bFound = true;
 	}
-	else if(kv.JumpToKey(DEFAULT_KEY, false))//4:默认键.
+	else if(kv.JumpToKey(DEFAULT_KEY, false))//5:默认键.
 	{
 		strcopy(sSource, sizeof(sSource), DEFAULT_KEY);
 		bFound = true;
@@ -367,7 +377,7 @@ void SaveServerName(const char[] sName, const char[] sKey)
 	SetServerName();
 }
 
-//生成配置键:主键(IP:端口)、本地键、通配键.
+//生成配置键:主键(IP:端口)、本地键、通配键(IP:* 和 *:端口).
 void BuildServerKey()
 {
 	char sIP[64];
@@ -383,7 +393,12 @@ void BuildServerKey()
 	else
 		g_sLocalKey[0] = '\0';
 
-	if(sPort[0] != '\0')
+	if(IsValidIP(sIP))//这台服务器IP上的所有端口: "IP:*"
+		FormatEx(g_sIpWildcardKey, sizeof(g_sIpWildcardKey), "%s:%s", sIP, WILDCARD_IP);
+	else
+		g_sIpWildcardKey[0] = '\0';
+
+	if(sPort[0] != '\0')//同一端口的所有服务器: "*:端口"
 		FormatEx(g_sWildcardKey, sizeof(g_sWildcardKey), "%s:%s", WILDCARD_IP, sPort);
 	else
 		strcopy(g_sWildcardKey, sizeof(g_sWildcardKey), WILDCARD_IP);

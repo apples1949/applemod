@@ -5,7 +5,7 @@
 		"Addresses"
 		{
 			//引擎的公网地址读取函数, status里"[ public x.x.x.x:端口 ]"就是它给的.
-			//插件里对应 l4d2_hostname_engine 1 (默认0=不调用).
+			//插件里对应 l4d2_hostname_engine 1 (默认1=优先用签名).
 			"NET_GetPublicAdr"
 			{
 				"signature"		"NET_GetPublicAdr"
@@ -16,22 +16,49 @@
 			/**
 			 * bool NET_GetPublicAdr(netadr_t &adr)   -- cdecl, 1个指针参数, 返回bool
 			 *
-			 * 出处: 私人文件/reports/status-public-ip-逆向报告.md
-			 *   调用方: status (engine_srv.so RVA 0x0016D400, 调用点 0x0016D523)
-			 *   内部逻辑: net_public_adr 非空就用它 -> 否则调 Steam ISteamGameServer014 vtable slot 33
-			 *            -> 都不行返回 false (status 打印 "[ public n/a ]")
+			 * 内部逻辑(两平台一致):
+			 *   1) net_public_adr 这个ConVar非空 -> netadr_s::SetFromString(它)
+			 *   2) 否则 net_dedicated 为真且 SteamGameServer接口非空 -> 调该接口 vtable slot 33(偏移0x84)
+			 *      取IPv4, 端口用 NET_GetUDPPort(1)
+			 *   3) 都失败返回 false (status 打印 "[ public n/a ]")
+			 * 引擎从不回写 net_public_adr, 它只是"用户可写的覆盖项".
 			 *
-			 * 样本: engine_srv.so (ELF32/i386), 游戏 build 2.2.4.3 10097,
-			 *       sha256 5fa15f28...09b7, 函数 RVA 0x001B53A0, 大小 425 字节.
+			 * ---- Linux 样本 ----
+			 * engine_srv.so (ELF32/i386), build 2.2.4.3 10097, sha256 5fa15f28...09b7
+			 * 函数 RVA 0x001B53A0, 大小 425 字节; status 在 RVA 0x0016D400(调用点 0x0016D523)
+			 * 详细证据: 私人文件/reports/status-public-ip-逆向报告.md §3~§7
+			 * sigcheck: OK hits=1 (.text va=0x1B53A0)
 			 *
-			 * 只提供 linux: windows (engine.dll) 没有分析, 所以 windows 服不会命中这条签名,
-			 * 插件会自动退回 net_public_adr/ip/hostip/status 这些取值方式.
+			 * ---- Windows 样本 ----
+			 * engine.dll (PE32/i386), sha256 8a6d4680...bf7ba86, PE timestamp 1782845142 (2026-06-30 18:45:42 UTC)
+			 * 函数 VA 0x101CB380 (RVA 0x1CB380), 大小 0x135=309 字节; status 在 VA 0x101949B0(调用点 0x10194B24)
+			 * 关键地址: net_public_adr 对象 0x106B2F30 (flags@+0x14, m_pParent@+0x1C, 串@parent+0x24),
+			 *          net_dedicated 0x106B2B50, Steam3Server()=0x1012D5D0 -> 0x10674648, +0x04 = ISteamGameServer*
+			 * 说明: Windows 的 NET_GetUDPPort 被内联(序言里的 cmp [0x106B2F28],1 即此), Linux 是 call.
+			 * sigcheck: OK hits=1 (.text rva=0x1CB380); 在 server.dll / engine_srv.so / engine.so 上 0 命中
+			 *
+			 * ---- 客户端/服务端差异 ----
+			 * 该函数在不同构建里没有 client/dedi 分支: 实测 Linux 客户端 engine.so@0x48D240 与
+			 * Linux 服务端 engine_srv.so@0x1B53A0 的函数体 115 条指令逐条相同(0 差异, 屏蔽立即数后).
+			 * 所以 Windows 这份样本(旁有 serverbrowser.dll, 无法100%断定是 srcds)推导出的签名,
+			 * 在 srcds 上命中概率高; 若真服不命中, 插件会记一条"签名没有命中"并自动退回status解析.
+			 *
+			 * ---- 备用(都已在 engine.dll 上 sigcheck 唯一, 需要时替换 windows 那行) ----
+			 * 76字节版:
+			 *   55 8B EC 83 EC 1C A1 ? ? ? ? 33 C5 89 45 FC 53 32 DB 83 3D ? ? ? ? 01 56 8B 75 08
+			 *   7E 0E A1 ? ? ? ? 0F B7 48 10 89 4D E4 EB 07 C7 45 E4 00 00 00 00 F7 05 ? ? ? ? 00 10
+			 *   00 00 75 12 8B 15 ? ? ? ? 8B 42 24 85 C0
+			 * 不依赖序言的锚点(函数+0x35, Addresses里要配 "offset" "-53"):
+			 *   F7 05 ? ? ? ? 00 10 00 00 75 12 8B 15 ? ? ? ? 8B 42 24 85 C0 74 54 80 38 00 74 4F
+			 *   6A 03 8B CE B3 01 E8 62 52 0C 00
 			 */
 			"NET_GetPublicAdr"
 			{
 				"library"		"engine"
 				"linux"			"\x55\x89\xE5\x57\x56\x53\x83\xEC\x4C\x65\xA1\x14\x00\x00\x00\x89\x45\xE4\x31\xC0\xC7\x04\x24\x01\x00\x00\x00\x8B\x5D\x08\xE8\x2A\x2A\x2A\x2A"
-								/* 55 89 E5 57 56 53 83 EC 4C 65 A1 14 00 00 00 89 45 E4 31 C0 C7 04 24 01 00 00 00 8B 5D 08 E8 ? ? ? ?  -- 35字节,31个固定字节 */
+								/* 55 89 E5 57 56 53 83 EC 4C 65 A1 14 00 00 00 89 45 E4 31 C0 C7 04 24 01 00 00 00 8B 5D 08 E8 ? ? ? ?  -- 35字节,31个固定 */
+				"windows"		"\x55\x8B\xEC\x83\xEC\x1C\xA1\x2A\x2A\x2A\x2A\x33\xC5\x89\x45\xFC\x53\x32\xDB\x83\x3D\x2A\x2A\x2A\x2A\x01\x56\x8B\x75\x08"
+								/* 55 8B EC 83 EC 1C A1 ? ? ? ? 33 C5 89 45 FC 53 32 DB 83 3D ? ? ? ? 01 56 8B 75 08  -- 30字节,22个固定 */
 			}
 		}
 	}

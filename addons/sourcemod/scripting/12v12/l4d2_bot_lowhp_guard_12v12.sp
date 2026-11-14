@@ -121,10 +121,36 @@
  *       把虚血清 0、实血设为阈值（默认 10）并立即进入守护状态。
  *       不在守护名额内的 bot 不做保命，照常掉血 / 倒地（否则全队 bot 永远打不死）。
  *
+ *   1.4.0 变更（按需求：无限救起 + 轮询所有生还者状态 + 修"挂边卡无敌"）：
+ *     - 需求1 无限救起：l4d2_bot_guard_revive_times 语义改成
+ *         -1 = 不限次数（新的默认值，无限救起）；0 = 关闭自动救起；>0 = 每回合上限。
+ *       原语义（0=关闭、1=每回合一次）里 0 的含义保持不变，避免旧配置被静默改写。
+ *     - 需求2 救起后"当作没倒地过"：救起时把 m_currentReviveCount 与 m_bIsOnThirdStrike
+ *       一起清零。前者决定"下一次倒地是不是第三次打击"，后者就是黑白/直接死的那个标记，
+ *       只清前者会留下黑白状态，两个都清才等于"从没倒过"。
+ *     - 需求3 改成循环定时轮询：不再靠 player_incapacitated 事件 + 一次性 timer 救起，
+ *       改为由 0.1s 的保护线程持续扫描"所有生还者"的状态（倒地 / 挂边 / 低血 / 挂边坠落），
+ *       倒地的 bot 只要符合守护条件就立刻救起（倒地/挂边的判定完全不依赖事件是否漏接，
+ *       插件晚加载、bot 早就在地上躺着的情况一样能救）。
+ *       救起延迟仍由 l4d2_bot_guard_revive_delay 控制（0 = 发现即救）。
+ *     - 需求4 修"挂边死亡坠落状态被守护 → 卡原地无敌"（玩家反馈）：
+ *         现象：12 人局里两个 bot 挂在边缘没进守护，等她们挂边到时间往下掉、
+ *               进入"坠落死亡"状态时反而进了守护 ⇒ 免伤 + 血量回锁把引擎的死亡流程冻住，
+ *               人卡在原地无敌，直到有玩家接管身体才结束，接管瞬间立刻死亡。
+ *         根因：守护的挂载条件只看"存活 + 未倒地 + 总血量 <= 阈值"。挂边（m_isHangingFromLedge）
+ *               不写 m_isIncapacitated，掉边坠落（m_isFallingFromLedge）更是引擎已经在走
+ *               死亡流程 —— 这两种状态都被当成"正常站立的低血 bot"送进了守护。
+ *         修复：① ShouldGuard 明确排除挂边 / 掉边坠落（新增 IsOnLedge()）；
+ *               ② 保护线程（0.1s）里加硬保险：守护中的人一旦倒地 / 挂边 / 坠落 / 死亡
+ *                  立刻 LeaveGuard，把 m_takedamage 与血量锁一起还原，绝不可能冻结死亡流程；
+ *               ③ 不再对"掉边坠落"中的人做任何救起/守护写入（那是引擎的死亡流程）。
+ *
  * 安全设计（重要，改动前请先读）：
- *   - 守护状态只对"存活且未倒地"的 bot 生效。倒地后守护会自动关闭，
+ *   - 守护状态只对"存活且未倒地、未挂边、未掉边坠落"的 bot 生效。倒地后守护会自动关闭，
  *     避免"倒地 + 免伤 + 不能流血死亡"造成永久卡关；倒地由自动救起兜底
- *     （次数用完后按正常规则流血死亡）。
+ *     （1.4.0 起默认不限次数）。
+ *   - 保护线程里有一道硬保险：守护中的人一旦倒地/挂边/坠落/死亡，立刻退出守护。
+ *     这是防止"卡原地无敌"的最后一道闸，不要为了省开销删掉。
  *   - 守护结束时会把进入守护前的四个发光 netprop 原值写回去，
  *     避免污染其它插件的发光效果。
  *   - 移速是独立于守护状态的另一套状态（g_bSpeedApplied 记录写过谁），
@@ -149,7 +175,12 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
-#define PLUGIN_VERSION		"1.3.4"
+#define PLUGIN_VERSION		"1.4.0"
+
+// 1.4.0：救起提示的全局节流（秒）。无限救起时如果每救一次就刷一条，12v12 会刷屏。
+#define REVIVE_NOTIFY_COOLDOWN	3.0
+// 1.4.0：救起失败（引擎没把人拉起来）时的重试间隔（秒），避免每 tick 空转。
+#define REVIVE_RETRY_INTERVAL	0.5
 
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
@@ -201,9 +232,16 @@ int		g_iOrigGlowRange[MAXPLAYERS + 1];	// 进入守护前的 m_nGlowRange
 int		g_iOrigGlowRangeMin[MAXPLAYERS + 1];	// 进入守护前的 m_nGlowRangeMin
 int		g_iOrigTakeDamage[MAXPLAYERS + 1];		// 进入守护前的 m_takedamage（1.2.2：守护期间引擎层免伤）
 float	g_fTempStash[MAXPLAYERS + 1];		// 守护开始时冻结的虚血值
-int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动救起次数
+int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动救起次数（-1 = 不限次数）
 float	g_fTestGlowUntil[MAXPLAYERS + 1];	// 调试用：到该时刻前强制给该客户端上轮廓
 bool	g_bSpeedApplied[MAXPLAYERS + 1];	// 1.2.0：本插件是否给该客户端写过移速（退出/失效时要还原）
+
+// 1.4.0：轮询式救起的状态
+//   g_fReviveAt        计划救起的游戏时间（0 = 当前没有计划）
+//   g_bReviveCounted   本次倒地/挂边是否已经扣过救起次数（失败重试时不重复扣）
+float	g_fReviveAt[MAXPLAYERS + 1];
+bool	g_bReviveCounted[MAXPLAYERS + 1];
+float	g_fNotifyNextAt;					// 1.4.0：救起提示的全局节流时间戳
 
 float	g_fWarnLast[MAXPLAYERS + 1];		// 1.3.0：该特感玩家上次收到"打不动"提示的游戏时间
 char	g_sWarnSound[PLATFORM_MAX_PATH];	// 1.3.0：解析后的提示音路径（空 = 不播放）
@@ -238,7 +276,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持每回合一次自动救起；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动救起（1.4.0 起默认无限次，救起后倒地次数清零，改为轮询所有生还者状态并在倒地/挂边时立刻救起）；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -343,9 +381,9 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 1.0, true, 1000.0);
 
 	g_cvReviveTimes = CreateConVar("l4d2_bot_guard_revive_times",
-		"1",
-		"AI 生还者每回合可自动救起次数（0=关闭自动救起）.",
-		FCVAR_NOTIFY, true, 0.0, true, 10.0);
+		"-1",
+		"AI 生还者每回合可自动救起次数：-1=不限次数（默认，无限救起）；0=关闭自动救起；>0=每回合上限.",
+		FCVAR_NOTIFY, true, -1.0, true, 99.0);
 
 	g_cvReviveHealth = CreateConVar("l4d2_bot_guard_revive_health",
 		"30",
@@ -421,7 +459,8 @@ public void OnPluginStart()
 		PrintToServer("[BotGuard] 未检测到 Actions 扩展 (actionslib)：守护中的 AI 生还者仍会自行吃药/打针/打包。插件其余功能不受影响。");
 	}
 
-	HookEvent("player_incapacitated", Event_PlayerIncapacitated, EventHookMode_Post);
+	// 1.4.0：不再挂 player_incapacitated —— 倒地/挂边的判定改成保护线程里的轮询
+	// （见 ProcessBotRevives：不依赖事件，晚加载 / 挂边一样能救）。
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 
 	// 1.3.3：玩家离开、身体被 bot 接管时，打断"继承"过来的自动吃药/打针
@@ -493,7 +532,12 @@ public void OnMapStart()
 		// 换图后实体重建，m_flLaggedMovementValue 自然是 1.0，只需要清掉标记
 		g_bSpeedApplied[i] = false;
 		g_fWarnLast[i] = 0.0;
+		// 1.4.0：轮询式救起的计划全部作废
+		g_fReviveAt[i] = 0.0;
+		g_bReviveCounted[i] = false;
 	}
+
+	g_fNotifyNextAt = 0.0;
 }
 
 public void OnPluginEnd()
@@ -549,6 +593,9 @@ public void OnClientPutInServer(int client)
 	g_iReviveLeft[client] = g_cvReviveTimes.IntValue;
 	g_bSpeedApplied[client] = false;
 	g_fWarnLast[client] = 0.0;
+	// 1.4.0：轮询式救起的计划
+	g_fReviveAt[client] = 0.0;
+	g_bReviveCounted[client] = false;
 
 	// 每个客户端都要挂伤害钩子（r ygive 同款做法：进服即挂）
 	SDKHook(client, SDKHook_OnTakeDamage, Hook_OnTakeDamage);
@@ -563,6 +610,8 @@ public void OnClientDisconnect(int client)
 	// 客户端已经离开，实体随后销毁，不需要再写属性，只清标记
 	g_bSpeedApplied[client] = false;
 	g_fWarnLast[client] = 0.0;
+	g_fReviveAt[client] = 0.0;
+	g_bReviveCounted[client] = false;
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -630,7 +679,14 @@ void StartProtectTimer()
    ① 立刻解掉任何控制 —— charger 的「捶打/扛走」引擎没有"开始捶打"的前置 forward 可拦，
       只能靠这条快线程抢在伤害与位移之前打断（舌头/扑击/骑乘/撞墙另有一级前置拦截）；
    ② 血量回锁 —— spitter 酸液这类伤害不一定经过 OnTakeDamage（SDKHook 拦不到），
-      这里把实血顶回进入守护时的值，保证"守护中绝不掉血"。 */
+      这里把实血顶回进入守护时的值，保证"守护中绝不掉血"。
+
+   1.4.0：这条线程同时承担两件事：
+   ③ 硬保险 —— 守护中的人一旦倒地 / 挂边 / 掉边坠落 / 死亡，立刻 LeaveGuard。
+      玩家的"挂边坠落卡原地无敌"就是缺了这一步：倒地/坠落时 m_takedamage 还是 0、
+      血量还被回锁着，引擎的死亡流程走不完，人就永远卡在那里。这条检查必须在
+      伤害/血量回锁之前做，绝不能省。
+   ④ 轮询救起 —— 扫描所有生还者状态（倒地 / 挂边），到点立刻救起（见 ProcessBotRevives）。 */
 public Action Timer_Protect(Handle timer)
 {
 	if (!g_cvEnabled.BoolValue)
@@ -641,8 +697,15 @@ public Action Timer_Protect(Handle timer)
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (!g_bGuarded[i] || !IsClientInGame(i) || !IsPlayerAlive(i))
+		if (!g_bGuarded[i])
 			continue;
+
+		// 1.4.0 ③：硬保险。注意顺序：先判断要不要退出守护，再谈解控/回血。
+		if (!IsClientInGame(i) || !IsPlayerAlive(i) || IsIncapacitated(i) || IsOnLedge(i))
+		{
+			LeaveGuard(i);
+			continue;
+		}
 
 		if (bBlockControl)
 			ReleaseControl(i);
@@ -650,6 +713,9 @@ public Action Timer_Protect(Handle timer)
 		if (bInvincible && g_iGuardHealth[i] > 0 && GetClientHealth(i) < g_iGuardHealth[i])
 			SetEntityHealth(i, g_iGuardHealth[i]);
 	}
+
+	// 1.4.0 ④：轮询所有生还者状态，倒地/挂边的 bot 立刻救起
+	ProcessBotRevives();
 
 	return Plugin_Continue;
 }
@@ -670,6 +736,16 @@ public Action Timer_Tick(Handle timer)
 	g_iAiSurvivors = CountAiSurvivors();
 	g_iDownCount = CountDownedSurvivors();
 	g_iGuardAllowed = ComputeAllowedGuards();
+
+	// 1.4.0：轮询所有生还者状态 —— 倒地 / 挂边的 bot 在这里被救起（0.1s 保护线程里也在跑，
+	// 这里再跑一次是为了"救起 + 纳入守护"能在同一个 tick 里完成）。
+	// 救起会改变存活/倒地人数，所以救完要重算一遍名额。
+	if (ProcessBotRevives())
+	{
+		g_iAiSurvivors = CountAiSurvivors();
+		g_iDownCount = CountDownedSurvivors();
+		g_iGuardAllowed = ComputeAllowedGuards();
+	}
 
 	// 第一步：先释放"已经不该守护"的人（死亡 / 倒地 / 被真人接管 / 血量回升 / 总开关关闭）
 	for (int i = 1; i <= MaxClients; i++)
@@ -1383,6 +1459,14 @@ bool ShouldGuard(int client)
 	if (IsIncapacitated(client))
 		return false;
 
+	// 1.4.0：挂边 / 挂边坠落同样不能进守护。
+	//   挂边（m_isHangingFromLedge）不写 m_isIncapacitated，所以以前会被当成"正常的低血 bot"；
+	//   挂边到时间往下掉（m_isFallingFromLedge）时引擎已经在走死亡流程，此时给
+	//   m_takedamage=0 + 血量回锁会把死亡流程冻住 —— 这就是玩家反馈的
+	//   "挂边的 bot 卡在原地无敌，直到有人接管才结束，接管瞬间就死"。
+	if (IsOnLedge(client))
+		return false;
+
 	return GetTotalHealth(client) <= g_cvHealth.IntValue;
 }
 
@@ -1534,6 +1618,14 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	// 1.2.0 起不再有"AI 数量超限就整段失效"的开关，改由名额本身控制谁能进守护
 	if (g_bGuarded[victim])
 	{
+		// 1.4.0：守护中的人若已经进入倒地/挂边/坠落状态，先退出守护再放行这次伤害，
+		// 否则会把引擎的死亡流程一起吃掉（卡原地无敌）。
+		if (IsIncapacitated(victim) || IsOnLedge(victim))
+		{
+			LeaveGuard(victim);
+			return Plugin_Continue;
+		}
+
 		// 1.3.0：告诉攻击的玩家特感"这只人机是无敌的"（提示音 + 三渠道文字，带 1 秒节流）
 		NotifyGuardBlocked(attacker, victim);
 
@@ -1547,6 +1639,12 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 		return Plugin_Continue;
 
 	if (IsIncapacitated(victim))
+		return Plugin_Continue;
+
+	// 1.4.0：挂边 / 挂边坠落的人不做"保命"。挂边坠落已经是引擎在执行的死亡流程，
+	// 这时候把他打进守护（m_takedamage=0 + 血量回锁）就会冻住死亡流程 —— 玩家反馈的
+	// "挂边的 bot 卡在原地无敌，直到有人接管才结束"就是从这里进去的。
+	if (IsOnLedge(victim))
 		return Plugin_Continue;
 
 	// 0 伤害的"记分"事件不是真伤害，不参与保命判定
@@ -1707,57 +1805,135 @@ bool BlockControlOn(int victim)
 }
 
 // ============================================================================
-// 自动救起（每回合每名 AI 生还者一次）
+// 1.4.0：自动救起（轮询式，默认不限次数）
+//
+// 与旧实现的区别（这三点都是玩家反馈逼出来的）：
+//   ① 旧实现"每回合每人只有 1 次"，次数用完倒地就只能流血死 —— 现在默认无限（-1）。
+//   ② 旧实现只在 player_incapacitated 事件里排一个一次性 timer：事件漏接（插件晚加载、
+//      事件在插件就绪前发生）、或者人是"挂边"而不是"倒地"，就完全不会救。
+//      现在改成由 0.1s 的保护线程持续扫描**所有生还者**的状态 —— 只要看到
+//      "倒地 / 挂边" 且是本插件该管的 bot，就走救起流程，不依赖任何事件。
+//   ③ 旧实现救起后不管"倒地次数"，救起来的人仍然算"已经倒地过"（下一次倒地可能直接
+//      进黑白甚至直接死）。现在救起时把 m_currentReviveCount 与 m_bIsOnThirdStrike
+//      一起清零 = 当作没倒地过。
+//
+// 状态机（每个生还者各自一份）：
+//   g_fReviveAt      计划救起的时间；发现"需要救起"时排期（= 现在 + revive_delay）
+//   g_bReviveCounted 本次倒地/挂边是否已经扣过次数；救起失败会重试，重试不重复扣
 // ============================================================================
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	// 回合开始时重置每名客户端的自动救起次数
+	// 回合开始时重置每名客户端的自动救起次数（-1 = 不限次数）
 	for (int i = 0; i <= MaxClients; i++)
+	{
 		g_iReviveLeft[i] = g_cvReviveTimes.IntValue;
+		g_fReviveAt[i] = 0.0;
+		g_bReviveCounted[i] = false;
+	}
+
+	g_fNotifyNextAt = 0.0;
 
 	// 1.3.4：本回合重新判定「终点安全屋」的运行期条件
 	// （native 可用性 + 本图有没有 info_changelevel；救援关会自动识别成"没有"）。
 	RefreshEndSaferoomState();
 }
 
-public void Event_PlayerIncapacitated(Event event, const char[] name, bool dontBroadcast)
+// 1.4.0：轮询所有生还者状态，把"倒地 / 挂边"的 bot 救起来。
+// 返回 true 表示本次至少救起了一个人（调用方可据此重算守护名额）。
+bool ProcessBotRevives()
 {
-	if (!g_cvEnabled.BoolValue || g_cvReviveTimes.IntValue <= 0)
-		return;
+	if (!g_cvEnabled.BoolValue)
+		return false;
 
-	int client = GetClientOfUserId(event.GetInt("userid"));
-	if (!IsGuardTarget(client))
-		return;
+	// 0 = 关闭自动救起
+	if (g_cvReviveTimes.IntValue == 0)
+		return false;
 
-	if (g_iReviveLeft[client] <= 0)
-		return;
+	float fNow = GetGameTime();
 
 	float fDelay = g_cvReviveDelay.FloatValue;
 	if (fDelay < 0.0)
 		fDelay = 0.0;
 
-	CreateTimer(fDelay, Timer_AutoRevive, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	bool bAnyRevived = false;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		// 不是本插件该管的生还者（真人 / 已接管 / 已死亡 / 非生还者队）→ 清状态
+		if (!IsGuardCandidate(i))
+		{
+			g_fReviveAt[i] = 0.0;
+			g_bReviveCounted[i] = false;
+			continue;
+		}
+
+		// 现在不需要救起（站着 / 或者已经掉边坠落交给引擎）→ 结束这一轮，清状态
+		if (!NeedsReviveNow(i))
+		{
+			g_fReviveAt[i] = 0.0;
+			g_bReviveCounted[i] = false;
+			continue;
+		}
+
+		if (!HasReviveLeft(i))
+		{
+			// 次数用完（仅在 >0 的有限模式里出现）：保留倒地状态，按正常规则流血死亡
+			g_fReviveAt[i] = 0.0;
+			continue;
+		}
+
+		// 第一次发现 → 排期（revive_delay = 0 时就是"发现即救"）
+		if (g_fReviveAt[i] <= 0.0)
+			g_fReviveAt[i] = fNow + fDelay;
+
+		if (fNow < g_fReviveAt[i])
+			continue;
+
+		// 本次倒地只扣一次次数：救起失败会在 REVIVE_RETRY_INTERVAL 后重试，不能重复扣
+		if (!g_bReviveCounted[i])
+		{
+			if (g_cvReviveTimes.IntValue > 0 && g_iReviveLeft[i] > 0)
+				g_iReviveLeft[i]--;
+
+			g_bReviveCounted[i] = true;
+		}
+
+		bool bRevived = ReviveBotNow(i);
+
+		if (bRevived)
+		{
+			g_fReviveAt[i] = 0.0;
+			bAnyRevived = true;
+		}
+		else
+		{
+			// 没救起来（引擎拒绝 / 还挂在边缘上）：稍后重试
+			float fRetry = (fDelay > REVIVE_RETRY_INTERVAL) ? fDelay : REVIVE_RETRY_INTERVAL;
+			g_fReviveAt[i] = fNow + fRetry;
+		}
+	}
+
+	return bAnyRevived;
 }
 
-public Action Timer_AutoRevive(Handle timer, any iUserId)
+// 1.4.0：立刻救起一个"倒地 / 挂边"的 bot，并把倒地次数清零（当作没倒地过）。
+// 返回 true = 救完之后复查，确实已经不在倒地/挂边状态了（引擎已把人拉起来）。
+//
+// 注意收尾（血量 / 倒地次数）是**无条件**写的，不等复查通过：
+// 引擎有时要下一帧才清 m_isIncapacitated，如果等复查通过才写，这一次救起的收尾就会漏掉
+// （人已经站起来，但血还是倒地时的 1，倒地次数也没清）。重复写这些属性是无害的。
+bool ReviveBotNow(int client)
 {
-	int client = GetClientOfUserId(iUserId);
-
-	if (!IsGuardTarget(client))
-		return Plugin_Stop;
-
-	// 期间被别人救起 / 已经死亡就不用管了
-	if (!IsIncapacitated(client))
-		return Plugin_Stop;
-
-	if (g_iReviveLeft[client] <= 0)
-		return Plugin_Stop;
-
-	g_iReviveLeft[client]--;
+	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+		return false;
 
 	// Left4DHooks: 让倒地/挂边生还者起身
+	// （left4dhooks.inc 的 @brief：Revives an incapacitated survivor, also from ledge hanging）
 	L4D_ReviveSurvivor(client);
+
+	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+		return false;
 
 	int iHealth = g_cvReviveHealth.IntValue;
 	if (iHealth < 1)
@@ -1765,20 +1941,48 @@ public Action Timer_AutoRevive(Handle timer, any iUserId)
 
 	SetEntityHealth(client, iHealth);
 
-	if (g_cvNotify.BoolValue)
-	{
-		if (g_iReviveLeft[client] > 0)
-		{
-			PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合剩余自动救起 %d 次）。",
-				client, g_iReviveLeft[client]);
-		}
-		else
-		{
-			PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合自动救起次数已用完）。", client);
-		}
-	}
+	// 1.4.0 需求：救起后"当作没倒地过"。
+	//   m_currentReviveCount  已经倒地过几次 —— 决定下一次倒地是不是"第三次打击"
+	//   m_bIsOnThirdStrike    第三次打击（黑白 / 再倒直接死）的标记位
+	// 两个都要清：只清前者的话黑白画面和"再倒就死"的判定还会留着。
+	SetEntProp(client, Prop_Send, "m_currentReviveCount", 0);
+	SetEntProp(client, Prop_Send, "m_bIsOnThirdStrike", 0, 1);
 
-	return Plugin_Stop;
+	// 复查：引擎拒绝（例如挂边的人拉不上来）时状态不会变，交给调用方稍后重试
+	if (NeedsReviveNow(client))
+		return false;
+
+	NotifyBotRevived(client);
+
+	return true;
+}
+
+// 1.4.0：救起提示（全局节流 REVIVE_NOTIFY_COOLDOWN，无限救起时不会刷屏）
+void NotifyBotRevived(int client)
+{
+	if (!g_cvNotify.BoolValue)
+		return;
+
+	float fNow = GetGameTime();
+
+	if (fNow < g_fNotifyNextAt)
+		return;
+
+	g_fNotifyNextAt = fNow + REVIVE_NOTIFY_COOLDOWN;
+
+	if (g_cvReviveTimes.IntValue < 0)
+	{
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（倒地次数已清零）。", client);
+	}
+	else if (g_iReviveLeft[client] > 0)
+	{
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合剩余自动救起 %d 次，倒地次数已清零）。",
+			client, g_iReviveLeft[client]);
+	}
+	else
+	{
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合自动救起次数已用完，倒地次数已清零）。", client);
+	}
 }
 
 // ============================================================================
@@ -1937,6 +2141,63 @@ bool IsHangingFromLedge(int client)
 	return GetEntProp(client, Prop_Send, "m_isHangingFromLedge", 1) != 0;
 }
 
+// 1.4.0：是否已经"从边缘掉下去了"（挂边超时 → 坠落死亡）。
+// 这是引擎正在执行的死亡流程，不是可救/可守护的状态：
+// 此时任何减伤或血量回写都会让死亡流程走不完，人卡在原地。
+bool IsFallingFromLedge(int client)
+{
+	return GetEntProp(client, Prop_Send, "m_isFallingFromLedge", 1) != 0;
+}
+
+// 1.4.0：挂边 或 挂边坠落 —— 两种状态都不允许进守护（见 ShouldGuard）
+bool IsOnLedge(int client)
+{
+	return IsHangingFromLedge(client) || IsFallingFromLedge(client);
+}
+
+// 1.4.0：守护候选 —— 只看"这个生还者是不是本插件该管的（非玩家操控的存活生还者）"，
+// 不看血量 / 倒地 / 挂边。倒地、挂边的人要做的是"立刻救起"而不是"免伤"。
+bool IsGuardCandidate(int client)
+{
+	if (!g_cvEnabled.BoolValue)
+		return false;
+
+	if (client <= 0 || client > MaxClients)
+		return false;
+
+	if (!IsClientInGame(client))
+		return false;
+
+	if (GetClientTeam(client) != TEAM_SURVIVOR)
+		return false;
+
+	// 被真人接管后 IsFakeClient 会变 false，这里直接排除（接管的身体不归本插件管）
+	if (!IsFakeClient(client))
+		return false;
+
+	return IsPlayerAlive(client);
+}
+
+// 1.4.0：这个 bot 现在要不要救起 —— 倒地 或 挂边。
+//   挂边坠落（IsFallingFromLedge）不在里面：那是引擎的死亡流程，人已经"掉下去"了，
+//   此时救起只会把她从死亡流程里硬拽回来（玩家反馈的卡死就是这条路）。
+bool NeedsReviveNow(int client)
+{
+	if (IsFallingFromLedge(client))
+		return false;
+
+	return IsIncapacitated(client) || IsHangingFromLedge(client);
+}
+
+// 1.4.0：还有没有救起次数。cvar < 0 = 不限次数（无限救起，默认）
+bool HasReviveLeft(int client)
+{
+	if (g_cvReviveTimes.IntValue < 0)
+		return true;
+
+	return g_iReviveLeft[client] > 0;
+}
+
 // 总血量 = 实血 + 虚血（临时血量，已扣减自然衰减）
 int GetTotalHealth(int client)
 {
@@ -1963,7 +2224,14 @@ int GetTotalHealth(int client)
 //   - 发光 netprop 当前值 + HasEntProp 结果（false 说明该客户端读不到属性表，但插件仍会照写）
 public Action Cmd_Status(int client, int args)
 {
-	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 自动救起=%d/回合 | 守护上限=%d（按未倒地比例分配） | 移速 %.0f/%.0f = x%.2f",
+	// 1.4.0：自动救起次数改成"无限时显示不限"（cvar = -1）
+	char sReviveTimes[32];
+	if (g_cvReviveTimes.IntValue < 0)
+		strcopy(sReviveTimes, sizeof(sReviveTimes), "不限(无限救起)");
+	else
+		IntToString(g_cvReviveTimes.IntValue, sReviveTimes, sizeof(sReviveTimes));
+
+	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 自动救起=%s | 守护上限=%d（按未倒地比例分配） | 移速 %.0f/%.0f = x%.2f",
 		PLUGIN_VERSION,
 		g_cvEnabled.IntValue,
 		g_cvHealth.IntValue,
@@ -1973,7 +2241,7 @@ public Action Cmd_Status(int client, int args)
 		g_cvInterval.FloatValue,
 		g_cvInvincible.IntValue,
 		g_cvBlockControl.IntValue,
-		g_cvReviveTimes.IntValue,
+		sReviveTimes,
 		g_cvMaxCount.IntValue,
 		g_cvBotSpeed.FloatValue,
 		g_cvBaseSpeed.FloatValue,
@@ -2042,21 +2310,29 @@ public Action Cmd_Status(int client, int args)
 		char sName[MAX_NAME_LENGTH];
 		GetClientName(i, sName, sizeof(sName));
 
+		// 1.4.0：补 hang / fall 两个挂边状态位，并显示"剩余救起"为不限时的写法
+		char sLeft[32];
+		if (g_cvReviveTimes.IntValue < 0)
+			strcopy(sLeft, sizeof(sLeft), "不限");
+		else
+			IntToString(g_iReviveLeft[i], sLeft, sizeof(sLeft));
+
 		ReplyToCommand(client,
-			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d | 实血=%d 虚血=%.1f 总血=%d | 移速=%.2f | 守护=%d(免伤位=%d) 本回合剩余救起=%d | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
+			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d | 实血=%d 虚血=%.1f 总血=%d | 移速=%.2f | 守护=%d(免伤位=%d) 本回合剩余救起=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
 			i, sName,
 			IsFakeClient(i) ? 0 : 1,
 			IsFakeClient(i) ? 1 : 0,
 			IsPlayerAlive(i) ? 1 : 0,
 			IsIncapacitated(i) ? 1 : 0,
 			IsHangingFromLedge(i) ? 1 : 0,
+			IsFallingFromLedge(i) ? 1 : 0,
 			GetClientHealth(i),
 			L4D_GetTempHealth(i),
 			GetTotalHealth(i),
 			GetEntPropFloat(i, Prop_Send, MOVEMENT_PROP),
 			g_bGuarded[i] ? 1 : 0,
 			GetEntProp(i, Prop_Data, "m_takedamage", 1),
-			g_iReviveLeft[i],
+			sLeft,
 			GetEntProp(i, Prop_Send, "m_iGlowType"),
 			GetEntProp(i, Prop_Send, "m_glowColorOverride"),
 			GetEntProp(i, Prop_Send, "m_nGlowRange"),

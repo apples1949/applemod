@@ -14,6 +14,14 @@
 #define MAX_CAMPAIGN_LIMIT      64
 #define READY_RESTART_MAP_DELAY 2
 
+// 踢出/强制旁观 处罚投票(4 级菜单)
+#define PUNISH_NONE        0	 // 未选择处罚方式
+#define PUNISH_KICK        1	 // 踢出玩家
+#define PUNISH_SPECTATE    2	 // 强制玩家旁观
+#define REASON_OTHER_INDEX 6	 // 理由表里"其他"的下标(必须与 g_sVoteReasons 一致)
+#define REASON_INPUT_MAX   10	 // 聊天框输入理由最多取前 10 个字符
+#define REASON_INPUT_TIME  20.0	 // 等待聊天框输入理由的时长(秒)
+
 // 过关检测相关
 #define MAP_END_FLAG_TIME     20.0	// 过关事件标记的有效时长(秒), 到时自动失效, 防止状态残留
 #define MAP_END_MIN_PLAY_TIME 20.0	// 地图/回合开始后多久内忽略过关事件(过滤开局过场动画的误报)
@@ -69,6 +77,22 @@ Handle g_hPenaltyTimer[MAXPLAYERS + 1];
 bool g_bSpectateAttempted[MAXPLAYERS + 1];
 int g_iSpectatePenaltyCounter[MAXPLAYERS + 1];
 int g_votedelay;
+
+// 踢出/旁观 处罚菜单流程状态(每个玩家独立, 多人同时开菜单不会互相覆盖)
+int	   g_iPunishAction[MAXPLAYERS + 1];			// 2级菜单选的处罚方式 PUNISH_*
+int	   g_iPunishTargetUserId[MAXPLAYERS + 1];	// 3级菜单选的玩家 userid
+Handle g_hReasonInputTimer[MAXPLAYERS + 1];		// 等待"其他"理由聊天输入的超时计时器
+
+// 投票理由表: 下标顺序即菜单里的序号, REASON_OTHER_INDEX 那一项要求玩家在聊天框输入
+char g_sVoteReasons[][] = {
+	"开挂",
+	"辱骂",
+	"黑枪",
+	"挂机",
+	"毒瘤",
+	"高延迟",
+	"其他",
+};
 
 ConVar g_Cvar_Limits;
 ConVar VotensHpED;
@@ -138,7 +162,7 @@ public Plugin myinfo =
 	name		= "Votes AppleMod",
 	author		= "apples1949",
 	description = "Votes Commands (builtinvotes)",
-	version		= "1.1.0",
+	version		= "1.2.0",
 	url			= "https://github.com/apples1949/l4dplugins"
 };
 
@@ -356,6 +380,7 @@ public void OnMapStart()
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		ClearSpectatePenalty(i);
+		ClearPunishState(i);
 	}
 	PrecacheSound("buttons/blip1.wav");
 }
@@ -363,6 +388,7 @@ public void OnMapStart()
 public void OnClientDisconnect(int client)
 {
     ClearSpectatePenalty(client);
+    ClearPunishState(client);
 }
 
 public void OnMapEnd()
@@ -372,7 +398,11 @@ public void OnMapEnd()
     ClearVoteExecution();
     delete g_hCooldownTimer;
     delete MapCountdownTimer;
-    for (int i = 1; i <= MaxClients; i++) ClearSpectatePenalty(i);
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        ClearSpectatePenalty(i);
+        ClearPunishState(i);
+    }
 }
 
 public void OnPluginEnd()
@@ -425,6 +455,8 @@ public Action Command_Votes(int client, int args)
 		return Plugin_Handled;
 	}
 
+	ClearPunishState(client);	// 重新打开主菜单 = 放弃上一次没走完的处罚投票
+
 	Menu menu = new Menu(Votes_Menu);
 	menu.SetTitle("投票菜单");
 	menu.AddItem("hp", VotensHpE_D ? "全体回血" : "全体回血 (禁用中)");
@@ -432,8 +464,7 @@ public Action Command_Votes(int client, int args)
 	menu.AddItem("restartmap", VotensRestartmapE_D ? "重置当前地图" : "重置当前地图 (禁用中)");
 	menu.AddItem("map", VotensMapE_D ? "投票更换官图" : "投票更换官图 (禁用中)");
 	menu.AddItem("map2", VotensMap2E_D ? "投票更换三方图" : "投票更换三方图 (禁用中)");
-	menu.AddItem("kick", g_bVotensKickED ? "踢出玩家" : "踢出玩家 (禁用中)");
-	menu.AddItem("forcespectate", g_bVotensForceSpectateED ? "强制玩家旁观" : "强制玩家旁观 (禁用中)");
+	menu.AddItem("punish", (g_bVotensKickED || g_bVotensForceSpectateED) ? "踢出或旁观玩家" : "踢出或旁观玩家 (禁用中)");
 	menu.AddItem("dellobby", g_bVotenForceDelLobby ? "强制删除游戏大厅" : "强制删除游戏大厅 (禁用中)");
 	menu.AddItem("forcestart", (VotensForceStartGameE_D && !IsGameLive()) ? "强制开始游戏" : "强制开始游戏 (禁用中)");
 	menu.AddItem("hud", VotensHudE_D ? "开关顶部HUD" : "开关顶部HUD (禁用中)");
@@ -514,28 +545,16 @@ public int Votes_Menu(Menu menu, MenuAction action, int client, int itemNum)
 				FakeClientCommand(client, "votesmaps2menu");
 			}
 		}
-		else if (StrEqual(item, "kick"))
+		else if (StrEqual(item, "punish"))
 		{
-			if (!g_bVotensKickED)
+			if (!g_bVotensKickED && !g_bVotensForceSpectateED)
 			{
-				CPrintToChat(client, "[{olive}VOTE{default}]踢出玩家已禁用");
+				CPrintToChat(client, "[{olive}VOTE{default}]踢出玩家和强制玩家旁观都已禁用");
 				FakeClientCommand(client, "sm_votes");
 			}
 			else
 			{
-				FakeClientCommand(client, "voteskick");
-			}
-		}
-		else if (StrEqual(item, "forcespectate"))
-		{
-			if (!g_bVotensForceSpectateED)
-			{
-				CPrintToChat(client, "[{olive}VOTE{default}]强制玩家旁观已禁用");
-				FakeClientCommand(client, "sm_votes");
-			}
-			else
-			{
-				FakeClientCommand(client, "votesforcespectate");
+				CreateVotePunishActionMenu(client);
 			}
 		}
 		else if (StrEqual(item, "dellobby"))
@@ -892,13 +911,19 @@ public Action Command_VoteRestartmap(int client, int args)
 	return Plugin_Handled;
 }
 
-// 踢出玩家
+// ====================================================
+// 踢出玩家 / 强制玩家旁观 (合并入口 + 4 级菜单)
+// 1级主菜单"踢出或旁观玩家" -> 2级(踢出 / 强制旁观)
+// -> 3级(全体玩家) -> 4级(投票理由) -> 游戏原生投票(全体玩家投票)
+// ====================================================
+
+// 踢出玩家: 保留旧的直接指令入口, 跳过 2 级菜单直接选人
 public Action Command_VotesKick(int client, int args)
 {
 	if (client == 0) return Plugin_Handled;
 	if (g_bEnable && g_bVotensKickED)
 	{
-		if (TestVoteDelay(client) && CanStartVotes(client)) CreateVoteKickMenu(client);
+		if (TestVoteDelay(client) && CanStartVotes(client)) BeginPunishFlow(client, PUNISH_KICK);
 	}
 	else if (!g_bEnable || !g_bVotensKickED)
 	{
@@ -907,97 +932,421 @@ public Action Command_VotesKick(int client, int args)
 	return Plugin_Handled;
 }
 
-void CreateVoteKickMenu(int client)
+// 强制玩家旁观: 保留旧的直接指令入口
+public Action Command_Votesforcespectate(int client, int args)
 {
-	int	 team = GetClientTeam(client);
-	Menu menu = new Menu(Menu_VotesKick);
-	char name[MAX_NAME_LENGTH];
-	char playerid[32];
-	menu.SetTitle("请选择你要踢出的玩家");
-	for (int i = 1; i <= MaxClients; i++)
+	if (client == 0) return Plugin_Handled;
+	if (g_bEnable && g_bVotensForceSpectateED)
 	{
-		if (IsClientInGame(i) && !IsFakeClient(i) && (GetClientTeam(i) == team || GetClientTeam(i) == L4D_TEAM_SPECTATE))
-		{
-			Format(playerid, sizeof(playerid), "%i", GetClientUserId(i));
-			if (GetClientName(i, name, sizeof(name)))
-			{
-				menu.AddItem(playerid, name);
-			}
-		}
+		if (TestVoteDelay(client) && CanStartVotes(client)) BeginPunishFlow(client, PUNISH_SPECTATE);
 	}
+	else if (!g_bEnable || !g_bVotensForceSpectateED)
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]强制玩家旁观已被禁止");
+	}
+	return Plugin_Handled;
+}
+
+void BeginPunishFlow(int client, int iAction)
+{
+	ClearPunishState(client);	// 放弃上一次没走完的处罚流程(含"其他"的聊天输入等待), 防止旧状态串到这次
+	g_iPunishAction[client] = iAction;
+	CreateVotePunishTargetMenu(client);
+}
+
+// 2级菜单: 选择处罚方式(原来 1 级菜单里的两个选项)
+void CreateVotePunishActionMenu(int client)
+{
+	Menu menu = new Menu(Menu_VotePunishAction);
+	menu.SetTitle("踢出或旁观玩家");
+	menu.AddItem("kick", g_bVotensKickED ? "踢出玩家" : "踢出玩家 (禁用中)");
+	menu.AddItem("spectate", g_bVotensForceSpectateED ? "强制玩家旁观" : "强制玩家旁观 (禁用中)");
 	menu.ExitBackButton = true;
-	menu.ExitButton = true;
+	menu.ExitButton	   = true;
 	menu.Display(client, MENU_TIME);
 }
 
-public int Menu_VotesKick(Menu menu, MenuAction action, int param1, int param2)
+public int Menu_VotePunishAction(Menu menu, MenuAction action, int client, int param2)
 {
 	if (action == MenuAction_Select)
 	{
-		if (!TestVoteDelay(param1) || !CanStartVotes(param1)) return 0;
-		char info[32], name[32];
-		menu.GetItem(param2, info, sizeof(info), _, name, sizeof(name));
-		int player = StringToInt(info);
-		player	   = GetClientOfUserId(player);
-		if (player && IsClientInGame(player))
+		char sItem[16];
+		menu.GetItem(param2, sItem, sizeof(sItem));
+
+		int iAction = PUNISH_NONE;
+		if (StrEqual(sItem, "kick"))
 		{
-			if (player == param1)
+			if (!g_bVotensKickED)
 			{
-				CPrintToChatAll("[{olive}VOTE{default}]你确定要踢你自己吗?请重新选择");
-				CreateVoteKickMenu(param1);
+				CPrintToChat(client, "[{olive}VOTE{default}]踢出玩家已禁用");
+				CreateVotePunishActionMenu(client);
 				return 0;
 			}
-
-			if (HasAccess(player, g_sKickImmueAccesslvl))
-			{
-				CPrintToChat(param1, "[{olive}VOTE{default}]该玩家无法被踢出，请重新选择你想踢出的玩家!");
-				CPrintToChat(player, "[{olive}VOTE{default}]{olive}%N{default}尝试投票将你踢出, 但你拥有权限无法踢出", param1);
-				CreateVoteKickMenu(param1);
-			}
-			else
-			{
-				DisplayVoteKickMenu(param1, player);
-			}
+			iAction = PUNISH_KICK;
 		}
-		else
+		else if (StrEqual(sItem, "spectate"))
 		{
-			CPrintToChatAll("[{olive}VOTE{default}]该玩家已不在游戏中, 请重新选择!");
-			CreateVoteKickMenu(param1);
+			if (!g_bVotensForceSpectateED)
+			{
+				CPrintToChat(client, "[{olive}VOTE{default}]强制玩家旁观已禁用");
+				CreateVotePunishActionMenu(client);
+				return 0;
+			}
+			iAction = PUNISH_SPECTATE;
 		}
+
+		if (iAction == PUNISH_NONE || !IsClientInGame(client)) return 0;
+
+		// 先卡一道冷却/人数/投票进行中, 免得走到第4级才被拒绝
+		if (!TestVoteDelay(client) || !CanStartVotes(client)) return 0;
+
+		BeginPunishFlow(client, iAction);
 	}
 	else if (action == MenuAction_Cancel)
 	{
 		if (param2 == MenuCancel_ExitBack)
-		{
-			FakeClientCommand(param1, "votes");
-		}
+			FakeClientCommand(client, "sm_votes");
+		else
+			ClearPunishState(client);
 	}
 	else if (action == MenuAction_End)
 	{
 		delete menu;
 	}
-
 	return 0;
 }
 
-void DisplayVoteKickMenu(int client, int player)
+// 3级菜单: 选择要处罚的玩家 (全体玩家, 不再限制阵营)
+void CreateVotePunishTargetMenu(int client)
 {
-	if (!TestVoteDelay(client)) return;
-	if (!CanStartVotes(client)) return;
+	Menu menu = new Menu(Menu_VotePunishTarget);
+	menu.SetTitle((g_iPunishAction[client] == PUNISH_SPECTATE) ? "请选择你要强制旁观的玩家" : "请选择你要踢出的玩家");
 
-	char SteamId[35];
-	GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-    if (!IsClientInGame(player) || (GetClientTeam(player) != GetClientTeam(client) && GetClientTeam(player) != L4D_TEAM_SPECTATE)) return;
-    char kickplayer_name[MAX_NAME_LENGTH], kickplayer_SteamId[32];
-    GetClientName(player, kickplayer_name, sizeof(kickplayer_name));
-    GetClientAuthId(player, AuthId_Steam2, kickplayer_SteamId, sizeof(kickplayer_SteamId));
-    LogMessage("%N(%s) 发起投票: 踢出 %s(%s)", client, SteamId, kickplayer_name, kickplayer_SteamId);	 //紀錄在log文件
+	char sUserId[32];
+	char sName[MAX_NAME_LENGTH];
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || IsFakeClient(i)) continue;
 
-	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}踢出 %s {default}, 只有投票发起者的阵营才能参与投票", client, kickplayer_name);
-	char sArgument[128], sPassText[MAX_NAME_LENGTH];
-	EscapeAndFormat(sArgument, sizeof(sArgument), "是否踢出 %s ?", kickplayer_name);
-	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", kickplayer_name);
-	StartVote(client, kick, sArgument, sPassText, VoteBroadcast_Team, BuiltinVoteType_Custom_YesNo, GetClientUserId(player), kickplayer_name, kickplayer_SteamId);
+		Format(sUserId, sizeof(sUserId), "%d", GetClientUserId(i));
+		if (GetClientName(i, sName, sizeof(sName)))
+			menu.AddItem(sUserId, sName);
+	}
+
+	menu.ExitBackButton = true;
+	menu.ExitButton	   = true;
+	menu.Display(client, MENU_TIME);
+}
+
+public int Menu_VotePunishTarget(Menu menu, MenuAction action, int client, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		if (!IsClientInGame(client)) return 0;
+
+		char sInfo[32];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+
+		int iAction = g_iPunishAction[client];
+		int player	= GetClientOfUserId(StringToInt(sInfo));
+
+		if (iAction == PUNISH_NONE || player <= 0 || !IsClientInGame(player))
+		{
+			CPrintToChat(client, "[{olive}VOTE{default}]该玩家已不在游戏中, 请重新选择!");
+			CreateVotePunishTargetMenu(client);
+			return 0;
+		}
+
+		if (player == client)
+		{
+			CPrintToChat(client, "[{olive}VOTE{default}]不能投票处罚你自己, 请重新选择");
+			CreateVotePunishTargetMenu(client);
+			return 0;
+		}
+
+		if (HasAccess(player, g_sKickImmueAccesslvl))
+		{
+			if (iAction == PUNISH_KICK)
+				CPrintToChat(client, "[{olive}VOTE{default}]该玩家无法被踢出，请重新选择你想踢出的玩家!");
+			else
+				CPrintToChat(client, "[{olive}VOTE{default}]该玩家无法被强制旁观，请重新选择!");
+			CPrintToChat(player, "[{olive}VOTE{default}]{olive}%N{default}尝试投票处罚你, 但你拥有权限无法被处罚", client);
+			CreateVotePunishTargetMenu(client);
+			return 0;
+		}
+
+		g_iPunishTargetUserId[client] = GetClientUserId(player);
+		CreateVoteReasonMenu(client);
+	}
+	else if (action == MenuAction_Cancel)
+	{
+		if (param2 == MenuCancel_ExitBack)
+		{
+			g_iPunishTargetUserId[client] = 0;
+			CreateVotePunishActionMenu(client);
+		}
+		else
+			ClearPunishState(client);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+// 4级菜单: 选择投票理由
+void CreateVoteReasonMenu(int client)
+{
+	Menu menu = new Menu(Menu_VoteReason);
+	menu.SetTitle("请选择投票理由");
+
+	char sInfo[8];
+	char sItem[48];
+	for (int i = 0; i < sizeof(g_sVoteReasons); i++)
+	{
+		IntToString(i, sInfo, sizeof(sInfo));
+		if (i == REASON_OTHER_INDEX)
+			Format(sItem, sizeof(sItem), "%d.%s(聊天输入)", i + 1, g_sVoteReasons[i]);
+		else
+			Format(sItem, sizeof(sItem), "%d.%s", i + 1, g_sVoteReasons[i]);
+		menu.AddItem(sInfo, sItem);
+	}
+
+	menu.ExitBackButton = true;
+	menu.ExitButton	   = true;
+	menu.Display(client, MENU_TIME);
+}
+
+public int Menu_VoteReason(Menu menu, MenuAction action, int client, int param2)
+{
+	if (action == MenuAction_Select)
+	{
+		if (!IsClientInGame(client)) return 0;
+
+		char sInfo[8];
+		if (!menu.GetItem(param2, sInfo, sizeof(sInfo))) return 0;
+		if (sInfo[0] < '0' || sInfo[0] > '9') return 0;	   // 理由下标一定是我们自己塞的数字
+		int iReason = StringToInt(sInfo);
+
+		if (iReason == REASON_OTHER_INDEX)
+		{
+			BeginReasonChatInput(client);
+			return 0;
+		}
+
+		if (iReason < 0 || iReason >= sizeof(g_sVoteReasons)) return 0;
+		StartPunishVote(client, g_sVoteReasons[iReason]);
+	}
+	else if (action == MenuAction_Cancel)
+	{
+		if (param2 == MenuCancel_ExitBack)
+			CreateVotePunishTargetMenu(client);
+		else
+			ClearPunishState(client);
+	}
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+	return 0;
+}
+
+// 选"其他": 让玩家在聊天框输入理由(最多取前 REASON_INPUT_MAX 个字符)
+void BeginReasonChatInput(int client)
+{
+	// 不用 TIMER_FLAG_NO_MAPCHANGE: 换图时 SourceMod 会直接释放该句柄, 我们数组里留的就是
+	// 野句柄, 之后 delete 会报 Invalid Handle. 统一由 ClearPunishState 手动关闭.
+	delete g_hReasonInputTimer[client];
+	g_hReasonInputTimer[client] = CreateTimer(REASON_INPUT_TIME, Timer_ReasonInputTimeout, client);
+
+	CPrintToChat(client, "[{olive}VOTE{default}]请在聊天框输入理由(最多{green}%d{default}个字), {red}%d{default}秒内有效", REASON_INPUT_MAX, RoundToNearest(REASON_INPUT_TIME));
+	PrintHintText(client, "在聊天框输入投票理由(最多 %d 个字)", REASON_INPUT_MAX);
+}
+
+public Action Timer_ReasonInputTimeout(Handle timer, int client)
+{
+	if (client <= 0 || client > MaxClients) return Plugin_Stop;
+	if (g_hReasonInputTimer[client] != timer) return Plugin_Stop;	// 已被清理或换了新的计时器
+
+	g_hReasonInputTimer[client] = null;	   // 先摘掉自己, 免得 ClearPunishState 去删正在运行的本计时器
+	ClearPunishState(client);
+
+	if (IsClientInGame(client))
+		CPrintToChat(client, "[{olive}VOTE{default}]输入理由超时, 投票已取消");
+
+	return Plugin_Stop;
+}
+
+// 监听聊天输出: 正在等"其他"理由时, 把这条聊天当理由用掉(不再广播出去)
+public Action OnClientSayCommand(int client, const char[] command, const char[] sArgs)
+{
+	if (client <= 0 || client > MaxClients) return Plugin_Continue;
+	if (g_hReasonInputTimer[client] == null) return Plugin_Continue;
+
+	char sInput[128];
+	strcopy(sInput, sizeof(sInput), sArgs);
+	TrimString(sInput);
+
+	// 空消息 / 聊天指令(!xxx、/xxx)不当作理由, 继续等待
+	if (sInput[0] == '\0' || sInput[0] == '!' || sInput[0] == '/') return Plugin_Continue;
+
+	delete g_hReasonInputTimer[client];
+	g_hReasonInputTimer[client] = null;
+
+	char sReason[64];
+	Utf8Truncate(sInput, sReason, sizeof(sReason), REASON_INPUT_MAX);
+	if (sReason[0] == '\0')
+	{
+		ClearPunishState(client);
+		return Plugin_Handled;
+	}
+
+	// 输入里的 {} 会被 multicolors 当成颜色标签, 去掉防止注入颜色
+	ReplaceString(sReason, sizeof(sReason), "{", "");
+	ReplaceString(sReason, sizeof(sReason), "}", "");
+
+	if (StartPunishVote(client, sReason))
+		CPrintToChat(client, "[{olive}VOTE{default}]已使用你输入的理由: {blue}%s", sReason);
+
+	return Plugin_Handled;
+}
+
+// 按 UTF-8 首字节判断该字符占几个字节(只看低 8 位, 不受 char 符号扩展影响)
+int Utf8CharBytes(int iByte)
+{
+	if ((iByte & 0xF8) == 0xF0) return 4;
+	if ((iByte & 0xF0) == 0xE0) return 3;
+	if ((iByte & 0xE0) == 0xC0) return 2;
+	return 1;
+}
+
+// 按 UTF-8 字符数截断(不是按字节), 避免把中文/emoji 截成半个字符
+void Utf8Truncate(const char[] sInput, char[] sOutput, int iOutputLen, int iMaxChars)
+{
+	int iLen   = strlen(sInput);
+	int iBytes = 0;
+	int iChars = 0;
+
+	while (iBytes < iLen && iChars < iMaxChars)
+	{
+		int iSize = Utf8CharBytes(sInput[iBytes]);
+		if (iSize < 1 || iBytes + iSize > iLen) break;	  // 末尾被截断的半个字符直接丢掉
+		iBytes += iSize;
+		iChars++;
+	}
+
+	if (iBytes > iOutputLen - 1)
+	{
+		// 输出缓冲比字符上限更小时, 退回上一个字符边界, 保证不会写出半个 UTF-8 字符
+		iBytes = iOutputLen - 1;
+		int iByte;
+		while (iBytes > 0)
+		{
+			iByte = sInput[iBytes];
+			if ((iByte & 0xC0) != 0x80) break;	// 不在续字节上 = 已落在字符边界
+			iBytes--;
+		}
+	}
+
+	for (int i = 0; i < iBytes; i++) sOutput[i] = sInput[i];
+	sOutput[iBytes] = '\0';
+}
+
+// 转义 builtinvotes 参数里的 %: 它会把 argument 再当格式串解析一次
+void EscapePercent(const char[] sText, char[] sBuffer, int iMaxLength)
+{
+	strcopy(sBuffer, iMaxLength, sText);
+	ReplaceString(sBuffer, iMaxLength, "%", "%%");
+}
+
+// 最后一步: 玩家 + 理由 -> 游戏原生投票界面(全体玩家投票). 返回投票是否真的发起成功
+bool StartPunishVote(int client, const char[] sReason)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client)) return false;
+
+	int iAction	   = g_iPunishAction[client];
+	int iTargetUid = g_iPunishTargetUserId[client];
+	ClearPunishState(client);	// 一次投票只消费一次, 防止重复发起
+
+	if (iAction == PUNISH_NONE || iTargetUid <= 0)
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]处罚投票信息已失效, 请重新选择");
+		return false;
+	}
+
+	if (iAction == PUNISH_KICK && !g_bVotensKickED)
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]踢出玩家已禁用");
+		return false;
+	}
+	if (iAction == PUNISH_SPECTATE && !g_bVotensForceSpectateED)
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]强制玩家旁观已禁用");
+		return false;
+	}
+
+	int player = GetClientOfUserId(iTargetUid);
+	if (player <= 0 || !IsClientInGame(player) || IsFakeClient(player))
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]该玩家已不在游戏中, 请重新选择!");
+		return false;
+	}
+
+	if (HasAccess(player, g_sKickImmueAccesslvl))
+	{
+		CPrintToChat(client, "[{olive}VOTE{default}]该玩家拥有权限, 无法被投票处罚");
+		return false;
+	}
+
+	if (!TestVoteDelay(client)) return false;
+	if (!CanStartVotes(client)) return false;
+
+	char sTargetName[MAX_NAME_LENGTH];
+	GetClientName(player, sTargetName, sizeof(sTargetName));
+
+	char sTargetSteamId[32];
+	GetClientAuthId(player, AuthId_Steam2, sTargetSteamId, sizeof(sTargetSteamId));
+
+	char sSteamId[35];
+	GetClientAuthId(client, AuthId_Steam2, sSteamId, sizeof(sSteamId));
+
+	// 原生投票界面文本: 是否踢出 xxx?理由:开挂 / 是否强制xxx旁观?理由:开挂
+	char sNameEsc[MAX_NAME_LENGTH];
+	char sReasonEsc[64];
+	EscapePercent(sTargetName, sNameEsc, sizeof(sNameEsc));
+	EscapePercent(sReason, sReasonEsc, sizeof(sReasonEsc));
+
+	char sArgument[192];
+	if (iAction == PUNISH_KICK)
+		Format(sArgument, sizeof(sArgument), "是否踢出 %s?理由:%s", sNameEsc, sReasonEsc);
+	else
+		Format(sArgument, sizeof(sArgument), "是否强制%s旁观?理由:%s", sNameEsc, sReasonEsc);
+
+	char sPassText[MAX_NAME_LENGTH];
+	EscapePercent(sTargetName, sPassText, sizeof(sPassText));
+
+	if (iAction == PUNISH_KICK)
+	{
+		LogMessage("%N(%s) 发起投票: 踢出 %s(%s), 理由: %s", client, sSteamId, sTargetName, sTargetSteamId, sReason);	   //紀錄在log文件
+		CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}踢出 %s {default}(理由:{olive}%s{default}), 所有玩家都可以参与投票", client, sTargetName, sReason);
+		return StartVote(client, kick, sArgument, sPassText, VoteBroadcast_All, BuiltinVoteType_Custom_YesNo, iTargetUid, sTargetName, sTargetSteamId);
+	}
+
+	LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观, 理由: %s", client, sSteamId, sTargetName, sReason);	   //紀錄在log文件
+	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}强制玩家 %s 旁观{default}(理由:{olive}%s{default}), 所有玩家都可以参与投票", client, sTargetName, sReason);
+	return StartVote(client, forcespectate, sArgument, sPassText, VoteBroadcast_All, BuiltinVoteType_Custom_YesNo, iTargetUid, sTargetName, sTargetSteamId);
+}
+
+// 清掉该玩家的处罚菜单/聊天输入状态(断线、换图、放弃菜单、投票已发起时都要清)
+void ClearPunishState(int client)
+{
+	if (client <= 0 || client > MaxClients) return;
+
+	delete g_hReasonInputTimer[client];
+	g_hReasonInputTimer[client]	  = null;
+	g_iPunishAction[client]		  = PUNISH_NONE;
+	g_iPunishTargetUserId[client] = 0;
 }
 
 // 更换地图
@@ -1382,88 +1731,6 @@ void AddCampaignEntry(const char[] sMap, const char[] sLabel)
 	strcopy(g_sCampaignStart[g_iCampaignTableCount], MAX_NAME_LENGTH, sMap);
 	strcopy(g_sCampaignLabel[g_iCampaignTableCount], MAX_NAME_LENGTH, sLabel);
 	g_iCampaignTableCount++;
-}
-
-// 强制玩家旁观
-public Action Command_Votesforcespectate(int client, int args)
-{
-	if (client == 0) return Plugin_Handled;
-	if (g_bEnable && g_bVotensForceSpectateED)
-	{
-		if (TestVoteDelay(client) && CanStartVotes(client)) CreateVoteforcespectateMenu(client);
-	}
-	else if (!g_bEnable || !g_bVotensForceSpectateED)
-	{
-		CPrintToChat(client, "[{olive}VOTE{default}]强制玩家旁观已被禁止");
-	}
-	return Plugin_Handled;
-}
-
-void CreateVoteforcespectateMenu(int client)
-{
-	Menu menu = new Menu(Menu_Votesforcespectate);
-	int	 team = GetClientTeam(client);
-	char name[MAX_NAME_LENGTH];
-	char playerid[32];
-	menu.SetTitle("请选择你要强制旁观的玩家");
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == team)
-		{
-			Format(playerid, sizeof(playerid), "%d", GetClientUserId(i));
-			if (GetClientName(i, name, sizeof(name)))
-			{
-				menu.AddItem(playerid, name);
-			}
-		}
-	}
-	menu.ExitBackButton = true;
-	menu.ExitButton = true;
-	menu.Display(client, MENU_TIME);
-}
-
-public int Menu_Votesforcespectate(Menu menu, MenuAction action, int param1, int param2)
-{
-	if (action == MenuAction_Select)
-	{
-		char info[32], name[32];
-		menu.GetItem(param2, info, sizeof(info), _, name, sizeof(name));
-		if (!TestVoteDelay(param1) || !CanStartVotes(param1)) return 0;
-		int player = GetClientOfUserId(StringToInt(info));
-		if (player > 0 && IsClientInGame(player)) DisplayVoteforcespectateMenu(param1, player);
-	}
-	else if (action == MenuAction_Cancel)
-	{
-		if (param2 == MenuCancel_ExitBack)
-		{
-			FakeClientCommand(param1, "votes");
-		}
-	}
-	else if (action == MenuAction_End)
-	{
-		delete menu;
-	}
-
-	return 0;
-}
-
-void DisplayVoteforcespectateMenu(int client, int player)
-{
-	if (!TestVoteDelay(client)) return;
-	if (!CanStartVotes(client)) return;
-
-	char SteamId[35];
-	GetClientAuthId(client, AuthId_Steam2, SteamId, sizeof(SteamId));
-    if (!IsClientInGame(player) || GetClientTeam(player) != GetClientTeam(client) || HasAccess(player, g_sKickImmueAccesslvl)) return;
-    char forcespectateplayername[MAX_NAME_LENGTH];
-    GetClientName(player, forcespectateplayername, sizeof(forcespectateplayername));
-    LogMessage("%N(%s) 发起投票: 强制玩家 %s 旁观", client, SteamId, forcespectateplayername);	  //紀錄在log文件
-
-	CPrintToChatAll("[{olive}VOTE{default}]{olive} %N {default}发起投票: {blue}强制玩家%s旁观{default}, 只有投票发起者的阵营才能参与投票", client, forcespectateplayername);
-	char sArgument[128], sPassText[MAX_NAME_LENGTH];
-	EscapeAndFormat(sArgument, sizeof(sArgument), "是否强制%s旁观?", forcespectateplayername);
-	EscapeAndFormat(sPassText, sizeof(sPassText), "%s", forcespectateplayername);
-	StartVote(client, forcespectate, sArgument, sPassText, VoteBroadcast_Team, BuiltinVoteType_Custom_YesNo, GetClientUserId(player), forcespectateplayername);
 }
 
 // ====================================================

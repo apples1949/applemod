@@ -1,3 +1,17 @@
+// 1.10.1 修复记录（玩家反馈"女巫身上出现燃烧效果"）：
+//  1) 根因：换目标用的是"对女巫本身发一记 0 伤害 DMG_BURN"来骗引擎把 target 记成攻击者，
+//     而引擎不看伤害值、只看伤害类型 —— 这一记假命中会真的把她点燃（m_bIsBurning=1、
+//     FL_ONFIRE 置位、并生成 entityflame 挂到 m_hEffectEntity），于是她带着火光到处跑。
+//  2) 原来的清理只在"下一帧"做（一次性 ThinkPost + KillEntNextFrame），而引擎的火苗实体
+//     常常比那一帧还晚建出来 ⇒ 清不到，火光一直留着。现在：
+//       - 假命中发完 **同一帧内** 立刻 ClearWitchFire（灭火 + 清 m_bIsBurning/FL_ONFIRE + 删火苗实体）；
+//       - 之后 FAKE_BURN_CLEAR_TIME(0.25s) 窗口内由 ThinkWitch 每帧兜底再清一次，
+//         晚建出来的火苗也能被收掉；人手点的火不在窗口内，不会被误灭。
+//  3) 顺带修掉一个隐藏冲突：原来用 SDKHook(ThinkPost, PostThink) 做那条一次性清理，
+//     而 ThinkPost 同一实体只能挂一个回调 ⇒ 它把 ThinkWitch（跟随 + 目标接力）顶掉了，
+//     之后这只女巫就再也不接力。现在 ThinkPost 只挂 ThinkWitch，清理走上面的窗口。
+//  4) 假命中会把她切到"着火"动作序列，现在清完火会把原来的 m_nSequence 还原（原本没着火时）。
+//
 // 1.10.0 修复记录：
 //  1) 目标接力（本版本核心）：原来只有 player_incapacitated / player_death 两个事件会换目标，
 //     而"主动跟随"这条线一旦被以下任意一件事打断就永久失效 —— 被生还者打中、受惊
@@ -45,7 +59,10 @@
 
 #pragma semicolon 1
 #pragma newdecls required
-#define PLUGIN_VERSION "1.10.0"
+#define PLUGIN_VERSION "1.10.1"
+// 1.10.1：假命中后持续灭火的时长（秒）。引擎的火苗实体经常晚一两帧才建出来，
+// 只清一帧会漏 —— 这里留一个短窗口，由 ThinkWitch 每帧兜（见 ClearWitchFire）。
+#define FAKE_BURN_CLEAR_TIME 0.25
 #define DEBUG 0
 
 #include <sourcemod>
@@ -114,6 +131,10 @@ bool bWitchScared[MAXENTITY+1], bWitchSit[MAXENTITY+1], bWitchFollowing[MAXENTIT
 Handle BurnWitchTimer[MAXENTITY+1] = {null};
 bool ge_bInvalidTrace[MAXENTITY+1];
 bool g_bFakeBurnHit[MAXENTITY+1];   // 本插件自己发出去的那一记 0 伤害 DMG_BURN，不算真着火
+// 1.10.1 新增：假命中"灭火窗口"。引擎会把这一记 0 伤害 DMG_BURN 当成真的点燃
+// （m_bIsBurning=1 / FL_ONFIRE / 生成 entityflame 挂到 m_hEffectEntity），
+// 所以发完之后在这个时间点之前，每帧都要确认她没被点着（见 ClearWitchFire / ThinkWitch）。
+float g_fFakeBurnClearAt[MAXENTITY+1];
 // 1.10.0 新增状态：目标接力（不丢仇恨）
 int   g_iAggroTarget[MAXENTITY+1];     // 当前"她恨谁"（witch_harasser_set / 本插件换目标时维护）
 float g_fRetargetAt[MAXENTITY+1];      // 下次允许补换目标/补换仇恨的引擎时间（冷却，防同帧重复）
@@ -289,23 +310,29 @@ void WitchAttackTarget(int witch, int target, int addHealth)
 	// 真着火判定：火焰状态标记（引擎给女巫点火时会写 m_bIsBurning）
 	bool burning = (GetEntityFlags(witch) & FL_ONFIRE) != 0 || GetEntProp(witch, Prop_Send, "m_bIsBurning") != 0;
 
+	// 假命中会把她切到"着火"动作序列，先记下来，清完火再按需还原
+	int anim = GetEntProp(witch, Prop_Send, "m_nSequence");
+
+	// 1.10.0：这一记 0 伤害只是为了骗引擎把 target 认成攻击者（女巫才会改追他），
+	// 不是真的燃烧伤害；用标志位挡掉 OnTakeDamageWitchPost 里的"中弹着火"分支
+	g_bFakeBurnHit[witch] = true;
+	SDKHooks_TakeDamage(witch, target, target, 0.0, DMG_BURN);
+	g_bFakeBurnHit[witch] = false;
+
+	if (!IsWitch(witch)) return;   // 这一记万一把她打没了，后面的写入就别做了
+
+	// 1.10.1（核心修复）：上面那一记假命中会被引擎当成"被点燃"——
+	// m_bIsBurning 置 1、FL_ONFIRE 置位、并生成一个 entityflame 挂在 m_hEffectEntity 上，
+	// 于是女巫身上出现"燃烧效果"。原来只在下一帧（KillEntNextFrame / 一次性 ThinkPost）里清，
+	// 而引擎的火苗实体往往比那一帧还晚建出来 ⇒ 清不到，火光一直留着。
+	// 现在：发完假命中立刻灭火，并开一个 FAKE_BURN_CLEAR_TIME 的窗口让 ThinkWitch 每帧兜底。
+	ClearWitchFire(witch);
+	g_fFakeBurnClearAt[witch] = GetEngineTime() + FAKE_BURN_CLEAR_TIME;
+
 	if(burning)
 	{
-		ExtinguishEntity(witch);
-		int flame = GetEntPropEnt(witch, Prop_Send, "m_hEffectEntity");
-		if( flame != -1 )
-		{
-			KillEntNextFrame(flame);
-		}
-
-		// 这一记 0 伤害只是为了骗引擎把 target 认成攻击者（女巫才会改追他），
-		// 不是真的燃烧伤害；用标志位挡掉 OnTakeDamageWitchPost 里的"中弹着火"分支
-		g_bFakeBurnHit[witch] = true;
-		SDKHooks_TakeDamage(witch, target, target, 0.0, DMG_BURN);
-		g_bFakeBurnHit[witch] = false;
-
 		// recalculate_burn_time = 1：换目标时把烧伤时间重新计一遍（0 = 保持原定死亡时间）
-		if (g_bCvarReCalculateBurnOverride && IsWitch(witch))
+		if (g_bCvarReCalculateBurnOverride)
 		{
 			delete BurnWitchTimer[witch];
 			BurnWitchTimer[witch] = null;
@@ -317,31 +344,53 @@ void WitchAttackTarget(int witch, int target, int addHealth)
 	}
 	else
 	{
-		int anim = GetEntProp(witch, Prop_Send, "m_nSequence");
-		g_bFakeBurnHit[witch] = true;
-		SDKHooks_TakeDamage(witch, target, target, 0.0, DMG_BURN);
-		g_bFakeBurnHit[witch] = false;
-
-		if (IsWitch(witch))   // 这一记万一把她打没了，后面的写入就别做了
-		{
-			SetEntProp(witch, Prop_Send, "m_nSequence", anim);
-			SetEntProp(witch, Prop_Send, "m_bIsBurning", 0);
-			SDKHook(witch, SDKHook_ThinkPost, PostThink);
-		}
+		// 原本没着火：把假命中顶掉的走路/站立动作序列还原回来
+		SetEntProp(witch, Prop_Send, "m_nSequence", anim);
 	}
 }
 
-public void PostThink(int witch)
+// 1.10.1：清掉女巫身上"被点燃"的全部痕迹。
+//   - ExtinguishEntity 灭火（引擎侧去掉燃烧状态与火苗）；
+//   - m_bIsBurning / FL_ONFIRE 兜底清零（netprop 与 flags 两条路都可能残留）；
+//   - m_hEffectEntity 上挂的 entityflame 实体真正删掉 —— 这一步必须走 KillEntNextFrame
+//     （延迟到下一帧删，队列内去重），不能在实体回调中途当帧 delete。
+// 所有写入前都重新校验实体，女巫随时可能被这一记伤害打死。
+void ClearWitchFire(int witch)
 {
-	SDKUnhook(witch, SDKHook_ThinkPost, PostThink);
+	if (witch <= MaxClients || !IsValidEntity(witch)) return;
+	if (!IsWitch(witch)) return;
+
+	bool bWasBurning = (GetEntityFlags(witch) & FL_ONFIRE) != 0 || GetEntProp(witch, Prop_Send, "m_bIsBurning") != 0;
 
 	ExtinguishEntity(witch);
 
+	if (GetEntProp(witch, Prop_Send, "m_bIsBurning") != 0)
+		SetEntProp(witch, Prop_Send, "m_bIsBurning", 0);
+
+	int flags = GetEntityFlags(witch);
+	if (flags & FL_ONFIRE)
+		SetEntityFlags(witch, flags & ~FL_ONFIRE);
+
+	// 火苗实体：只删 entityflame（引擎点火时建的就是这个类）。
+	// 别把别的插件挂在 m_hEffectEntity 上的特效一起删了 —— 例外是"她确实在着火"，
+	// 那种情况挂着的特效就是火，直接删。
 	int flame = GetEntPropEnt(witch, Prop_Send, "m_hEffectEntity");
-	if( flame != -1 )
+	if (flame > 0 && IsValidEntity(flame))
 	{
-		KillEntNextFrame(flame);
+		if (bWasBurning || IsFlameEntity(flame))
+			KillEntNextFrame(flame);
 	}
+}
+
+// 1.10.1：是不是引擎的火焰特效实体（CBaseEntity 点火时建的就是 entityflame）
+bool IsFlameEntity(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity)) return false;
+
+	char sClass[32];
+	GetEdictClassname(entity, sClass, sizeof(sClass));
+
+	return strcmp(sClass, "entityflame", false) == 0;
 }
 
 int GetNearestSurvivorDist(int entity)
@@ -452,6 +501,7 @@ public void witch_spawn(Event event, const char[] event_name, bool dontBroadcast
 	bWitchSit[witchid] = false;
 	bWitchFollowing[witchid] = false;
 	g_bFakeBurnHit[witchid] = false;
+	g_fFakeBurnClearAt[witchid] = 0.0;   // 1.10.1：新刷出的女巫不该继承上一只的灭火窗口
 	ResetWitchAggro(witchid);   // 实体号会被复用：仇恨目标/冷却/跟随许可都要重新开始
 
 	// 实体号可能被复用：新刷出的女巫不该继承上一个实体的燃烧计时器
@@ -548,6 +598,7 @@ public void OnEntityDestroyed(int entity)
 	bWitchSit[entity] = false;
 	bWitchFollowing[entity] = false;
 	g_bFakeBurnHit[entity] = false;
+	g_fFakeBurnClearAt[entity] = 0.0;   // 1.10.1：清掉灭火窗口，实体号复用时不继承
 	ResetWitchAggro(entity);
 	delete BurnWitchTimer[entity];
 	BurnWitchTimer[entity] = null;   // delete 之后槽位里仍残留旧句柄值，必须显式清掉
@@ -706,6 +757,32 @@ public Action ThinkWitch(int witch)
 	float duration = time-LastTime[witch];
 	if(duration>0.1) duration = 0.1;
 	LastTime[witch] = time;
+
+	// 1.10.1：假命中的灭火窗口。引擎可能在我们清完之后的下一两帧才把火苗实体建出来，
+	// 所以这里在窗口期内每帧都再确认一次（人手点的火不在窗口内，不会被误灭）。
+	if (g_fFakeBurnClearAt[witch] > 0.0)
+	{
+		if (time >= g_fFakeBurnClearAt[witch])
+		{
+			g_fFakeBurnClearAt[witch] = 0.0;
+		}
+		else if (!IsWitch(witch))
+		{
+			g_fFakeBurnClearAt[witch] = 0.0;
+		}
+		else if ((GetEntityFlags(witch) & FL_ONFIRE) != 0 || GetEntProp(witch, Prop_Send, "m_bIsBurning") != 0)
+		{
+			ClearWitchFire(witch);
+		}
+		else
+		{
+			// 没着火标记也再确认一次火苗实体（引擎偶尔只建实体不写标记）。
+			// 只删 entityflame，别的特效不碰。
+			int iFlame = GetEntPropEnt(witch, Prop_Send, "m_hEffectEntity");
+			if (iFlame > 0 && IsFlameEntity(iFlame))
+				KillEntNextFrame(iFlame);
+		}
+	}
 
 	// 1.10.0：不管"主动跟随"还在不在，每帧都先跑目标接力。
 	// 这是"击倒两人后不丢仇恨、不跑路"的关键：目标一失效就换下一个站着的人，
@@ -1160,6 +1237,7 @@ void ResetWitchStates()
 		bWitchSit[entity] = false;
 		bWitchFollowing[entity] = false;
 		g_bFakeBurnHit[entity] = false;
+		g_fFakeBurnClearAt[entity] = 0.0;   // 1.10.1
 		ge_bInvalidTrace[entity] = false;
 		ResetWitchAggro(entity);
 		Enemy[entity] = 0;

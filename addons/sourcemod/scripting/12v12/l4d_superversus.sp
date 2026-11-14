@@ -25,7 +25,7 @@ native void SpecHud_TankHudDisable(int client);
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.19-12v12"
+#define PLUGIN_VERSION "2.5.22-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -54,10 +54,8 @@ native void SpecHud_TankHudDisable(int client);
 #define SIHUD_TITLE              "特感辅助面板"
 #define SIHUD_TXT_HINT           "输入!sihud开关面板"
 #define SIHUD_TXT_BLANK          " "
-#define SIHUD_TXT_TANK_AI        "AI"      // 坦克行：AI 坦克时"名字"位置显示 AI
-#define SIHUD_TXT_WITCH_ALIVE    "已生成"  // 女巫行：已刷出且还活着
-#define SIHUD_TXT_CTRL_FIRST     "一控"    // 坦克行：第一次控制
-#define SIHUD_TXT_CTRL_SECOND    "二控"    // 坦克行：被第二名玩家接管（二控）
+#define SIHUD_TXT_TANK_FIXED     "固定"    // 坦克行：本回合坦克不是按 flow 刷的（静态/事件刷出）
+#define SIHUD_TXT_WITCH_FIXED    "固定"    // 女巫行：同上
 #define SIHUD_PANEL_SECONDS      3      // 面板显示时长（秒）；比刷新间隔长，画面才连续
 #define SIHUD_REFRESH_SECONDS    1.0    // 刷新间隔（秒）：需求 1 秒刷新
 #define SIHUD_FORCE_SECONDS      2.0    // 需求：离开安全区 / 坦克刷出与接管时，强制显示面板的秒数
@@ -66,12 +64,19 @@ native void SpecHud_TankHudDisable(int client);
 #define SIHUD_TEXT_BUDGET        510    // 面板总预算 511 字节，单行留 1 字节给换行
 #define SIHUD_NAME_CHARS         2      // 玩家名保留的字符数（需求：只显示前两个字符）
 #define SIHUD_SAFE_HEALTH        40     // "总血量>40"的门槛（倒地人数那一列用）
-#define SIHUD_SPAWN_LINES        2      // 刷新点显示几行
-#define SIHUD_MAX_SPAWNS         192    // 缓存的 info_zombie_spawn 上限
-#define SIHUD_SPAWN_SCAN_ATTEMPTS 30    // 全图最大 flow 还没就绪时最多重试多少次（每秒一次）
-#define SIHUD_SPAWN_AHEAD_EPS    1.0    // flow 余量：与最远生还者齐平的点算"已越过"
-#define SIHUD_EARLY_CLOSE_SLACK  0.5    // 面板提前这么多秒消失即认为玩家自己关了
 #define SIHUD_DEFAULT_TANK_DELAY 7      // sm_sihud_tank_delay 默认值（需求：接管坦克 7 秒后才关掉他的 tankhud）
+// 坦克玩家的面板交接状态（g_iSiHudTankPanel 的取值；见 SiHud_TankHandoverPanel）
+#define SIHUD_TANKPANEL_NONE     0      // 这只坦克还没替他处理过
+#define SIHUD_TANKPANEL_AUTO     1      // 面板是我们替他自动打开的（坦克结束后收回）
+#define SIHUD_TANKPANEL_DONE     2      // 已经处理过：之后完全听玩家自己的 !sihud
+/* 2.5.22 删掉的常量，改需求时别照着旧代码加回来：
+   · SIHUD_SPAWN_LINES / SIHUD_MAX_SPAWNS / SIHUD_SPAWN_SCAN_ATTEMPTS / SIHUD_SPAWN_AHEAD_EPS：
+     面板底部那两个刷新点行被"坦克 / 女巫"两行取代（百分比口径走 Versus Director 的
+     boss flow percent，与顶部 HUD 一致），info_zombie_spawn 的 flow 采样整段删除；
+   · SIHUD_EARLY_CLOSE_SLACK：SourceMod 的 Panel 只要收到按键（数字键也算）就会被关掉，
+     按"提前多少秒消失"反推"玩家自己关的"必然误判 —— 玩家一按数字键面板就被永久关死；
+   · SIHUD_TXT_TANK_AI / SIHUD_TXT_WITCH_ALIVE / SIHUD_TXT_CTRL_FIRST / SIHUD_TXT_CTRL_SECOND：
+     它们只给"坦克活着 / 女巫已生成"那两行用，而新需求是刷出过就整行不再显示。 */
 #define SIHUD_WPN_AWP            "weapon_sniper_awp"
 #define SIHUD_WPN_SCOUT          "weapon_sniper_scout"
 
@@ -79,6 +84,7 @@ native void SpecHud_TankHudDisable(int client);
 // 生还者 bot 创建失败统计（NextBotCreatePlayerBot 返回无效槽位 -1 的防御与日志限频）
 // ---------------------------------------------------------------------------
 #define NEXTBOT_FAIL_LOG_SECONDS   5.0	// "无效槽位"日志最短间隔（秒），需求：每 N 秒最多一条
+#define NEXTBOT_FAIL_LOUD_COUNT    2	// 连续失败到第几次才写 error log（第 1 次只记 notice）
 #define NEXTBOT_FAIL_DEGRADE_COUNT 10	// 连续失败次数达到这么多……
 #define NEXTBOT_FAIL_DEGRADE_SECS  30.0	// ……且已持续这么久，才彻底降级（避免瞬时失败就降级）
 #define NEXTBOT_LEGACY_RETRY_SECS  10.0	// 走 CreateFakeClient 兜底的最短间隔（秒）
@@ -151,8 +157,7 @@ ConVar SiHudDebug;							// sm_sihud_debug：打印诊断日志
 ConVar VersusBossBuffer;					// versus_boss_buffer：boss 刷出位置的余量（与 spechud 同口径）
 bool g_bSiHudOn[MAXPLAYERS+1];				// 玩家是否开启面板（只由 !sihud 改变）
 bool g_bSiHudSent[MAXPLAYERS+1];			// 上一次发送成功与否（判断屏幕上的面板是不是我们自己的）
-bool g_bSiHudSeen[MAXPLAYERS+1];			// 上一 tick 确实看到过我们自己的面板（防止把"没显示出来"误判成 ESC）
-bool g_bSiHudAutoShownRound = false;		// 本回合"首次离开安全区强制显示"是否已经用掉
+bool g_bSiHudAutoShownRound = false;		// 本回合"首次离开安全区强制显示"是否真的显示出去过
 float g_fSiHudTankLockUntil[MAXPLAYERS+1];	// 坦克玩家：到这一刻为止面板让位给他的 tankhud（强制显示不受它限制）
 float g_fSiHudLastSendAt[MAXPLAYERS+1];		// 上一次成功发送面板的时刻
 // 强制显示窗口（需求：离开安全区 / 坦克事件时对所有能看面板的玩家连续 2 秒强开）
@@ -160,28 +165,25 @@ float g_fSiHudLastSendAt[MAXPLAYERS+1];		// 上一次成功发送面板的时刻
 //   g_hSiHudForceTimer（SIHUD_FORCE_REDRAW 秒一次）按固定的快节奏重画。
 float g_fSiHudForceUntil[MAXPLAYERS+1];
 Handle g_hSiHudForceTimer = null;
-// 坦克 / 女巫状态（面板最后两行 + "坦克刷出与接管"事件的判定）
+// C：本回合"有人离开安全区"这件事是否已经由事件报过。准备阶段会把那一次强制显示挡掉，
+//    由 Timer_SiHudRefresh 里的 1 秒轮询（SiHud_PollForceShow）补发，所以要先记下来。
+bool g_bSiHudLeftSafeArea = false;
+bool g_bSiHudSafeAreaNative = false;		// Left4DHooks 的 L4D_HasAnySurvivorLeftSafeArea
+// 坦克 / 女巫状态（面板最下面"坦克 / 女巫"两行的判定 + "坦克刷出与接管"事件的判定）
 int g_iSiHudTankClient = 0;					// 当前坦克玩家（含 AI bot；0=场上没有坦克）
-int g_iSiHudTankControl = 0;				// 这只坦克已经被几个真人控制过（1=一控 2=二控及以上）
-bool g_bSiHudTankSpawned = false;			// 本回合坦克刷出过
-bool g_bSiHudTankDead = false;				// 坦克刷出过且已经死（→ 不显示 Tank 行）
-bool g_bSiHudWitchSpawned = false;			// 本回合女巫刷出过
-bool g_bSiHudWitchDead = false;				// 女巫刷出过且已经死（→ 不显示 Witch 行）
-// 地图 info_zombie_spawn 的路程缓存（每张图只扫一次，见 SiHud_EnsureSpawnFlows）
-float g_fSiHudSpawnFlow[SIHUD_MAX_SPAWNS];
-int g_iSiHudSpawnCount = 0;
-int g_iSiHudSpawnAttempts = 0;				// 本图已尝试采样次数（flow 没有就绪时的上限保护）
-bool g_bSiHudSpawnScanned = false;
-bool g_bSiHudSpawnWarned = false;
+int g_iSiHudTankControl = 0;				// 这只坦克已经被几个真人控制过（1=一控 2=二控及以上；只进调试日志）
+bool g_bSiHudTankSpawned = false;			// 本回合坦克刷出过（→ 不再画"坦克"行）
+// 2.5.22：面板不再区分"刷出还没死"和"刷出已经死"（刷出过的 boss 整行都不画，见 SiHud_GetBossLine），
+// 所以原来的 g_bSiHudTankDead / g_bSiHudWitchDead 两个标记删掉了（留着只会变成编译告警 204）。
+bool g_bSiHudWitchSpawned = false;			// 本回合女巫刷出过（→ 不再画"女巫"行）
+// 坦克玩家的面板交接：tank_delay 让位窗口结束（他的 tankhud 关掉）后面板必须回到他屏幕上
+int g_iSiHudTankPanel[MAXPLAYERS+1];		// SIHUD_TANKPANEL_*（0=没动过 1=替他自动打开 2=已处理）
 bool g_bSiHudLimitMissLogged[7];			// 六个 z_versus_*_limit 读不到时"只记一次"
 // Left4DHooks native 可用性：left4dhooks.inc 默认把这些 native 标成 optional，必须先探再用
 bool g_bSiHudMaxFlowNative = false;			// L4D2Direct_GetMapMaxFlowDistance
 bool g_bSiHudClientFlowNative = false;		// L4D2Direct_GetFlowDistance
 bool g_bSiHudHighestNative = false;			// L4D_GetHighestFlowSurvivor
 bool g_bSiHudFurthestFlowNative = false;	// L4D2_GetFurthestSurvivorFlow
-bool g_bSiHudNavFlowNative = false;			// L4D2Direct_GetTerrorNavAreaFlow
-bool g_bSiHudNearestNavNative = false;		// L4D_GetNearestNavArea
-bool g_bSiHudDirectNavNative = false;		// L4D2Direct_GetTerrorNavArea
 bool g_bSiHudReadyUpNative = false;			// readyup 的 IsInReady（准备阶段不抢屏幕）
 bool g_bSiHudBossFlowNative = false;		// 坦克/女巫出生百分比位置（L4D2Direct_GetVS*FlowPercent 等）
 bool g_bSiHudSpecHudNative = false;			// spechud_appledmod 的 SpecHud_TankHudDisable（关 tankhud）
@@ -195,6 +197,7 @@ int g_iNextBotFailStreak = 0;				// 连续失败次数
 int g_iNextBotFailSuppressed = 0;			// 被限频压掉的日志条数
 float g_fNextBotLegacyAt = 0.0;				// 上次走 CreateFakeClient 兜底的时刻
 int g_iNextBotLegacyUses = 0;				// 兜底次数（诊断用）
+bool g_bNextBotNoSlotNoticed = false;		// 本图"服务端没有空位"的 notice 是否已经记过（每图一条）
 
 // ---------------------------------------------------------------------------
 // 六种特感的单类上限 cvar 名（PickSiType 也在用；这里提前声明，因为特感辅助面板要先读它们）
@@ -334,7 +337,7 @@ public void OnPluginStart()
 	GameType = FindConVar("mp_gamemode");
 	PainPillsDR = FindConVar("pain_pills_decay_rate");
 	MinionLimit = FindConVar("z_minion_limit");
-	// 特感辅助面板最后两行（Tank / Witch 出生位置）要用，与 spechud_appledmod 的算法同口径
+	// 特感辅助面板最下面"坦克 / 女巫"两行（boss 出生位置）要用，与 spechud_appledmod 的算法同口径
 	VersusBossBuffer = FindConVar("versus_boss_buffer");
 	
 	// 入队命令统一门禁：sm_join / sm_jg / sm_survivor / sm_sur / sm_infected / sm_inf
@@ -404,7 +407,7 @@ public void OnPluginStart()
 	SiHudEnable = CreateConVar("sm_sihud_enable", "1", "特感辅助面板总开关. 0=关闭（所有人都打不开）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	SiHudForceShow = CreateConVar("sm_sihud_force_show", "1", "生还者每回合首次离开安全区域时，是否给所有能看面板的玩家连续强制显示特感辅助面板 2 秒. 1=强制显示(默认); 0=不强制，只刷新已经开着面板的人.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	SiHudTankDelay = CreateConVar("sm_sihud_tank_delay", "7", "坦克玩家接管坦克后，多少秒后才关掉他的坦克HUD(tankhud)；这期间他的特感辅助面板让位给坦克HUD（强制显示的那 2 秒除外）.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
-	SiHudDebug = CreateConVar("sm_sihud_debug", "0", "1=在服务端日志里打印特感辅助面板的诊断信息（ESC 关闭、强制显示、坦克事件、刷新点采样等）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SiHudDebug = CreateConVar("sm_sihud_debug", "0", "1=在服务端日志里打印特感辅助面板的诊断信息（强制显示、坦克事件与面板交接、按键不算关面板等）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	RegConsoleCmd("sm_sihud", Cmd_SiHud, "开关特感辅助面板（聊天 !sihud）");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
 	// 2.5.16：闲置判定体检（谁会被转旁观、谁被"慢加载保护"挡住）
@@ -700,6 +703,15 @@ public void OnMapStart()
 		g_fIdleNoticeAt[i] = 0.0;
 		g_fInGameSince[i] = 0.0;
 	}
+	/* 同一套道理：bot 创建失败的限频/降级时间戳存的是上一张图的 GetGameTime，
+	   换图归零后 "now - 旧值" 是负数 —— 新图第一次失败会被限频直接吞掉，
+	   降级窗口也算错。这里必须一起清。 */
+	g_fNextBotFailLogAt = 0.0;
+	g_fNextBotFailSince = 0.0;
+	g_iNextBotFailStreak = 0;
+	g_iNextBotFailSuppressed = 0;
+	g_fNextBotLegacyAt = 0.0;
+	g_bNextBotNoSlotNoticed = false;
 	if (!LateLoad) CacheRoundState(false);
 	SiHud_ResetMap();
 }
@@ -977,8 +989,14 @@ void SpawnCheck()
 	if (iSurvivor >= cvar_minsurvivor.IntValue)  return;
 	/* iSurvivor 只在进函数时读一次；每次补位调用内部都会自己重新读 GetSurvivorTeam()
 	   并各自守住 SurvivorLimit。new bot 在 SpawnSurvivorBot() 返回时就已计入生还者队
-	   （ChangeClientTeam 是同步生效的），所以同一帧连续补位既不会超员、也不会重复补同一格。 */
-	for(; iSurvivor < cvar_minsurvivor.IntValue; iSurvivor++) SpawnSurvivorBot();
+	   （ChangeClientTeam 是同步生效的），所以同一帧连续补位既不会超员、也不会重复补同一格。
+	   只有"确实补上了"才继续补下一格：旧循环无论补位成功与否都推进计数，失败一次就等于
+	   少补一格（引擎拒绝造 bot 时就是这样）。失败就结束本次补位，交给下一轮触发去补：
+	   玩家进服/断线/spawn 都会重新触发 SpawnCheck。 */
+	for (int i = iSurvivor; i < cvar_minsurvivor.IntValue; i++)
+	{
+		if (!SpawnSurvivorBot()) break;
+	}
 }
 
 // ------------------------------------------------------------------------
@@ -1109,23 +1127,18 @@ bool SpawnSurvivorBotNextBot(const char[] botName, bool manual)
 
 	int bot = SDKCall(g_hSDK_NextBotCreatePlayerBot, botName);
 
-	/* NextBotCreatePlayerBot 内部就是 CreateFakeClient() + Instance()：空位刚被回收
-	   （同一 tick 里刚踢掉的 bot、玩家刚断线）时它会返回无效槽位 -1。这类失败是瞬时的，
-	   所以先立刻重试一次 —— 第二次调用时引擎通常已经把空位放出来了。
-	   旧代码在这里直接 LogError 后返回，于是每次 SpawnCheck 都刷一条同样的日志，
-	   就是用户看到的 "...NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 -1" 刷屏。 */
+	/* NextBotCreatePlayerBot 内部就是 CreateFakeClient() + Instance()，返回 -1 就等于
+	   引擎的 CreateFakeClient() 返回了 NULL（SourceMod 把空的 CBasePlayer 返回值记成 -1）。
+	   旧代码在这里"同一 tick 立刻再调一次"，但 player 槽位是引擎帧末才回收的
+	   （KickClient 也是下一帧才生效），同帧重试只会拿到同样的 -1，是死代码。
+	   现在改成：失败按原因分流（没有可复用槽位 → 静默等下一次触发；该有位置却没造出来
+	   → 报错，并按连续失败次数决定是否退回 CreateFakeClient 兜底）。 */
 	if (!IsNextBotSlotUsable(bot))
 	{
 		NextBotReleaseInvalidSlot(bot);
-		bot = SDKCall(g_hSDK_NextBotCreatePlayerBot, botName);
-	}
-
-	if (!IsNextBotSlotUsable(bot))
-	{
-		NextBotReleaseInvalidSlot(bot);
-		NextBotNoteFailure(bot);
-		// 连续失败时退回旧的 CreateFakeClient 两段式，把座位照旧补上（内部限频）
-		return NextBotLegacyFallback(botName, manual);
+		// 只有"引擎还有位置却没造出来"才退回旧的 CreateFakeClient 两段式补位（内部限频）
+		if (NextBotNoteFailure(bot)) return NextBotLegacyFallback(botName, manual);
+		return false;
 	}
 
 	// 成功：清失败统计
@@ -1172,11 +1185,60 @@ void NextBotReleaseInvalidSlot(int bot)
 		KickClient(bot, "Failed to create survivor bot");
 }
 
+/* 引擎那边"还能不能再塞一个 player 客户端"的上限。
+   MaxClients 是 sv_maxclients（12v12 必须是 31，见 l4dmultislots 的要求），但 l4dtoolz
+   把 sv_maxplayers 写进引擎的玩家槽位表（m_numGameSlots）并通过 GetMaxHumanPlayers()
+   暴露出来（本服 cfg/server.cfg 是 mv_maxplayers 30）。L4D2 里旁观者同样是 player，
+   30 个 client 连满时再造 bot 引擎就没槽位了 —— 这就是日志里 "clients=30/31"
+   却拿到 -1 的原因。没有 l4dtoolz 的服这个值等于 MaxClients。 */
+int SvPlayerSlotCapacity()
+{
+	int capacity = GetMaxHumanPlayers();
+	if (capacity > 0 && capacity < MaxClients) return capacity;
+	return MaxClients;
+}
+
+/* 引擎的假客户端槽位不能复用：CBaseServer::CreateFakeClient() 内部 GetFreeClient()
+   会 `if (client->IsFakeClient()) continue;` —— 刚被踢掉的 bot，在引擎把它的 client
+   槽 Clear() 掉（m_bFakePlayer 复位）之前，那个槽位对"再造一个 player"是不可用的；
+   当 m_Clients.Count() 已经到 MaxClients 时，CreateFakeClient() 就返回 NULL，
+   也就是 NextBotCreatePlayerBot 返回的 -1。 */
+bool SvHasPendingKickedSlot()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		if (IsClientInKickQueue(i)) return true;
+	return false;
+}
+
+/* 引擎这次拒绝造 bot 属于常态（没有可复用的 player 槽位）时的处理：
+   - 不写 error log：人满 / 槽位刚被回收时每张图都会撞上一次，不是插件故障
+   - 不计入连续失败次数，因此也不会把 NextBot 主路径降级成 CreateFakeClient 两段式
+   - 不重试：槽位空出来必然伴随客户端变动（OnClientDisconnect / player_spawn 都会重新
+     触发 SpawnCheck），不需要自己拿定时器空转 */
+void NextBotNoteNoSlot()
+{
+	if (g_bNextBotNoSlotNoticed) return;
+	g_bNextBotNoSlotNoticed = true;
+	LogMessage("[SV bot] 服务端暂时没有可复用的 player 槽位，本次补位跳过（clients=%d/%d，可玩槽位=%d，生还者=%d/%d）。客户端变动后由下一次 SpawnCheck 自动补上。",
+		GetClientCount(false), MaxClients, SvPlayerSlotCapacity(), GetSurvivorTeam(), SurvivorLimit.IntValue);
+}
+
 /* 无效槽位统计 + 限频日志（需求：每 N 秒最多一条）。
+   返回 true = "不该失败却失败了"，这次失败值得退回 CreateFakeClient 兜底；
+   返回 false = 引擎没有可复用的 player 槽位，属于常态，什么都不用做。
    连续失败次数与持续时间同时达标才彻底降级：分批连刷 12 个 bot 时的一次性瞬时失败
    不该把整条 NextBot 路径废掉。 */
-void NextBotNoteFailure(int bot)
+bool NextBotNoteFailure(int bot)
 {
+	// ① 引擎那边已经没位置（可玩槽位满 / 刚踢掉的 bot 槽位还没回收）：必然一直失败
+	if (SvHasPendingKickedSlot() || GetClientCount(false) >= SvPlayerSlotCapacity())
+	{
+		NextBotNoteNoSlot();
+		return false;
+	}
+
+	// ② 还有位置却没造出来：这才是异常
+
 	float now = GetGameTime();
 	g_iNextBotFailStreak++;
 	if (g_fNextBotFailSince == 0.0) g_fNextBotFailSince = now;
@@ -1187,14 +1249,21 @@ void NextBotNoteFailure(int bot)
 	}
 	else
 	{
-		char message[256];
+		char message[288];
 		FormatEx(message, sizeof(message),
 			"[SV bot] NextBotCreatePlayerBot<SurvivorBot> 返回无效槽位 %d"
 			... "（连续第 %d 次；日志已限频=每 5 秒最多一条，本次压掉 %d 条；"
-			... "clients=%d/%d，生还者=%d/%d）",
+			... "clients=%d/%d，生还者=%d/%d，实体=%d/%d）",
 			bot, g_iNextBotFailStreak, g_iNextBotFailSuppressed,
-			GetClientCount(false), MaxClients, GetSurvivorTeam(), SurvivorLimit.IntValue);
-		LogError("%s", message);
+			GetClientCount(false), MaxClients, GetSurvivorTeam(), SurvivorLimit.IntValue,
+			GetEntityCount(), GetMaxEntities());
+
+		/* 第 1 次只记 notice：换图/回合开始/刚踢掉 bot 的瞬间撞上一次很常见
+		   （引擎的 client 槽位池要下一次帧才回收），不该在 errors_*.log 里留一条 error。
+		   第 2 次起仍按 error 记，保留"引擎真的坏了"的可观测性。 */
+		if (g_iNextBotFailStreak < NEXTBOT_FAIL_LOUD_COUNT) LogMessage("%s", message);
+		else LogError("%s", message);
+
 		g_fNextBotFailLogAt = now;
 		g_iNextBotFailSuppressed = 0;
 	}
@@ -1208,6 +1277,7 @@ void NextBotNoteFailure(int bot)
 			g_iNextBotFailStreak, now - g_fNextBotFailSince, bot);
 		DegradeSurvivorBotCreation(reason);
 	}
+	return true;
 }
 
 /* 兜底：SDKCall 连续失败时退回 CreateFakeClient 两段式，保证 12v12 的座位照旧补上
@@ -1221,9 +1291,10 @@ bool NextBotLegacyFallback(const char[] botName, bool manual)
 	if (GetClientCount(false) >= MaxClients) return false;
 	if (!SvBotsAllowed() || GetSurvivorTeam() >= SurvivorLimit.IntValue) return false;
 
+	if (!SpawnSurvivorBotLegacy(botName, manual)) return false;
+	// 限频时间戳只在真的补位成功时写：失败也写会把下一次兜底白锁 10 秒
 	g_fNextBotLegacyAt = now;
 	g_iNextBotLegacyUses++;
-	if (!SpawnSurvivorBotLegacy(botName, manual)) return false;
 	LogMessage("[SV bot] NextBot 路径失败，本次退回 CreateFakeClient 两段式补位（第 %d 次）。", g_iNextBotLegacyUses);
 	return true;
 }
@@ -2275,19 +2346,33 @@ bool AnySurvivorLeftSafeArea()
 //   显示规则（与需求逐条对应）：
 //     B. 只允许非生还者（感染者 / 旁观 / 未分队）打开并显示；生还者输入 !sihud 只提示、不开面板，
 //        已开面板的玩家一旦转成生还者也立刻停掉。
-//     C. 生还者**每回合首次**离开安全区域（player_left_start_area / player_left_checkpoint）时，
-//        给所有能看面板的玩家**连续 2 秒**强制显示（SIHUD_FORCE_SECONDS，2 秒里每 0.25 秒重画一次，
-//        被别的面板顶掉也会立刻顶回来），2 秒后解除强制 —— 之后**不再自动打开**，
-//        面板是开是关完全由玩家自己 !sihud 决定。sm_sihud_force_show=0 时这一步跳过。
-//        本回合已经强制显示过之后，中途进服的非生还者补一次同样的 2 秒强制显示。
+//     C. 生还者**每回合首次**离开安全区域时，给所有能看面板的玩家**连续 2 秒**强制显示
+//        （SIHUD_FORCE_SECONDS，2 秒里每 0.25 秒重画一次，被别的面板顶掉也会立刻顶回来），
+//        2 秒后解除强制 —— 之后**不再自动打开**，面板是开是关完全由玩家自己 !sihud 决定。
+//        sm_sihud_force_show=0 时这一步跳过。
+//        "首次离开"有两条触发：player_left_start_area / player_left_checkpoint 事件，加
+//        Timer_SiHudRefresh 里 1 秒一次的兜底轮询（SiHud_PollForceShow）。引擎在换图 / 读图 /
+//        出生点重定位时会误发 player_left_start_area（hdf.sp 里也有同样的记录），准备阶段
+//        （readyup / 门锁面板在场）又不该抢屏幕 —— 这两种情况**不消耗**本回合唯一那次机会，
+//        否则真实离开时就不会再自动显示了。本回合已经强制显示过之后，中途进服的非生还者
+//        补一次同样的 2 秒强制显示。
 //     D. 坦克刷出 / 被接管（tank_spawn、以及 1 秒轮询发现"同一只坦克换了控制者"）：
 //          · 关掉**所有玩家**的坦克HUD（tankhud 由 spechud_appledmod 画，走 SpecHud_TankHudDisable）；
 //            坦克玩家本人例外：他先看 sm_sihud_tank_delay（默认 7 秒）自己的坦克血量，7 秒后才关；
 //          · 除坦克玩家外的其它玩家：同一时刻起连续 2 秒强制显示本面板；
-//          · 坦克玩家：这 7 秒里本面板让位（g_fSiHudTankLockUntil），但那 2 秒强制显示对他同样生效。
+//          · 坦克玩家：这 7 秒里本面板让位（g_fSiHudTankLockUntil），但那 2 秒强制显示对他同样生效；
+//            7 秒到点（他的 tankhud 关掉）后面板**必须回到他屏幕上**：他原本开着就恢复，原本
+//            没开就由插件替他打开一次（g_iSiHudTankPanel = AUTO），坦克结束后再收回
+//            （见 SiHud_TankHandoverPanel / SiHud_ReleaseTankPanel）。不能只是"恢复他原本的开关"：
+//            玩家变成坦克之前多半压根没开面板，tankhud 一关他就一块 HUD 都没有了。
 //        二控（坦克被第二名玩家接管）按当前坦克玩家重新计时。
-//     G. 玩家按 ESC 关掉面板后不再自动重开（旧 Team Panel 会重开）；ESC / !sihud 关闭会同时取消
-//        该玩家的强制显示窗口，所以"强制 2 秒"也不会和玩家抢屏幕。
+//     E. 面板最下面两行是"坦克 / 女巫"，口径与游戏顶部 HUD（l4d2_scripted_hud / spechud_appledmod）
+//        一致：按 Versus Director 的 boss flow percent 显示 `坦克: 34%`；本回合这个 boss 不是按
+//        flow 刷的（静态/事件刷出）就显示 `坦克: 固定`。**本回合已经刷出过就整行不画**。
+//     G. 面板是 HUD，不是菜单：开关只由 !sihud 改变。SourceMod 的 Panel 收到任何按键（数字键、
+//        ESC……）都会被引擎关掉，这是引擎行为、改不了；但**不再**把它当成"玩家把面板关了"
+//        （2.5.21 之前用"面板提前消失 ⇒ 玩家自己关的"反推 ESC，玩家按数字键切武器就把面板按死，
+//        连带那一回合的自动显示一起废掉），下一秒刷新会原样重新发出来。
 // *********************************************************************************
 
 // 特感英文名，顺序固定 = m_zombieClass 1..6（需求顺序：smoker/boomer/hunter/spitter/jockey/charger）
@@ -2330,8 +2415,9 @@ public Action Cmd_SiHud(int client, int args)
 	{
 		g_bSiHudOn[client] = false;
 		g_bSiHudSent[client] = false;
-		g_bSiHudSeen[client] = false;
-		// 手动关掉 = 连强制显示窗口一起取消（否则 ESC / !sihud 之后面板还会被强制顶回来）
+		// 玩家自己动过开关 = 这块面板归他自己管：坦克让位结束后不再替他自动打开
+		g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
+		// 手动关掉 = 连强制显示窗口一起取消（否则 !sihud 之后面板还会被强制顶回来）
 		SiHud_CancelForce(client);
 		SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
 		PrintToChat(client, "[SV] 特感辅助面板已关闭。");
@@ -2341,12 +2427,13 @@ public Action Cmd_SiHud(int client, int args)
 	// D：坦克玩家在 tank_delay 窗口里面板让位给他的坦克HUD（这段时间不给开）
 	if (SiHud_IsTankLocked(client))
 	{
-		PrintToChat(client, "[SV] 你刚接管坦克，%d 秒后才显示特感辅助面板。",
+		PrintToChat(client, "[SV] 你刚接管坦克，%d 秒后面板会随着坦克HUD关闭自动显示。",
 			SiHudTankDelay != null ? SiHudTankDelay.IntValue : SIHUD_DEFAULT_TANK_DELAY);
 		return Plugin_Handled;
 	}
 
 	g_bSiHudOn[client] = true;
+	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;	// 自己开的：坦克结束后别收回去
 	SiHud_UpdatePanel();	// 立刻画一次，不必等下一个 1 秒刷新
 	if (SiHud_ReadyUpActive())
 		PrintToChat(client, "[SV] 特感辅助面板已开启（准备阶段结束后显示），再次输入 !sihud 关闭。");
@@ -2361,6 +2448,7 @@ public Action Cmd_SiHud(int client, int args)
 public Action Timer_SiHudRefresh(Handle timer)
 {
 	SiHud_PollBossState();
+	SiHud_PollForceShow();		// C：离开安全区的兜底（事件误发/被准备阶段挡掉时不浪费本回合机会）
 	SiHud_UpdatePanel();
 	return Plugin_Continue;
 }
@@ -2389,7 +2477,6 @@ public Action Timer_SiHudForceTick(Handle timer)
 		if (!g_bSiHudOn[client] && IsClientInGame(client) && !IsFakeClient(client))
 		{
 			g_bSiHudSent[client] = false;
-			g_bSiHudSeen[client] = false;
 			SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
 		}
 		if (SiHudDebug != null && SiHudDebug.BoolValue)
@@ -2405,7 +2492,9 @@ public Action Timer_SiHudForceTick(Handle timer)
 	return Plugin_Continue;
 }
 
-// 坦克玩家延迟结束（sm_sihud_tank_delay 秒）：先关掉他的坦克HUD，再按原开关状态恢复面板
+// ------------------------------------------------------------------------
+// 坦克玩家的让位窗口结束（sm_sihud_tank_delay 秒）：先关掉他的坦克HUD，再把面板交还给他
+// ------------------------------------------------------------------------
 public Action Timer_SiHudTankRestore(Handle timer, int userid)
 {
 	int client = GetClientOfUserId(userid);
@@ -2415,11 +2504,54 @@ public Action Timer_SiHudTankRestore(Handle timer, int userid)
 	if (IsClientInGame(client)) SiHud_DisableTankHud(client);
 
 	if (!IsClientInGame(client) || IsFakeClient(client)) return Plugin_Stop;
-	if (!g_bSiHudOn[client]) return Plugin_Stop;			// 期间自己关掉了就别再开
 	if (GetClientTeam(client) == TEAM_SURVIVOR) return Plugin_Stop;
 	if (SiHud_IsTankLocked(client)) return Plugin_Stop;	// 锁又被延长了，交给更晚的 timer
-	SiHud_UpdatePanel();								// 时间到，立即恢复
+	SiHud_TankHandoverPanel(client);					// 时间到：面板回到他屏幕上
 	return Plugin_Stop;
+}
+
+// ------------------------------------------------------------------------
+// 坦克玩家的面板交接（问题 4 的修法）
+//   tank_delay 到点、他的 tankhud 已经关掉之后调用：
+//     · 他原本开着面板 → 什么都不用做，下一秒刷新自然会重画；
+//     · 他原本没开（最常见：变成坦克之前压根没输入过 !sihud）→ **替他打开一次**。
+//       旧代码在这里 `if (!g_bSiHudOn[client]) return`，结果 tankhud 关了以后他一块 HUD
+//       都没有 —— 这就是玩家反馈的"坦克玩家看不到面板"。
+//   每只坦克只接管一次（g_iSiHudTankPanel 记状态）：之后玩家自己 !sihud 关掉就不再硬开。
+// ------------------------------------------------------------------------
+void SiHud_TankHandoverPanel(int client)
+{
+	if (client <= 0 || client > MaxClients) return;
+	if (g_iSiHudTankPanel[client] != SIHUD_TANKPANEL_NONE) return;	// 这只坦克已经处理过
+	if (!SiHud_IsTankClient(client)) return;						// 坦克已经没了（死亡 / 换人）：不接管
+	if (SiHud_IsTankLocked(client)) return;							// 还在 tankhud 让位窗口里
+	if (!SiHud_CanSeePanel(client)) return;							// 已转生还者 / 已离线：不接管
+
+	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
+	if (g_bSiHudOn[client])											// 他本来开着：直接重画一拍
+	{
+		SiHud_UpdatePanel();
+		return;
+	}
+
+	g_bSiHudOn[client] = true;
+	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_AUTO;
+	SiHud_UpdatePanel();
+	if (SiHudDebug != null && SiHudDebug.BoolValue)
+		LogMessage("[SV sihud] client=%d 坦克让位结束：替他自动打开面板（坦克结束后收回）。", client);
+}
+
+// 坦克结束（坦克死亡 / 换人 / 本回合结束）：把替他自动打开的面板收回去，恢复他自己原本的选择
+void SiHud_ReleaseTankPanel(int client)
+{
+	if (client < 0 || client > MaxClients) return;
+	bool bAuto = (g_iSiHudTankPanel[client] == SIHUD_TANKPANEL_AUTO);
+	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_NONE;
+	if (!bAuto) return;
+
+	g_bSiHudOn[client] = false;
+	g_bSiHudSent[client] = false;
+	if (IsClientInGame(client) && !IsFakeClient(client)) SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
 }
 
 // ------------------------------------------------------------------------
@@ -2440,30 +2572,27 @@ public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	g_iSiHudTankClient = tank;
 	g_iSiHudTankControl = SiHud_IsHumanTank(tank) ? 1 : 0;	// 刷出时算"一控"
 	g_bSiHudTankSpawned = true;
-	g_bSiHudTankDead = false;
+	if (tank > 0 && tank <= MaxClients) g_iSiHudTankPanel[tank] = SIHUD_TANKPANEL_NONE;	// 新的一只坦克：交接状态重置
 
 	SiHud_OnTankEvent(tank, false);
 }
 
-// 坦克死亡（tank_killed）：本回合刷出过且已死 → 面板不再画 Tank 行（需求）
+// 坦克死亡（tank_killed）：本回合刷出过（活着/死了都算）→ 面板不再画"坦克"那一行（需求）
 public void Event_TankKilled(Event event, const char[] name, bool dontBroadcast)
 {
 	g_iSiHudTankClient = 0;
 	g_bSiHudTankSpawned = true;
-	g_bSiHudTankDead = true;
 }
 
-// 女巫刷出 / 死亡：只影响面板最后一行的 Witch 行要不要画
+// 女巫刷出 / 死亡：只影响面板最下面"女巫"那一行要不要画（刷出过就整行不画）
 public void Event_WitchSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bSiHudWitchSpawned = true;
-	g_bSiHudWitchDead = false;
 }
 
 public void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bSiHudWitchSpawned = true;
-	g_bSiHudWitchDead = true;
 }
 
 // ------------------------------------------------------------------------
@@ -2488,7 +2617,6 @@ void SiHud_PollBossState()
 		g_iSiHudTankClient = tank;
 		g_iSiHudTankControl = SiHud_IsHumanTank(tank) ? 1 : 0;
 		g_bSiHudTankSpawned = true;
-		g_bSiHudTankDead = false;
 		SiHud_OnTankEvent(tank, false);
 	}
 	else if (tank != g_iSiHudTankClient)
@@ -2511,7 +2639,6 @@ void SiHud_PollBossState()
 				g_iSiHudTankControl++;
 				if (g_iSiHudTankControl > 2) g_iSiHudTankControl = 2;	// 面板只分一控/二控
 				g_bSiHudTankSpawned = true;
-				g_bSiHudTankDead = false;
 				SiHud_OnTankEvent(tank, true);
 			}
 		}
@@ -2521,7 +2648,19 @@ void SiHud_PollBossState()
 	if (!g_bSiHudWitchSpawned && FindEntityByClassname(-1, "witch") != -1)
 	{
 		g_bSiHudWitchSpawned = true;
-		g_bSiHudWitchDead = false;
+	}
+
+	// 真人坦克的面板交接：让位窗口（tank_delay）结束后必须让他看到面板（问题 4 的修法）。
+	// 放在轮询里是因为"AI 坦克被真人接管"、"插件晚加载"这些路径不会再有 tank_spawn 事件。
+	if (g_iSiHudTankClient > 0 && SiHud_IsHumanTank(g_iSiHudTankClient))
+		SiHud_TankHandoverPanel(g_iSiHudTankClient);
+
+	// 已经不当坦克的人（坦克死亡 / 换人 / 回合结束）：把替他自动打开的面板收回去
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (g_iSiHudTankPanel[client] == SIHUD_TANKPANEL_NONE) continue;
+		if (client == g_iSiHudTankClient && SiHud_IsTankClient(client)) continue;	// 还是那只坦克：留着
+		SiHud_ReleaseTankPanel(client);
 	}
 }
 
@@ -2592,7 +2731,6 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 	{
 		g_fSiHudTankLockUntil[tank] = GetGameTime() + float(delay);
 		g_bSiHudSent[tank] = false;
-		g_bSiHudSeen[tank] = false;
 		/* 不保存 timer 句柄：二控 / 同一玩家连着刷两次坦克时多出来的那个 timer
 		   只会再关一次 tankhud、再刷一次面板，不会造成错乱；换图时由引擎统一回收。 */
 		CreateTimer(float(delay), Timer_SiHudTankRestore, GetClientUserId(tank), TIMER_FLAG_NO_MAPCHANGE);
@@ -2644,7 +2782,8 @@ bool SiHud_SpecHudReady()
 // 强制显示窗口
 //   窗口内不管玩家自己的开关、也不管坦克让位窗口，一律画面板（需求："连续 2 秒一直打开"）。
 //   窗口由 Timer_SiHudForceTick 按 SIHUD_FORCE_REDRAW（0.25 秒）重画，2 秒里面板不会掉。
-//   玩家在窗口内按 ESC 或输入 !sihud 关闭 → SiHud_CancelForce 立刻取消窗口，不强抢屏幕。
+//   玩家在窗口内输入 !sihud 关闭 → SiHud_CancelForce 立刻取消窗口，不强抢屏幕；按键/ESC 只是
+//   让引擎那块窗口消失，不算"玩家不要面板"（见 SiHud_DummyHandler）。
 // ------------------------------------------------------------------------
 // 能不能看面板：游戏内、真人、非生还者（规则 B）
 bool SiHud_CanSeePanel(int client)
@@ -2672,17 +2811,22 @@ void SiHud_ForceShowStart(int client, float seconds)
 }
 
 // 对所有能看面板的玩家开强制窗口（离开安全区时用）
-void SiHud_ForceShowAll(float seconds)
+//   返回"开出了几个人的窗口"：一个能看面板的玩家都没有（人都没进服 / 全在生还者队）时返回 0，
+//   调用方据此**不算用掉**本回合那唯一一次自动显示机会（见 SiHud_TryForceShowAll）。
+int SiHud_ForceShowAll(float seconds)
 {
+	int count = 0;
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (!SiHud_CanSeePanel(client)) continue;
 		SiHud_ForceShowStart(client, seconds);
+		count++;
 	}
-	SiHud_DrawFrame(true);
+	if (count) SiHud_DrawFrame(true);
+	return count;
 }
 
-// 取消某人的强制窗口（玩家自己按 ESC / !sihud 关掉时调用）
+// 取消某人的强制窗口（玩家自己输入 !sihud 关掉面板时调用）
 void SiHud_CancelForce(int client)
 {
 	if (client <= 0 || client > MaxClients) return;
@@ -2701,13 +2845,17 @@ void SiHud_EnsureForceTimer()
 //   需求：**每回合首次**离开时，对所有能看面板的玩家（感染者 / 旁观 / 未分队）连续 2 秒
 //         强制显示面板（这段时间每 0.25 秒重画一次，被别的面板顶掉也立刻顶回来）；
 //         2 秒后解除强制 —— 之后不再自动打开，面板开/关由玩家自己的 !sihud 决定。
-//   手动关掉过的玩家同样会被强制这 2 秒（需求原文"所有玩家"），但他们随时可以按 ESC /
-//   再输入 !sihud 立刻取消（SiHud_CancelForce）。
+//   手动关掉过的玩家同样会被强制这 2 秒（需求原文"所有玩家"），再输入一次 !sihud 可以立刻
+//   取消（SiHud_CancelForce）；按键 / ESC 关掉的只是引擎那块窗口，不算玩家关掉了面板。
 //   sm_sihud_force_show=0 时不做强制，只刷新已经开着面板的人（旧行为）。
 // ------------------------------------------------------------------------
 void SiHud_OnSurvivorLeftSafeArea()
 {
 	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+
+	// 先把"本回合有人离开过安全区"记下来：准备阶段会把这一次强制显示挡掉，
+	// 由 Timer_SiHudRefresh 里的 1 秒轮询（SiHud_PollForceShow）补发。
+	g_bSiHudLeftSafeArea = true;
 
 	// 本回合已经强制显示过 / 关掉了强制显示：只刷新，不再强开
 	if (g_bSiHudAutoShownRound || SiHudForceShow == null || !SiHudForceShow.BoolValue)
@@ -2716,11 +2864,61 @@ void SiHud_OnSurvivorLeftSafeArea()
 		return;
 	}
 
+	// 事件本身不可信：换图 / 读图 / 出生点重定位时引擎会误发 player_left_start_area
+	// （hdf.sp 里有同样的记录）。这里用 Left4DHooks 的"确实有生还者离开安全区"复核一次，
+	// 复核不过就先不消耗机会 —— 真离开了由 1 秒轮询补上。
+	if (!SiHud_SurvivorsLeftSafeArea())
+	{
+		SiHud_UpdatePanel();
+		return;
+	}
+
+	SiHud_TryForceShowAll();
+}
+
+// "确实有生还者离开安全区"的二次确认。
+//   L4D_HasAnySurvivorLeftSafeArea 在 left4dhooks.inc 里是 optional native（服务器上的
+//   Left4DHooks 版本太旧时会没绑定），拿不到就退回"只信事件本身"，绝不因为探测而中断。
+bool SiHud_SurvivorsLeftSafeArea()
+{
+	if (!g_bSiHudSafeAreaNative) return true;
+	return AnySurvivorLeftSafeArea();
+}
+
+// ------------------------------------------------------------------------
+// C'：真正把"本回合首次离开安全区"的强制显示发出去
+//   只有**确实发出去了**（至少有一个能看面板的玩家、而且不在准备阶段）才算用掉本回合的机会：
+//     · 准备阶段（readyup / 门锁面板在场）不抢屏幕，机会留着等准备结束；
+//     · 一个能看面板的玩家都没有（人都没进服 / 全在生还者队）也不算用掉。
+//   旧代码在这两种情况下照样把 g_bSiHudAutoShownRound 置 true，于是真正离开安全区时面板
+//   再也不会自动显示，玩家只能自己 !sihud —— 这是玩家反馈"离开安全区不会自动显示面板"的主因。
+// ------------------------------------------------------------------------
+bool SiHud_TryForceShowAll()
+{
+	if (SiHud_ReadyUpActive()) return false;
+	if (SiHud_ForceShowAll(SIHUD_FORCE_SECONDS) <= 0) return false;
+
 	g_bSiHudAutoShownRound = true;
 	if (SiHudDebug != null && SiHudDebug.BoolValue)
 		LogMessage("[SV sihud] 生还者首次离开安全区：对所有能看面板的玩家强制显示 %.1f 秒。", SIHUD_FORCE_SECONDS);
+	return true;
+}
 
-	SiHud_ForceShowAll(SIHUD_FORCE_SECONDS);
+// ------------------------------------------------------------------------
+// C''：离开安全区的 1 秒兜底轮询（Timer_SiHudRefresh 里调）
+//   那两个游戏事件会误发、还会被准备阶段整个挡掉；这里每秒复核一次"事件报过 + 确实有人
+//   离开安全区 + 本回合还没真正强制显示过"，满足就补一次。准备阶段里 SiHud_TryForceShowAll
+//   会自己返回 false，下一拍照样会再试，直到真的显示出去为止。
+//   成功一次后 g_bSiHudAutoShownRound 为 true，之后这里只剩几次 bool 判断，不扫实体。
+// ------------------------------------------------------------------------
+void SiHud_PollForceShow()
+{
+	if (g_bSiHudAutoShownRound || !g_bSiHudLeftSafeArea) return;
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+	if (SiHudForceShow == null || !SiHudForceShow.BoolValue) return;
+	if (!SiHud_SurvivorsLeftSafeArea()) return;
+
+	SiHud_TryForceShowAll();
 }
 
 // ------------------------------------------------------------------------
@@ -2753,7 +2951,7 @@ void SiHud_UpdatePanel()
 
 // ------------------------------------------------------------------------
 // 画一帧并发送
-//   bForce=false：常规路径，只发给"自己开着面板"的玩家，遇到别人的菜单 / 玩家 ESC 都不抢；
+//   bForce=false：常规路径，只发给"自己开着面板"的玩家，遇到别的插件的菜单不抢；
 //   bForce=true ：强制显示路径，只发给"强制窗口内"的玩家，无视玩家开关、也无视坦克让位窗口
 //                 （需求：离开安全区 / 坦克事件时连续 2 秒一直显示）。
 // ------------------------------------------------------------------------
@@ -2789,7 +2987,6 @@ void SiHud_DrawFrame(bool bForce)
 		{
 			g_bSiHudOn[client] = false;
 			g_bSiHudSent[client] = false;
-			g_bSiHudSeen[client] = false;
 			g_fSiHudForceUntil[client] = 0.0;
 			continue;
 		}
@@ -2818,61 +3015,31 @@ void SiHud_DrawFrame(bool bForce)
 			// 显示时长（3 秒）比刷新间隔（1 秒）长，所以"屏幕上的面板是我们自己上一块"是常态：
 			// 这种情况允许覆盖重发，否则永远收不到刷新；别的菜单在显示时一律不抢。
 			bool ours = g_bSiHudSent[client] && (now - g_fSiHudLastSendAt[client]) < float(SIHUD_PANEL_SECONDS);
-			if (source == MenuSource_Normal || source == MenuSource_RawPanel)
-			{
-				if (!ours) continue;			// 别的插件的面板/内置投票还在显示
-				// 还看得到我们自己的面板 → 记下"确实显示过"。这一步是为了不把
-				// "引擎还没把面板画出来（玩家仍在加载）"误判成下面那条 ESC 判定。
-				g_bSiHudSeen[client] = true;
-			}
+			if ((source == MenuSource_Normal || source == MenuSource_RawPanel) && !ours)
+				continue;					// 别的插件的面板 / 内置投票还在显示，别抢
 
-			// 面板本该还在显示，却已经从屏幕上没了 → 玩家自己关掉的（ESC）。
-			// 需求 G：ESC 之后不要强制重开，开关就地置关。
-			// 必须"之前确实见到过面板"（g_bSiHudSeen）才这么判，否则刚进服还在加载的玩家
-			// 会被当成按了 ESC，自动补开的面板就永远出不来。
-			if (source == MenuSource_None && ours && g_bSiHudSeen[client]
-				&& (now - g_fSiHudLastSendAt[client]) < float(SIHUD_PANEL_SECONDS) - SIHUD_EARLY_CLOSE_SLACK)
-			{
-				g_bSiHudOn[client] = false;
-				g_bSiHudSent[client] = false;
-				g_bSiHudSeen[client] = false;
-				if (SiHudDebug != null && SiHudDebug.BoolValue)
-					LogMessage("[SV sihud] client=%d 面板提前消失（%.2f 秒 < %d 秒），判定为玩家关闭，开关置关。",
-						client, now - g_fSiHudLastSendAt[client], SIHUD_PANEL_SECONDS);
-				continue;
-			}
+			/* 2.5.22：这里**不再**用"面板提前消失 ⇒ 玩家自己关的"来反推 ESC。
+			   SourceMod 的 Panel 收到任何按键（按数字键切武器也算）都会被引擎关掉，
+			   按时间差判定必然误判 —— 玩家一按数字键就被当成"玩家自己关了面板"，
+			   开关被置关、本回合的自动显示也跟着一起废掉（玩家反馈的问题 3 / 问题 4）。
+			   现在按键只让这块窗口提前消失，下一秒刷新会原样重发；要关面板请用 !sihud。 */
 		}
 
-		g_bSiHudSent[client] = panel.Send(client, SiHud_PanelHandler, SIHUD_PANEL_SECONDS);
+		g_bSiHudSent[client] = panel.Send(client, SiHud_DummyHandler, SIHUD_PANEL_SECONDS);
 		if (g_bSiHudSent[client]) g_fSiHudLastSendAt[client] = now;
 	}
 	delete panel;
 }
 
 // ------------------------------------------------------------------------
-// 面板回调：只处理"玩家自己按 ESC 退出面板"这一件事（需求 G：ESC 后不强制重开）
-//   MenuCancel_Exit / MenuCancel_ExitBack = 玩家主动退出 → 开关置关、强制窗口一起取消；
-//   MenuCancel_Interrupted = 被别的菜单顶掉、MenuCancel_Timeout = 显示时长到期
-//   （我们每秒重发，到期属于正常刷新）、Disconnected → 都不当成"玩家关掉了"。
+// 面板回调：故意什么都不做（与 readyup / spechud 的 Dummy 回调同一套语义）
+//   2.5.22 起不再从回调里判断"玩家把面板关了"：
+//     · MenuCancel_Exit / ExitBack —— 按 ESC 与按数字键都落到这里，两者分不开，
+//       而玩家按数字键（切武器）是常规操作，不能因此把面板开关置关（问题 3）；
+//     · Interrupted / Timeout / Disconnected —— 被别的面板顶掉 / 3 秒显示时长到期，
+//       本来就是我们每秒重发的一部分。
+//   开关完全交给 !sihud（Cmd_SiHud）；按键只让这块窗口提前消失，下一秒刷新重发。
 // ------------------------------------------------------------------------
-int SiHud_PanelHandler(Handle menu, MenuAction action, int client, int param2)
-{
-	if (action == MenuAction_Cancel && (param2 == MenuCancel_Exit || param2 == MenuCancel_ExitBack))
-	{
-		if (client > 0 && client <= MaxClients)
-		{
-			bool bWasOn = g_bSiHudOn[client];
-			g_bSiHudOn[client] = false;
-			g_bSiHudSent[client] = false;
-			// 强制窗口也必须一起取消，否则 0.25 秒后面板又被强制 timer 顶回来
-			SiHud_CancelForce(client);
-			if (bWasOn && SiHudDebug != null && SiHudDebug.BoolValue)
-				LogMessage("[SV sihud] client=%d 按 ESC 关闭面板（reason=%d），开关置关。", client, param2);
-		}
-	}
-	return 0;
-}
-
 int SiHud_DummyHandler(Handle menu, MenuAction action, int param1, int param2)
 {
 	return 0;
@@ -3081,7 +3248,7 @@ bool SiHud_GetFurthestFlow(float &flow)
 }
 
 // ------------------------------------------------------------------------
-// 内容：感染者段（感染者人数行 / 六行职业统计 / 两个刷新点路程百分比 / 最后两行 Tank、Witch）
+// 内容：感染者段（感染者人数行 / 六行职业统计 / 最后两行 坦克、女巫）
 // ------------------------------------------------------------------------
 void SiHud_DrawInfectedSection(Panel panel)
 {
@@ -3095,110 +3262,101 @@ void SiHud_DrawInfectedSection(Panel panel)
 	SiHud_DrawText(panel, line);
 
 	SiHud_DrawClassLines(panel);
-	SiHud_FillSpawnFlowLines(panel);
 	SiHud_DrawBossLines(panel);
 }
 
 // ------------------------------------------------------------------------
-// 最后两行：Tank / Witch（需求）
-//   · 坦克还没刷出：画"出生位置百分比"（见 SiHud_GetBossFlowPercent，数据源与 l4d_boss_percent 一致）；
-//   · 坦克已经刷出：`Tank（<名字前2字符>* / AI） <剩余血量>（一控/二控）`；
-//   · 坦克刷出过且已死亡：整行不画；
-//   · 女巫同理：没刷出画百分比，刷出没死画"已生成"，刷出且已死整行不画。
+// 面板最下面两行：坦克 / 女巫（需求：风格与游戏顶部 HUD 一致）
+//   `坦克: 34%`  本回合坦克按 flow 刷出、还没刷 → 显示它会在哪一段路程刷出
+//                （百分比口径与 spechud_appledmod / l4d2_scripted_hud 的顶部 HUD 完全一致，
+//                 取数见 SiHud_GetBossLine）；
+//   `坦克: 固定` 本回合坦克不是按 flow 刷的（静态 / 事件刷出）；
+//   **本回合已经刷出过就整行不画**（活着、死了都一样 —— 需求原文），女巫完全同理。
+//   拿不到 Left4DHooks 的 boss flow 数据时也整行不画，不拿 info_zombie_spawn 的采样冒充。
 // ------------------------------------------------------------------------
+// 一行 boss 的取值结果
+enum
+{
+	SiHudBossLine_Hidden = 0,	// 这一行不画
+	SiHudBossLine_Percent,		// 画百分比：`坦克: 34%`
+	SiHudBossLine_Fixed			// 画"固定"：`坦克: 固定`
+};
+
 void SiHud_DrawBossLines(Panel panel)
 {
-	char line[96];
+	char line[64];
 	int percent = 0;
 
-	int tank = SiHud_FindTankClient();
-	if (tank > 0)
+	int tankLine = SiHud_GetBossLine(true, percent);
+	if (tankLine == SiHudBossLine_Percent)
 	{
-		int health = GetClientHealth(tank);
-		if (health < 0) health = 0;
-
-		if (IsFakeClient(tank))
-		{
-			// AI 坦克：名字位显示 AI，不显示一控/二控（没有真人控制）
-			FormatEx(line, sizeof(line), "Tank（%s） %d", SIHUD_TXT_TANK_AI, health);
-		}
-		else
-		{
-			char shortName[32];
-			SiHud_ShortName(tank, shortName, sizeof(shortName));
-			FormatEx(line, sizeof(line), "Tank（%s） %d（%s）", shortName, health,
-				(g_iSiHudTankControl >= 2) ? SIHUD_TXT_CTRL_SECOND : SIHUD_TXT_CTRL_FIRST);
-		}
+		FormatEx(line, sizeof(line), "坦克: %d%%", percent);
 		SiHud_DrawText(panel, line);
 	}
-	else if (g_bSiHudTankSpawned && g_bSiHudTankDead)
+	else if (tankLine == SiHudBossLine_Fixed)
 	{
-		// 已生成且已死亡 → 不画 Tank 行（需求）
-	}
-	else if (SiHud_GetBossFlowPercent(true, percent))
-	{
-		FormatEx(line, sizeof(line), "Tank：%d%%", percent);
+		FormatEx(line, sizeof(line), "坦克: %s", SIHUD_TXT_TANK_FIXED);
 		SiHud_DrawText(panel, line);
 	}
 
-	if (g_bSiHudWitchSpawned)
+	int witchLine = SiHud_GetBossLine(false, percent);
+	if (witchLine == SiHudBossLine_Percent)
 	{
-		if (!g_bSiHudWitchDead)
-		{
-			FormatEx(line, sizeof(line), "Witch：%s", SIHUD_TXT_WITCH_ALIVE);
-			SiHud_DrawText(panel, line);
-		}
-		// 已生成且已死亡 → 不画 Witch 行（需求）
+		FormatEx(line, sizeof(line), "女巫: %d%%", percent);
+		SiHud_DrawText(panel, line);
 	}
-	else if (SiHud_GetBossFlowPercent(false, percent))
+	else if (witchLine == SiHudBossLine_Fixed)
 	{
-		FormatEx(line, sizeof(line), "Witch：%d%%", percent);
+		FormatEx(line, sizeof(line), "女巫: %s", SIHUD_TXT_WITCH_FIXED);
 		SiHud_DrawText(panel, line);
 	}
 }
 
 // ------------------------------------------------------------------------
-// Tank / Witch 的出生位置百分比（与 spechud_appledmod 的 GetRoundTankFlow / GetRoundWitchFlow、
-// 以及 l4d_boss_percent 的算法完全一致）：
-//   L4D2Direct_GetVSTankFlowPercent(round) 是 0..1 的小数（flow percent，不是距离），
-//   ×100 之后再加上 versus_boss_buffer / 全图最大 flow 的余量 —— boss 实际会在稍晚一点的位置刷出。
-//   round 0 = 上半场，1 = 下半场（GameRules 的 m_bInSecondHalfOfRound，非对抗模式按 0 处理）。
-//   本回合这个 boss 不是按 flow 刷出的（静态/事件），或者 native 不可用 → 返回 false，不画百分比。
+// 坦克 / 女巫行的取值（bTank 区分两者），返回 SiHudBossLine_*
+//   数据源与顶部 HUD 一致（spechud_appledmod 的 GetRoundTankFlow / GetRoundWitchFlow、
+//   l4d2_scripted_hud 的 GetTankFlow / GetWitchFlow）：
+//     · L4D2Direct_GetVSTankFlowPercent(round) 是 0..1 的 flow percent 小数
+//       （个别 left4dhooks 版本也可能直接给 0..100，这里统一归一化），×100 得到百分比；
+//     · 再加上 versus_boss_buffer / 全图最大 flow 的余量 —— boss 实际会在稍晚一点的位置刷出；
+//     · round 0 = 上半场，1 = 下半场（GameRules 的 m_bInSecondHalfOfRound，非对抗按 0 处理）。
+//   本回合这个 boss 不是按 flow 刷出的（静态 / 事件）→ SiHudBossLine_Fixed，与顶部 HUD 的"固定"同义。
 // ------------------------------------------------------------------------
-bool SiHud_GetBossFlowPercent(bool bTank, int &percent)
+int SiHud_GetBossLine(bool bTank, int &percent)
 {
 	percent = 0;
-	if (!g_bSiHudBossFlowNative) return false;
-	// 下面几个 native 读的是对抗 Director 的 boss flow 数据，非对抗模式没有这个概念
-	if (!L4D_IsVersusMode()) return false;
+
+	// 本回合已经刷出过（活着 / 死了都算）→ 整行不画（需求）
+	if (bTank ? g_bSiHudTankSpawned : g_bSiHudWitchSpawned) return SiHudBossLine_Hidden;
+
+	// 下面几个 native 读的是对抗 Director 的 boss flow 数据：拿不到就别瞎猜
+	if (!g_bSiHudBossFlowNative) return SiHudBossLine_Hidden;
+	if (!L4D_IsVersusMode()) return SiHudBossLine_Hidden;
 
 	int round = SiHud_IsSecondHalf() ? 1 : 0;
-	if (bTank)
-	{
-		if (!L4D2Direct_GetVSTankToSpawnThisRound(round)) return false;
-	}
-	else
-	{
-		if (!L4D2Direct_GetVSWitchToSpawnThisRound(round)) return false;
-	}
+	bool bFlowBoss = bTank ? L4D2Direct_GetVSTankToSpawnThisRound(round)
+		: L4D2Direct_GetVSWitchToSpawnThisRound(round);
+	if (!bFlowBoss) return SiHudBossLine_Fixed;
 
 	float fraction = bTank ? L4D2Direct_GetVSTankFlowPercent(round)
 		: L4D2Direct_GetVSWitchFlowPercent(round);
 
-	// 需求「改成百分比」：不同 left4dhooks 版本这个 native 可能给 0..1 的小数，也可能直接给
-	// 0..100 的百分数。先统一归一化到 0..1，再算百分比，避免后者被 clamp 成恒 100%。
-	// （归一化必须放在加 buffer 之前：buffer / maxFlow 本身就是 0..1 的 flow 比例。）
-	if (fraction > 1.0)
-		fraction /= 100.0;
+	/* 与顶部 HUD（spechud_appledmod 的 GetRoundTankFlow/GetRoundWitchFlow）**完全同口径**：
+	   该 native 读的是引擎的 m_fTankSpawnFlowPercent，给的是 0..100 的百分比，不是 0..1 的
+	   flow 比例；顶部 HUD 的算法是 `RoundToNearest(native + versus_boss_buffer/maxFlow)`，
+	   余量是直接加在"百分点"上的。旧写法先除 100、加完比例再乘 100，会把余量放大 100 倍
+	   （差 1~2 个百分点），画面上下两个 HUD 的数字就对不上了。 */
+	if (fraction > 0.0 && fraction < 1.0)	// 个别 left4dhooks 版本给 0..1 的小数：兼容一下
+		fraction *= 100.0;
 
 	float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
 	float buffer = (VersusBossBuffer != null) ? VersusBossBuffer.FloatValue : 0.0;
 	if (maxFlow > 0.0) fraction += buffer / maxFlow;
 
-	percent = RoundToNearest(fraction * 100.0);
+	percent = RoundToNearest(fraction);
 	if (percent < 0) percent = 0;
 	else if (percent > 100) percent = 100;
-	return true;
+	return SiHudBossLine_Percent;
 }
 
 // 当前是不是本图的第二回合（上下半场），与 l4d2util_rounds 的 InSecondHalfOfRound 同一取法；
@@ -3268,94 +3426,14 @@ int SiHud_ClassLimit(int siClass)
 }
 
 // ------------------------------------------------------------------------
-// 两个特感刷新点的路程百分比
-//   数据源：地图里的 info_zombie_spawn 点（每张图只扫一次，见 SiHud_EnsureSpawnFlows），
-//   每个点用 L4D_GetNearestNavArea（退 L4D2Direct_GetTerrorNavArea）取 nav area，
-//   再用 L4D2Direct_GetTerrorNavAreaFlow 换成 flow，百分比 = flow / 全图最大 flow × 100。
-//   只显示"最远生还者前方最近的两个"点：已越过（flow <= 最远生还者 flow）的不显示。
-//   数据不全时返回 false，一行都不画（不影响面板其它内容）。
+// 2.5.22：这里原来是"刷新点1 / 刷新点2"两行（扫描 info_zombie_spawn，再用
+// L4D_GetNearestNavArea / L4D2Direct_GetTerrorNavAreaFlow 把点换成 flow 百分比）。
+// 需求把这两行换成了"坦克 / 女巫"两行（见 SiHud_DrawBossLines），整段采样随之删除：
+//   · 顶部 HUD 的 boss 位置来自 Versus Director 的 boss flow percent，那才是 boss 真正
+//     刷出的位置；info_zombie_spawn 只是地图上的刷怪候选点，两者不是一回事，口径也对不上；
+//   · 留着不用等于每次换图白扫一遍实体（还带一份 nav native 可用性判断）。
+// 以后真需要"最近的刷怪点"再从这个函数的 git 历史取回。
 // ------------------------------------------------------------------------
-bool SiHud_FillSpawnFlowLines(Panel panel)
-{
-	SiHud_EnsureSpawnFlows();
-	if (g_iSiHudSpawnCount <= 0) return false;
-	if (!g_bSiHudMaxFlowNative) return false;
-
-	float maxFlow = L4D2Direct_GetMapMaxFlowDistance();
-	if (maxFlow <= 0.0) return false;
-
-	float furthest;
-	if (!SiHud_GetFurthestFlow(furthest)) return false;
-
-	char line[64];
-	int drawn = 0;
-	for (int i = 0; i < g_iSiHudSpawnCount && drawn < SIHUD_SPAWN_LINES; i++)
-	{
-		// g_fSiHudSpawnFlow 已按 flow 升序排好，所以第一次命中的就是"前方最近的"两个点
-		if (g_fSiHudSpawnFlow[i] <= furthest + SIHUD_SPAWN_AHEAD_EPS) continue;
-		int percent = RoundToNearest(g_fSiHudSpawnFlow[i] / maxFlow * 100.0);
-		if (percent < 0) percent = 0;
-		else if (percent > 100) percent = 100;
-		FormatEx(line, sizeof(line), "刷新点%d:%d%%", drawn + 1, percent);
-		SiHud_DrawText(panel, line);
-		drawn++;
-	}
-	return drawn > 0;
-}
-
-// 扫描并缓存地图 info_zombie_spawn 的 flow（每张图一次；nav mesh 没准备好时下次再试）
-void SiHud_EnsureSpawnFlows()
-{
-	if (g_bSiHudSpawnScanned) return;
-
-	if (!g_bSiHudNavFlowNative || (!g_bSiHudNearestNavNative && !g_bSiHudDirectNavNative)
-		|| !g_bSiHudMaxFlowNative)
-	{
-		if (!g_bSiHudSpawnWarned)
-		{
-			g_bSiHudSpawnWarned = true;
-			LogError("[SV sihud] Left4DHooks 缺少 nav area flow 相关 native，刷新点行不显示（面板其它行不受影响）。");
-		}
-		g_bSiHudSpawnScanned = true;	// 本图不再重试
-		return;
-	}
-
-	// nav mesh 还没建好时全图最大 flow 会是 0，隔一秒再试；连续试满上限就放弃本图，
-	// 避免"没有 flow 的地图"上每秒白扫一遍实体。
-	if (L4D2Direct_GetMapMaxFlowDistance() <= 0.0)
-	{
-		if (++g_iSiHudSpawnAttempts < SIHUD_SPAWN_SCAN_ATTEMPTS) return;
-		g_bSiHudSpawnScanned = true;
-		if (SiHudDebug != null && SiHudDebug.BoolValue)
-			LogError("[SV sihud] 本图取不到全图最大 flow，刷新点行不显示。");
-		return;
-	}
-
-	g_iSiHudSpawnCount = 0;
-	float origin[3];
-	for (int entity = FindEntityByClassname(-1, "info_zombie_spawn");
-		entity != -1 && g_iSiHudSpawnCount < SIHUD_MAX_SPAWNS;
-		entity = FindEntityByClassname(entity, "info_zombie_spawn"))
-	{
-		if (!IsValidEntity(entity)) continue;
-		GetEntPropVector(entity, Prop_Send, "m_vecOrigin", origin);
-
-		Address area = Address_Null;
-		// 先用可靠度更高的 L4D_GetNearestNavArea（anyZ=true，保证空中的刷怪点也能落到脚下 nav area）
-		if (g_bSiHudNearestNavNative) area = L4D_GetNearestNavArea(origin, 500.0, true);
-		if (area == Address_Null && g_bSiHudDirectNavNative) area = L4D2Direct_GetTerrorNavArea(origin);
-		if (area == Address_Null) continue;
-
-		float flow = L4D2Direct_GetTerrorNavAreaFlow(area);
-		if (flow <= 0.0) continue;
-		g_fSiHudSpawnFlow[g_iSiHudSpawnCount++] = flow;
-	}
-	if (g_iSiHudSpawnCount > 1) SortFloats(g_fSiHudSpawnFlow, g_iSiHudSpawnCount, Sort_Ascending);
-	g_bSiHudSpawnScanned = true;
-
-	if (SiHudDebug != null && SiHudDebug.BoolValue)
-		LogMessage("[SV sihud] 本图 info_zombie_spawn 采样完成：%d 个有效刷新点。", g_iSiHudSpawnCount);
-}
 
 // ------------------------------------------------------------------------
 // 工具函数
@@ -3434,10 +3512,10 @@ void SiHud_ResetClient(int client)
 	if (client < 0 || client > MaxClients) return;
 	g_bSiHudOn[client] = false;
 	g_bSiHudSent[client] = false;
-	g_bSiHudSeen[client] = false;
 	g_fSiHudTankLockUntil[client] = 0.0;
 	g_fSiHudLastSendAt[client] = 0.0;
 	g_fSiHudForceUntil[client] = 0.0;
+	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_NONE;
 }
 
 void SiHud_ResetAll()
@@ -3445,29 +3523,29 @@ void SiHud_ResetAll()
 	for (int client = 0; client <= MaxClients; client++) SiHud_ResetClient(client);
 }
 
-// 换图：清状态 + 让刷新点/坦克/女巫缓存失效
+// 换图：清状态 + 让坦克/女巫缓存失效
 void SiHud_ResetMap()
 {
 	SiHud_ResetAll();
 	g_bSiHudAutoShownRound = false;
-	g_iSiHudSpawnCount = 0;
-	g_iSiHudSpawnAttempts = 0;
-	g_bSiHudSpawnScanned = false;
+	g_bSiHudLeftSafeArea = false;
 	g_hSiHudForceTimer = null;			// 强制 timer 带 TIMER_FLAG_NO_MAPCHANGE，换图时已被回收
 	SiHud_ResetBossState();
 	for (int i = 0; i < sizeof(g_bSiHudLimitMissLogged); i++) g_bSiHudLimitMissLogged[i] = false;
 }
 
 // 新回合：坦克让位窗口、强制显示窗口、本回合的自动显示机会一起重置
-// （需求：这些"每回合一次"的东西都不跨回合）
+// （需求：这些"每回合一次"的东西都不跨回合；坦克交接状态同理，新回合的坦克重新算）
 void SiHud_ResetRound()
 {
 	g_bSiHudAutoShownRound = false;
+	g_bSiHudLeftSafeArea = false;
 	SiHud_ResetBossState();
 	for (int client = 0; client <= MaxClients; client++)
 	{
 		g_fSiHudTankLockUntil[client] = 0.0;
 		g_fSiHudForceUntil[client] = 0.0;
+		SiHud_ReleaseTankPanel(client);		// 上回合替坦克自动打开的面板不跨回合
 	}
 }
 
@@ -3477,9 +3555,7 @@ void SiHud_ResetBossState()
 	g_iSiHudTankClient = 0;
 	g_iSiHudTankControl = 0;
 	g_bSiHudTankSpawned = false;
-	g_bSiHudTankDead = false;
 	g_bSiHudWitchSpawned = false;
-	g_bSiHudWitchDead = false;
 }
 
 // Left4DHooks / 跨插件的 native 默认被标成 optional，
@@ -3490,11 +3566,9 @@ void SiHud_CheckNatives()
 	g_bSiHudClientFlowNative = SiHud_NativeAvailable("L4D2Direct_GetFlowDistance");
 	g_bSiHudHighestNative = SiHud_NativeAvailable("L4D_GetHighestFlowSurvivor");
 	g_bSiHudFurthestFlowNative = SiHud_NativeAvailable("L4D2_GetFurthestSurvivorFlow");
-	g_bSiHudNavFlowNative = SiHud_NativeAvailable("L4D2Direct_GetTerrorNavAreaFlow");
-	g_bSiHudNearestNavNative = SiHud_NativeAvailable("L4D_GetNearestNavArea");
-	g_bSiHudDirectNavNative = SiHud_NativeAvailable("L4D2Direct_GetTerrorNavArea");
 	g_bSiHudReadyUpNative = SiHud_NativeAvailable("IsInReady");
-	// 最后两行 Tank / Witch 的出生百分比位置（4 个 native 全在才用，缺一个就不画百分比）
+	g_bSiHudSafeAreaNative = SiHud_NativeAvailable("L4D_HasAnySurvivorLeftSafeArea");
+	// 最后两行"坦克 / 女巫"的出生百分比位置（4 个 native 全在才用，缺一个就不画这一行）
 	g_bSiHudBossFlowNative = g_bSiHudMaxFlowNative
 		&& SiHud_NativeAvailable("L4D2Direct_GetVSTankFlowPercent")
 		&& SiHud_NativeAvailable("L4D2Direct_GetVSWitchFlowPercent")
@@ -3504,7 +3578,7 @@ void SiHud_CheckNatives()
 	g_bSiHudSpecHudNative = SiHud_NativeAvailable("SpecHud_TankHudDisable");
 
 	if (!g_bSiHudMaxFlowNative && SiHudDebug != null && SiHudDebug.BoolValue)
-		LogError("[SV sihud] L4D2Direct_GetMapMaxFlowDistance 不可用：当前路程百分比与刷新点两行都不会显示。");
+		LogError("[SV sihud] L4D2Direct_GetMapMaxFlowDistance 不可用：当前路程百分比与坦克/女巫两行都不会显示。");
 	if (!g_bSiHudSpecHudNative && SiHudDebug != null && SiHudDebug.BoolValue)
 		LogError("[SV sihud] 找不到 spechud_appledmod 的 SpecHud_TankHudDisable：坦克刷出/接管时无法关闭 tankhud。");
 }

@@ -823,6 +823,15 @@ public void OnMapStart()
 
 public void OnMapEnd()
 {
+	/* 换图时引擎会销毁所有 TIMER_FLAG_NO_MAPCHANGE 计时器，句柄从此刻起失效。
+	   必须**先**把这些句柄置空，再做后面的 KeepTeams ——
+	   它会 KillTimer 这些句柄，对已销毁的句柄调用会抛 "Invalid timer handle"，
+	   而 SourcePawn 的运行时错误会直接中断当前回调：OnMapEnd 剩下的代码
+	   （包括原本放在函数末尾的句柄复位）全被跳过，死句柄就永久留在全局变量里。
+	   之后每一次 OnClientPutInServer / OnClientDisconnect / ResetClientFlags /
+	   下一次 OnMapEnd 都会报同一条错，而且报错会连带跳过调用方后面的清理。 */
+	DropMapChangeTimers();
+
 	// 兜底记录：地图要换了，但本次没走"回合结束记录"——换图插件/管理员用
 	// ForceChangeLevel、或引擎自动过关都不经过 changelevel 命令监听。
 	// 仅在允许中途记录时补一次；读不到实体就放弃（宁可不记录，也不能记错）。
@@ -835,17 +844,24 @@ public void OnMapEnd()
 			LogMessage("[队伍修正] 换图前兜底记录 %d 人（本次未走回合结束）", g_iPendingCount);
 	}
 
-	// NO_MAPCHANGE 计时器在换图时被引擎销毁，句柄不再有效
-	g_hCheckTimer = INVALID_HANDLE;
-	g_hTimeoutTimer = INVALID_HANDLE;
-
+	// 句柄已在函数开头统一置空（DropMapChangeTimers），这里只复位玩家状态标志
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		g_hClientTimer[client] = INVALID_HANDLE;
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
 	}
+}
+
+/* 把"换图即失效"的计时器句柄全部置空，不调用 KillTimer：
+   换图时这些计时器已由引擎销毁，再关一次就是 "Invalid timer handle"。 */
+void DropMapChangeTimers()
+{
+	g_hCheckTimer = INVALID_HANDLE;
+	g_hTimeoutTimer = INVALID_HANDLE;
+
+	for (int client = 1; client <= MaxClients; client++)
+		g_hClientTimer[client] = INVALID_HANDLE;
 }
 
 public Action Timer_UpdateTeamFlipped(Handle timer)
@@ -976,11 +992,24 @@ void StopClientRestoreTimer(int client)
 	if (client <= 0 || client > MaxClients)
 		return;
 
-	if (g_hClientTimer[client] != INVALID_HANDLE)
-	{
-		KillTimer(g_hClientTimer[client]);
+	/* 先取值并把槽位置空，再 KillTimer：
+	   万一这个句柄已经失效（换图销毁、或上一次 KillTimer 抛错留下的残留），
+	   KillTimer 会抛运行时错误并中断当前回调；若"置空"写在它后面，
+	   就会永远留下一个死句柄——之后每次调用都报同一条错，
+	   而且调用方（OnClientDisconnect / ResetClientFlags 等）后续清理全部被跳过。 */
+	Handle timer = g_hClientTimer[client];
+	g_hClientTimer[client] = INVALID_HANDLE;
+
+	if (timer != INVALID_HANDLE)
+		KillTimer(timer);
+}
+
+/* 计时器自己决定停止时调用：只在槽里仍然是"这一个"计时器时才清，
+   避免回调期间又起了新计时器却被这里误清（下一次 Stop 就会对死句柄 KillTimer）。 */
+void ReleaseClientTimer(int client, Handle timer)
+{
+	if (client > 0 && client <= MaxClients && g_hClientTimer[client] == timer)
 		g_hClientTimer[client] = INVALID_HANDLE;
-	}
 }
 
 // 单玩家还原计时器：每 1 秒检查一次，直到成功、放弃或整体解锁
@@ -993,7 +1022,7 @@ public Action Timer_RestoreClient(Handle timer, any data)
 	{
 		if (client > 0 && client <= MaxClients)
 		{
-			g_hClientTimer[client] = INVALID_HANDLE;
+			ReleaseClientTimer(client, timer);
 			g_bChecked[client] = false;
 			g_iFailureCount[client] = 0;
 		}
@@ -1106,7 +1135,7 @@ public Action Timer_RestoreClient(Handle timer, any data)
 			FixLogClient(client, "修复：不在记录中，%s -> %s（换图后新加入）", sBefore, sAfter);
 		}
 
-		g_hClientTimer[client] = INVALID_HANDLE;
+		ReleaseClientTimer(client, timer);
 		g_bChecked[client] = false;
 		return Plugin_Stop;
 	}
@@ -1130,7 +1159,7 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		}
 
 		MarkClientRestored(client);
-		g_hClientTimer[client] = INVALID_HANDLE;
+		ReleaseClientTimer(client, timer);
 		return Plugin_Stop;
 	}
 
@@ -1197,7 +1226,7 @@ public Action Timer_RestoreClient(Handle timer, any data)
 			FixLogClient(client, "修复：接管 Bot 后退回旁观（目标=旁观）");
 
 		MarkClientRestored(client);
-		g_hClientTimer[client] = INVALID_HANDLE;
+		ReleaseClientTimer(client, timer);
 		return Plugin_Stop;
 	}
 
@@ -1220,7 +1249,7 @@ public Action Timer_RestoreClient(Handle timer, any data)
 			}
 
 			// 放弃该玩家；5 秒检查器会把其 checked 标记视为已完成并整体解锁
-			g_hClientTimer[client] = INVALID_HANDLE;
+			ReleaseClientTimer(client, timer);
 			g_bChecked[client] = false;
 			g_iFailureCount[client] = 0;
 			return Plugin_Stop;
@@ -1795,17 +1824,17 @@ void ClearVars()
 
 void CancelProcessTimers()
 {
-	if (g_hCheckTimer != INVALID_HANDLE)
-	{
-		KillTimer(g_hCheckTimer);
-		g_hCheckTimer = INVALID_HANDLE;
-	}
+	// 一律"先把槽位置空，再关句柄"：句柄万一已失效（换图销毁），
+	// 抛错也只是一条，不会把死句柄留在全局变量里反复报错
+	Handle checkTimer = g_hCheckTimer;
+	g_hCheckTimer = INVALID_HANDLE;
+	if (checkTimer != INVALID_HANDLE)
+		KillTimer(checkTimer);
 
-	if (g_hTimeoutTimer != INVALID_HANDLE)
-	{
-		KillTimer(g_hTimeoutTimer);
-		g_hTimeoutTimer = INVALID_HANDLE;
-	}
+	Handle timeoutTimer = g_hTimeoutTimer;
+	g_hTimeoutTimer = INVALID_HANDLE;
+	if (timeoutTimer != INVALID_HANDLE)
+		KillTimer(timeoutTimer);
 }
 
 void ResetClientFlags()

@@ -1271,7 +1271,13 @@ void GetHUD2_Text(char[] output, int size)
     FormatEx(output, size, "\0");
     int PlayerLimit = GetConVarInt(FindConVar("sv_maxplayers"));
     char hostname[64];
-    char sTime[32];
+    /* 缓冲区按 UTF-8 字节数算，不是按"字"算：
+         完整格式 "%Y年%m月%d日 %H时%M分%S秒" 展开后是
+         4 + 3(年) + 2 + 3(月) + 2 + 3(日) + 1(空格) + 2 + 3(时) + 2 + 3(分) + 2 + 3(秒) = 33 字节，
+         再加结尾的 '\0' 一共 34 字节；原来只有 32，strftime 装不下就返回 0，
+         SM 的 FormatTime 于是抛 "Invalid time format or buffer too small"（每帧刷一条）。
+       4v4 用完整日期，多人配置用 "%H:%M:%S"，统一留足余量。 */
+    char sTime[64];
     FindConVar("hostname").GetString(hostname, sizeof(hostname));
 
     // 1.6.1：时间部分按配置分两种写法（判据统一走 survivor_limit，见 IsMultiplayerMode）：

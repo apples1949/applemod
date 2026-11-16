@@ -25,7 +25,7 @@ native void SpecHud_TankHudDisable(int client);
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.5.22-12v12"
+#define PLUGIN_VERSION "2.6.0-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -52,7 +52,7 @@ native void SpecHud_TankHudDisable(int client);
 // 特感辅助面板（sm_sihud）常量
 // ---------------------------------------------------------------------------
 #define SIHUD_TITLE              "特感辅助面板"
-#define SIHUD_TXT_HINT           "输入!sihud开关面板"
+#define SIHUD_TXT_HINT           "输入!sihud或!infhud开关面板"
 #define SIHUD_TXT_BLANK          " "
 #define SIHUD_TXT_TANK_FIXED     "固定"    // 坦克行：本回合坦克不是按 flow 刷的（静态/事件刷出）
 #define SIHUD_TXT_WITCH_FIXED    "固定"    // 女巫行：同上
@@ -64,7 +64,21 @@ native void SpecHud_TankHudDisable(int client);
 #define SIHUD_TEXT_BUDGET        510    // 面板总预算 511 字节，单行留 1 字节给换行
 #define SIHUD_NAME_CHARS         2      // 玩家名保留的字符数（需求：只显示前两个字符）
 #define SIHUD_SAFE_HEALTH        40     // "总血量>40"的门槛（倒地人数那一列用）
-#define SIHUD_DEFAULT_TANK_DELAY 7      // sm_sihud_tank_delay 默认值（需求：接管坦克 7 秒后才关掉他的 tankhud）
+// 坦克玩家"让位给克面板"的时长：= 克面板显示总时间 + 1 秒。
+//   克面板（坦克面板 / tankhud）由 spechud_appledmod 画，机制是"每秒重发 + 每次显示 3 秒"
+//   （spechud_appledmod.sp:37 SPECHUD_DRAW_INTERVAL 1.0；spechud_appledmod.sp:764 tankHud.Send(..., 3)），
+//   所以从坦克刷出到这块面板真正从屏幕上消失，总时间 = 最多 1 秒等待重发 + 3 秒显示 = 4~5 秒，
+//   按需求口径取 5 秒；再 + 1 秒余量 = 6 秒，到点才关 tankhud、把本面板交给他。
+//   这 6 秒里面板让位（g_fSiHudTankLockUntil），不受让位限制的只有那 2 秒强制显示。
+#define SIHUD_TANKHUD_SECONDS    5      // 克面板在坦克玩家屏幕上的显示总时间（秒，用户口径）
+#define SIHUD_DEFAULT_TANK_DELAY (SIHUD_TANKHUD_SECONDS + 1)    // sm_sihud_tank_delay 默认值 = 5 + 1 = 6
+#define SIHUD_MAX_TANK_LINES     3      // 坦克行最多画几只（2.6.0：多坦克同时存活时逐只一行）
+#define SIHUD_TANK_FULL_HEALTH   4000   // 取不到 m_iMaxHealth 时的坦克满血兜底（对抗坦克 4000）
+// 2.6.0：坦克行要显示"名称 + 血量 + 一控/二控"，这几个文案重新加回来（2.5.22 曾因"刷出过就整行不画"
+// 的需求删掉；现在的需求改成"坦克存活时逐只显示"，所以又需要它们了）。
+#define SIHUD_TXT_TANK_AI        "AI"   // AI 坦克：没有玩家名，也没有"几控"
+#define SIHUD_TXT_TANK_CTRL_FIRST  "1控" // 该玩家本回合第 1 次拿到坦克
+#define SIHUD_TXT_TANK_CTRL_SECOND "2控" // 该玩家本回合第 2 次及以上拿到坦克
 // 坦克玩家的面板交接状态（g_iSiHudTankPanel 的取值；见 SiHud_TankHandoverPanel）
 #define SIHUD_TANKPANEL_NONE     0      // 这只坦克还没替他处理过
 #define SIHUD_TANKPANEL_AUTO     1      // 面板是我们替他自动打开的（坦克结束后收回）
@@ -75,8 +89,8 @@ native void SpecHud_TankHudDisable(int client);
      boss flow percent，与顶部 HUD 一致），info_zombie_spawn 的 flow 采样整段删除；
    · SIHUD_EARLY_CLOSE_SLACK：SourceMod 的 Panel 只要收到按键（数字键也算）就会被关掉，
      按"提前多少秒消失"反推"玩家自己关的"必然误判 —— 玩家一按数字键面板就被永久关死；
-   · SIHUD_TXT_TANK_AI / SIHUD_TXT_WITCH_ALIVE / SIHUD_TXT_CTRL_FIRST / SIHUD_TXT_CTRL_SECOND：
-     它们只给"坦克活着 / 女巫已生成"那两行用，而新需求是刷出过就整行不再显示。 */
+   · SIHUD_TXT_WITCH_ALIVE：女巫"已生成"那行同样因为"刷出过就整行不画"被删。
+   （SIHUD_TXT_TANK_AI / SIHUD_TXT_TANK_CTRL_FIRST / SIHUD_TXT_TANK_CTRL_SECOND 已在 2.6.0 按新需求恢复。） */
 #define SIHUD_WPN_AWP            "weapon_sniper_awp"
 #define SIHUD_WPN_SCOUT          "weapon_sniper_scout"
 
@@ -152,12 +166,17 @@ Handle EmptyServerTimer = null;
 // ---------------------------------------------------------------------------
 ConVar SiHudEnable;							// sm_sihud_enable：总开关
 ConVar SiHudForceShow;						// sm_sihud_force_show：首次离开安全区是否强制显示 2 秒
+ConVar SiHudForceKeep;						// sm_sihud_force_keep：强制显示结束后是否保持开启（2.6.0）
+ConVar SiHudAutoOpen;						// sm_sihud_auto_open：进感染者队伍自动开启面板（2.6.0）
 ConVar SiHudTankDelay;						// sm_sihud_tank_delay：坦克玩家多少秒后才关掉 tankhud
 ConVar SiHudDebug;							// sm_sihud_debug：打印诊断日志
 ConVar VersusBossBuffer;					// versus_boss_buffer：boss 刷出位置的余量（与 spechud 同口径）
-bool g_bSiHudOn[MAXPLAYERS+1];				// 玩家是否开启面板（只由 !sihud 改变）
+bool g_bSiHudOn[MAXPLAYERS+1];				// 玩家是否开启面板（!sihud / 自动开启 / 坦克交接都会改）
 bool g_bSiHudSent[MAXPLAYERS+1];			// 上一次发送成功与否（判断屏幕上的面板是不是我们自己的）
 bool g_bSiHudAutoShownRound = false;		// 本回合"首次离开安全区强制显示"是否真的显示出去过
+// 2.6.0：玩家自己用 !sihud 关掉过面板 -> 本回合内不再自动替他打开（进队自动开 / 强制显示后保持开启
+// 都要看这个闩锁）。换队到生还者、新回合、换图时复位，所以"下回合/下次进特感"仍然会自己打开。
+bool g_bSiHudUserOff[MAXPLAYERS+1];
 float g_fSiHudTankLockUntil[MAXPLAYERS+1];	// 坦克玩家：到这一刻为止面板让位给他的 tankhud（强制显示不受它限制）
 float g_fSiHudLastSendAt[MAXPLAYERS+1];		// 上一次成功发送面板的时刻
 // 强制显示窗口（需求：离开安全区 / 坦克事件时对所有能看面板的玩家连续 2 秒强开）
@@ -171,8 +190,12 @@ bool g_bSiHudLeftSafeArea = false;
 bool g_bSiHudSafeAreaNative = false;		// Left4DHooks 的 L4D_HasAnySurvivorLeftSafeArea
 // 坦克 / 女巫状态（面板最下面"坦克 / 女巫"两行的判定 + "坦克刷出与接管"事件的判定）
 int g_iSiHudTankClient = 0;					// 当前坦克玩家（含 AI bot；0=场上没有坦克）
-int g_iSiHudTankControl = 0;				// 这只坦克已经被几个真人控制过（1=一控 2=二控及以上；只进调试日志）
-bool g_bSiHudTankSpawned = false;			// 本回合坦克刷出过（→ 不再画"坦克"行）
+int g_iSiHudTankControl = 0;				// 当前这只坦克已经被几个真人控制过（1=一控 2=二控及以上；调试日志用）
+// 2.6.0：**按玩家**记"本回合第几次拿到坦克控制权"（1=一控，2=二控及以上）。
+//   为什么按玩家而不按坦克：本服的口径是"二控 = 同一名玩家在控制权被消耗之后又拿回同一辆坦克"，
+//   而且多只坦克同时在场时（决战/多坦克局）每一行都要显示各自的控数 —— 只有按玩家记才不会串。
+int g_iSiHudTankCtrl[MAXPLAYERS+1];
+bool g_bSiHudTankSpawned = false;			// 本回合坦克刷出过（→ 没坦克在场时不再画"坦克"行）
 // 2.5.22：面板不再区分"刷出还没死"和"刷出已经死"（刷出过的 boss 整行都不画，见 SiHud_GetBossLine），
 // 所以原来的 g_bSiHudTankDead / g_bSiHudWitchDead 两个标记删掉了（留着只会变成编译告警 204）。
 bool g_bSiHudWitchSpawned = false;			// 本回合女巫刷出过（→ 不再画"女巫"行）
@@ -403,12 +426,16 @@ public void OnPluginStart()
 	QueuedPummelOffset = teamData.GetOffset("CTerrorPlayer->m_queuedPummelAttacker");
 	delete teamData;
 	if (QueuedPummelOffset == -1) SetFailState("Missing CTerrorPlayer->m_queuedPummelAttacker offset");
-	/* 特感辅助面板（旧 Team Panel 已删除，这里注册唯一的开关命令 sm_sihud / 聊天 !sihud） */
+	/* 特感辅助面板（旧 Team Panel 已删除，这里注册开关命令 sm_sihud / sm_infhud / 聊天 !sihud !infhud） */
 	SiHudEnable = CreateConVar("sm_sihud_enable", "1", "特感辅助面板总开关. 0=关闭（所有人都打不开）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	SiHudForceShow = CreateConVar("sm_sihud_force_show", "1", "生还者每回合首次离开安全区域时，是否给所有能看面板的玩家连续强制显示特感辅助面板 2 秒. 1=强制显示(默认); 0=不强制，只刷新已经开着面板的人.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	SiHudTankDelay = CreateConVar("sm_sihud_tank_delay", "7", "坦克玩家接管坦克后，多少秒后才关掉他的坦克HUD(tankhud)；这期间他的特感辅助面板让位给坦克HUD（强制显示的那 2 秒除外）.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
-	SiHudDebug = CreateConVar("sm_sihud_debug", "0", "1=在服务端日志里打印特感辅助面板的诊断信息（强制显示、坦克事件与面板交接、按键不算关面板等）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	RegConsoleCmd("sm_sihud", Cmd_SiHud, "开关特感辅助面板（聊天 !sihud）");
+	SiHudForceKeep = CreateConVar("sm_sihud_force_keep", "1", "强制显示（离开安全区 / 坦克刷出与接管）2 秒结束后，面板是否保持开启. 1=保持开启(默认，玩家自己 !sihud 才关); 0=旧行为（2 秒后自动收起，玩家得自己再输入一次 !sihud）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SiHudAutoOpen = CreateConVar("sm_sihud_auto_open", "1", "玩家进入感染者队伍（含中途进服时已经在感染者队）时，是否自动替他打开特感辅助面板. 1=自动打开(默认); 0=不自动打开，必须自己输入 !sihud.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	SiHudTankDelay = CreateConVar("sm_sihud_tank_delay", "6", "坦克玩家刷出/接管后，多少秒后才关掉他的坦克面板(克面板/tankhud)并把特感辅助面板交给他. 默认 6 = 克面板显示总时间 5 秒 + 1 秒（先让他看完自己的克面板）; 0=立刻交接（立刻关克面板、立刻显示本面板）. 大于 0 时这 N 秒里本面板让位; spechud 不在场/他的克面板已被关掉时永远立刻交接.", FCVAR_NOTIFY, true, 0.0, true, 60.0);
+	SiHudDebug = CreateConVar("sm_sihud_debug", "0", "1=在服务端日志里打印特感辅助面板的诊断信息（自动开启、强制显示与保持、坦克事件与面板交接、按键不算关面板等）.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	RegConsoleCmd("sm_sihud", Cmd_SiHud, "开关特感辅助面板（聊天 !sihud；也可 sm_sihud on|off）");
+	// 2.6.0：单独的开关入口（用户口径里的 infhud = 特感辅助面板），语义与 sm_sihud 完全一致
+	RegConsoleCmd("sm_infhud", Cmd_SiHud, "开关特感辅助面板（聊天 !infhud；也可 sm_infhud on|off）");
 	RegAdminCmd("sm_createplayer", Create_Player, ADMFLAG_CONVARS, "Create Survivor Bot");
 	// 2.5.16：闲置判定体检（谁会被转旁观、谁被"慢加载保护"挡住）
 	RegAdminCmd("sm_svidle", Cmd_IdleStatus, ADMFLAG_GENERIC,
@@ -835,6 +862,13 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	
 	// Adds very brief invulnerability to spawned SI infected bots in versus/scavenge. Otherwise they keep respawning dead
 	if (GetClientTeam(client) == TEAM_INFECTED && InfectedAllowed && MoreSiBotsVersus.BoolValue && IsFakeClient(client)) SetGodMode(client, 0.1);
+
+	/* 2.6.0：特感每一次刷出都补一次"面板该开着就开着"的兜底。
+	   进队自动开启的主路径是 player_team（Event_PlayerTeamSpecSince），但换图/读图后
+	   引擎有时只重发 player_spawn 不再发 player_team —— 用户反馈的"新玩家进入感染者队伍
+	   不会自动开启面板"就出在这条缝里。玩家自己 !sihud 关过的照样不打开（g_bSiHudUserOff）。 */
+	if (GetClientTeam(client) == TEAM_INFECTED && !IsFakeClient(client))
+		SiHud_AutoOpen(client, "感染者出生");
 	
 	// Each survivor spawn updates bot capacity and records respawn eligibility.
 	if (GetClientTeam(client) == TEAM_SURVIVOR)
@@ -1206,7 +1240,14 @@ int SvPlayerSlotCapacity()
 bool SvHasPendingKickedSlot()
 {
 	for (int i = 1; i <= MaxClients; i++)
+	{
+		/* IsClientInKickQueue 要求这个 client 已经在游戏里，否则 native 抛
+		   "Client X is not in game"（日志 4 就是这个：
+		   SvHasPendingKickedSlot → NextBotNoteFailure → SpawnSurvivorBotNextBot）。
+		   空闲槽位、还在连接/读图的槽位本来就不可能处在"刚踢掉 bot、槽位未回收"的状态，跳过即可。 */
+		if (!IsClientInGame(i)) continue;
 		if (IsClientInKickQueue(i)) return true;
+	}
 	return false;
 }
 
@@ -2347,8 +2388,10 @@ bool AnySurvivorLeftSafeArea()
 //     B. 只允许非生还者（感染者 / 旁观 / 未分队）打开并显示；生还者输入 !sihud 只提示、不开面板，
 //        已开面板的玩家一旦转成生还者也立刻停掉。
 //     C. 生还者**每回合首次**离开安全区域时，给所有能看面板的玩家**连续 2 秒**强制显示
-//        （SIHUD_FORCE_SECONDS，2 秒里每 0.25 秒重画一次，被别的面板顶掉也会立刻顶回来），
-//        2 秒后解除强制 —— 之后**不再自动打开**，面板是开是关完全由玩家自己 !sihud 决定。
+//        （SIHUD_FORCE_SECONDS，2 秒里每 0.25 秒重画一次，被别的面板顶掉也会立刻顶回来）。
+//        ★2.6.0：2 秒结束后**面板保持开启**（sm_sihud_force_keep=1，默认）——
+//        旧版到这里会 SiHud_ClosePanel 把它收掉，玩家看到的就是"离开安全区后闪一下就没了"。
+//        只有玩家自己 !sihud 关过（g_bSiHudUserOff）或者转成生还者时才真的收起来。
 //        sm_sihud_force_show=0 时这一步跳过。
 //        "首次离开"有两条触发：player_left_start_area / player_left_checkpoint 事件，加
 //        Timer_SiHudRefresh 里 1 秒一次的兜底轮询（SiHud_PollForceShow）。引擎在换图 / 读图 /
@@ -2356,19 +2399,27 @@ bool AnySurvivorLeftSafeArea()
 //        （readyup / 门锁面板在场）又不该抢屏幕 —— 这两种情况**不消耗**本回合唯一那次机会，
 //        否则真实离开时就不会再自动显示了。本回合已经强制显示过之后，中途进服的非生还者
 //        补一次同样的 2 秒强制显示。
+//     C'.2.6.0：玩家**进入感染者队伍**（player_team）或中途进服时已经在非生还者队伍
+//        （OnClientPostAdminCheck）→ 自动打开面板（sm_sihud_auto_open=1，默认）。
+//        玩家自己 !sihud 关过则本回合不再自动开（换回合/换图/转生还者后复位）。
 //     D. 坦克刷出 / 被接管（tank_spawn、以及 1 秒轮询发现"同一只坦克换了控制者"）：
 //          · 关掉**所有玩家**的坦克HUD（tankhud 由 spechud_appledmod 画，走 SpecHud_TankHudDisable）；
-//            坦克玩家本人例外：他先看 sm_sihud_tank_delay（默认 7 秒）自己的坦克血量，7 秒后才关；
 //          · 除坦克玩家外的其它玩家：同一时刻起连续 2 秒强制显示本面板；
-//          · 坦克玩家：这 7 秒里本面板让位（g_fSiHudTankLockUntil），但那 2 秒强制显示对他同样生效；
-//            7 秒到点（他的 tankhud 关掉）后面板**必须回到他屏幕上**：他原本开着就恢复，原本
-//            没开就由插件替他打开一次（g_iSiHudTankPanel = AUTO），坦克结束后再收回
-//            （见 SiHud_TankHandoverPanel / SiHud_ReleaseTankPanel）。不能只是"恢复他原本的开关"：
-//            玩家变成坦克之前多半压根没开面板，tankhud 一关他就一块 HUD 都没有了。
-//        二控（坦克被第二名玩家接管）按当前坦克玩家重新计时。
-//     E. 面板最下面两行是"坦克 / 女巫"，口径与游戏顶部 HUD（l4d2_scripted_hud / spechud_appledmod）
-//        一致：按 Versus Director 的 boss flow percent 显示 `坦克: 34%`；本回合这个 boss 不是按
-//        flow 刷的（静态/事件刷出）就显示 `坦克: 固定`。**本回合已经刷出过就整行不画**。
+//          · 坦克玩家：sm_sihud_tank_delay=6（2.6.0 默认 = 克面板显示总时间 5 秒 + 1 秒）→
+//            先让他看完自己的克面板（坦克面板），6 秒到点再关掉它并把面板交给他（面板里的坦克行
+//            已经显示 名称/血量/一控二控，之后就不需要 tankhud 了）；
+//            tank_delay=0 → 立刻关 tankhud、立刻把面板交给他；
+//            **没有 tankhud（原生不在场/已被关掉）时永远立刻交棒** —— 否则这 N 秒里他既没有
+//            tankhud 也没有面板，就是玩家报的"坦克玩家什么 HUD 都看不到"。
+//            交接统一走 SiHud_TankHandoverPanel：他原本开着就重画，原本没开就由插件替他打开一次
+//            （g_iSiHudTankPanel = AUTO，坦克结束后收回）。
+//        二控（换了一名玩家控制）按当前坦克玩家重新计时，并把交接状态复位。
+//     E. 面板最下面两行是"坦克 / 女巫"：
+//        ★2.6.0 坦克行：**有坦克活着**时逐只一行 `坦克: Ni* 78% 1控`
+//          （名称=前两个字符+*，血量=当前/最大，控数=该玩家本回合第几次拿到坦克；
+//            多只坦克同时存活时一只一行，最多 SIHUD_MAX_TANK_LINES 行，多的用一行"还有 N 只"提示）；
+//          **没有坦克活着**时才回落到旧口径：按 Versus Director 的 boss flow percent 显示
+//          `坦克: 34%`，不是按 flow 刷的就 `坦克: 固定`，本回合已刷出过则整行不画。
 //     G. 面板是 HUD，不是菜单：开关只由 !sihud 改变。SourceMod 的 Panel 收到任何按键（数字键、
 //        ESC……）都会被引擎关掉，这是引擎行为、改不了；但**不再**把它当成"玩家把面板关了"
 //        （2.5.21 之前用"面板提前消失 ⇒ 玩家自己关的"反推 ESC，玩家按数字键切武器就把面板按死，
@@ -2389,7 +2440,9 @@ static const char SiHudCharacterNames[8][16] =
 };
 
 // ------------------------------------------------------------------------
-// 命令入口：反复输入 !sihud / sm_sihud 开关面板
+// 命令入口：sm_sihud / sm_infhud / 聊天 !sihud !infhud
+//   无参数 = 开/关切换（旧行为）；on|1 / off|0 = 直接指定（2.6.0 新增，
+//   方便绑键或服务器指令一键打开面板）。
 // ------------------------------------------------------------------------
 public Action Cmd_SiHud(int client, int args)
 {
@@ -2409,37 +2462,106 @@ public Action Cmd_SiHud(int client, int args)
 		return Plugin_Handled;
 	}
 
-	// 判断"看到的面板要不要关"：自己开着面板，或者正处在强制显示窗口里（屏幕上确实有面板）。
-	// 这一步必须排在坦克让位窗口判断之前 —— 否则坦克玩家在自己那 7 秒里连强制显示的面板都关不掉。
-	if (g_bSiHudOn[client] || SiHud_IsForced(client, GetGameTime()))
+	// 屏幕上此刻有没有面板：自己开着，或者正处在强制显示窗口里。
+	bool bVisible = g_bSiHudOn[client] || SiHud_IsForced(client, GetGameTime());
+	bool bTurnOn = !bVisible;
+
+	if (args >= 1)
 	{
-		g_bSiHudOn[client] = false;
-		g_bSiHudSent[client] = false;
-		// 玩家自己动过开关 = 这块面板归他自己管：坦克让位结束后不再替他自动打开
-		g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
-		// 手动关掉 = 连强制显示窗口一起取消（否则 !sihud 之后面板还会被强制顶回来）
-		SiHud_CancelForce(client);
-		SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
-		PrintToChat(client, "[SV] 特感辅助面板已关闭。");
+		char arg[8];
+		GetCmdArg(1, arg, sizeof(arg));
+		if (StrEqual(arg, "on", false) || StrEqual(arg, "1", false)) bTurnOn = true;
+		else if (StrEqual(arg, "off", false) || StrEqual(arg, "0", false)) bTurnOn = false;
+		else
+		{
+			ReplyToCommand(client, "[SV] 用法：!sihud 或 !infhud 开关面板；sm_sihud on|off 直接指定。");
+			return Plugin_Handled;
+		}
+	}
+
+	if (bTurnOn)
+	{
+		// D：坦克玩家在 tank_delay 窗口里（sm_sihud_tank_delay>0 且他的 tankhud 还在场）
+		//    面板让位，到点由 Timer_SiHudTankRestore 自动交棒；tank_delay=0 时不会有这个窗口。
+		//    默认 6 秒 = 克面板显示总时间 5 秒 + 1 秒（见 SIHUD_DEFAULT_TANK_DELAY）。
+		if (SiHud_IsTankLocked(client))
+		{
+			PrintToChat(client, "[SV] 你刚接管坦克，%d 秒后面板会随着坦克HUD关闭自动显示。",
+				SiHudTankDelay != null ? SiHudTankDelay.IntValue : SIHUD_DEFAULT_TANK_DELAY);
+			return Plugin_Handled;
+		}
+
+		SiHud_SetPanel(client, true, SIHUD_TANKPANEL_DONE);	// 自己开的：坦克结束后别收回去
+		if (SiHud_ReadyUpActive())
+			PrintToChat(client, "[SV] 特感辅助面板已开启（准备阶段结束后显示），再次输入 !sihud 关闭。");
+		else
+			PrintToChat(client, "[SV] 特感辅助面板已开启，再次输入 !sihud 关闭。");
 		return Plugin_Handled;
 	}
 
-	// D：坦克玩家在 tank_delay 窗口里面板让位给他的坦克HUD（这段时间不给开）
-	if (SiHud_IsTankLocked(client))
-	{
-		PrintToChat(client, "[SV] 你刚接管坦克，%d 秒后面板会随着坦克HUD关闭自动显示。",
-			SiHudTankDelay != null ? SiHudTankDelay.IntValue : SIHUD_DEFAULT_TANK_DELAY);
-		return Plugin_Handled;
-	}
-
-	g_bSiHudOn[client] = true;
-	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;	// 自己开的：坦克结束后别收回去
-	SiHud_UpdatePanel();	// 立刻画一次，不必等下一个 1 秒刷新
-	if (SiHud_ReadyUpActive())
-		PrintToChat(client, "[SV] 特感辅助面板已开启（准备阶段结束后显示），再次输入 !sihud 关闭。");
-	else
-		PrintToChat(client, "[SV] 特感辅助面板已开启，再次输入 !sihud 关闭。");
+	// 关：连强制显示窗口一起取消（否则 !sihud 之后面板还会被强制顶回来），
+	// 并记"玩家自己关过"的闩锁 —— 本回合不再自动替他打开（换回合/换图/回生还者后复位）。
+	SiHud_SetPanel(client, false, SIHUD_TANKPANEL_DONE);
+	g_bSiHudUserOff[client] = true;
+	PrintToChat(client, "[SV] 特感辅助面板已关闭（本回合不再自动打开，随时输入 !sihud 可再开）。");
 	return Plugin_Handled;
+}
+
+// ------------------------------------------------------------------------
+// 2.6.0：面板开关的唯一入口（需求"增加单独的开关函数"）
+//   bOn = true ：打开并立刻画一帧；iTankPanel >= 0 时同时记"这块面板归谁管"
+//                （SIHUD_TANKPANEL_DONE = 玩家/自动开启的，坦克结束不收回；
+//                  SIHUD_TANKPANEL_AUTO = 替坦克玩家开的，坦克结束收回）
+//   bOn = false：关闭、取消强制窗口、把屏幕上的面板顶掉
+//   返回 true = 面板状态确实发生了变化
+// ------------------------------------------------------------------------
+bool SiHud_SetPanel(int client, bool bOn, int iTankPanel = -1)
+{
+	if (client <= 0 || client > MaxClients) return false;
+	if (!IsClientInGame(client) || IsFakeClient(client)) return false;
+
+	if (bOn)
+	{
+		if (GetClientTeam(client) == TEAM_SURVIVOR) return false;		// B：生还者永远不显示
+		bool bChanged = !g_bSiHudOn[client];
+		g_bSiHudOn[client] = true;
+		g_bSiHudUserOff[client] = false;
+		if (iTankPanel >= 0) g_iSiHudTankPanel[client] = iTankPanel;
+		SiHud_UpdatePanel();				// 立刻画一次，不必等下一个 1 秒刷新
+		return bChanged;
+	}
+
+	bool bChanged = g_bSiHudOn[client] || SiHud_IsForced(client, GetGameTime());
+	g_bSiHudOn[client] = false;
+	g_bSiHudSent[client] = false;
+	SiHud_CancelForce(client);				// 连强制显示窗口一起取消（SiHud_CancelForce 会清 g_fSiHudForceUntil）
+	if (iTankPanel >= 0) g_iSiHudTankPanel[client] = iTankPanel;
+	SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
+	return bChanged;
+}
+
+// ------------------------------------------------------------------------
+// 2.6.0：进入感染者队伍（含中途进服时已经在感染者队）自动打开面板
+//   用户反馈"新玩家进入感染者队伍不会自动开启面板" —— 以前只有"本回合已强制
+//   显示过"的中途进服才有一次 2 秒强制显示，之后又自动关掉，等于永远看不到面板。
+//   规则：
+//     · sm_sihud_auto_open=0 -> 不自动开（回到旧行为，全部靠玩家自己 !sihud）；
+//     · 玩家自己 !sihud 关过 -> 本回合内不再自动开（g_bSiHudUserOff）；
+//     · 生还者 / bot 不开；准备阶段照开（SiHud_DrawFrame 会等准备结束再画）。
+// ------------------------------------------------------------------------
+void SiHud_AutoOpen(int client, const char[] reason)
+{
+	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+	if (SiHudAutoOpen == null || !SiHudAutoOpen.BoolValue) return;
+	if (!SiHud_CanSeePanel(client)) return;
+	if (g_bSiHudUserOff[client]) return;
+	if (g_bSiHudOn[client]) return;					// 已经开着
+	if (SiHud_IsTankLocked(client)) return;			// 坦克让位窗口里由 Timer_SiHudTankRestore 交棒
+
+	if (!SiHud_SetPanel(client, true, SIHUD_TANKPANEL_DONE)) return;
+	PrintToChat(client, "[SV] 特感辅助面板已自动开启（输入 !sihud 关闭）。");
+	if (SiHudDebug != null && SiHudDebug.BoolValue)
+		LogMessage("[SV sihud] client=%d %s：自动打开面板。", client, reason);
 }
 
 // ------------------------------------------------------------------------
@@ -2462,6 +2584,8 @@ public Action Timer_SiHudForceTick(Handle timer)
 {
 	float now = GetGameTime();
 	bool any = false;
+	bool bKept = false;
+	bool bKeep = (SiHudForceKeep != null && SiHudForceKeep.BoolValue);
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
@@ -2471,21 +2595,34 @@ public Action Timer_SiHudForceTick(Handle timer)
 			any = true;
 			continue;
 		}
-		// 窗口到期：解除强制。玩家自己没开面板的，把屏幕上的残影清掉 ——
-		// 否则这块面板还会按 SIHUD_PANEL_SECONDS 再挂 3 秒，"2 秒就是 2 秒"。
+		// 窗口到期：解除强制。
+		// 2.6.0：默认（sm_sihud_force_keep=1）把面板**留下来**，不再像旧版那样
+		// "强制显示 2 秒 -> 自动关闭" —— 用户反馈的"生还者离开安全区后闪一下就没了"、
+		// "玩家接管坦克时面板短暂显示又关闭了" 都是这一条造成的。
+		// 只有玩家自己关过（g_bSiHudUserOff）或已经转生还者/离线时才真的收起来。
 		g_fSiHudForceUntil[client] = 0.0;
 		if (!g_bSiHudOn[client] && IsClientInGame(client) && !IsFakeClient(client))
 		{
-			g_bSiHudSent[client] = false;
-			SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
+			if (bKeep && !g_bSiHudUserOff[client] && GetClientTeam(client) != TEAM_SURVIVOR)
+			{
+				g_bSiHudOn[client] = true;	// 保持开启：交给 1 秒常规刷新继续重画
+				bKept = true;
+			}
+			else
+			{
+				g_bSiHudSent[client] = false;
+				SiHud_ClosePanel(client, SIHUD_TXT_BLANK);
+			}
 		}
 		if (SiHudDebug != null && SiHudDebug.BoolValue)
-			LogMessage("[SV sihud] client=%d 强制显示结束。", client);
+			LogMessage("[SV sihud] client=%d 强制显示结束（保持开启=%d）。", client, bKeep);
 	}
 
 	if (!any)
 	{
 		g_hSiHudForceTimer = null;
+		// 刚被"保持开启"的玩家还等着这一拍画面：走常规刷新补一次（强制路径只发给窗口内的玩家）
+		if (bKept) SiHud_UpdatePanel();
 		return Plugin_Stop;
 	}
 	SiHud_DrawFrame(true);
@@ -2542,12 +2679,23 @@ void SiHud_TankHandoverPanel(int client)
 }
 
 // 坦克结束（坦克死亡 / 换人 / 本回合结束）：把替他自动打开的面板收回去，恢复他自己原本的选择
+//   2.6.0：sm_sihud_auto_open=1（默认）时"面板就是特感玩家的常驻 HUD" —— 坦克一死就把他的
+//   面板收掉会让屏幕立刻又空掉（玩家反馈的"面板自动关闭"）。所以这种情况下保持开启，
+//   只把交接状态改成 DONE；只有"不自动开启"或玩家自己关过（g_bSiHudUserOff）时才真的收回去。
 void SiHud_ReleaseTankPanel(int client)
 {
 	if (client < 0 || client > MaxClients) return;
 	bool bAuto = (g_iSiHudTankPanel[client] == SIHUD_TANKPANEL_AUTO);
 	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_NONE;
 	if (!bAuto) return;
+
+	bool bKeep = (SiHudAutoOpen != null && SiHudAutoOpen.BoolValue && !g_bSiHudUserOff[client]);
+	if (bKeep && SiHud_CanSeePanel(client))
+	{
+		g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
+		SiHud_UpdatePanel();
+		return;
+	}
 
 	g_bSiHudOn[client] = false;
 	g_bSiHudSent[client] = false;
@@ -2570,7 +2718,17 @@ public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	}
 
 	g_iSiHudTankClient = tank;
-	g_iSiHudTankControl = SiHud_IsHumanTank(tank) ? 1 : 0;	// 刷出时算"一控"
+	// 2.6.0：控数按玩家记（同一名玩家第几次拿到坦克 = 一控/二控），面板的坦克行直接读它
+	if (SiHud_IsHumanTank(tank))
+	{
+		if (tank > 0 && tank <= MaxClients)
+		{
+			g_iSiHudTankCtrl[tank]++;
+			g_iSiHudTankControl = g_iSiHudTankCtrl[tank];
+		}
+		else g_iSiHudTankControl = 1;
+	}
+	else g_iSiHudTankControl = 0;							// AI 坦克：没有"几控"
 	g_bSiHudTankSpawned = true;
 	if (tank > 0 && tank <= MaxClients) g_iSiHudTankPanel[tank] = SIHUD_TANKPANEL_NONE;	// 新的一只坦克：交接状态重置
 
@@ -2598,7 +2756,7 @@ public void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast
 // ------------------------------------------------------------------------
 // 1 秒轮询坦克 / 女巫状态（Timer_SiHudRefresh 里调）
 //   · 坦克：事件没覆盖到的"刷出"（插件晚加载、事件丢失）与**接管**（同一只坦克换了控制者）
-//     都在这里兜住。接管 = 二控，需求要求按新的坦克玩家重新计时 7 秒；
+//     都在这里兜住。接管 = 二控，需求要求按新的坦克玩家重新计时（tank_delay，默认 6 秒）；
 //   · 女巫：主线靠 witch_spawn 事件，这里只兜"实体已经在场却没收到事件"的情况。
 // ------------------------------------------------------------------------
 void SiHud_PollBossState()
@@ -2634,10 +2792,15 @@ void SiHud_PollBossState()
 			if (bHuman)
 			{
 				/* 上一任已经不再是坦克、这只坦克换成了真人控制 = 接管（二控）。
-				   需求：二控要按当前坦克玩家重新计时 7 秒，所以走同一个坦克事件入口。
+				   需求：二控要按当前坦克玩家重新计时，所以走同一个坦克事件入口。
 				   AI 接手（玩家掉线/放弃）不触发事件，只更新跟踪对象。 */
-				g_iSiHudTankControl++;
-				if (g_iSiHudTankControl > 2) g_iSiHudTankControl = 2;	// 面板只分一控/二控
+				g_iSiHudTankCtrl[tank]++;								// 按玩家累计：第几次拿到坦克
+				g_iSiHudTankControl = g_iSiHudTankCtrl[tank];
+				if (g_iSiHudTankControl > 2) g_iSiHudTankControl = 2;	// 日志只分一控/二控
+				/* 换了一名控制者 = 新的一段：交接状态复位，否则他上一段留下的
+				   SIHUD_TANKPANEL_DONE 会让 SiHud_TankHandoverPanel 直接 return，
+				   接管后他的面板就再也不会被打开（用户反馈的"接管坦克后面板短暂显示又关闭"的成因之一）。 */
+				g_iSiHudTankPanel[tank] = SIHUD_TANKPANEL_NONE;
 				g_bSiHudTankSpawned = true;
 				SiHud_OnTankEvent(tank, true);
 			}
@@ -2696,8 +2859,8 @@ bool SiHud_IsHumanTank(int client)
 // 坦克事件（刷出 / 接管）统一入口
 //   1) 除坦克玩家外的所有玩家：立刻关掉 tankhud（需求第 2 条）；
 //   2) 除坦克玩家外的所有玩家：连续 2 秒强制显示面板（需求第 3 条）；
-//   3) 坦克玩家：tankhud 先留着（sm_sihud_tank_delay，默认 7 秒，让他看自己的坦克血量），
-//      到点由 Timer_SiHudTankRestore 关掉；这 7 秒里面板让位（g_fSiHudTankLockUntil），
+//   3) 坦克玩家：克面板先留着（sm_sihud_tank_delay，默认 6 秒 = 克面板 5 秒 + 1 秒，让他看自己的坦克血量），
+//      到点由 Timer_SiHudTankRestore 关掉；这 6 秒里面板让位（g_fSiHudTankLockUntil），
 //      但那 2 秒强制显示对他同样生效（需求第 4 条）。
 //   bTakeover=true 表示同一只坦克被另一名玩家接管（二控）：按新的坦克玩家重新计时。
 // ------------------------------------------------------------------------
@@ -2726,14 +2889,29 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 		SiHud_DisableTankHudAll();
 	}
 
-	// 2) 坦克玩家：tankhud 先留着，delay 秒后再关；这段时间面板让位
+	// 2) 坦克玩家（2.6.0 重写：保证他任何时刻都有 HUD）
+	//    · 没有 tankhud（spechud_appledmod 不在场 / 已经被强制关掉 / tank_delay=0）：
+	//      **立刻**交棒 —— 旧版无条件先让他看 7 秒 tankhud，可 tankhud 万一已经被关掉，
+	//      那 7 秒里他既没有 tankhud 也没有面板 = 用户反馈的"坦克玩家什么 HUD 都看不到"；
+	//    · 有 tankhud 且 tank_delay>0：先让他看完自己的克面板（默认 6 秒 = 克面板 5 秒 + 1 秒，
+	//      面板让位），到点关 tankhud 并把面板交棒。
 	if (bHuman)
 	{
-		g_fSiHudTankLockUntil[tank] = GetGameTime() + float(delay);
 		g_bSiHudSent[tank] = false;
-		/* 不保存 timer 句柄：二控 / 同一玩家连着刷两次坦克时多出来的那个 timer
-		   只会再关一次 tankhud、再刷一次面板，不会造成错乱；换图时由引擎统一回收。 */
-		CreateTimer(float(delay), Timer_SiHudTankRestore, GetClientUserId(tank), TIMER_FLAG_NO_MAPCHANGE);
+		int iHandoverDelay = (SiHud_SpecHudReady() && delay > 0) ? delay : 0;
+		if (iHandoverDelay > 0)
+		{
+			g_fSiHudTankLockUntil[tank] = GetGameTime() + float(iHandoverDelay);
+			/* 不保存 timer 句柄：二控 / 同一玩家连着刷两次坦克时多出来的那个 timer
+			   只会再关一次 tankhud、再刷一次面板，不会造成错乱；换图时由引擎统一回收。 */
+			CreateTimer(float(iHandoverDelay), Timer_SiHudTankRestore, GetClientUserId(tank), TIMER_FLAG_NO_MAPCHANGE);
+		}
+		else
+		{
+			g_fSiHudTankLockUntil[tank] = 0.0;
+			if (SiHud_SpecHudReady()) SiHud_DisableTankHud(tank);
+			SiHud_TankHandoverPanel(tank);		// 面板立刻接管（含替他自动打开）
+		}
 	}
 
 	// 3) 除坦克玩家外的所有玩家：连续 2 秒强制显示
@@ -2743,7 +2921,7 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 		if (bHuman && client == tank) continue;
 		SiHud_ForceShowStart(client, SIHUD_FORCE_SECONDS);
 	}
-	// 4) 坦克玩家本人：同样强制显示 2 秒
+	// 4) 坦克玩家本人：同样强制显示 2 秒（让位窗口里也生效）
 	if (bHuman) SiHud_ForceShowStart(tank, SIHUD_FORCE_SECONDS);
 
 	// 立刻画一拍（强制窗口的 timer 下一拍会接着画）
@@ -2930,6 +3108,12 @@ void SiHud_PollForceShow()
 void SiHud_OnClientReady(int client)
 {
 	if (SiHudEnable == null || !SiHudEnable.BoolValue) return;
+
+	/* 2.6.0：中途进服、且已经在非生还者队伍（感染者/旁观/未分队）→ 自动打开面板。
+	   旧版这里只在"本回合已经强制显示过"时才补一次 2 秒强制显示，玩家进队后
+	   面板再也不会出现（用户反馈的"新玩家进入感染者队伍不会自动开启面板"）。 */
+	SiHud_AutoOpen(client, "中途进服");
+
 	if (!g_bSiHudAutoShownRound) return;							// 还没到首次离开安全区
 	if (SiHudForceShow == null || !SiHudForceShow.BoolValue) return;
 	if (!SiHud_CanSeePanel(client)) return;						// B：生还者/机器人永远不显示
@@ -3282,22 +3466,24 @@ enum
 	SiHudBossLine_Fixed			// 画"固定"：`坦克: 固定`
 };
 
+// ------------------------------------------------------------------------
+// 面板最下面两行：坦克 / 女巫
+//   坦克行（2.6.0 重写，需求："当坦克存活时显示坦克名称（2 字符和星号）+ 血量百分比 +
+//   控制权是一控还是二控，并且要考虑多只坦克同时存活"）：
+//     · **有坦克活着**：每只坦克各一行 `坦克: Ni* 78% 1控`
+//       —— 名字复用 AWP/Scout 那套 SiHud_ShortName（前两个字符，超过两个补 '*'）；
+//          血量 = GetClientHealth / m_iMaxHealth（与 spechud 的坦克HUD 同口径）；
+//          控数 = 该玩家本回合第几次拿到坦克（1=一控，>=2=二控），按玩家记所以多坦克不会串；
+//     · **没有坦克活着**：沿用旧口径 —— 本回合坦克按 flow 刷出、还没刷 → `坦克: 34%`；
+//       不是按 flow 刷的（静态 / 事件刷出）→ `坦克: 固定`；本回合已经刷出过（活着/死了）就整行不画。
+//   女巫行不变。
+// ------------------------------------------------------------------------
 void SiHud_DrawBossLines(Panel panel)
 {
 	char line[64];
 	int percent = 0;
 
-	int tankLine = SiHud_GetBossLine(true, percent);
-	if (tankLine == SiHudBossLine_Percent)
-	{
-		FormatEx(line, sizeof(line), "坦克: %d%%", percent);
-		SiHud_DrawText(panel, line);
-	}
-	else if (tankLine == SiHudBossLine_Fixed)
-	{
-		FormatEx(line, sizeof(line), "坦克: %s", SIHUD_TXT_TANK_FIXED);
-		SiHud_DrawText(panel, line);
-	}
+	SiHud_DrawTankLines(panel);
 
 	int witchLine = SiHud_GetBossLine(false, percent);
 	if (witchLine == SiHudBossLine_Percent)
@@ -3310,6 +3496,112 @@ void SiHud_DrawBossLines(Panel panel)
 		FormatEx(line, sizeof(line), "女巫: %s", SIHUD_TXT_WITCH_FIXED);
 		SiHud_DrawText(panel, line);
 	}
+}
+
+// ------------------------------------------------------------------------
+// 坦克行（2.6.0）
+//   多坦克同时存活时一只一行，最多 SIHUD_MAX_TANK_LINES 行（面板 511 字节预算有限，
+//   12v12 里同时 3 只以上坦克的场合极少；超出的用一行"还有 N 只"提示，不会静默丢掉）。
+// ------------------------------------------------------------------------
+void SiHud_DrawTankLines(Panel panel)
+{
+	char line[64];
+	int tanks[SIHUD_MAX_TANK_LINES];
+	int shown = 0;
+	int total = 0;
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || !IsPlayerAlive(client)) continue;
+		if (GetSiType(client) != ZC_TANK) continue;
+		total++;
+		if (shown < SIHUD_MAX_TANK_LINES) tanks[shown++] = client;
+	}
+
+	if (total == 0)
+	{
+		// 没有坦克活着：沿用旧口径（下一次坦克会在哪刷 / 固定），刷出过就整行不画
+		int percent = 0;
+		int tankLine = SiHud_GetBossLine(true, percent);
+		if (tankLine == SiHudBossLine_Percent)
+		{
+			FormatEx(line, sizeof(line), "坦克: %d%%", percent);
+			SiHud_DrawText(panel, line);
+		}
+		else if (tankLine == SiHudBossLine_Fixed)
+		{
+			FormatEx(line, sizeof(line), "坦克: %s", SIHUD_TXT_TANK_FIXED);
+			SiHud_DrawText(panel, line);
+		}
+		return;
+	}
+
+	char name[32];
+	char control[16];
+	for (int i = 0; i < shown; i++)
+	{
+		int tank = tanks[i];
+		SiHud_TankDisplayName(tank, name, sizeof(name));
+		SiHud_TankControlText(tank, control, sizeof(control));
+		FormatEx(line, sizeof(line), "坦克: %s %d%% %s", name, SiHud_TankHealthPercent(tank), control);
+		SiHud_DrawText(panel, line);
+	}
+
+	if (total > shown)
+	{
+		FormatEx(line, sizeof(line), "坦克: 还有 %d 只（只显示前 %d 只）", total - shown, shown);
+		SiHud_DrawText(panel, line);
+	}
+}
+
+// 坦克的显示名：真人 = 前两个字符 + '*'（SiHud_ShortName，与 AWP/Scout 行同一套规则）；
+// AI 坦克没有玩家名字，统一显示 "AI"。
+void SiHud_TankDisplayName(int tank, char[] out, int maxlen)
+{
+	out[0] = '\0';
+	if (tank <= 0 || tank > MaxClients) return;
+	if (IsFakeClient(tank))
+	{
+		strcopy(out, maxlen, SIHUD_TXT_TANK_AI);
+		return;
+	}
+	SiHud_ShortName(tank, out, maxlen);
+}
+
+// 坦克血量百分比：当前血量 / 最大血量（m_iMaxHealth 与 spechud 的坦克HUD 同一取法：
+// 优先 Prop_Send，取不到再退 Prop_Data，最后兜底 4000 = 对抗坦克满血）
+int SiHud_TankHealthPercent(int tank)
+{
+	int health = GetClientHealth(tank);
+	if (health < 0) health = 0;
+
+	int maxHealth = HasEntProp(tank, Prop_Send, "m_iMaxHealth") ? GetEntProp(tank, Prop_Send, "m_iMaxHealth") : 0;
+	if (maxHealth <= 0 && HasEntProp(tank, Prop_Data, "m_iMaxHealth"))
+		maxHealth = GetEntProp(tank, Prop_Data, "m_iMaxHealth");
+	if (maxHealth <= 0) maxHealth = SIHUD_TANK_FULL_HEALTH;
+
+	int percent = RoundToNearest(float(health) / float(maxHealth) * 100.0);
+	if (percent < 0) percent = 0;
+	else if (percent > 100) percent = 100;
+	return percent;
+}
+
+// 这只坦克是"一控"还是"二控"：
+//   按玩家累计（g_iSiHudTankCtrl），与文件头/Apex 的口径一致 —— 本服"二控"= 同一名玩家在
+//   控制权被消耗之后又拿回同一辆坦克；AI 坦克没有"几控"，显示 AI。
+void SiHud_TankControlText(int tank, char[] out, int maxlen)
+{
+	out[0] = '\0';
+	if (tank <= 0 || tank > MaxClients) return;
+	if (IsFakeClient(tank))
+	{
+		strcopy(out, maxlen, SIHUD_TXT_TANK_AI);
+		return;
+	}
+
+	int count = g_iSiHudTankCtrl[tank];
+	if (count < 1) count = 1;
+	strcopy(out, maxlen, (count >= 2) ? SIHUD_TXT_TANK_CTRL_SECOND : SIHUD_TXT_TANK_CTRL_FIRST);
 }
 
 // ------------------------------------------------------------------------
@@ -3512,6 +3804,8 @@ void SiHud_ResetClient(int client)
 	if (client < 0 || client > MaxClients) return;
 	g_bSiHudOn[client] = false;
 	g_bSiHudSent[client] = false;
+	g_bSiHudUserOff[client] = false;
+	g_iSiHudTankCtrl[client] = 0;
 	g_fSiHudTankLockUntil[client] = 0.0;
 	g_fSiHudLastSendAt[client] = 0.0;
 	g_fSiHudForceUntil[client] = 0.0;
@@ -3545,6 +3839,8 @@ void SiHud_ResetRound()
 	{
 		g_fSiHudTankLockUntil[client] = 0.0;
 		g_fSiHudForceUntil[client] = 0.0;
+		g_bSiHudUserOff[client] = false;	// 新回合：允许再次自动打开面板
+		g_iSiHudTankCtrl[client] = 0;		// 新回合：控数重新从一开始（一控/二控）
 		SiHud_ReleaseTankPanel(client);		// 上回合替坦克自动打开的面板不跨回合
 	}
 }
@@ -3880,6 +4176,24 @@ public void Event_PlayerTeamSpecSince(Event event, const char[] name, bool dontB
 	// 2.5.17：换到感染者时清掉身上残留的生还者武器（进服时引擎先给生还者席位、随后被换到特感的竞态）
 	if (!IsFakeClient(client) && event.GetInt("team") == TEAM_INFECTED)
 		StripSurvivorWeapons(client);
+
+	/* 2.6.0：面板跟随队伍
+	   · 换到感染者 -> 自动打开特感辅助面板（新玩家进特感不再需要自己输入 !sihud）；
+	   · 换到生还者 -> 面板立刻停掉（规则 B），并清"玩家自己关过"的闩锁，
+	     这样他下次回到特感/旁观时仍会按 sm_sihud_auto_open 自动打开。 */
+	if (!IsFakeClient(client))
+	{
+		if (event.GetInt("team") == TEAM_INFECTED)
+		{
+			SiHud_AutoOpen(client, "进入感染者队伍");
+		}
+		else if (event.GetInt("team") == TEAM_SURVIVOR)
+		{
+			if (g_bSiHudOn[client] || SiHud_IsForced(client, GetGameTime()))
+				SiHud_SetPanel(client, false, SIHUD_TANKPANEL_DONE);
+			g_bSiHudUserOff[client] = false;
+		}
+	}
 }
 
 // 轮询"队伍修复完成"：从"修复进行中"变为"已完成"的那一下触发补位

@@ -10,6 +10,26 @@
 /* ===========================================================================
 	版本变更记录(只追加, 不覆盖历史)
 	---------------------------------------------------------------------------
+	1.7.5-applefix (2026-11-17)  看得见不再"回满控制权" + 两条秒数提示不再混用同一个数字
+	   * 根因一(用户报"坦克看到生还者就将控制权回满"): Timer_TankVision 的"看得见"分支在
+	     l4d2_tankvision_seen_clear=1 时直接 "m_frustration"=0(1.7.4 的行 4678~4681) ——
+	     那是把**已经消耗掉的控制权整份补回去**, 看得越勤坦克越不会掉控。
+	     1.7.5 起这里只做"冻结"(hold): 进入看得见的那一刻记下当前怒气, 之后只挡住它继续涨;
+	     怒气比 hold 还小(引擎/控制权插件真的重新给了控制权)就跟着降, 永不清 0、绝不往上补。
+	     另一条会把怒气写小的路径一起收口: 接管阶段的覆盖写(原 4765~4769 行)现在只往上写,
+	     引擎/别的插件已经扣得更多时直接跟上它的读数, 不再把控制权发回去。
+	     引擎自己的掉控判定完全保留: 一旦看不见, 冻结立刻解除, 怒气从 hold 继续涨到 100 照常
+	     tank_frustrated 掉控(force_blind=1 时插件还会把"最后看见时刻"写老配合引擎)。
+	   * 根因二(用户报"1控提示 330 秒, 二控提示 240 秒"): 这两条根本不是同一个门槛 ——
+	     VisionNotifyRange(原 3890 行)是"视野判定范围阶梯收紧"(t1/t2/t3_time, 默认 270/330/390),
+	     报的是**当时真实存活秒数**, 所以一控走到第 330 秒时正好看到 330;
+	     接管播报(原 4742 行)是"插件开始扣控制权"(start_time, 默认 240), 却把**配置门槛**
+	     当成"存活秒数"打印; 二控时继承来的存活早过了几百秒, 提示仍写"存活已满 240 秒"
+	     -> 看起来像同一件事报了两个数。1.7.5 起两条提示各说各的门槛: 范围提示带
+	     "阶梯门槛 N 秒(只决定多远算看得见, 与接管/掉控无关)", 接管播报改成
+	     "存活 X 秒(接管门槛 Y 秒)" —— X 是真实存活秒数, Y 每次实时读 cvar,
+	     热改后下一次提示就是新值, 一控/二控同语义同数字。
+	   * 调试: sm_tankvision 的"生效诊断"按新口径说明(看得见=冻结在 N, 不会回满)。
 	1.7.4-applefix (2026-11-14)  二控 = 同一玩家的第二次完整控制权, 按这个口径修好了
 	   * 口径更正(重要): 本服的"二控"是**同一个玩家 A 在控制权被消耗掉之后, 又把同一辆
 	     坦克拿回来, 拿到第二次完整控制权**; 不是"交给第二名玩家"。1.7.2/1.7.3 的注释把
@@ -90,7 +110,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   "1.7.4-applefix"
+#define PLG_VERS		   "1.7.5-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -217,9 +237,9 @@ ConVar Apex[52];
 	  玩家控坦克时, 引擎那条“敌人可见性”路径(CTerrorPlayer::CheckEnemySightings)
 	  一次都不跑 —— 它属于 AI think, 只有 AI 控特感才走。玩家坦克的 m_frustration
 	  是无条件累加的: 看得见看不见都照涨, 到 100 就 tank_frustrated 掉控。
-	  所以本插件自己判: 看得见 -> 把引擎原始 m_frustration 写回 0(抑制累积);
-	  看不见 -> 不干预引擎自己的累积, 只在“跟踪石命中 / 存活满门限”这两个状态下
-	  按原版节奏额外再扣一点(见下面“扣控”说明)。
+	  所以本插件自己判: 看得见 -> **冻结**怒气(只挡住它继续涨, 不清 0: 已经消耗掉的
+	  控制权不会因为看得见而补回来, 见 1.7.5); 看不见 -> 不干预引擎自己的累积, 只在
+	  “跟踪石命中 / 存活满门限”这两个状态下按原版节奏额外再扣一点(见下面“扣控”说明)。
 
 	判定口径(三条全过才算看得见):
 	  距离  : 坦克眼睛 -> 生还者眼睛 <= 当前档位范围(范围按存活时长阶梯收紧)
@@ -236,6 +256,11 @@ ConVar Apex[52];
 	  * 插件强制扣控的速率(四种情况, 叠加):
 	      正常 5% | 存活满 4 分钟 +1% -> 6% | 跟踪石命中 +1% -> 6% | 两者都有 7%;
 	  * 按游戏掉控频率(每秒一笔)写入 m_frustration; 已经掉控后本命闩锁, 再看到生还者也不回控。
+	  * 看得见只“停扣”, 不“回满”(1.7.5): 怒气冻结在进入看得见那一刻的读数, 只有引擎/控制权
+	    插件真的复位时才跟着往下走; 本模块任何路径都不把怒气写小、更不清 0。冻结点以上不再
+	    涨, 所以看不见时怒气会从冻结点继续涨到 100 -> 引擎自己的 tank_frustrated 掉控照常生效。
+	  * 两条秒数提示各说各的语义(1.7.5): “视野范围阶梯门槛”(t1/t2/t3_time) 只决定多远算看得见;
+	    “接管门槛”(start_time) 只决定插件从第几秒开始扣控制权。提示里两个数字都带标签, 不混用。
 ----------------------------------------------------------- */
 #define APEX_TV_ENABLE		28	/* 1=接管(看得见不掉控/看不见按阶梯扣) 0=关闭(原版) */
 #define APEX_TV_RANGE		29	/* 基准可见范围(单位), 0=无限 */
@@ -250,7 +275,7 @@ ConVar Apex[52];
 #define APEX_TV_T3_RANGE	38
 #define APEX_TV_NOTIFY		39	/* 范围收紧/开始扣控时通知全体玩家 */
 #define APEX_TV_STEP		40	/* 每格基础幅度(%), <=0 自动读 tankcontrol_trac_base */
-#define APEX_TV_SEEN_CLEAR	41	/* 看得见时是否把怒气清 0(1=清, 0=不干预) */
+#define APEX_TV_SEEN_CLEAR	41	/* 看得见时是否"冻结"怒气(1=冻结: 停止继续扣控但绝不清 0/不回满; 0=完全不写怒气) */
 #define APEX_TV_START_TIME	42	/* 存活满多少秒后插件才接管控制权(默认 210 = 3.5 分钟) */
 #define APEX_TV_ALIVE_TIME	43	/* 存活满多少秒后每秒多扣 1(默认 240 = 4 分钟) */
 #define APEX_TV_ALIVE_EXTRA	44	/* 存活满门限后每秒多加的百分点(默认 1) */
@@ -262,6 +287,11 @@ ConVar Apex[52];
 
 /* 引擎原始 m_frustration: 0 -> 100 累加, 到顶即掉控(把坦克交给 AI) */
 #define TV_FRUSTRATION_MAX	100
+/* "看得见冻结怒气"的安全阀(1.7.5): 一个判定周期(interval 0.05~1.0 秒)里引擎自己最多涨
+   ~5~7 点(原生速率), 所以"涨幅 <= 这个值"才认为是引擎的正常累积、可以挡回去继续冻结;
+   一次涨幅比它更大 = 引擎/别的插件确实消耗了控制权(例如强制换控前的写入), 这种情况一律
+   接受新值、只把冻结点抬高, 绝不把控制权补回去 —— 这就是用户要求的"不回满"。 */
+#define VISION_SEEN_HOLD_TOL	10
 
 ConVar g_hTankVisionControlAfter;    /* tankcontrol_trac_after: 跟踪石命中后的加速持续时间(0=到死亡/交接) */
 
@@ -291,6 +321,7 @@ float  g_fVisionTracAt[MAXPLAYERS + 1];    /* 跟踪石命中时刻(tankcontrol_
 int    g_iVisionMeter[MAXPLAYERS + 1];     /* 上次观察到的怒气原始值(不含本插件自己的写入) */
 float  g_fVisionEngineAt[MAXPLAYERS + 1];   /* 上次观察到"引擎自己让怒气上涨"的时刻(判游戏是否在掉控) */
 float  g_fVisionMeterF[MAXPLAYERS + 1];     /* 插件接管时的怒气读数(浮点): 每秒 += 速率, 直接覆盖写 m_frustration */
+float  g_fVisionSeenHold[MAXPLAYERS + 1];   /* 看得见期间的"怒气冻结值"(-1 = 这一段还没建立): 只挡住继续涨, 绝不往上补 */
 float  g_fVisionPayAt[MAXPLAYERS + 1];      /* 上次"插件强制扣控"的时刻(与游戏掉控频率一致: 每秒一笔) */
 float  g_fVisionSampleAt[MAXPLAYERS + 1];  /* 上次结算时刻 */
 float  g_fVisionChatAt[MAXPLAYERS + 1];    /* 每秒一条调试日志的节流 */
@@ -572,7 +603,7 @@ public void
 	Apex[APEX_TV_T3_RANGE]    = CreateConVar("l4d2_tankvision_t3_range", "500.0", "阶梯3: 收紧后的可见范围(单位)");
 	Apex[APEX_TV_NOTIFY]      = CreateConVar("l4d2_tankvision_notify", "1", "可见范围收紧 / 开始扣控制权时通知全体玩家(0=不通知 1=通知)", _, true, 0.0, true, 1.0);
 	Apex[APEX_TV_STEP]        = CreateConVar("l4d2_tankvision_step", "5.0", "基础扣控幅度(%%/秒), 默认 5. 这就是「正常 5%%」那一档, 不再自动读别的插件");
-	Apex[APEX_TV_SEEN_CLEAR]  = CreateConVar("l4d2_tankvision_seen_clear", "0", "看得见生还者时是否把怒气写回 0(1=清, 坦克不会掉控; 0=不干预, 交给引擎原生判断)", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_SEEN_CLEAR]  = CreateConVar("l4d2_tankvision_seen_clear", "0", "看得见生还者时是否冻结怒气: 1=冻结(停止继续扣控, 已消耗的控制权不会回满, 也不会清 0) 0=完全不写怒气(交给引擎原生判断, 看得见也照原版累积). 注意 1 只'停扣'不'补满', 1.7.5 之前 1 会把怒气清 0 导致坦克回满控制权", _, true, 0.0, true, 1.0);
 	Apex[APEX_TV_START_TIME]  = CreateConVar("l4d2_tankvision_start_time", "240.0", "坦克存活满多少秒后本插件才接管控制权(秒). 默认 240 = 4 分钟", _, true, 0.0);
 	Apex[APEX_TV_ALIVE_TIME]  = CreateConVar("l4d2_tankvision_alive_time", "240.0", "坦克存活满多少秒后, 每秒扣控再加 1 个百分点(秒). 默认 240 = 4 分钟", _, true, 0.0);
 	Apex[APEX_TV_ALIVE_EXTRA] = CreateConVar("l4d2_tankvision_alive_extra", "1.0", "存活满 alive_time 后每秒多加的百分点", _, true, 0.0, true, 100.0);
@@ -590,7 +621,13 @@ public void
 
 	/* -1 = 还没观察过这辆坦克(和“0 = 无限”区分开) */
 	for (int i = 1; i <= MaxClients; i++)
+	{
 		g_fVisionRangeMark[i] = -1.0;
+
+		/* -1 = "这辆坦克这段控制权还没进入过看得见状态"(0 是合法冻结值, 不能拿来当未初始化):
+		   漏了这一步, 插件加载后第一次判定"看得见"时 hold 会是 0 -> 又把怒气写回 0 = 回满 bug */
+		g_fVisionSeenHold[i]  = -1.0;
+	}
 
 	/* 坦克生命期记录: 清空所有槽位并把 client -> 槽 的映射置 -1(没有记录的 client 一律 -1) */
 	VisionLifeResetAll();
@@ -2933,6 +2970,7 @@ void VisionClearTracking(int client)
 	g_fVisionEngRate[client]   = 0.0;
 	g_bTVGateLogged[client]    = false;
 	g_fVisionMeterF[client]    = 0.0;
+	g_fVisionSeenHold[client]  = -1.0;
 	g_fVisionPayAt[client]     = 0.0;
 	g_fVisionSampleAt[client]  = 0.0;
 	g_fVisionChatAt[client]    = 0.0;
@@ -3319,6 +3357,7 @@ void VisionRenewSegment(int client, float fNow, const char[] reason)
 	   数值当成"引擎自己在掉控", 白白让位 2 秒(force=0 时最明显) */
 	g_iVisionMeter[client]	 = GetEntProp(client, Prop_Send, "m_frustration");
 	g_fVisionMeterF[client]	 = float(g_iVisionMeter[client]);
+	g_fVisionSeenHold[client] = -1.0; /* 新的一段:"看得见冻结"的基线重新取(否则上一段的冻结值会把怒气压低) */
 	g_fVisionEngineAt[client] = 0.0;
 	g_fVisionSampleAt[client] = fNow;
 	g_fVisionPayAt[client]	  = fNow;
@@ -3652,6 +3691,7 @@ void VisionBeginControlSegment(int client, float fNow)
 	g_fVisionEngineAt[client]  = 0.0;
 	g_fVisionPayAt[client]	   = fNow;
 	g_fVisionMeterF[client]	   = float(iMeter0);
+	g_fVisionSeenHold[client]  = -1.0; /* 新的一段: "看得见冻结"基线重新取, 不带上一段的旧值 */
 	g_fVisionFullAt[client]	   = 0.0;
 	g_bVisionWroteFull[client] = false;
 	g_bVisionDropTried[client] = false;
@@ -3787,6 +3827,34 @@ float VisionRangeByAlive(float fAlive)
 	return fRange;
 }
 
+/* 当前生效的"视野范围阶梯"门槛(秒); 0 = 还在用基准 range, 没有任何阶梯门槛生效。
+   判定条件必须与 VisionRangeByAlive 一字不差(同一组 cvar、同一个"档位 range<=0 视为
+   不生效"规则), 否则提示里报的门槛会与实际收紧的那一档对不上 —— 用户看到的就是
+   "1控提示 330 秒 / 二控提示 240 秒"这种同一件事两个数字。 */
+float VisionRangeTierTime(float fAlive)
+{
+	float fTierTime = 0.0;
+	float fTime;
+	float fTier;
+
+	fTime = Apex[APEX_TV_T1_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T1_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fTierTime = fTime;
+
+	fTime = Apex[APEX_TV_T2_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T2_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fTierTime = fTime;
+
+	fTime = Apex[APEX_TV_T3_TIME].FloatValue;
+	fTier = Apex[APEX_TV_T3_RANGE].FloatValue;
+	if (fTime > 0.0 && fTier > 0.0 && fAlive >= fTime)
+		fTierTime = fTime;
+
+	return fTierTime;
+}
+
 /* 取控制权插件的 cvar 值(句柄缓存; 对方被热卸载时句柄会失效, 这时重新查一次, 仍没有就用 fallback) */
 float VisionControlCvar(ConVar &cv, const char[] name, float fFallback)
 {
@@ -3887,8 +3955,20 @@ void VisionNotifyRange(int tank, float fRange, float fAlive)
 	if (!bTightened)
 		return;
 
-	CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活 {lightgreen}%d{default} 秒, 视野判定范围收紧到 {lightgreen}%d{default} 单位(超出这个距离的生还者不再算“看得见”)",
-		TAG, tank, RoundToNearest(fAlive), RoundToNearest(fRange));
+	/* 1.7.5 提示口径: 这一条只讲"视野判定范围"(多远算看得见), 并把**这一档真实生效的门槛**
+	   一起报出来(阶梯门槛 = t1/t2/t3_time 中当前起作用的那一档, 实时读 cvar)。
+	   以前这里只报"存活 %d 秒 + 范围", 而接管播报又报 start_time, 玩家就把两条当成同一件事,
+	   觉得"一会儿 330 秒一会儿 240 秒"。现在两条各带标签, 同一语义在一控/二控显示同一个门槛。 */
+	float fTierTime = VisionRangeTierTime(fAlive);
+	char  sTier[48];
+
+	if (fTierTime > 0.0)
+		FormatEx(sTier, sizeof(sTier), "阶梯门槛 %d 秒", RoundToNearest(fTierTime));
+	else
+		FormatEx(sTier, sizeof(sTier), "基准范围, 无阶梯门槛");
+
+	CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活 {lightgreen}%d{default} 秒, {olive}视野判定范围{default}收紧到 {lightgreen}%d{default} 单位(%s; 只决定多远算“看得见”, 与接管/掉控门槛无关)",
+		TAG, tank, RoundToNearest(fAlive), RoundToNearest(fRange), sTier);
 }
 
 /* 视线射线的碰撞过滤: 只让世界几何体挡视线, 忽略所有客户端实体(坦克/生还者/其它感染者) */
@@ -4045,9 +4125,10 @@ Action Cmd_TankVision(int client, int args)
 		else if (!bTakeover)
 			ReplyToCommand(client, "[坦克视野]   生效诊断: 存活 %.0f 秒还没到接管门槛 %.0f 秒 -> 此阶段插件的可视范围与扣控速率完全不参与(存活计时有没有被二控清零, 看这一行最直观)", fAlive, fStart);
 		else if (bSee && !Apex[APEX_TV_SEEN_CLEAR].BoolValue)
-			ReplyToCommand(client, "[坦克视野]   生效诊断: 判定看得见 且 seen_clear=0 -> 插件只观察不写怒气, 所以改可视范围不会改变游戏里的掉控表现; 要让范围真正起作用需把 l4d2_tankvision_seen_clear 设为 1");
+			ReplyToCommand(client, "[坦克视野]   生效诊断: 判定看得见 且 seen_clear=0 -> 插件完全不写怒气(既不清 0 也不回满), 看得见也照引擎原生累积 -> 该掉控照样掉; 要让“看得见就停止扣控”生效需把 l4d2_tankvision_seen_clear 设为 1");
 		else if (bSee)
-			ReplyToCommand(client, "[坦克视野]   生效诊断: 判定看得见 -> 怒气清 0, 本命不掉控");
+			ReplyToCommand(client, "[坦克视野]   生效诊断: 判定看得见 -> 怒气冻结在 %d(只挡住继续涨 = 停止扣控, 已消耗的控制权不补回, 永不写 0/不回满); 看不见时从冻结点继续往上涨",
+				(g_fVisionSeenHold[i] >= 0.0) ? RoundToNearest(g_fVisionSeenHold[i]) : iMeter);
 		else if (g_bVisionDropped[i])
 			ReplyToCommand(client, "[坦克视野]   生效诊断: 本命已掉控闩锁, 不再写怒气");
 		else
@@ -4496,6 +4577,7 @@ Action Timer_TankVision(Handle timer)
 				   届时玩家接手的是干净状态(存活计时照旧延续) */
 				g_iVisionMeter[i]	  = iMeterBot;
 				g_fVisionMeterF[i]	  = float(iMeterBot);
+				g_fVisionSeenHold[i]  = -1.0; /* 新的一段: "看得见冻结"基线重新取 */
 				g_bVisionDropped[i]	  = false;
 				g_bVisionWroteFull[i] = false;
 				g_bVisionDropTried[i] = false;
@@ -4572,6 +4654,7 @@ Action Timer_TankVision(Handle timer)
 				g_bVisionWroteFull[i] = false;	/* 上一段的 per-life 标记一律作废 */
 				g_bVisionDropTried[i] = false;
 				g_fVisionFullAt[i]	  = 0.0;
+				g_fVisionSeenHold[i]  = -1.0; /* 交接来的新一段: "看得见冻结"基线重新取 */
 
 				VisionLifeBind(i, fNow, fLate);
 
@@ -4664,27 +4747,79 @@ Action Timer_TankVision(Handle timer)
 		float fNearest = 0.0;
 		bool  bSee = VisionCanSeeSurvivor(i, fRange, fNearest);
 
-		/* ---------------- 看得见: 怒气写回 0, 不掉控 ---------------- */
+		/* ---------------- 看得见: 停止扣控(冻结怒气), 但绝不把怒气写小 ----------------
+		   2026-11 用户报的"坦克看到生还者就将控制权回满": 1.7.4 及以前这里在 seen_clear=1 时
+		   直接 m_frustration=0, 等于把**已经消耗掉的控制权**整份补回去(看得越勤越不会掉控)。
+		   现在只做"冻结"(hold), 规则四条:
+		     ① 进入"看得见"的那一刻把当前怒气记成 hold; 之后 iMeter 比 hold 大就写回 hold ——
+		        只挡住"继续涨"(= 不再继续扣控), 不制造任何新的怒气;
+		     ② iMeter 比 hold 小(引擎/控制权插件真的把控制权还回来了)就跟着降, 不拦;
+		     ③ 永远不写 0、永远不往上写一个更大的值 —— 已消耗的控制权不会因为看得见而补满。
+		     ④ 安全阀: 一个周期里怒气涨幅 > VISION_SEEN_HOLD_TOL 点, 视为"引擎/别的插件真的
+		        消耗了控制权", 这时接受新值、只把冻结点抬高, 同样不会把控制权补回去。
+		   冻结期间引擎自己的掉控判定仍然有效: 一旦看不见(下面的分支)冻结立刻解除,
+		   怒气从 hold 继续涨到 100, 引擎照常发 tank_frustrated 掉控(force_blind=1 还会把
+		   "最后看见时刻"写老配合引擎), 所以不会出现"永远不掉控"的另一个极端。
+		   seen_clear=0 = 完全不动引擎的怒气(看得见也照原版累积)。 */
 		if (bSee)
 		{
 			if (g_fVisionUnseenAt[i] > 0.0)
 			{
 				g_fVisionUnseenAt[i] = 0.0;
 				g_bVisionPenalty[i]  = false;
+				g_fVisionSeenHold[i] = -1.0;	/* 这一轮"看得见"重新取冻结基线 */
 
 				VisionLog("%N 重新看见生还者, 停止扣控制权(范围 %d)", i, RoundToNearest(fRange));
 			}
 
-			if (Apex[APEX_TV_SEEN_CLEAR].BoolValue && iMeter > 0)
-				SetEntProp(i, Prop_Send, "m_frustration", 0);
+			if (!Apex[APEX_TV_SEEN_CLEAR].BoolValue)
+			{
+				g_iVisionMeter[i] = iMeter;
+			}
+			else
+			{
+				if (g_fVisionSeenHold[i] < 0.0 || float(iMeter) < g_fVisionSeenHold[i])
+					g_fVisionSeenHold[i] = float(iMeter);
 
-			g_iVisionMeter[i] = Apex[APEX_TV_SEEN_CLEAR].BoolValue ? 0 : iMeter;
+				int iHold = RoundToNearest(g_fVisionSeenHold[i]);
+
+				/* 只在"怒气比冻结值大一点(引擎正常累积)"时挡回去; iMeter < iHold 说明控制权
+				   真的被复位了(这时 hold 已经跟着降了), 不需要也不允许往上写。
+				   涨幅 > VISION_SEEN_HOLD_TOL = 引擎/别的插件确实消耗了控制权: 接受新值,
+				   只把冻结点抬到新值(否则就等于把这段控制权还回去 = 用户报的"回满")。 */
+				if (iMeter > iHold)
+				{
+					if ((iMeter - iHold) <= VISION_SEEN_HOLD_TOL)
+					{
+						SetEntProp(i, Prop_Send, "m_frustration", iHold);
+						iMeter = iHold;
+					}
+					else
+					{
+						g_fVisionSeenHold[i] = float(iMeter);
+						VisionLog("%N 看得见但怒气一次涨了 %d 点(>%d), 按真实消耗接受, 冻结点抬到 %d",
+							i, iMeter - iHold, VISION_SEEN_HOLD_TOL, iMeter);
+					}
+				}
+
+				g_iVisionMeter[i] = iMeter;
+			}
 
 			if (iDebug >= 1 && (fNow - g_fVisionChatAt[i]) >= 1.0)
 			{
 				g_fVisionChatAt[i] = fNow;
-				CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 存活 %d 秒 | 范围 %d | 看得见{green}是{default}(最近 %d) | 怒气 %d(已清 0, 不扣)",
-					TAG, i, RoundToNearest(fAlive), RoundToNearest(fRange), RoundToNearest(fNearest), iMeter);
+
+				if (!Apex[APEX_TV_SEEN_CLEAR].BoolValue)
+				{
+					CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 存活 %d 秒 | 范围 %d | 看得见{green}是{default}(最近 %d) | 怒气 %d(seen_clear=0, 插件完全不写怒气)",
+						TAG, i, RoundToNearest(fAlive), RoundToNearest(fRange), RoundToNearest(fNearest), iMeter);
+				}
+				else
+				{
+					CPrintToChatAll("%s[tankvision] {lightgreen}%N{default} 存活 %d 秒 | 范围 %d | 看得见{green}是{default}(最近 %d) | 怒气 %d(冻结在 %d: 只停扣, 不回满)",
+						TAG, i, RoundToNearest(fAlive), RoundToNearest(fRange), RoundToNearest(fNearest), iMeter,
+						RoundToNearest(g_fVisionSeenHold[i]));
+				}
 			}
 
 			continue;
@@ -4739,8 +4874,8 @@ Action Timer_TankVision(Handle timer)
 			{
 				g_bVisionAnnounced[i] = true;
 
-				CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活已满 {lightgreen}%d{default} 秒, 插件接管控制权: 每秒 {lightgreen}%d%%{default}{default}%s",
-					TAG, i, RoundToNearest(VisionStartTime()), RoundToNearest(fRate),
+				CPrintToChatAll("%s坦克 {lightgreen}%N{default} 存活 {lightgreen}%d{default} 秒(接管门槛 {lightgreen}%d{default} 秒), {olive}插件开始按速率扣控制权{default}: 每秒 {lightgreen}%d%%{default}%s",
+					TAG, i, RoundToNearest(fAlive), RoundToNearest(VisionStartTime()), RoundToNearest(fRate),
 					bGameDeducting ? " (游戏也在掉控, 读数按插件速率覆盖)" : "");
 			}
 
@@ -4750,12 +4885,17 @@ Action Timer_TankVision(Handle timer)
 				i, fAlive, RoundToNearest(fRate), bGameDeducting ? "是" : "否");
 		}
 
-		/* 怒气被引擎/别的插件大幅回填(变小很多) -> 把插件读数重新对齐, 免得下一秒跳回高位 */
+		/* 怒气被引擎/别的插件大幅回填(变小很多) -> 把插件读数重新对齐, 免得下一秒跳回高位。
+		   注意: 这里只改插件自己的浮点读数, 下面的写入分支保证**永远不会把怒气写小**。 */
 		if (float(iMeter) < g_fVisionMeterF[i] - 5.0)
 			g_fVisionMeterF[i] = float(iMeter);
 
-		/* 接管: 用插件自己的读数(每秒 +fRate)直接覆盖 m_frustration,
-		   这样不管引擎那点累积, 面板上看到的就是 5/6/7% 每秒。 */
+		/* 接管: 用插件自己的读数(每秒 +fRate)覆盖 m_frustration, 保证面板上是 5/6/7% 每秒。
+		   1.7.5: **只往上覆盖**。以前这里是无条件写 iWant, 而 iWant 可能是"插件读数落后于
+		   引擎实际值"的结果(例如刚进接管时 iMeter=90、meterF=80 -> iWant=81), 那一笔等于把
+		   9 点控制权还给坦克 —— 与"看得见就回满"是同一类错误。现在:
+		     iWant > iMeter -> 写上去(插件速率生效);
+		     iWant < iMeter -> 跟上引擎的读数, 一个点都不退回。 */
 		g_fVisionMeterF[i] += fRate * fDt;
 		if (g_fVisionMeterF[i] < 0.0)
 			g_fVisionMeterF[i] = 0.0;
@@ -4763,8 +4903,16 @@ Action Timer_TankVision(Handle timer)
 			g_fVisionMeterF[i] = float(TV_FRUSTRATION_MAX);
 
 		int iWant = RoundToNearest(g_fVisionMeterF[i]);
-		if (iWant != iMeter)
+
+		if (iWant < iMeter)
+		{
+			iWant = iMeter;
+			g_fVisionMeterF[i] = float(iMeter);
+		}
+		else if (iWant > iMeter)
+		{
 			SetEntProp(i, Prop_Send, "m_frustration", iWant);
+		}
 
 		g_iVisionMeter[i] = iWant;
 

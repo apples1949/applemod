@@ -14,7 +14,16 @@
  *
  * 注意：
  *   · 生成时间必须晚于框架 (ConfoglCompMod) 在 round_start+0.3s 的武器清理扫描，
- *     所以默认 delay = 1.0 秒；配合 confogl_remove_chainsaw 0，电锯才不会被删。
+ *     所以默认 delay = 1.0 秒。
+ *     具体是谁在 0.3 秒干什么（1.4.0 核对过，别再凭印象）：
+ *       - EntityRemover.sp:357     round_start+0.3s 按 entityremove.txt 扫一遍；
+ *       - WeaponInformation.sp:1208 round_start+0.3s 的 WI_RoundStartLoop → WI_ReplaceWeapon，
+ *                                 其中武器属性表 ReplacementIndex==-1 且对应 cvar 为 1 的会被 KillEntity
+ *                                 （WeaponInformation.sp:803-815；电锯这一项就是 confogl_remove_chainsaw，
+ *                                 见 WeaponInformation.sp:584）。
+ *     cfg/cfgogl/applemod12v12/shared_cvars.cfg:39 现在把 confogl_remove_chainsaw 设成 "1"，
+ *     所以电锯能活下来靠的正是「0.3s < delay(1.0)」这个先后顺序 —— 谁把这个 delay 调到 0.3 以下，
+ *     电锯就会当场被框架删掉（其余三把枪不受此影响）。
  *   · 不生成 cfg（不用 AutoExecConfig），全部 cvar 由 confogl 的 12v12 配置下发。
  *
  * ===========================================================================
@@ -72,6 +81,39 @@
  *     挡住这一类误发（武器本身是 round_start+1.0 秒才生成，2 秒窗口内不可能有真人走出去）。
  *   · 发光 netprop 的双保险（直接写 + 隐形代理）、5 个属性、捡枪撤发光等逻辑一行没动。
  * ===========================================================================
+ * 1.4.0（2026-11-17）修复「有的时候对抗第一回合不生成双狙/SG552/电锯」
+ * ---------------------------------------------------------------------------
+ * 1.3.0 及之前是「round_start 与 player_spawn 两个事件都收到 → CreateTimer(延迟) 一次性出场」。
+ * 这条链路有几个各自独立就能让整回合一把枪都不生成的洞：
+ *   ① player_spawn 不是生还者专属事件：感染者（乃至观察者）生成也会发它（本仓库
+ *      l4d2_infected_highlight_prompt.sp:685 就用它处理 Charger/Boomer 的生成，
+ *      l4d2_skill_detect_edi.sp 里也是先取 userid 再判阵营）。对抗第一回合里感染者比生还者
+ *      更早、更频繁地 spawn，很容易把「生还者已就位」这个条件误判成满足。
+ *   ② 第一回合的时序天生不同：换图 / 读图后生还者常常在 round_start 之前就已经生成完毕，
+ *      round_start 之后不会再补一次 player_spawn；若中途又被 round_end（回合 0→1 的引擎切换）
+ *      把两个标志一起重置，这对事件就永远凑不齐了。
+ *   ③ 最致命的是没有第二次机会：TrySchedule() 在 CreateTimer 之前就把 g_bSpawned 置位，
+ *      而 Timer_SpawnWeapons() 里「没有可用的生还者」「实体全部创建失败」等分支直接 return，
+ *      g_bSpawned 不回滚；这些失败路径还只有 am12v12_wdrop_debug=1 才留痕。
+ *      一次瞬时失败 = 整个回合没有枪，所以表现成「有时候」。
+ *   ④ g_bSpawned 只由 round_end / OnMapEnd 清除，漏一次 round_end 就整局不再生成。
+ *
+ * 1.4.0 的做法：
+ *   · round_start 之后起一个 0.25 秒轮询（BeginSpawnWatch），直到「已过延迟 + 找到可用的
+ *     生还者 + 至少成功建出一把枪」同时成立才收工，失败自动重试；窗口由
+ *     am12v12_wdrop_retry_window（默认 20 秒）控制，0 = 退回 1.3.0 的一次性行为。
+ *   · 「可用生还者」的判据改成直接看世界状态、而不是靠事件凑：在游戏内 + 生还者阵营 + 活着 +
+ *     绝对坐标不是 (0,0,0)。最后一条很重要：刚生成 / 正在被传送到出生点的玩家会短暂读到原点，
+ *     这时生成的枪会落在世界原点（虚空里），实机看上去同样是「没生成」。
+ *   · player_spawn 从「门闩的一半」降级成「提前触发的加速信号」，并且只认生还者的生成。
+ *   · g_bSpawned 改成「真的生成成功」才置位，并在每个 round_start 重新清零；同一回合内重复收到的
+ *     round_start（换图 / 读图 / 准备阶段引擎会重发）用 5 秒去重挡掉，免得二次生成或把刚加好的发光清掉。
+ *   · 窗口用完仍然失败时写一条 LogError（不依赖 debug），日志里直接带 weapons 列表和尝试次数，
+ *     以后「本回合没生成」不必再靠猜。
+ *
+ * 生成时机、位置 / 散布 / 弹药 / 发光 / 清理逻辑与全部 cvar 语义保持原样：第一个生成时刻仍然
+ * 不早于 am12v12_wdrop_delay 秒（默认 1.0，晚于框架 round_start+0.3s 的武器清理）。
+ * ===========================================================================
  */
 #pragma semicolon 1
 #pragma newdecls required
@@ -80,15 +122,34 @@
 #include <sdktools>
 #include <sdkhooks>          // OnEntityDestroyed / SDKHook_WeaponEquipPost
 
-#define PLUGIN_VERSION "1.3.0"
+#define PLUGIN_VERSION "1.4.0"
 
 ConVar g_hEnable, g_hWeapons, g_hMode, g_hDelay, g_hSpread, g_hDebug;
 ConVar g_hAmmoRifle, g_hAmmoChainsaw, g_hAmmoSniper;
 ConVar g_hGlowEnable, g_hGlowColor, g_hGlowRange, g_hGlowMinRange, g_hGlowFlashing, g_hGlowProxy;
 // 1.3.0：只在安全区内发光（默认 1）；=0 回到 1.2.0 的永久发光
 ConVar g_hGlowSaferoomOnly;
+// 1.4.0：生成重试窗口（秒）。0 = 退回 1.3.0 的「只尝试一次」
+ConVar g_hRetryWindow;
 
-bool g_bRoundStart, g_bPlayerSpawn, g_bSpawned;
+// 1.4.0：g_bSpawned 的语义改成「本回合已经真的生成成功」，不再是「已经排过队」。
+// g_bRoundStart 仍然是「本回合的 round_start 已经收到」。
+bool g_bRoundStart, g_bSpawned;
+
+// 1.4.0：生成重试状态
+//   · g_hSpawnWatch —— 回合开始后 0.25 秒一次的重试定时器；null = 没在等
+//   · g_fLastSpawnAt —— 上次真正生成成功的时刻，用来识别同一回合内重复的 round_start
+//   · g_iSpawnAttempts —— 本回合已经尝试过几次（只用于日志，方便回看「到底试了多久」）
+Handle g_hSpawnWatch;
+float  g_fLastSpawnAt;
+int    g_iSpawnAttempts;
+
+// 1.4.0：轮询步长（秒）。0.25 与同仓库 starting_items_edi.sp:120 的取法一致：
+// 足够细到「生还者一落地就能生成」，又便宜到可以连跑 20 秒。
+#define SPAWN_WATCH_STEP 0.25
+// 1.4.0：同一回合内重复 round_start 的去重窗口（秒）。
+// 生还者不可能在 5 秒内打完一个回合，所以「5 秒内又收到 round_start」只可能是引擎/框架重发。
+#define SPAWN_DEDUP_SECONDS 5.0
 
 // 1.3.0：「本回合已经有生还者离开安全区」。
 // 一旦置 true 就保持到本回合结束 —— 需求是「离开之后就不再发光」，
@@ -181,6 +242,13 @@ public void OnPluginStart()
 	g_hSpread  = CreateConVar("am12v12_wdrop_spread",  "20.0", "同一位置生成多把武器时的散开半径（避免叠在一起）", _, true, 0.0, true, 200.0);
 	g_hDebug   = CreateConVar("am12v12_wdrop_debug",   "0", "1=在服务端控制台打印生成了什么、生成在谁脚下、发光走了哪条路", _, true, 0.0, true, 1.0);
 
+	// 1.4.0：生成重试窗口。原来是「过了 delay 只尝试一次」，一次瞬时失败（生还者还没落地、
+	// 第一回合事件时序错位）就整回合没有枪，所以表现成「有时候不生成」。
+	// 这里给一个「一直重试到成功为止」的窗口；0 表示退回旧的一次性行为。
+	g_hRetryWindow = CreateConVar("am12v12_wdrop_retry_window", "20.0",
+								  "生成失败后最多在回合开始后多少秒内继续重试（秒）。0=只尝试一次（1.3.0 的旧行为）。默认 20 秒足以覆盖「生还者比 round_start 晚落地」和第一回合时序错位",
+								  _, true, 0.0, true, 120.0);
+
 	// ---- 发光轮廓（glow）----
 	g_hGlowEnable   = CreateConVar("am12v12_wdrop_glow_enable",    "1",
 								   "是否给开局生成的武器加发光轮廓（可闪烁）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -201,10 +269,16 @@ public void OnPluginStart()
 								   "1=只在安全区内发光(默认): 一旦有生还者离开开局安全区域, 立刻关掉场上所有掉落武器的发光(武器实体属性+假模型代理一起清), 并且本回合不再给新武器加发光. 0=旧的永久发光行为(不管玩家走到哪都一直发光)",
 								   FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-	// 注意：这里**不**注册任何 cvar 变更钩子。
+	// 注意：发光相关的 cvar **不**注册变更钩子。
 	// 颜色在 ApplyGlowToWeapon() 里按需解析（每次生成武器时读一次当前值），
 	// 这样 glow_enable=0 时本插件注册的 event/hook 与 1.0.0 完全一致，
 	// 且改 am12v12_wdrop_glow_color 之后下一把生成的武器自动用新颜色。
+	//
+	// 1.4.0：只有总开关挂了钩子。理由：am12v12_wdrop_enable 是「有没有枪」的唯一开关，
+	// 管理员中途打开时应该当回合就补生成（而不是等到下一回合），中途关掉时也应该立刻
+	// 停掉重试并撤掉场上发光。am12v12_wdrop_retry_window 不需要钩子 ——
+	// 轮询每 0.25 秒现读一次它的值。
+	g_hEnable.AddChangeHook(CvarChg_Enable);
 
 	// 弹药取游戏自己的 cvar（与枪柜插件同一套），取不到就不写该属性
 	g_hAmmoRifle    = FindConVar("ammo_assaultrifle_max");
@@ -244,6 +318,17 @@ public void OnMapEnd()
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
+	// 1.4.0：同一回合里重复收到的 round_start 一律忽略。
+	// 引擎/框架在换图、读图、准备阶段重发 round_start 是真实存在的；照单全收会把刚生成好的
+	// 武器的发光全部撤掉（ClearAllGlow），甚至再生成一整套。生还者不可能 5 秒打完一个回合，
+	// 所以「5 秒内又收到 round_start」只可能是重发。
+	if (g_bSpawned && GetGameTime() - g_fLastSpawnAt < SPAWN_DEDUP_SECONDS)
+	{
+		if (g_hDebug.BoolValue)
+			PrintToServer("[12v12 wdrop] 忽略重复的 round_start（%.2f 秒前刚生成过）", GetGameTime() - g_fLastSpawnAt);
+		return;
+	}
+
 	// 上一回合生成、没被捡走的武器可能还留在地上（虽然通常会被框架清掉）。
 	// 先全量撤掉旧发光，避免槽位表和实体状态对不上。
 	ClearAllGlow();
@@ -253,7 +338,10 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	g_fRoundStartAt = GetGameTime();
 
 	g_bRoundStart = true;
-	TrySchedule();
+
+	// 1.4.0：不再用「round_start + player_spawn 双标志」这种一次性门闩，
+	// 改成回合开始后持续轮询，直到真的把武器生成出来（见 BeginSpawnWatch）。
+	BeginSpawnWatch();
 }
 
 /**
@@ -319,8 +407,17 @@ bool ShouldGlowNow()
 
 public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
-	g_bPlayerSpawn = true;
-	TrySchedule();
+	// 1.4.0：player_spawn 不是生还者专属事件 —— 感染者（乃至观察者）生成也会发它
+	// （本仓库 l4d2_infected_highlight_prompt.sp:685 就拿它处理 Charger/Boomer 的生成，
+	//  l4d2_skill_detect_edi.sp 里也是先取 userid 再判阵营）。
+	// 1.3.0 把它直接当成「生还者已经就位」，对抗第一回合里感染者先 spawn 就会误判。
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client <= 0 || !IsClientInGame(client) || GetClientTeam(client) != 2)
+		return;
+
+	// 生还者真的落地了：已经过了延迟就立刻生成，不必等下一次轮询；
+	// 还没到延迟就什么都不做，轮询会在延迟到点后接手。
+	TrySpawnNow("生还者生成");
 }
 
 public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
@@ -331,29 +428,153 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 
 void ResetRound()
 {
+	// 1.4.0：轮询定时器是 TIMER_REPEAT，回合结束必须收掉，否则会跨回合瞎跑。
+	StopSpawnWatch();
+
 	g_bRoundStart = false;
-	g_bPlayerSpawn = false;
 	g_bSpawned = false;
+	g_iSpawnAttempts = 0;
 
 	// 1.3.0：新回合重新允许「安全区内发光」
 	g_bLeftSafeArea = false;
 	g_fRoundStartAt = 0.0;
 }
 
-// round_start 与 player_spawn 都发生后才排定生成（两者顺序在 L4D2 里不固定）
-void TrySchedule()
+// ===========================================================================
+// 1.4.0：生成调度（取代 1.3.0 的 TrySchedule + 一次性 Timer_SpawnWeapons）
+// ---------------------------------------------------------------------------
+// 触发链路：
+//   round_start                              → BeginSpawnWatch() 起 0.25 秒轮询
+//   player_spawn（只认生还者）               → TrySpawnNow() 提前触发一次
+//   am12v12_wdrop_enable 由 0 改成 1          → 当回合补生成
+// 每次 AttemptSpawn() 只要「至少建出一把枪」就算成功：置 g_bSpawned 并收工；
+// 失败就保留定时器继续重试，直到 am12v12_wdrop_retry_window 用完为止。
+// ===========================================================================
+
+// AttemptSpawn 的结果。必须区分「等一下还有机会」和「重试也没用」，
+// 否则 weapons 列表写错时会变成每 0.25 秒刷一条 LogError。
+enum
 {
-	if (g_bSpawned || !g_bRoundStart || !g_bPlayerSpawn)
+	SPAWN_RESULT_FAILED = 0,     // 建不出实体（类名写错 / 实体数已满）：重试没用，立刻停
+	SPAWN_RESULT_OK     = 1,     // 至少成功建出一把
+	SPAWN_RESULT_NOSURV = 2      // 当时没有「在游戏内+活着+已落地」的生还者：交给下一次轮询
+};
+
+void BeginSpawnWatch()
+{
+	StopSpawnWatch();
+
+	// 新回合重新计数。g_bSpawned 现在只在「真的生成成功」时才置位，
+	// 所以这里必须清掉 —— 否则上一回合的成功状态会让本回合直接跳过（1.3.0 的 ④ 号洞）。
+	g_bSpawned = false;
+	g_iSpawnAttempts = 0;
+
+	if (!g_hEnable.BoolValue)
 		return;
 
-	g_bSpawned = true;
-	CreateTimer(g_hDelay.FloatValue, Timer_SpawnWeapons, _, TIMER_FLAG_NO_MAPCHANGE);
+	g_hSpawnWatch = CreateTimer(SPAWN_WATCH_STEP, Timer_SpawnWatch, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+
+	// delay = 0 时不必等第一个 tick（默认 1.0 时这次调用会因为还没到点而直接返回）
+	TrySpawnNow("回合开始");
 }
 
-public Action Timer_SpawnWeapons(Handle timer)
+void StopSpawnWatch()
 {
-	if (!g_hEnable.BoolValue)
+	if (g_hSpawnWatch != null)
+	{
+		KillTimer(g_hSpawnWatch);
+		g_hSpawnWatch = null;
+	}
+}
+
+// 已经过了延迟就立刻尝试一次。没到延迟 / 已经生成过 / 不在回合里都直接返回。
+// 这里不主动 kill 定时器（本函数可能正被定时器回调间接调用），
+// 交给 Timer_SpawnWatch 下一个 tick 看到 g_bSpawned 自己收工。
+void TrySpawnNow(const char[] sReason)
+{
+	if (g_bSpawned || !g_bRoundStart || !g_hEnable.BoolValue)
+		return;
+
+	if (GetGameTime() - g_fRoundStartAt < g_hDelay.FloatValue)
+		return;
+
+	AttemptSpawn(sReason);
+}
+
+public Action Timer_SpawnWatch(Handle timer)
+{
+	// 句柄已经被换掉 / 收掉的旧定时器：立刻停
+	if (timer != g_hSpawnWatch)
+		return Plugin_Stop;
+
+	if (g_bSpawned || !g_bRoundStart || !g_hEnable.BoolValue)
+	{
+		g_hSpawnWatch = null;
+		return Plugin_Stop;
+	}
+
+	float fElapsed = GetGameTime() - g_fRoundStartAt;
+
+	// 还没到延迟：继续等。延迟必须晚于框架 round_start+0.3s 的武器清理，
+	// 否则刚生成的枪（尤其是电锯）会被 ConfoglCompMod 当场删掉。
+	if (fElapsed < g_hDelay.FloatValue)
 		return Plugin_Continue;
+
+	int iResult = AttemptSpawn("轮询重试");
+
+	if (iResult == SPAWN_RESULT_OK)
+	{
+		g_hSpawnWatch = null;
+		return Plugin_Stop;
+	}
+
+	// 建不出实体（weapons 列表写错 / 实体数已满）：重试没有意义，立刻收工。
+	// SpawnWeapon 自己已经打过 LogError，这里不再重复刷。
+	if (iResult == SPAWN_RESULT_FAILED)
+	{
+		g_hSpawnWatch = null;
+		return Plugin_Stop;
+	}
+
+	// 走到这里说明只是「当时没有可用的生还者」。窗口用完就写一条 LogError
+	// （不依赖 debug），把 weapons 列表和尝试次数一起带上，
+	// 以后「本回合没生成」能直接从日志判断原因，不用再靠 am12v12_wdrop_debug 复现。
+	float fWindow = g_hRetryWindow.FloatValue;
+	if (fWindow <= 0.0 || fElapsed >= fWindow)
+	{
+		g_hSpawnWatch = null;
+
+		char sList[512];
+		g_hWeapons.GetString(sList, sizeof(sList));
+
+		LogError("[12v12 wdrop] 回合开始后 %.1f 秒内尝试了 %d 次，仍然一把开局武器都没生成（窗口 am12v12_wdrop_retry_window=%.1f，weapons=\"%s\"）。原因：这段时间一直没有「在游戏内 + 生还者阵营 + 活着 + 已落地」的生还者。",
+				 fElapsed, g_iSpawnAttempts, fWindow, sList);
+		return Plugin_Stop;
+	}
+
+	return Plugin_Continue;
+}
+
+// am12v12_wdrop_enable 的变更钩子。
+void CvarChg_Enable(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+	if (convar.BoolValue)
+	{
+		// 中途打开：这一回合还没生成过就立刻补上（不必等到下一次 round_start）
+		if (g_bRoundStart && !g_bSpawned)
+			BeginSpawnWatch();
+		return;
+	}
+
+	// 中途关掉：停掉重试，并把场上已经加好的发光撤掉（武器本身保留，玩家还能捡）
+	StopSpawnWatch();
+	ClearAllGlow();
+}
+
+// 尝试生成一次整轮武器。返回 SPAWN_RESULT_*，调用方据此决定要不要继续重试。
+int AttemptSpawn(const char[] sReason)
+{
+	g_iSpawnAttempts++;
 
 	char sList[512];
 	g_hWeapons.GetString(sList, sizeof(sList));
@@ -361,7 +582,7 @@ public Action Timer_SpawnWeapons(Handle timer)
 	char aWeapons[16][64];
 	int iCount = ExplodeString(sList, ",", aWeapons, sizeof(aWeapons), sizeof(aWeapons[]));
 	if (iCount <= 0)
-		return Plugin_Continue;
+		return SPAWN_RESULT_FAILED;           // weapons 为空：配置问题，重试没用
 
 	// 清掉空格
 	int iValid;
@@ -376,19 +597,19 @@ public Action Timer_SpawnWeapons(Handle timer)
 		iValid++;
 	}
 	if (iValid <= 0)
-		return Plugin_Continue;
+		return SPAWN_RESULT_FAILED;           // 全是空串：配置问题，重试没用
 
-	int iAnchor = PickRandomSurvivor();
+	// 锚点必须是「在游戏内 + 生还者阵营 + 活着 + 已落地」的玩家。
+	// 还没有这样的生还者就返回 NOSURV，让轮询继续等 —— 这正是 1.3.0 白丢一整个回合的地方。
+	int iAnchor = PickDropAnchor();
 	if (iAnchor <= 0)
 	{
 		if (g_hDebug.BoolValue)
-			PrintToServer("[12v12 wdrop] 没有可用的生还者，跳过本回合生成");
-		return Plugin_Continue;
+			PrintToServer("[12v12 wdrop] 第 %d 次尝试（%s）：目前没有可用的生还者，继续重试", g_iSpawnAttempts, sReason);
+		return SPAWN_RESULT_NOSURV;
 	}
 
 	float fSpread = g_hSpread.FloatValue;
-	float vBase[3];
-	GetClientAbsOrigin(iAnchor, vBase);
 
 	// 方形散布（最多 4 把按四角摆放；超过 4 把的用随机抖动兜底）
 	float fOff[4][2];
@@ -397,18 +618,21 @@ public Action Timer_SpawnWeapons(Handle timer)
 	fOff[2][0] = -fSpread; fOff[2][1] =  fSpread;
 	fOff[3][0] =  fSpread; fOff[3][1] =  fSpread;
 
+	int iSpawned, iCreateFail;
 	for (int i = 0; i < iValid; i++)
 	{
 		int iTarget = iAnchor;
 		if (g_hMode.IntValue == 1)
 		{
-			int iRand = PickRandomSurvivor();
+			int iRand = PickDropAnchor();
 			if (iRand > 0)
 				iTarget = iRand;
 		}
 
 		float vPos[3];
-		GetClientAbsOrigin(iTarget, vPos);
+		if (!GetDropAnchorOrigin(iTarget, vPos))
+			continue;                          // 这一刻读不到可信坐标就跳过这把，下次重试会补
+
 		vPos[2] += 15.0;                       // 抬到脚下略上方，避免卡进地板
 
 		if (i < 4)
@@ -426,13 +650,44 @@ public Action Timer_SpawnWeapons(Handle timer)
 		// 返回值 > 0 才说明生成成功；失败时不动发光逻辑
 		int iWeapon = SpawnWeapon(aWeapons[i], vPos, iTarget);
 		if (iWeapon > 0)
+		{
+			iSpawned++;
 			QueueGlow(iWeapon);
+		}
+		else
+		{
+			iCreateFail++;                 // SpawnWeapon 内部已经 LogError 过了
+		}
+	}
+
+	if (iSpawned > 0)
+	{
+		// 只有真的建出枪才算本回合完工
+		g_bSpawned = true;
+		g_fLastSpawnAt = GetGameTime();
+
+		if (iSpawned < iValid)
+			LogError("[12v12 wdrop] 本回合只生成了 %d/%d 把开局武器（其余要么创建失败，要么那一刻读不到可信的脚下坐标）", iSpawned, iValid);
+
+		if (g_hDebug.BoolValue)
+			PrintToServer("[12v12 wdrop] 已在 %N 脚下生成 %d/%d 把武器（mode=%d，第 %d 次尝试，%s）",
+						  iAnchor, iSpawned, iValid, g_hMode.IntValue, g_iSpawnAttempts, sReason);
+
+		return SPAWN_RESULT_OK;
+	}
+
+	// 一把都没建出来：有实体创建失败就是「重试也没用」，否则只是等不到可信坐标。
+	if (iCreateFail > 0)
+	{
+		if (g_hDebug.BoolValue)
+			PrintToServer("[12v12 wdrop] 第 %d 次尝试（%s）：%d 把武器全部创建失败，停止重试", g_iSpawnAttempts, sReason, iCreateFail);
+		return SPAWN_RESULT_FAILED;
 	}
 
 	if (g_hDebug.BoolValue)
-		PrintToServer("[12v12 wdrop] 已在 %N 脚下生成 %d 把武器（mode=%d）", iAnchor, iValid, g_hMode.IntValue);
+		PrintToServer("[12v12 wdrop] 第 %d 次尝试（%s）：这一刻读不到可信的脚下坐标，继续重试", g_iSpawnAttempts, sReason);
 
-	return Plugin_Continue;
+	return SPAWN_RESULT_NOSURV;
 }
 
 // 生成一把武器实体。返回值：> 0 = 实体索引，0 = 失败（调用方据此决定要不要加发光）
@@ -505,30 +760,52 @@ int GetAmmoFor(const char[] sClassname)
 	return (g_hAmmoRifle != null) ? g_hAmmoRifle.IntValue : -1;
 }
 
-// 随机取一名在游戏内的生还者（优先活着的；都没有就返回 0）
+// 随机取一名「可以当丢枪锚点」的生还者；一个都没有就返回 0（调用方继续重试）。
 // 注意：函数名不能叫 GetRandomSurvivor —— 那是 left4dhooks_silver.inc:1314 的 stock，
 // 且它的语义也不同（带 alive/bots 参数过滤），所以这里用自己实现的名字。
-int PickRandomSurvivor()
+int PickDropAnchor()
 {
-	int aAlive[MAXPLAYERS + 1], aAny[MAXPLAYERS + 1];
-	int iAlive, iAny;
+	int aCand[MAXPLAYERS + 1];
+	int iCount;
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (!IsClientInGame(i) || GetClientTeam(i) != 2)
-			continue;
-
-		aAny[iAny++] = i;
-		if (IsPlayerAlive(i))
-			aAlive[iAlive++] = i;
+		if (IsDropAnchorReady(i))
+			aCand[iCount++] = i;
 	}
 
-	if (iAlive > 0)
-		return aAlive[GetRandomInt(0, iAlive - 1)];
-	if (iAny > 0)
-		return aAny[GetRandomInt(0, iAny - 1)];
+	if (iCount <= 0)
+		return 0;
 
-	return 0;
+	return aCand[GetRandomInt(0, iCount - 1)];
+}
+
+// 这名生还者现在适不适合把枪丢在他脚下。判据全部取自「世界状态」而不是「收到过什么事件」，
+// 所以漏事件、事件顺序错位都不会误判：
+//   · 必须在游戏内、生还者阵营、活着 —— 死亡/观察者/感染者都没有可信的脚下坐标；
+//   · 绝对坐标不能是 (0,0,0) —— 刚生成、正在被传送到出生点的玩家会短暂读到原点，
+//     这时生成的枪会落在世界原点（虚空里），实机上看起来同样是「没生成」。
+bool IsDropAnchorReady(int client)
+{
+	float vOrigin[3];
+	return GetDropAnchorOrigin(client, vOrigin);
+}
+
+bool GetDropAnchorOrigin(int client, float vOrigin[3])
+{
+	vOrigin[0] = 0.0;
+	vOrigin[1] = 0.0;
+	vOrigin[2] = 0.0;
+
+	if (client <= 0 || client > MaxClients)
+		return false;
+
+	if (!IsClientInGame(client) || GetClientTeam(client) != 2 || !IsPlayerAlive(client))
+		return false;
+
+	GetClientAbsOrigin(client, vOrigin);
+
+	return (FloatAbs(vOrigin[0]) > 1.0 || FloatAbs(vOrigin[1]) > 1.0 || FloatAbs(vOrigin[2]) > 1.0);
 }
 
 // ===========================================================================

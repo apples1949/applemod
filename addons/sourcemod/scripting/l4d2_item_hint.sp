@@ -234,151 +234,151 @@ public void OnPluginStart()
 	g_iZombieClass = FindSendPropInfo("CTerrorPlayer", "m_zombieClass");
 
 	// general
-	g_hCvarCMDEnable					= CreateConVar("l4d2_item_hint_cmd", 							"1", 					"If 1, Survivors can type !mark to mark targets", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hHintTransType					= CreateConVar("l4d2_item_hint_instructorhint_translate", 		"0", 					"Instructor hint language. 0=Server language (English), 1=Caller language", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvarCMDEnable					= CreateConVar("l4d2_item_hint_cmd", 							"0", 					"1=生还者可以输入 !mark 标记目标，0=关闭该指令（感染者同样可用 !mark，另受 l4d2_item_hint_inf_team_mark_enable 控制）", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hHintTransType					= CreateConVar("l4d2_item_hint_instructorhint_translate", 		"1", 					"教练提示语言。0=服务器语言（英语），1=发起者语言", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// survivor
-	g_hSurvivorTeamVocalizeEnable 		= CreateConVar("l4d2_item_hint_sur_vocalize", 					"1", 					"If 1, Survivors can use vocalize \"Look\" to mark targets", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorTeamButtons				= CreateConVar("l4d2_item_hint_sur_buttons", 					"131104", 				"Survivors press which buttons to mark targets, 131072=Shift, 4=Ctrl, 32=Use, 8192=Reload, 524288=Middle Mouse\nYou can add numbers together, ex. 131104=Shift + Use (0=off)", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorTeamAliveMark			= CreateConVar("l4d2_item_hint_sur_alive_mark", 				"31", 					"Standing Survivors can mark, 1=S.I., 2=Witch, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 31=All)", FCVAR_NOTIFY, true, 0.0, true, 31.0);
-	g_hSurvivorTeamIncapMark			= CreateConVar("l4d2_item_hint_sur_incap_mark", 				"19", 					"Incapped Survivors can mark, 1=S.I., 2=Witch, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 31=All)", FCVAR_NOTIFY, true, 0.0, true, 31.0);
-	g_hSurvivorTeamHaningMark			= CreateConVar("l4d2_item_hint_sur_hanging_mark", 				"16", 					"Survivors Hanging from ledge can mark, 1=S.I., 2=Witch, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 31=All)", FCVAR_NOTIFY, true, 0.0, true, 31.0);
-	g_hSurvivorTeamCappedMark			= CreateConVar("l4d2_item_hint_sur_capped_mark", 				"1", 					"Pinned Survivors can mark, 1=S.I., 2=Witch, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 31=All)", FCVAR_NOTIFY, true, 0.0, true, 31.0);
-	g_hSurvivorTeamDeadMark				= CreateConVar("l4d2_item_hint_sur_dead_mark", 					"16", 					"Dead Survivors can mark, 1=S.I., 2=Witch, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 31=All)", FCVAR_NOTIFY, true, 0.0, true, 31.0);
+	g_hSurvivorTeamVocalizeEnable 		= CreateConVar("l4d2_item_hint_sur_vocalize", 					"1", 					"1=生还者可用语音菜单 \"Look\" 标记目标，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorTeamButtons				= CreateConVar("l4d2_item_hint_sur_buttons", 					"0", 				"生还者按哪些按键标记目标，131072=Shift，4=Ctrl，32=使用，8192=换弹，524288=鼠标中键\n可相加组合，例如 131104=Shift+使用（0=关闭）", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorTeamAliveMark			= CreateConVar("l4d2_item_hint_sur_alive_mark", 				"16", 					"站立状态生还者可标记，1=特感，2=Witch，4=生还者，8=物品/武器，16=点位（可相加，31=全部）", FCVAR_NOTIFY, true, 0.0, true, 31.0);
+	g_hSurvivorTeamIncapMark			= CreateConVar("l4d2_item_hint_sur_incap_mark", 				"0", 					"倒地生还者可标记，1=特感，2=Witch，4=生还者，8=物品/武器，16=点位（可相加，31=全部）", FCVAR_NOTIFY, true, 0.0, true, 31.0);
+	g_hSurvivorTeamHaningMark			= CreateConVar("l4d2_item_hint_sur_hanging_mark", 				"0", 					"悬挂于边缘的生还者可标记，1=特感，2=Witch，4=生还者，8=物品/武器，16=点位（可相加，31=全部）", FCVAR_NOTIFY, true, 0.0, true, 31.0);
+	g_hSurvivorTeamCappedMark			= CreateConVar("l4d2_item_hint_sur_capped_mark", 				"0", 					"被特感控住的生还者可标记，1=特感，2=Witch，4=生还者，8=物品/武器，16=点位（可相加，31=全部）", FCVAR_NOTIFY, true, 0.0, true, 31.0);
+	g_hSurvivorTeamDeadMark				= CreateConVar("l4d2_item_hint_sur_dead_mark", 					"16", 					"已死亡生还者可标记，1=特感，2=Witch，4=生还者，8=物品/武器，16=点位（可相加，31=全部）", FCVAR_NOTIFY, true, 0.0, true, 31.0);
 	
 	// infected
-	g_hInfectedTeamMarkEnable			= CreateConVar("l4d2_item_hint_inf_team_mark_enable",			"1",					"If 1, infected players can use mark", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hInfectedTeamButtons				= CreateConVar("l4d2_item_hint_inf_team_mark_buttons", 			"131072", 				"Infected players press which buttons to mark targets, 131072=Shift, 4=Ctrl, 32=Use, 8192=Reload, 524288=Middle Mouse\nYou can add numbers together, ex. 131104=Shift + Use (0=off)", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedTeamAliveMark			= CreateConVar("l4d2_item_hint_inf_alive_mark", 				"20", 					"Alive infected players can mark, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 28=All)", FCVAR_NOTIFY, true, 0.0, true, 28.0);
-	g_hInfectedTeamDeadMark				= CreateConVar("l4d2_item_hint_inf_dead_mark", 					"20", 					"Dead infected players can mark, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 28=All)", FCVAR_NOTIFY, true, 0.0, true, 28.0);
-	g_hInfectedTeamGhostMark			= CreateConVar("l4d2_item_hint_inf_ghost_mark", 				"20", 					"Ghost infected players can mark, 4=Survivors, 8=Items/Weapons, 16=Spots (Add numbers togethoer, 28=All)", FCVAR_NOTIFY, true, 0.0, true, 28.0);
+	g_hInfectedTeamMarkEnable			= CreateConVar("l4d2_item_hint_inf_team_mark_enable",			"1",					"1=感染者玩家可以使用标记，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedTeamButtons				= CreateConVar("l4d2_item_hint_inf_team_mark_buttons", 			"131072", 				"感染者玩家按哪些按键标记目标，131072=Shift，4=Ctrl，32=使用，8192=换弹，524288=鼠标中键\n可相加组合，例如 131104=Shift+使用（0=关闭）", FCVAR_NOTIFY, true, 0.0);
+	g_hInfectedTeamAliveMark			= CreateConVar("l4d2_item_hint_inf_alive_mark", 				"20", 					"存活的感染者玩家可标记，4=生还者，8=物品/武器，16=点位（可相加，28=全部）", FCVAR_NOTIFY, true, 0.0, true, 28.0);
+	g_hInfectedTeamDeadMark				= CreateConVar("l4d2_item_hint_inf_dead_mark", 					"20", 					"死亡的感染者玩家可标记，4=生还者，8=物品/武器，16=点位（可相加，28=全部）", FCVAR_NOTIFY, true, 0.0, true, 28.0);
+	g_hInfectedTeamGhostMark			= CreateConVar("l4d2_item_hint_inf_ghost_mark", 				"20", 					"幽灵状态的感染者玩家可标记，4=生还者，8=物品/武器，16=点位（可相加，28=全部）", FCVAR_NOTIFY, true, 0.0, true, 28.0);
 
 	// spot mark
-	g_hSpotMarkRingCvarColor			= CreateConVar("l4d2_spot_marker_circle_color", 				"200 200 200", 			"Spot marker beam ring color (RGB, space-separated). Empty = Remove beam ring", FCVAR_NOTIFY);
-	g_hSpotMarkCoolDown					= CreateConVar("l4d2_spot_marker_cooldown_time", 				"0.25", 				"Cooldown between spot marks (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hSpotMarkUseRange     			= CreateConVar("l4d2_spot_marker_use_range", 					"1800", 				"Max distance to place a spot marker", FCVAR_NOTIFY, true, 1.0);
-	g_hSpotMarkUseSound     			= CreateConVar("l4d2_spot_marker_use_sound", 					"buttons/blip1.wav", 	"Sound when placing a spot marker. (relative to sound/, Empty = Off)", FCVAR_NOTIFY);
-	g_hSpotMarkAnnounceType				= CreateConVar("l4d2_spot_marker_announce_type", 				"1", 					"Spot marker announce type: 0=Off, 1=Chat, 2=Hint text, 3=Center text", FCVAR_NOTIFY, true, 0.0, true, 3.0);
-	g_hSpotMarkTimer					= CreateConVar("l4d2_spot_marker_duration", 					"10.0", 				"Spot marker duration (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hSpotMarkSpriteColor      		= CreateConVar("l4d2_spot_marker_sprite_color", 				"200 200 200", 			"Spot marker icon color (RGB, space-separated). (Empty = Remove icon)");
-	g_hSpotMarkSpriteModel      		= CreateConVar("l4d2_spot_marker_sprite_model", 				"materials/vgui/icon_arrow_down.vmt", "Spot marker icon model.");
-	g_hSpotMarkSpriteHeight      		= CreateConVar("l4d2_spot_marker_sprite_height", 				"10.0", 				"Spot marker icon height from ground", FCVAR_NOTIFY, true, 0.0);
-	g_hSpotMarkSpriteScale      		= CreateConVar("l4d2_spot_marker_sprite_scale", 				"0.5", 					"Spot marker icon size", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkRingCvarColor			= CreateConVar("l4d2_spot_marker_circle_color", 				"200 200 200", 			"点位标记光束环颜色（RGB，空格分隔）。留空=不显示光束环", FCVAR_NOTIFY);
+	g_hSpotMarkCoolDown					= CreateConVar("l4d2_spot_marker_cooldown_time", 				"3.00", 				"两次点位标记之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkUseRange     			= CreateConVar("l4d2_spot_marker_use_range", 					"1800", 				"放置点位标记的最大距离（兼教练提示可视距离）", FCVAR_NOTIFY, true, 1.0);
+	g_hSpotMarkUseSound     			= CreateConVar("l4d2_spot_marker_use_sound", 					"buttons/blip1.wav", 	"放置点位标记时的音效（相对 sound/ 目录，留空=关闭）", FCVAR_NOTIFY);
+	g_hSpotMarkAnnounceType				= CreateConVar("l4d2_spot_marker_announce_type", 				"0", 					"点位标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hSpotMarkTimer					= CreateConVar("l4d2_spot_marker_duration", 					"3.0", 				"点位标记持续时间（秒，兼教练提示时长）", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkSpriteColor      		= CreateConVar("l4d2_spot_marker_sprite_color", 				"200 200 200", 			"点位标记图标颜色（RGB，空格分隔）。（留空=不显示图标）");
+	g_hSpotMarkSpriteModel      		= CreateConVar("l4d2_spot_marker_sprite_model", 				"materials/vgui/icon_arrow_down.vmt", "点位标记图标模型。");
+	g_hSpotMarkSpriteHeight      		= CreateConVar("l4d2_spot_marker_sprite_height", 				"10.0", 				"点位标记图标离地高度", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkSpriteScale      		= CreateConVar("l4d2_spot_marker_sprite_scale", 				"0.5", 					"点位标记图标大小", FCVAR_NOTIFY, true, 0.0);
 	if(g_bL4D2Version)
 	{
-		g_hSpotMarkInstructorHint		= CreateConVar("l4d2_spot_marker_instructorhint_enable", 		"1", 					"(L4D2) If 1, show instructor hint on spot marker", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hSpotMarkInstructorColor		= CreateConVar("l4d2_spot_marker_instructorhint_color", 		"200 200 200", 			"(L4D2) Instructor hint color on spot marker. (Empty = hide text)", FCVAR_NOTIFY);
-		g_hSpotMarkInstructorIcon		= CreateConVar("l4d2_spot_marker_instructorhint_icon", 			"icon_info", 			"(L4D2) Instructor hint icon on spot marker", FCVAR_NOTIFY);
+		g_hSpotMarkInstructorHint		= CreateConVar("l4d2_spot_marker_instructorhint_enable", 		"0", 					"(L4D2) 1=在点位标记上显示教练提示，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hSpotMarkInstructorColor		= CreateConVar("l4d2_spot_marker_instructorhint_color", 		"200 200 200", 			"(L4D2) 点位标记上教练提示的颜色。（留空=不显示文字）", FCVAR_NOTIFY);
+		g_hSpotMarkInstructorIcon		= CreateConVar("l4d2_spot_marker_instructorhint_icon", 			"icon_info", 			"(L4D2) 点位标记上的教练提示图标", FCVAR_NOTIFY);
 	}	
-	g_hSpotMarkRingStartRadius			= CreateConVar("l4d2_spot_marker_ring_start_radius", 			"35.0", 				"Spot marker beam ring starting radius", FCVAR_NOTIFY, true, 1.0);
-	g_hSpotMarkRingEndRadius			= CreateConVar("l4d2_spot_marker_ring_end_radius", 				"50.0", 				"Spot marker beam ring ending radius", FCVAR_NOTIFY, true, 1.0);
-	g_hSpotMarkRingWidth				= CreateConVar("l4d2_spot_marker_ring_width", 					"2.0", 					"Spot marker beam ring width", FCVAR_NOTIFY, true, 0.0);
-	g_hSpotMarkParticle					= CreateConVar("l4d2_spot_marker_particle", 					"", 					"Particle effect on spot marker. (e.g., sline_sparks) \nEmpty = Off, more: https://forums.alliedmods.net/showthread.php?t=127111", FCVAR_NOTIFY); //sline_sparks
-	g_hSpotMarkRemovePrevious			= CreateConVar("l4d2_spot_marker_remove_previous", 				"1", 					"If 1, Remove previous spot marker if same player marks again", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSpotMarkRingStartRadius			= CreateConVar("l4d2_spot_marker_ring_start_radius", 			"35.0", 				"点位标记光束环起始半径", FCVAR_NOTIFY, true, 1.0);
+	g_hSpotMarkRingEndRadius			= CreateConVar("l4d2_spot_marker_ring_end_radius", 				"50.0", 				"点位标记光束环结束半径", FCVAR_NOTIFY, true, 1.0);
+	g_hSpotMarkRingWidth				= CreateConVar("l4d2_spot_marker_ring_width", 					"2.0", 					"点位标记光束环宽度", FCVAR_NOTIFY, true, 0.0);
+	g_hSpotMarkParticle					= CreateConVar("l4d2_spot_marker_particle", 					"", 					"点位标记的粒子特效。（例如 sline_sparks） \n留空=关闭，更多：https://forums.alliedmods.net/showthread.php?t=127111", FCVAR_NOTIFY); //sline_sparks
+	g_hSpotMarkRemovePrevious			= CreateConVar("l4d2_spot_marker_remove_previous", 				"1", 					"1=同一玩家再次标记时移除之前的点位标记，0=保留", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// item/weapon mark
 	if(g_bL4D2Version)
 	{
-		g_hItemCvarColor				= CreateConVar("l4d2_item_marker_glow_color", 					"0 255 255", 			"(L4D2) Item marker glow color (RGB, space-separated). Empty = Remove Glow", FCVAR_NOTIFY);
+		g_hItemCvarColor				= CreateConVar("l4d2_item_marker_glow_color", 					"0 255 255", 			"(L4D2) 物品标记发光颜色（RGB，空格分隔）。留空=不发光", FCVAR_NOTIFY);
 	}
 	else
 	{
-		g_hItemMarkGlowEnable			= CreateConVar("l4d2_item_marker_glow_enable", 					"1", 					"(L4D1) If 1, Enable white glow when mark items", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hItemMarkGlowEnable			= CreateConVar("l4d2_item_marker_glow_enable", 					"1", 					"(L4D1) 1=标记物品时显示白色发光，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	}
-	g_hItemGlowTimer					= CreateConVar("l4d2_item_marker_glow_timer", 					"10.0", 				"Item marker glow duration (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hItemGlowRange					= CreateConVar("l4d2_item_marker_glow_range", 					"800", 					"Item marker glow visible range", FCVAR_NOTIFY, true, 0.0);
-	g_hItemHintCoolDown					= CreateConVar("l4d2_item_marker_cooldown_time", 				"1.0", 					"Cooldown between marking items (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hItemUseHintRange					= CreateConVar("l4d2_item_marker_use_range", 					"150", 					"Max distance to mark an item", FCVAR_NOTIFY, true, 1.0);
-	g_hItemUseSound						= CreateConVar("l4d2_item_marker_use_sound", 					"buttons/blip1.wav", 	"Sound when marking an item. (relative to sound/, Empty = Off)", FCVAR_NOTIFY);
-	g_hItemAnnounceType					= CreateConVar("l4d2_item_marker_announce_type", 				"1", 					"Item marker announce type: 0=Off, 1=Chat, 2=Hint text, 3=Center text", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hItemGlowTimer					= CreateConVar("l4d2_item_marker_glow_timer", 					"10.0", 				"物品标记发光持续时间（秒，兼教练提示时长）", FCVAR_NOTIFY, true, 0.0);
+	g_hItemGlowRange					= CreateConVar("l4d2_item_marker_glow_range", 					"800", 					"物品标记发光可见范围（兼教练提示可视距离）", FCVAR_NOTIFY, true, 0.0);
+	g_hItemHintCoolDown					= CreateConVar("l4d2_item_marker_cooldown_time", 				"1.0", 					"标记物品之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hItemUseHintRange					= CreateConVar("l4d2_item_marker_use_range", 					"150", 					"标记物品的最大距离", FCVAR_NOTIFY, true, 1.0);
+	g_hItemUseSound						= CreateConVar("l4d2_item_marker_use_sound", 					"buttons/blip1.wav", 	"标记物品时的音效（相对 sound/ 目录，留空=关闭）", FCVAR_NOTIFY);
+	g_hItemAnnounceType					= CreateConVar("l4d2_item_marker_announce_type", 				"1", 					"物品标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	if(g_bL4D2Version)
 	{
-		g_hItemInstructorHint			= CreateConVar("l4d2_item_marker_instructorhint_enable", 		"1", 					"(L4D2) If 1, show instructor hint on marked items", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hItemInstructorColor			= CreateConVar("l4d2_item_marker_instructorhint_color", 		"0 255 255", 			"(L4D2) Instructor hint color on items. (Empty = hide item name)", FCVAR_NOTIFY);
-		g_hItemInstructorIcon			= CreateConVar("l4d2_item_marker_instructorhint_icon", 			"icon_interact", 		"(L4D2) Instructor hint icon. (More icons: https://developer.valvesoftware.com/wiki/Env_instructor_hint)", FCVAR_NOTIFY);
+		g_hItemInstructorHint			= CreateConVar("l4d2_item_marker_instructorhint_enable", 		"0", 					"(L4D2) 1=在已标记的物品上显示教练提示，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hItemInstructorColor			= CreateConVar("l4d2_item_marker_instructorhint_color", 		"0 255 255", 			"(L4D2) 物品上教练提示的颜色。（留空=不显示物品名称）", FCVAR_NOTIFY);
+		g_hItemInstructorIcon			= CreateConVar("l4d2_item_marker_instructorhint_icon", 			"icon_interact", 		"(L4D2) 教练提示图标。（更多图标：https://developer.valvesoftware.com/wiki/Env_instructor_hint）", FCVAR_NOTIFY);
 	}	
-	g_hItemRemovePrevious				= CreateConVar("l4d2_item_marker_remove_previous", 				"0", 					"If 1, Remove previous Item marker if same player marks again", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hItemRemovePrevious				= CreateConVar("l4d2_item_marker_remove_previous", 				"0", 					"1=同一玩家再次标记时移除之前的物品标记，0=保留", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// S.I./Witch mark
-	g_hInfectedMarkType   				= CreateConVar("l4d2_infected_marker_type", 					"0",					"S.I./Witch marker type, 0=(L4D2) Body Glow, 1=Sprite icon above head", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedMarkType   				= CreateConVar("l4d2_infected_marker_type", 					"0",					"特感/Witch 标记方式，0=(L4D2)身体发光，1=头顶图标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	if(g_bL4D2Version)
 	{
-		g_hInfectedMarkGlowColor   		= CreateConVar("l4d2_infected_marker_glow_color", 				"255 120 203",			"(L4D2) S.I./Witch marker glow color (RGB, space-separated). Empty = Remove Glow.", FCVAR_NOTIFY);
-		g_hInfectedMarkGlowTimer   		= CreateConVar("l4d2_infected_marker_glow_timer", 				"10.0", 				"(L4D2) S.I./Witch glow duration when marked by Survivors (seconds)", FCVAR_NOTIFY, true, 0.0);
-		g_hInfectedMarkGlowRange   		= CreateConVar("l4d2_infected_marker_glow_range", 				"2500", 				"(L4D2) S.I./Witch glow visible range when marked by Survivors", FCVAR_NOTIFY, true, 0.0);
+		g_hInfectedMarkGlowColor   		= CreateConVar("l4d2_infected_marker_glow_color", 				"255 120 203",			"(L4D2) 特感/Witch 标记发光颜色（RGB，空格分隔）。留空=不发光。", FCVAR_NOTIFY);
+		g_hInfectedMarkGlowTimer   		= CreateConVar("l4d2_infected_marker_glow_timer", 				"3.0", 				"(L4D2) 被生还者标记后特感/Witch 的发光持续时间（秒，兼教练提示时长）", FCVAR_NOTIFY, true, 0.0);
+		g_hInfectedMarkGlowRange   		= CreateConVar("l4d2_infected_marker_glow_range", 				"2500", 				"(L4D2) 被生还者标记后特感/Witch 的发光可见范围（兼教练提示可视距离）", FCVAR_NOTIFY, true, 0.0);
 	}
-	g_hInfectedMarkSpriteColor   		= CreateConVar("l4d2_infected_marker_sprite_color", 			"255 0 0",				"S.I./Witch marker icon color (RGB, space-separated). Empty = Off.", FCVAR_NOTIFY);
-	g_hInfectedMarkSpriteModel      	= CreateConVar("l4d2_infected_marker_sprite_model", 			"materials/vgui/icon_arrow_down.vmt", "S.I./Witch marker icon model.", FCVAR_NOTIFY);
-	g_hInfectedMarkSpriteTimer   		= CreateConVar("l4d2_infected_marker_sprite_timer", 			"10.0", 				"S.I./Witch marker icon duration when marked by Survivors (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedMarkSpriteScale      	= CreateConVar("l4d2_infected_marker_sprite_scale", 			"0.3", 					"S.I./Witch marker icon size", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedMarkSpriteFollow			= CreateConVar("l4d2_infected_marker_sprite_follow_target", 	"1", 					"If 1, S.I./Witch marker icon will follow target", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hInfectedMarkCoolDown				= CreateConVar("l4d2_infected_marker_cooldown_time", 			"0.25", 				"Cooldown for Survivors marking S.I./Witch (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hInfectedMarkUseRange     		= CreateConVar("l4d2_infected_marker_use_range", 				"1000", 				"Max distance for Survivors to mark S.I./Witch", FCVAR_NOTIFY, true, 1.0);
-	g_hInfectedMarkUseSound				= CreateConVar("l4d2_infected_marker_use_sound", 				"items/suitchargeok1.wav", "Sound when Survivors mark S.I./Witch (relative to sound/, Empty = Off)", FCVAR_NOTIFY);
-	g_hInfectedMarkAnnounceType			= CreateConVar("l4d2_infected_marker_announce_type",			"1", 					"S.I./Witch marker announce type: 0=Off, 1=Chat, 2=Hint text, 3=Center text", FCVAR_NOTIFY, true, 0.0, true, 3.0);
-	g_hInfectedMarkSIFlag    			= CreateConVar("l4d2_infected_marker_si_flag", 					"127", 					"Which S.I. can Survivors mark? 1=Smoker, 2=Boomer, 4=Hunter, 8=Spitter, 16=Jockey, 32=Charger, 64=Tank. Add together (127=All)", FCVAR_NOTIFY, true, 0.0, true, 127.0);
+	g_hInfectedMarkSpriteColor   		= CreateConVar("l4d2_infected_marker_sprite_color", 			"255 0 0",				"特感/Witch 标记图标颜色（RGB，空格分隔）。留空=关闭。", FCVAR_NOTIFY);
+	g_hInfectedMarkSpriteModel      	= CreateConVar("l4d2_infected_marker_sprite_model", 			"materials/vgui/icon_arrow_down.vmt", "特感/Witch 标记图标模型。", FCVAR_NOTIFY);
+	g_hInfectedMarkSpriteTimer   		= CreateConVar("l4d2_infected_marker_sprite_timer", 			"10.0", 				"被生还者标记后特感/Witch 图标的持续时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hInfectedMarkSpriteScale      	= CreateConVar("l4d2_infected_marker_sprite_scale", 			"0.3", 					"特感/Witch 标记图标大小", FCVAR_NOTIFY, true, 0.0);
+	g_hInfectedMarkSpriteFollow			= CreateConVar("l4d2_infected_marker_sprite_follow_target", 	"1", 					"1=特感/Witch 标记图标跟随目标移动，0=固定原地", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedMarkCoolDown				= CreateConVar("l4d2_infected_marker_cooldown_time", 			"0.25", 				"生还者标记特感/Witch 的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hInfectedMarkUseRange     		= CreateConVar("l4d2_infected_marker_use_range", 				"1000", 				"生还者标记特感/Witch 的最大距离", FCVAR_NOTIFY, true, 1.0);
+	g_hInfectedMarkUseSound				= CreateConVar("l4d2_infected_marker_use_sound", 				"items/suitchargeok1.wav", "生还者标记特感/Witch 时的音效（相对 sound/ 目录，留空=关闭）", FCVAR_NOTIFY);
+	g_hInfectedMarkAnnounceType			= CreateConVar("l4d2_infected_marker_announce_type",			"0", 					"特感/Witch 标记公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hInfectedMarkSIFlag    			= CreateConVar("l4d2_infected_marker_si_flag", 					"0", 					"生还者可以标记哪些特感？1=烟鬼，2=胖子，4=猎人，8=喷吐者，16=骑师，32=冲锋者，64=坦克。数值可相加（127=全部）", FCVAR_NOTIFY, true, 0.0, true, 127.0);
 	if(g_bL4D2Version)
 	{
-		g_hInfectedMarkInstructorHint	= CreateConVar("l4d2_infected_marker_instructorhint_enable", 	"1", 					"(L4D2) If 1, show instructor hint on S.I./Witch marked by Survivors", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hInfectedMarkInstructorColor	= CreateConVar("l4d2_infected_marker_instructorhint_color", 	"255 0 0", 				"(L4D2) Instructor hint color on S.I./Witch marker (Empty = hide S.I./Witch name)", FCVAR_NOTIFY);
-		g_hInfectedMarkInstructorIcon	= CreateConVar("l4d2_infected_marker_instructorhint_icon", 		"icon_skull", 			"(L4D2) Instructor hint icon on S.I./Witch marker", FCVAR_NOTIFY);
+		g_hInfectedMarkInstructorHint	= CreateConVar("l4d2_infected_marker_instructorhint_enable", 	"0", 					"(L4D2) 1=在被生还者标记的特感/Witch 上显示教练提示，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hInfectedMarkInstructorColor	= CreateConVar("l4d2_infected_marker_instructorhint_color", 	"255 0 0", 				"(L4D2) 特感/Witch 教练提示的颜色（留空=不显示特感/Witch 名称）", FCVAR_NOTIFY);
+		g_hInfectedMarkInstructorIcon	= CreateConVar("l4d2_infected_marker_instructorhint_icon", 		"icon_skull", 			"(L4D2) 特感/Witch 上的教练提示图标", FCVAR_NOTIFY);
 	}
-	g_hInfectedMarkSIFov				= CreateConVar("l4d2_infected_marker_si_fov", 					"15.0", 				"FOV angle to detect if Survivor is looking at S.I. (0=Crosshair only)", FCVAR_NOTIFY, true, 0.0, true, 90.0);
-	g_hInfectedMarkWitchFov				= CreateConVar("l4d2_infected_marker_witch_fov", 				"15.0", 				"FOV angle to detect if Survivor is looking at Witch. (0=Crosshair only)", FCVAR_NOTIFY, true, 0.0, true, 90.0);
-	g_hInfectedMarkRemovePrevious		= CreateConVar("l4d2_infected_marker_remove_previous", 			"1", 					"If 1, Remove previous S.I./Witch marker if same player marks again", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hInfectedMarkSIFov				= CreateConVar("l4d2_infected_marker_si_fov", 					"15.0", 				"检测生还者是否看向特感的 FOV 角度（0=仅准星对准）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
+	g_hInfectedMarkWitchFov				= CreateConVar("l4d2_infected_marker_witch_fov", 				"15.0", 				"检测生还者是否看向 Witch 的 FOV 角度（0=仅准星对准）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
+	g_hInfectedMarkRemovePrevious		= CreateConVar("l4d2_infected_marker_remove_previous", 			"1", 					"1=同一玩家再次标记时移除之前的特感/Witch 标记，0=保留", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// Survivor mark by Survivors
-	g_hSurvivorMarkType[0]   				= CreateConVar("l4d2_survivor_marker_type_by_sur", 						"0",					"(By Survivors) Survivor marker type, 0=(L4D2) Body Glow, 1=Sprite icon above head", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkType[0]   				= CreateConVar("l4d2_survivor_marker_type_by_sur", 						"0",					"（生还者标记）生还者标记方式，0=(L4D2)身体发光，1=头顶图标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	if(g_bL4D2Version)
 	{
-		g_hSurvivorMarkGlowColor[0]   		= CreateConVar("l4d2_survivor_marker_glow_color_by_sur", 				"0 200 0", 				"(L4D2) (By Survivors) Survivor marker glow color (RGB, space-separated). Empty = Off.", FCVAR_NOTIFY);
-		g_hSurvivorMarkGlowTimer[0]   		= CreateConVar("l4d2_survivor_marker_glow_timer_by_sur", 				"10.0", 				"(L4D2) (By Survivors) Survivor marker glow duration when marked (seconds)", FCVAR_NOTIFY, true, 0.0);
-		g_hSurvivorMarkGlowRange[0]   		= CreateConVar("l4d2_survivor_marker_glow_range_by_sur", 				"2000", 				"(L4D2) (By Survivors) Survivor marker glow visible range when marked", FCVAR_NOTIFY, true, 0.0);
+		g_hSurvivorMarkGlowColor[0]   		= CreateConVar("l4d2_survivor_marker_glow_color_by_sur", 				"0 200 0", 				"(L4D2)（生还者标记）生还者标记发光颜色（RGB，空格分隔）。留空=关闭。", FCVAR_NOTIFY);
+		g_hSurvivorMarkGlowTimer[0]   		= CreateConVar("l4d2_survivor_marker_glow_timer_by_sur", 				"10.0", 				"(L4D2)（生还者标记）被标记后生还者的发光持续时间（秒，兼教练提示时长）", FCVAR_NOTIFY, true, 0.0);
+		g_hSurvivorMarkGlowRange[0]   		= CreateConVar("l4d2_survivor_marker_glow_range_by_sur", 				"2000", 				"(L4D2)（生还者标记）被标记后生还者的发光可见范围（兼教练提示可视距离）", FCVAR_NOTIFY, true, 0.0);
 	}
-	g_hSurvivorMarkSpriteColor[0]   		= CreateConVar("l4d2_survivor_marker_sprite_color_by_sur", 				"0 200 0", 				"(By Survivors) Survivor marker icon color (RGB, space-separated). Empty = Off.", FCVAR_NOTIFY);
-	g_hSurvivorMarkSpriteModel[0]      		= CreateConVar("l4d2_survivor_marker_sprite_model_by_sur", 				"materials/vgui/icon_arrow_down.vmt", "(By Survivors) Survivor marker icon model", FCVAR_NOTIFY);
-	g_hSurvivorMarkSpriteTimer[0]   		= CreateConVar("l4d2_survivor_marker_sprite_timer_by_sur", 				"10.0", 				"(By Survivors) Survivor marker icon duration", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkSpriteScale[0]      		= CreateConVar("l4d2_survivor_marker_sprite_scale_by_sur", 				"0.35", 				"(By Survivors) Survivor marker icon size", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkSpriteFollow[0]			= CreateConVar("l4d2_survivor_marker_sprite_follow_target_by_sur", 		"1", 					"(By Survivors) If 1, Survivor marker icon will follow target", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorMarkCoolDown[0]				= CreateConVar("l4d2_survivor_marker_cooldown_time_by_sur", 			"0.25", 				"(By Survivors) Cooldown between marking survivors (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkUseRange[0]     			= CreateConVar("l4d2_survivor_marker_use_range_by_sur", 				"1000", 				"(By Survivors) Max distance to mark a survivor", FCVAR_NOTIFY, true, 1.0);
-	g_hSurvivorMarkUseSound[0]				= CreateConVar("l4d2_survivor_marker_use_sound_by_sur", 				"player/suit_denydevice.wav",  "(By Survivors) Sound when marking a survivor. (relative to sound/, Empty = Off)", FCVAR_NOTIFY);
-	g_hSurvivorMarkAnnounceType[0]			= CreateConVar("l4d2_survivor_marker_announce_type_by_sur", 			"1", 					"(By Survivors) Announce type when marking a survivor: 0=Off, 1=Chat, 2=Hint text, 3=Center text", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hSurvivorMarkSpriteColor[0]   		= CreateConVar("l4d2_survivor_marker_sprite_color_by_sur", 				"0 200 0", 				"（生还者标记）生还者标记图标颜色（RGB，空格分隔）。留空=关闭。", FCVAR_NOTIFY);
+	g_hSurvivorMarkSpriteModel[0]      		= CreateConVar("l4d2_survivor_marker_sprite_model_by_sur", 				"materials/vgui/icon_arrow_down.vmt", "（生还者标记）生还者标记图标模型", FCVAR_NOTIFY);
+	g_hSurvivorMarkSpriteTimer[0]   		= CreateConVar("l4d2_survivor_marker_sprite_timer_by_sur", 				"10.0", 				"（生还者标记）生还者标记图标持续时间", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkSpriteScale[0]      		= CreateConVar("l4d2_survivor_marker_sprite_scale_by_sur", 				"0.35", 				"（生还者标记）生还者标记图标大小", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkSpriteFollow[0]			= CreateConVar("l4d2_survivor_marker_sprite_follow_target_by_sur", 		"1", 					"（生还者标记）1=生还者标记图标跟随目标移动，0=固定原地", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkCoolDown[0]				= CreateConVar("l4d2_survivor_marker_cooldown_time_by_sur", 			"0.25", 				"（生还者标记）标记生还者之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkUseRange[0]     			= CreateConVar("l4d2_survivor_marker_use_range_by_sur", 				"1000", 				"（生还者标记）标记生还者的最大距离", FCVAR_NOTIFY, true, 1.0);
+	g_hSurvivorMarkUseSound[0]				= CreateConVar("l4d2_survivor_marker_use_sound_by_sur", 				"player/suit_denydevice.wav",  "（生还者标记）标记生还者时的音效（相对 sound/ 目录，留空=关闭）", FCVAR_NOTIFY);
+	g_hSurvivorMarkAnnounceType[0]			= CreateConVar("l4d2_survivor_marker_announce_type_by_sur", 			"1", 					"（生还者标记）标记生还者时的公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	if(g_bL4D2Version)
 	{
-		g_hSurvivorMarkInstructorHint[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_enable_by_sur", 	"1", 					"(L4D2) (By Survivors) If 1, show instructor hint on marked survivor", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hSurvivorMarkInstructorColor[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_color_by_sur", 		"0 200 0", 				"(L4D2) (By Survivors) Instructor hint color on survivor marker. (Empty = hide name)", FCVAR_NOTIFY);
-		g_hSurvivorMarkInstructorIcon[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_icon_by_sur", 		"icon_alert", 			"(L4D2) (By Survivors) Instructor hint icon on survivor marker", FCVAR_NOTIFY);
+		g_hSurvivorMarkInstructorHint[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_enable_by_sur", 	"0", 					"(L4D2)（生还者标记）1=在被标记的生还者上显示教练提示，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hSurvivorMarkInstructorColor[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_color_by_sur", 		"0 200 0", 				"(L4D2)（生还者标记）生还者上教练提示的颜色。（留空=不显示名称）", FCVAR_NOTIFY);
+		g_hSurvivorMarkInstructorIcon[0]	= CreateConVar("l4d2_survivor_marker_instructorhint_icon_by_sur", 		"icon_alert", 			"(L4D2)（生还者标记）生还者上的教练提示图标", FCVAR_NOTIFY);
 	}
-	g_hSurvivorMarkFov[0]					= CreateConVar("l4d2_survivor_marker_fov_by_sur", 						"15.0", 				"(By Survivors) FOV angle to detect if player is looking at a survivor. (0=Crosshair only)", FCVAR_NOTIFY, true, 0.0, true, 90.0);
-	g_hSurvivorMarkRemovePrevious[0]		= CreateConVar("l4d2_survivor_marker_remove_previous_by_sur", 			"1", 					"(By Survivors) If 1, Remove previous survivor marker if same player marks again", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkFov[0]					= CreateConVar("l4d2_survivor_marker_fov_by_sur", 						"15.0", 				"（生还者标记）检测玩家是否看向生还者的 FOV 角度。（0=仅准星对准）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
+	g_hSurvivorMarkRemovePrevious[0]		= CreateConVar("l4d2_survivor_marker_remove_previous_by_sur", 			"1", 					"（生还者标记）1=同一玩家再次标记时移除之前的生还者标记，0=保留", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	
 	// Survivor mark by Infected
-	g_hSurvivorMarkType[1]   				= CreateConVar("l4d2_survivor_marker_type_by_inf", 						"0",					"(By Infected) Survivor marker type, 0=(L4D2) Body Glow, 1=Sprite icon above head", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkType[1]   				= CreateConVar("l4d2_survivor_marker_type_by_inf", 						"0",					"（感染者标记）生还者标记方式，0=(L4D2)身体发光，1=头顶图标", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	if(g_bL4D2Version)
 	{
-		g_hSurvivorMarkGlowColor[1]   		= CreateConVar("l4d2_survivor_marker_glow_color_by_inf", 				"200 0 0", 				"(L4D2) (By Infected) Survivor marker glow color (RGB, space-separated). Empty = Off.", FCVAR_NOTIFY);
-		g_hSurvivorMarkGlowTimer[1]   		= CreateConVar("l4d2_survivor_marker_glow_timer_by_inf", 				"10.0", 				"(L4D2) (By Infected) Survivor marker glow duration when marked (seconds)", FCVAR_NOTIFY, true, 0.0);
-		g_hSurvivorMarkGlowRange[1]   		= CreateConVar("l4d2_survivor_marker_glow_range_by_inf", 				"2000", 				"(L4D2) (By Infected) Survivor marker glow visible range when marked", FCVAR_NOTIFY, true, 0.0);
+		g_hSurvivorMarkGlowColor[1]   		= CreateConVar("l4d2_survivor_marker_glow_color_by_inf", 				"200 0 0", 				"(L4D2)（感染者标记）生还者标记发光颜色（RGB，空格分隔）。留空=关闭。", FCVAR_NOTIFY);
+		g_hSurvivorMarkGlowTimer[1]   		= CreateConVar("l4d2_survivor_marker_glow_timer_by_inf", 				"10.0", 				"(L4D2)（感染者标记）被标记后生还者的发光持续时间（秒，兼教练提示时长）", FCVAR_NOTIFY, true, 0.0);
+		g_hSurvivorMarkGlowRange[1]   		= CreateConVar("l4d2_survivor_marker_glow_range_by_inf", 				"2000", 				"(L4D2)（感染者标记）被标记后生还者的发光可见范围（兼教练提示可视距离）", FCVAR_NOTIFY, true, 0.0);
 	}
-	g_hSurvivorMarkSpriteColor[1]   		= CreateConVar("l4d2_survivor_marker_sprite_color_by_inf", 				"0 200 0", 				"(By Infected) Survivor marker icon color (RGB, space-separated). Empty = Off.", FCVAR_NOTIFY);
-	g_hSurvivorMarkSpriteModel[1]      		= CreateConVar("l4d2_survivor_marker_sprite_model_by_inf", 				"materials/vgui/icon_arrow_down.vmt", "(By Infected) Survivor marker icon model", FCVAR_NOTIFY);
-	g_hSurvivorMarkSpriteTimer[1]   		= CreateConVar("l4d2_survivor_marker_sprite_timer_by_inf", 				"10.0", 				"(By Infected) Survivor marker icon duration", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkSpriteScale[1]      		= CreateConVar("l4d2_survivor_marker_sprite_scale_by_inf", 				"0.35", 				"(By Infected) Survivor marker icon size", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkSpriteFollow[1]			= CreateConVar("l4d2_survivor_marker_sprite_follow_target_by_inf", 		"1", 					"(By Infected) If 1, Survivor marker icon will follow target", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorMarkCoolDown[1]				= CreateConVar("l4d2_survivor_marker_cooldown_time_by_inf", 			"0.25", 				"(By Infected) Cooldown between marking survivors (seconds)", FCVAR_NOTIFY, true, 0.0);
-	g_hSurvivorMarkUseRange[1]     			= CreateConVar("l4d2_survivor_marker_use_range_by_inf", 				"1000", 				"(By Infected) Max distance to mark a survivor", FCVAR_NOTIFY, true, 1.0);
-	g_hSurvivorMarkUseSound[1]				= CreateConVar("l4d2_survivor_marker_use_sound_by_inf", 				"player/suit_denydevice.wav",  "(By Infected) Sound when marking a survivor. (relative to sound/, Empty = Off)", FCVAR_NOTIFY);
-	g_hSurvivorMarkAnnounceType[1]			= CreateConVar("l4d2_survivor_marker_announce_type_by_inf", 			"1", 					"(By Infected) Announce type when marking a survivor: 0=Off, 1=Chat, 2=Hint text, 3=Center text", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hSurvivorMarkSpriteColor[1]   		= CreateConVar("l4d2_survivor_marker_sprite_color_by_inf", 				"0 200 0", 				"（感染者标记）生还者标记图标颜色（RGB，空格分隔）。留空=关闭。", FCVAR_NOTIFY);
+	g_hSurvivorMarkSpriteModel[1]      		= CreateConVar("l4d2_survivor_marker_sprite_model_by_inf", 				"materials/vgui/icon_arrow_down.vmt", "（感染者标记）生还者标记图标模型", FCVAR_NOTIFY);
+	g_hSurvivorMarkSpriteTimer[1]   		= CreateConVar("l4d2_survivor_marker_sprite_timer_by_inf", 				"3.0", 				"（感染者标记）生还者标记图标持续时间", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkSpriteScale[1]      		= CreateConVar("l4d2_survivor_marker_sprite_scale_by_inf", 				"0.35", 				"（感染者标记）生还者标记图标大小", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkSpriteFollow[1]			= CreateConVar("l4d2_survivor_marker_sprite_follow_target_by_inf", 		"1", 					"（感染者标记）1=生还者标记图标跟随目标移动，0=固定原地", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkCoolDown[1]				= CreateConVar("l4d2_survivor_marker_cooldown_time_by_inf", 			"3.00", 				"（感染者标记）标记生还者之间的冷却时间（秒）", FCVAR_NOTIFY, true, 0.0);
+	g_hSurvivorMarkUseRange[1]     			= CreateConVar("l4d2_survivor_marker_use_range_by_inf", 				"1000", 				"（感染者标记）标记生还者的最大距离", FCVAR_NOTIFY, true, 1.0);
+	g_hSurvivorMarkUseSound[1]				= CreateConVar("l4d2_survivor_marker_use_sound_by_inf", 				"player/suit_denydevice.wav",  "（感染者标记）标记生还者时的音效（相对 sound/ 目录，留空=关闭）", FCVAR_NOTIFY);
+	g_hSurvivorMarkAnnounceType[1]			= CreateConVar("l4d2_survivor_marker_announce_type_by_inf", 			"0", 					"（感染者标记）标记生还者时的公告类型：0=关闭，1=聊天框，2=提示文字，3=屏幕中央文字", FCVAR_NOTIFY, true, 0.0, true, 3.0);
 	if(g_bL4D2Version)
 	{
-		g_hSurvivorMarkInstructorHint[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_enable_by_inf", 	"1", 					"(L4D2) (By Infected) If 1, show instructor hint on marked survivor", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-		g_hSurvivorMarkInstructorColor[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_color_by_inf", 		"0 200 0", 				"(L4D2) (By Infected) Instructor hint color on survivor marker. (Empty = hide name)", FCVAR_NOTIFY);
-		g_hSurvivorMarkInstructorIcon[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_icon_by_inf", 		"icon_alert", 			"(L4D2) (By Infected) Instructor hint icon on survivor marker", FCVAR_NOTIFY);
+		g_hSurvivorMarkInstructorHint[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_enable_by_inf", 	"0", 					"(L4D2)（感染者标记）1=在被标记的生还者上显示教练提示，0=关闭", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+		g_hSurvivorMarkInstructorColor[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_color_by_inf", 		"0 200 0", 				"(L4D2)（感染者标记）生还者上教练提示的颜色。（留空=不显示名称）", FCVAR_NOTIFY);
+		g_hSurvivorMarkInstructorIcon[1]	= CreateConVar("l4d2_survivor_marker_instructorhint_icon_by_inf", 		"icon_alert", 			"(L4D2)（感染者标记）生还者上的教练提示图标", FCVAR_NOTIFY);
 	}
-	g_hSurvivorMarkFov[1]					= CreateConVar("l4d2_survivor_marker_fov_by_inf", 						"15.0", 				"(By Infected) FOV angle to detect if player is looking at a survivor. (0=Crosshair only)", FCVAR_NOTIFY, true, 0.0, true, 90.0);
-	g_hSurvivorMarkRemovePrevious[1]		= CreateConVar("l4d2_survivor_marker_remove_previous_by_inf", 			"1", 					"(By Infected) If 1, Remove previous survivor marker if same player marks again", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hSurvivorMarkNotifyByInf				= CreateConVar("l4d2_survivor_marker_notify_by_inf",					"0",					"(By Infected) If 1, Notify that you are marked by an infected", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkFov[1]					= CreateConVar("l4d2_survivor_marker_fov_by_inf", 						"15.0", 				"（感染者标记）检测玩家是否看向生还者的 FOV 角度。（0=仅准星对准）", FCVAR_NOTIFY, true, 0.0, true, 90.0);
+	g_hSurvivorMarkRemovePrevious[1]		= CreateConVar("l4d2_survivor_marker_remove_previous_by_inf", 			"1", 					"（感染者标记）1=同一玩家再次标记时移除之前的生还者标记，0=保留", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hSurvivorMarkNotifyByInf				= CreateConVar("l4d2_survivor_marker_notify_by_inf",					"0",					"（感染者标记）1=被感染者标记时通知本人，0=不通知", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 
 	//保持老版行为: 不生成/不读取 cfg/sourcemod/l4d2_item_hint.cfg, 所有默认值以本文件里的 CreateConVar 为准.

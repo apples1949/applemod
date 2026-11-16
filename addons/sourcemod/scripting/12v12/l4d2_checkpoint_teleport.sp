@@ -161,6 +161,26 @@
  *      但仍静默记录在场状态（区域恢复可用时不会「集体进入」）；
  *      换图 / round_start / round_end / 玩家断线都会清状态。
  *
+ *  1.2.8 修复「触发过一次传送之后，再走进集合区域就再也不提示了」（需求 #7 续）：
+ *    - 现象：倒计时结束、把掉队者传送进区域之后，本回合剩下的时间里任何玩家
+ *      再进入该区域都没有任何进入提示（但「全员已进入 / 提前集合完毕」那条还在）。
+ *    - 根因：1.2.7 的 UpdateEnterNotices 把 g_bAreaFired 写进了静默条件：
+ *        bool bQuiet = g_bAreaFired[i] || !IsAreaAlive(i);
+ *      而 g_bAreaFired 只在 FinishCountdown（传送完毕）/ FinishCountdownAllSeen
+ *      （提前集合完毕）里被置 true，之后只有换回合 / 换图（ResetRound）或
+ *      重新登记区域（AddArea）才会清 —— 于是「触发过一次 = 本回合永不再提示」，
+ *      这正是用户报的现象。
+ *    - 修复：静默条件只保留「区域实体已经消失」（!IsAreaAlive(i)），
+ *      已触发过的区域照常播报进入提示；进入侦测本身仍是「不在 -> 在」跳变播报，
+ *      频率不变（同一玩家同一次进入仍只播一次，抖动仍由 ENTER_NOTICE_REPEAT 抑制）。
+ *    - 同时补一个不刷屏的细节：插件自己把人传送进区域的那一次（FinishCountdown
+ *      的主传送、安全屋结算状态机 SettleGatherSurvivors 的补传）不算「玩家走进来」，
+ *      由 SuppressEnterNoticeForTeleport 预先登记成已在区域内，不会紧接着多播一条
+ *      「N/N 名生还者已进入…」。玩家自己走进来照常播报。
+ *    - 「提前集合完毕」那条提示（FinishCountdownAllSeen 的
+ *      「全员已进入%s，倒计时提前结束，无人需要传送」/「全员已到达集合点…」）
+ *      完全未改动。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -174,7 +194,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.7"
+#define PLUGIN_VERSION      "1.2.8"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -450,8 +470,10 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// 1.2.7 需求：有生还者「首次进入」集合区域时，向所有玩家提示可触发传送。
+	// 1.2.8：该区域本回合已经触发过传送之后仍然继续提示（1.2.7 曾经触发一次就永久静音）；
+	//        插件自己把人传送进来的那一次不算「进入」，不会额外多播一条。
 	g_cvEnterNotice = CreateConVar("l4d2_cptele_enter_notice", "1",
-		"1=有生还者首次进入安全屋/救援点/集合点区域时，向所有玩家在聊天框和屏幕下方提示可触发传送（只在进入那一刻播报，不会每 tick 刷屏）。0=不播报",
+		"1=有生还者进入安全屋/救援点/集合点区域时，向所有玩家在聊天框和屏幕下方提示可触发传送（只在进入那一刻播报，不会每 tick 刷屏；该区域已触发过传送后仍继续提示，插件自己的传送不算进入）。0=不播报",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSaferoom = CreateConVar("l4d2_cptele_saferoom", "1",
@@ -1575,6 +1597,12 @@ public Action Timer_Monitor(Handle timer)
  *     天然就是「按人数变化逐次提示」。
  *   - 同一玩家 3 秒内反复进出同一区域（站在触发体积 / 半径边界上抖动）只播第一次。
  *   - 区域刚被侦测出来的那一刻，已经在里面的人算「侦测前就在场」，只静默登记不播报。
+ *   - 1.2.8：该区域本回合已经触发过传送（g_bAreaFired）之后**仍然照常播报**。
+ *     1.2.7 曾把 g_bAreaFired 当静默条件，等于「触发一次 = 本回合再也不提示」，
+ *     正是用户报的现象；现在只有「区域实体已经消失」才静默。
+ *   - 1.2.8：插件自己把人传进区域的那一次不算「走进来」，由
+ *     SuppressEnterNoticeForTeleport 在传送后预先登记，不会紧跟倒计时结束提示
+ *     再刷一条「N/N 名生还者已进入…」。
  *
  * 由 Timer_Monitor 每秒调用一次（g_bCountingDown 期间也调用）。
  *
@@ -1598,9 +1626,13 @@ void UpdateEnterNotices(bool bEscape)
 
 	for (int i = 0; i < g_iAreaCount; i++)
 	{
-		// 已经触发过（倒计时结束 / 传送完毕）或区域实体已经消失：不再提示。
-		// 但下面仍然静默记录在场状态，区域恢复可用时不会出现「全员集体进入」。
-		bool bQuiet = g_bAreaFired[i] || !IsAreaAlive(i);
+		// 1.2.8：只有「区域实体已经消失」才静默。
+		// 1.2.7 这里还带着 g_bAreaFired[i]，而它只在倒计时结束（传送完毕 /
+		// 提前集合完毕）时被置 true、且只有换回合才会清 —— 结果一旦触发过传送，
+		// 本回合剩下的时间里再走进集合区域就再也不提示（用户报的现象）。
+		// 现在已触发过的区域照常播报，频率仍是「不在 -> 在」跳变播一次。
+		// 静默不等于不记录：下面照样更新 g_bAreaPresence，区域恢复时不会「集体进入」。
+		bool bQuiet = !IsAreaAlive(i);
 
 		if (!bQuiet)
 		{
@@ -1691,6 +1723,33 @@ void AnnounceAreaEnter(int index, int reached, int total)
 	char sMsg[192];
 
 	GetAreaTypeName(type, sName, sizeof(sName));
+
+	/* 1.2.8：本区域本回合**已经触发过传送**（g_bAreaFired）之后，进入提示照常播报，
+	   但文案不能再写"（需要 %d 名触发传送）" —— 这个区域本回合不会再触发倒计时了，
+	   写"需要 N 名"会让玩家以为还要继续集合。改成直接说明已触发过。 */
+	bool bFired = (index >= 0 && index < MAX_AREAS && index < g_iAreaCount) ? g_bAreaFired[index] : false;
+
+	if (bFired)
+	{
+		if (g_cvChat.BoolValue)
+		{
+			PrintToChatAll("\x05[集合点]\x01 %d/%d 名生还者已进入%s（本集合点本回合已触发过传送）",
+				reached, total, sName);
+		}
+
+		Format(sMsg, sizeof(sMsg), "[集合点] %d/%d 名生还者已进入%s（本集合点本回合已触发过传送）",
+			reached, total, sName);
+
+		PrintHintTextToAll("%s", sMsg);
+
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 进入提示（已触发过传送）：区域 #%d (type=%d) reached=%d total=%d",
+				index, type, reached, total);
+		}
+
+		return;
+	}
 
 	if (g_cvChat.BoolValue)
 	{
@@ -1993,6 +2052,11 @@ void FinishCountdown(int index)
 			}
 
 			TeleportSurvivor(i, vClientDest);
+
+			// 1.2.8：这一次进入是插件传送造成的，不算玩家自己「走进来」，
+			// 登记成已在区域内，避免倒计时结束提示之后再多播一条进入提示。
+			SuppressEnterNoticeForTeleport(index, i);
+
 			moved++;
 		}
 	}
@@ -2647,6 +2711,10 @@ int SettleGatherSurvivors(int index)
 		}
 
 		TeleportSurvivor(i, vClientDest);
+
+		// 1.2.8：同 FinishCountdown，补传也不算「玩家走进来」（进入提示照常，但不重复播）
+		SuppressEnterNoticeForTeleport(index, i);
+
 		moved++;
 	}
 
@@ -3116,6 +3184,36 @@ void ClearEnterNoticeForClient(int client)
 		g_bAreaPresence[i][client] = false;
 		g_fAreaEnterAt[i][client] = 0.0;
 	}
+}
+
+/**
+ * 1.2.8：把「插件自己把人传进区域」这一次移动登记成「已经在区域内」。
+ *
+ * 1.2.8 起已触发过传送的区域仍然照常播报进入提示，于是插件自己的传送原本会被
+ * 下一秒的侦测当成一次「不在 -> 在」跳变，紧跟倒计时结束提示再多刷一条
+ * 「N/N 名生还者已进入…」。这里在传送后立刻登记，把这种情况压掉：
+ *   - g_bAreaPresence 预先置 true：下一秒看不到跳变，不播报；
+ *   - g_fAreaEnterAt 记成当前时刻：万一落点其实不在判定体积内（固定传送点写偏了），
+ *     也不会紧接着补一条提示（与 ENTER_NOTICE_REPEAT 的抖动抑制同一口径）。
+ * 传送失败 / 落点确实在体积外时，下一秒的侦测会把 g_bAreaPresence 自动修正回 false，
+ * 玩家之后自己走进来仍然照常播报 —— 这里只是「这一次不算走进来」，不是永久闩锁。
+ *
+ * 只影响进入提示的状态，不碰倒计时 / 传送 / 区域判定。
+ */
+void SuppressEnterNoticeForTeleport(int index, int client)
+{
+	if (index < 0 || index >= MAX_AREAS)
+	{
+		return;
+	}
+
+	if (client <= 0 || client > MaxClients)
+	{
+		return;
+	}
+
+	g_bAreaPresence[index][client] = true;
+	g_fAreaEnterAt[index][client] = GetGameTime();
 }
 
 /**

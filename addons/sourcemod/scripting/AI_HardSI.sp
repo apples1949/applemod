@@ -813,9 +813,12 @@ bool IsAliveSur(int client) {
 }
 
 void ResetAbilityTime(int charger, float time) {
-	static int ent;
-	ent = GetEntPropEnt(charger, Prop_Send, "m_customAbility");
-	if (ent > MaxClients)
+	/* 原来只判 ent > MaxClients 就写 m_timestamp：句柄指到别的能力实体（ability_throw）
+	   时 SetEntPropFloat 会抛 Property "m_timestamp" not found。以前这条抛错被
+	   Charger_OnPlayerRunCmd 里更早的 IsCharging() 抛错挡住，没进日志；IsCharging()
+	   修好后这条路径就会真的走到，所以这里也要先确认属性存在。 */
+	int ent = GetEntPropEnt(charger, Prop_Send, "m_customAbility");
+	if (ent > MaxClients && IsValidEntity(ent) && HasEntProp(ent, Prop_Send, "m_timestamp"))
 		SetEntPropFloat(ent, Prop_Send, "m_timestamp", GetGameTime() + time);
 }
 

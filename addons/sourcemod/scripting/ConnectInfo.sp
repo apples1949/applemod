@@ -19,6 +19,17 @@
 #define DISC_MSG_FULL "来自{LIGHTGREEN}{PLAYERREGION} {PLAYERCITY}{DEFAULT}的[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
 #define DISC_MSG_NOGEO "[{GREEN}{PLAYERNAME}{DEFAULT}]离开游戏，原因为: {GREEN}{DISC_REASON}"
 
+// ============ Steam 认证（NoSteam）判定用的占位值 ============
+// SourceMod 的 GetClientAuthId 拿不到"已校验"的 SteamID 时，会先把缓冲区预置成哨兵串
+// （core/logic/smn_players.cpp 的 SteamIdToLocal 开头就 StringToLocal("STEAM_ID_STOP_IGNORING_RETVALS")，
+// 之后取不到真实 SteamID 就直接 return 0，缓冲区就留在哨兵串上），SteamID3 与 SteamID64 都是这样。
+// 所以"读到这个串" == 引擎的 IsClientFullyAuthenticated() 没通过 == 玩家没完成 Steam 认证。
+#define NOAUTH_SENTINEL "STEAM_ID_STOP_IGNORING_RETVALS"
+// 认证还没跑完时 SourceMod 给出的占位值，同样不算通过认证
+#define NOAUTH_PENDING "STEAM_ID_PENDING"
+// 局域网服务器（sv_lan 1）不校验 Steam 票据，引擎统一报这个值 —— 与玩家无关，要放行
+#define NOAUTH_LAN "STEAM_ID_LAN"
+
 // ============ 声音相关（沿用 cannounce/joinmsg.sp 的配置） ============
 ConVar g_CvarPlaySound;
 ConVar g_CvarPlaySoundFile;
@@ -55,11 +66,24 @@ char g_ClientIPs[MAXPLAYERS+1][36];
 char g_ConnectNames[MAXPLAYERS+1][MAX_NAME_LENGTH];
 int g_ConnectUserIds[MAXPLAYERS+1];
 
+// ============ 未通过 Steam 认证（NoSteam）的提醒状态 ============
+ConVar g_CvarNoAuthWarn;      // 总开关
+ConVar g_CvarNoAuthDelay;     // 进服后多久做第一次判定（给正常授权留时间，避免误报）
+ConVar g_CvarNoAuthInterval;  // 没通过时重复提醒的间隔
+
+// 每个槽位当前挂着的定时器（先是一次性"首次判定"，判定没通过后换成循环提醒）
+Handle g_hNoAuthTimer[MAXPLAYERS+1];
+// 上面那个句柄是否"还活着"：定时器跑完/被 Stop 后引擎会关掉句柄，
+// 此时变量里的值仍非 null，直接 KillTimer 会报 Invalid timer handle，所以单独记状态。
+bool g_bNoAuthTimerAlive[MAXPLAYERS+1];
+// 已经提醒过几次（只用于日志和提示文案）
+int g_iNoAuthRemindCount[MAXPLAYERS+1];
+
 public Plugin myinfo = {
     name = "Connect info",
     author = "HoongDou apples1949",
     description = "Print SteamID, IP and geo location (geoip) on player connect/disconnect",
-    version = "2.4",
+    version = "2.5",
     url = ""
 };
 
@@ -82,6 +106,9 @@ public void OnPluginStart() {
     // cannounce 声音配置
     SetupJoinMsgSounds();
     
+    // 未通过 Steam 认证（NoSteam）的提醒配置
+    SetupNoAuthReminders();
+    
     // 直接指定中文语言：geoip native 只能通过 client 参数指定语言，
     // 这里解析简体中文语言号，配合 GeoLangSource() 强制返回中文地名
     g_iChineseLang = GetLanguageByCode("chi");
@@ -91,6 +118,14 @@ public void OnPluginStart() {
     
     // AutoExecConfig 必须在所有 CreateConVar 之后，确保生成的 cfg 包含全部 cvar
     AutoExecConfig(true, "connectinfo");
+    
+    // 晚加载（plugin_manager 在比赛模式里动态 load 本插件）时，场上已有的玩家不会再有
+    // OnClientPutInServer，这里补一次，保证他们同样被认证检查覆盖。
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsClientConnected(i) && IsClientInGame(i)) {
+            ScheduleNoAuthCheck(i);
+        }
+    }
 }
 
 // 返回用于 geoip 查询的语言来源参数，保证返回中文地名。
@@ -123,6 +158,14 @@ public void OnMapStart() {
     
     // 地图开始后一段时间内忽略加入声音
     OnMapStart_JoinMsg();
+}
+
+// 玩家进入游戏（还没走完 Steam 授权也算进来）。
+// NoSteam 玩家永远等不到 OnClientPostAdminCheck：SourceMod 只在引擎
+// IsClientFullyAuthenticated() 为真时才会授权，否则会把他一直留在授权队列里。
+// 所以"连接后查有没有通过 Steam 认证"必须挂在这里，不能挂在 OnClientPostAdminCheck。
+public void OnClientPutInServer(int client) {
+    ScheduleNoAuthCheck(client);
 }
 
 // 玩家完成授权进入游戏：geoip 查询归属地 + 播放加入声音 + 播报
@@ -336,6 +379,11 @@ public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroa
 }
 
 public void OnClientDisconnect(int client) {
+    // 认证提醒的定时器必须立刻杀掉：槽位会被下一位玩家复用，
+    // 留着的定时器会把上一位的提醒套到新玩家身上。
+    // 放在最前面，Bot 断线时也照清一遍（本来就不会有定时器，纯属兜底）。
+    StopNoAuthTimer(client);
+
     if (IsFakeClient(client)) {
         return;
     }
@@ -363,6 +411,197 @@ public Action Timer_ClearDisconnectedClient(Handle timer, any client) {
     // 所以留着不会串数据（Event_PlayerConnect 在该槽位换人时会整体重置），
     // 却能让任何晚到的断开播报仍拿得到名字。
     return Plugin_Stop;
+}
+
+// ==================== Steam 认证（NoSteam）检查与提醒 ====================
+
+void SetupNoAuthReminders() {
+    g_CvarNoAuthWarn = CreateConVar("sm_connectinfo_noauth_warn", "1",
+        "玩家没通过 Steam 认证时是否提醒他（0=关闭 1=开启）", FCVAR_NONE, true, 0.0, true, 1.0);
+    // 第一次判定要等一会儿：正常玩家的 Steam 票据校验需要 1~3 秒，
+    // 立刻判定会把"还在授权中"的正常玩家误判成 NoSteam；
+    // 但也不能太大，否则可能赶不上引擎的 "No Steam logon" 踢出。
+    g_CvarNoAuthDelay = CreateConVar("sm_connectinfo_noauth_delay", "8.0",
+        "玩家进服后多少秒做第一次 Steam 认证判定", FCVAR_NONE, true, 0.0);
+    g_CvarNoAuthInterval = CreateConVar("sm_connectinfo_noauth_interval", "30.0",
+        "没通过 Steam 认证时重复提醒的间隔（秒）", FCVAR_NONE, true, 1.0);
+}
+
+// 为某个槽位安排"进服后第一次认证判定"。已通过认证的玩家不会真的被提醒：
+// 定时器到点时先用 IsSteamAuthPassed() 复核，通过就直接结束。
+void ScheduleNoAuthCheck(int client) {
+    if (client <= 0 || client > MaxClients) {
+        return;
+    }
+    if (!IsClientConnected(client) || IsFakeClient(client)) {
+        return;
+    }
+
+    // 同一个槽位可能因为换图 / 重连再次进来：先清掉上一轮的定时器，避免重复提醒
+    StopNoAuthTimer(client);
+    g_iNoAuthRemindCount[client] = 0;
+
+    if (g_CvarNoAuthWarn == null || !g_CvarNoAuthWarn.BoolValue) {
+        return;
+    }
+
+    // 故意不加 TIMER_FLAG_NO_MAPCHANGE：带这个标记的定时器会在换图时被引擎杀掉
+    // （TimerSys.cpp 的 KillMapchangeTimers），而玩家换图后仍然是"没通过认证"的状态，
+    // 提醒必须跨图继续。同一槽位重复安排时 ScheduleNoAuthCheck / StopNoAuthTimer 会先杀旧定时器，
+    // 所以就算换图后 OnClientPutInServer 再调一次也不会出现双份提醒。
+    g_hNoAuthTimer[client] = CreateTimer(g_CvarNoAuthDelay.FloatValue, Timer_NoAuthFirstCheck,
+                                        GetClientUserId(client));
+    g_bNoAuthTimerAlive[client] = (g_hNoAuthTimer[client] != null);
+}
+
+// 第一次判定：正常玩家这个时候早就该授权完成了，还没完成的才是 NoSteam / Steam 掉线。
+public Action Timer_NoAuthFirstCheck(Handle timer, any userid) {
+    int client = GetClientOfUserId(userid);
+    if (client == 0) {
+        // 玩家已经离开：OnClientDisconnect 里已经把定时器清干净了
+        return Plugin_Stop;
+    }
+
+    // 这次是一次性定时器，句柄即将被引擎回收，只清记录，不能再 KillTimer
+    ForgetNoAuthTimer(client);
+
+    if (IsSteamAuthPassed(client)) {
+        return Plugin_Stop;
+    }
+
+    // 第一次提醒 + 换成循环提醒（每 g_CvarNoAuthInterval 秒一次，直到通过认证或离开）
+    PrintNoAuthReminder(client);
+    StartNoAuthRepeatTimer(client);
+
+    return Plugin_Stop;
+}
+
+void StartNoAuthRepeatTimer(int client) {
+    // 同上：不加 TIMER_FLAG_NO_MAPCHANGE，循环提醒要跟着玩家跨图继续
+    g_hNoAuthTimer[client] = CreateTimer(g_CvarNoAuthInterval.FloatValue, Timer_NoAuthRepeatCheck,
+                                        GetClientUserId(client), TIMER_REPEAT);
+    g_bNoAuthTimerAlive[client] = (g_hNoAuthTimer[client] != null);
+}
+
+// 循环判定：一通过认证立刻停手（不再打扰）；还是没通过就再提醒一次。
+public Action Timer_NoAuthRepeatCheck(Handle timer, any userid) {
+    int client = GetClientOfUserId(userid);
+    if (client == 0) {
+        return Plugin_Stop;
+    }
+
+    if (IsSteamAuthPassed(client)) {
+        // 自己返回 Plugin_Stop，句柄由引擎回收，这里只清记录
+        ForgetNoAuthTimer(client);
+        return Plugin_Stop;
+    }
+
+    PrintNoAuthReminder(client);
+
+    return Plugin_Continue;
+}
+
+// 判断客户端是否已经通过 Steam 认证（Steam 后端确认过这张 auth ticket）。
+//
+// 判定依据（SourceMod core/PlayerManager.cpp 的 RunAuthChecks 与
+// core/logic/smn_players.cpp 的 SteamIdToLocal）：
+//   1) 只有引擎 IsClientFullyAuthenticated() 为真时，SourceMod 才会把客户端标记为已授权
+//      （IsClientAuthorized）。这是最权威、也是本函数的主判据。
+//   2) GetClientAuthId() 取不到已校验的 SteamID 时返回 false，并把缓冲区留在预置的哨兵串
+//      "STEAM_ID_STOP_IGNORING_RETVALS" 上；SteamID3 和 SteamID64 都是这个行为。
+//      这就是需求里说的"查 SteamID3 / SteamID64 是不是这个值"。
+//   3) 局域网服务器（sv_lan 1）上引擎根本不校验票据：SourceMod 会直接把玩家授权，
+//      引擎网络 ID 统一是 STEAM_ID_LAN，SteamID64 那条路更是直接 return 0。
+//      这属于服务器配置而不是玩家的问题，必须当作"已通过"放行，否则整服玩家都会被刷屏。
+bool IsSteamAuthPassed(int client) {
+    if (client <= 0 || client > MaxClients) {
+        return true;
+    }
+    if (!IsClientConnected(client) || IsFakeClient(client)) {
+        return true;
+    }
+
+    // validate=false：取引擎当前报告的原始 ID，用来识别"局域网服务器"这种不可判定场景
+    char steam3[MAX_AUTHID_LENGTH] = "";
+    char steam64[MAX_AUTHID_LENGTH] = "";
+    GetClientAuthId(client, AuthId_Steam3, steam3, sizeof(steam3), false);
+    GetClientAuthId(client, AuthId_SteamID64, steam64, sizeof(steam64), false);
+    if (StrEqual(steam3, NOAUTH_LAN, false)) {
+        return true;
+    }
+
+    // 主判据：SourceMod 的授权状态
+    if (!IsClientAuthorized(client)) {
+        return false;
+    }
+
+    // 复核（需求指定的判据）：SteamID3 与 SteamID64 都还是占位值，同样算没通过。
+    // 这一步专门兜住 core.cfg 关掉 SteamAuthstringValidation 的情况：
+    // 那时 SourceMod 会把没验证过的玩家直接授权，只有 ID 还停在哨兵串上。
+    if (IsPlaceholderAuthId(steam3) && IsPlaceholderAuthId(steam64)) {
+        return false;
+    }
+
+    return true;
+}
+
+// SteamID 是否还是"没拿到真实 SteamID"的占位值。
+// 注意 STEAM_ID_LAN 不算：局域网服务器上它表示服务器关了 Steam 校验，与玩家无关。
+bool IsPlaceholderAuthId(const char[] auth) {
+    return auth[0] == '\0'
+        || StrEqual(auth, NOAUTH_SENTINEL, false)
+        || StrEqual(auth, NOAUTH_PENDING, false);
+}
+
+// 提醒玩家：说清现象、给出可操作步骤、说明不处理的后果
+void PrintNoAuthReminder(int client) {
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client)) {
+        return;
+    }
+
+    g_iNoAuthRemindCount[client]++;
+
+    CPrintToChat(client, "{default}[服务器] {red}你没有通过 Steam 认证{DEFAULT}，服务器会把你当成 NoSteam 客户端。");
+    CPrintToChat(client, "{default}[服务器] 请{green}用加速器加速 Steam{DEFAULT}，然后{green}重启 Steam 和游戏{DEFAULT}，再重新进服。");
+    CPrintToChat(client, "{default}[服务器] 否则你会被服务器以 {red}No Steam logon{DEFAULT} 的原因自动踢出（第 %d 次提醒）。",
+                 g_iNoAuthRemindCount[client]);
+
+    // 服务端日志：把实际读到的两个 ID 记下来，
+    // 方便事后区分"玩家没登录 Steam"和"服务器/网络侧的 Steam 连接问题"
+    char steam3[MAX_AUTHID_LENGTH] = "";
+    char steam64[MAX_AUTHID_LENGTH] = "";
+    GetClientAuthId(client, AuthId_Steam3, steam3, sizeof(steam3), false);
+    GetClientAuthId(client, AuthId_SteamID64, steam64, sizeof(steam64), false);
+
+    // NoSteam 玩家走不到 OnClientPostAdminCheck，g_ClientIPs 可能只有 player_connect 缓存的地址，
+    // 缓存也没有时现场取一次，保证日志里始终有 IP
+    char ip[36];
+    if (g_ClientIPs[client][0] != '\0') {
+        strcopy(ip, sizeof(ip), g_ClientIPs[client]);
+    } else {
+        GetClientIP(client, ip, sizeof(ip));
+        strcopy(g_ClientIPs[client], sizeof(g_ClientIPs[]), ip);
+    }
+
+    LogMessage("[ConnectInfo] 玩家 %N 未通过 Steam 认证（SteamID3=\"%s\"，SteamID64=\"%s\"，IP=%s），第 %d 次提醒",
+               client, steam3, steam64, ip, g_iNoAuthRemindCount[client]);
+}
+
+// 只清记录，不动句柄（在定时器自己的回调里用：句柄马上就要被引擎回收）
+void ForgetNoAuthTimer(int client) {
+    g_hNoAuthTimer[client] = null;
+    g_bNoAuthTimerAlive[client] = false;
+}
+
+// 外部清理（断线、换图后重新安排）：真的把定时器杀掉
+void StopNoAuthTimer(int client) {
+    if (client <= 0 || client > MaxClients) {
+        return;
+    }
+    if (g_bNoAuthTimerAlive[client] && g_hNoAuthTimer[client] != null) {
+        KillTimer(g_hNoAuthTimer[client]);
+    }
+    ForgetNoAuthTimer(client);
 }
 
 // ==================== 消息输出 ====================

@@ -473,7 +473,25 @@ static void RM_Match_Unload(bool bForced = false)
 
 	if (!RM_bIsChmatchRequest)
 	{
-		ExecuteCfg(sBuffer);
+		/* 当前没有任何模式生效（customcfg 为空）时，不存在"该模式的 off-cfg"：
+		   ExecuteCfg 只会去找服务器 cfg/ 根目录下的 confogl_off.cfg（各模式的
+		   off-cfg 都在 cfg/cfgogl/<模式>/ 下，根目录永远没有这个文件），于是
+		   每次卸载都往 errors 日志里写一条像"配置缺失"的
+		   "Could not execute config 'confogl_off.cfg' (mode='')"。
+		   这个状态下没有模式插件要卸、也没有模式 cvar 要复位，
+		   跳过执行既可消除这条假报错，行为与原来（同样什么都没执行）一致。 */
+		char sMode[PLATFORM_MAX_PATH];
+		Configs_GetConfigName(sMode, sizeof(sMode));
+
+		if (strlen(sMode))
+		{
+			ExecuteCfg(sBuffer);
+		}
+		else if (RM_bDebugEnabled || IsDebugEnabled())
+		{
+			LogMessage("[%s] No mode active; skipping off-config '%s'", RM_MODULE_NAME, sBuffer);
+		}
+
 		// The off-config path has already been queued; forget the selected mode on reset.
 		SetCustomCfg("");
 	}

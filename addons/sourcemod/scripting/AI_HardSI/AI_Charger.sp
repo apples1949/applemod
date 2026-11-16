@@ -314,18 +314,34 @@ static void ChargePrediction(int charger, int survivor) {
 	TeleportEntity(charger, NULL_VECTOR, attackAngle, NULL_VECTOR); 
 }
 
+/* m_customAbility 是实体句柄，不是稳定的实体编号：句柄被回收、或职业刚切换的那一两帧里，
+   它可能指到另一条能力实体（日志里是 ability_throw，也就是 Smoker 的舌头能力实体）。
+   那条实体上没有 m_isCharging / m_timestamp，直接读写就会抛
+   Property "m_isCharging" not found（entity N/ability_throw）。
+   所以取值前先确认这条能力实体确实带这两个属性（CanCharge 会读 m_timestamp，
+   IsCharging 读 m_isCharging）。AI_HardSI.sp 里的 ResetAbilityTime() 写的是
+   m_timestamp，它自己做同样的检查。 */
+static int GetChargeAbility(int client) {
+	int ent = GetEntPropEnt(client, Prop_Send, "m_customAbility");
+	if (ent <= MaxClients || !IsValidEntity(ent))
+		return -1;
+	if (!HasEntProp(ent, Prop_Send, "m_isCharging") || !HasEntProp(ent, Prop_Send, "m_timestamp"))
+		return -1;
+	return ent;
+}
+
 static bool CanCharge(int client) {
 	if (GetEntPropEnt(client, Prop_Send, "m_pummelVictim") > 0 || GetEntPropEnt(client, Prop_Send, "m_carryVictim") > 0)
 		return false;
 
 	static int ent;
-	ent = GetEntPropEnt(client, Prop_Send, "m_customAbility");
+	ent = GetChargeAbility(client);
 	return ent > MaxClients && !GetEntProp(ent, Prop_Send, "m_isCharging") && GetEntPropFloat(ent, Prop_Send, "m_timestamp") < GetGameTime();
 }
 
 static bool IsCharging(int client) {
 	static int ent;
-	ent = GetEntPropEnt(client, Prop_Send, "m_customAbility");
+	ent = GetChargeAbility(client);
 	return ent > MaxClients && GetEntProp(ent, Prop_Send, "m_isCharging");
 }
 

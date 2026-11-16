@@ -12,6 +12,9 @@
  *    3) 「重新发光」：每次触发都把上一次的计时全部清掉，从满色重新开始 5 秒
  *       （旧版是「已在发光中则延长时长」，现在是覆盖 / 重置）
  *    4) 不生成插件 cfg（去掉 AutoExecConfig）—— 参数写在 applemod12v12.cfg 里
+ *    5) 修复「击杀特感时轮廓不消失」：挂钩 player_death，在特感死亡的那一瞬间
+ *       就清掉它自己的轮廓，并连同尸体 ragdoll 一起清
+ *       （旧版只能等褪色脉冲的节拍才清，而且永远清不到 ragdoll）
  *    其余设置（发光颜色、褪色模式、褪色间隔、模式黑白名单、通知方式、管理命令）保持不变。
  *
  *  ConVar：
@@ -26,7 +29,7 @@
  * ============================================================================
  */
 
-#define PLUGIN_VERSION "2.0.0"
+#define PLUGIN_VERSION "2.0.1"
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -144,6 +147,7 @@ public void OnPluginStart()
 	// 事件常驻挂钩，是否生效在回调里按 cvar + 模式黑白名单逐次判定
 	HookEvent("tank_killed", Event_TankKilled);
 	HookEvent("witch_killed", Event_WitchKilled);
+	HookEvent("player_death", Event_PlayerDeath);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_Post);
 
 	// 颜色 / 时长热改：重新解析颜色；发光中则按新参数重新开始
@@ -274,6 +278,68 @@ public void Event_WitchKilled(Event event, const char[] name, bool dontBroadcast
 	{
 		RestartGlow();
 	}
+}
+
+/**
+ * 特感被击杀的瞬间摘掉它自己的轮廓。
+ *
+ * 为什么必须在事件里做：ApplyGlow / DisableGlow 只在发光循环的节拍里跑
+ * （glowmode=1 时每 3 秒才起一轮脉冲，节拍点 0.1/0.5/.../1.4 秒），
+ * 而且它们只遍历 1..MaxClients 的玩家实体、从不去碰尸体用的 ragdoll，
+ * 结果是死掉的特感在「尸体 / 原地」残留轮廓。
+ *
+ * 只清死亡的那一个客户端，其它还活着的特感完全不受影响；
+ * 也不动 g_iGlowGen ——「每次击杀重新发光」的语义保持不变。
+ */
+public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	// player_death 的 userid 是「用户 ID」（short 字段），不是实体 index，必须转换
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+
+	if (victim <= 0 || victim > MaxClients || !IsClientInGame(victim))
+	{
+		return;
+	}
+
+	// 本插件没在发光时一律不动，免得误清其它插件设置的轮廓
+	if (!g_bActive)
+	{
+		return;
+	}
+
+	// 只有特感死亡才和本插件有关（坦克也是 TEAM_INFECTED，一并覆盖）
+	if (GetClientTeam(victim) != TEAM_INFECTED)
+	{
+		return;
+	}
+
+	ClearClientGlow(victim);
+
+	// 尸体 ragdoll 可能比事件晚一点才写进 m_hRagdoll，再补一次（共 ≤0.15 秒）
+	CreateTimer(0.15, Timer_ClearDeadGlow, GetClientUserId(victim), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+/**
+ * 死亡后补清一次：事件触发时 m_hRagdoll 可能还没写进去。
+ * 客户端已经复活（重生为特感 / 新一局）就跳过，不能把新轮廓误清掉。
+ */
+public Action Timer_ClearDeadGlow(Handle timer, any iUserId)
+{
+	int client = GetClientOfUserId(iUserId);
+
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
+	{
+		return Plugin_Stop;
+	}
+
+	if (IsPlayerAlive(client))
+	{
+		return Plugin_Stop;
+	}
+
+	ClearClientGlow(client);
+
+	return Plugin_Stop;
 }
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
@@ -581,6 +647,53 @@ void DisableGlow()
 
 		SetEntProp(i, Prop_Send, "m_iGlowType", 0);
 		SetEntProp(i, Prop_Send, "m_glowColorOverride", 0);
+	}
+}
+
+/**
+ * 只摘掉「单个客户端」的轮廓（与 DisableGlow 的区别：不碰其它还活着的特感）。
+ * 供特感死亡瞬间立即熄灭用。
+ */
+void ClearClientGlow(int client)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
+	{
+		return;
+	}
+
+	SetEntProp(client, Prop_Send, "m_iGlowType", 0);
+	SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
+
+	// 死亡后画面上看到的是 ragdoll，一并清
+	ClearRagdollGlow(client);
+}
+
+/**
+ * 清掉尸体 ragdoll 的轮廓。
+ *
+ * 特感死亡后可见模型是 ragdoll（cs_ragdoll，实体号 > MaxClients），
+ * 轮廓会跟着它继续渲染；ApplyGlow / DisableGlow 只遍历 1..MaxClients，
+ * 永远清不到它，所以这里单独处理。
+ * 写法参考 l4d2_tank_defib_revive.sp 的 ResetBWOutline()：
+ * m_hRagdoll 是 DT_CSPlayer 的 sendprop（netprop dump 里 CTerrorPlayer 继承，
+ * offset 10400），客户端侧 ragdoll 时为 0，所以必须做有效性判断。
+ */
+void ClearRagdollGlow(int client)
+{
+	int ragdoll = GetEntPropEnt(client, Prop_Send, "m_hRagdoll");
+
+	if (ragdoll <= MaxClients || !IsValidEntity(ragdoll))
+	{
+		return;
+	}
+
+	// cs_ragdoll / prop_ragdoll 都继承 CBaseAnimating -> DT_BaseEntity 的 m_Glow 表，
+	// 但仍按仓库惯例做 HasEntProp 守卫，属性不存在就什么都不做
+	if (HasEntProp(ragdoll, Prop_Send, "m_iGlowType"))
+	{
+		SetEntProp(ragdoll, Prop_Send, "m_iGlowType", 0);
+		SetEntProp(ragdoll, Prop_Send, "m_glowColorOverride", 0);
+		SetEntProp(ragdoll, Prop_Send, "m_nGlowRange", 0);
 	}
 }
 

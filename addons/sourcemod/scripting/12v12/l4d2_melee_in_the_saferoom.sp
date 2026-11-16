@@ -17,14 +17,22 @@
  *     外加语义更宽的 player_left_safe_area（同字段），两个共用一个处理器。
  *     一旦发生：立刻把全部发光撤掉（武器实体属性 + 代理实体一起清），并且本回合不再加。
  *   · 清理时机：有人离开安全区、round_end、换图、插件卸载，外加 2 秒一次的低频巡检
- *     （只在真的亮过之后才存在）兜底 —— 近战武器被捡走/销毁后，代理最多多留 2 秒。
+ *     （只在真的亮过之后才存在）兜底。
+ *   · 3.2.1（2026-11-17）修「轮廓冻在半空 / 捡走近战武器轮廓不消失」：
+ *       ① 代理不再只摆一次：生成后 2 秒内 0.1 秒一跳跟着宿主重摆（武器这时正在下落、
+ *          翻滚），之后每次 2 秒巡检都按宿主当前 m_vecAbsOrigin/m_angAbsRotation 重摆；
+ *          已经对齐（位移 ≤1HU 且角度 ≤1°）时一次 TeleportEntity 都不下发。
+ *       ② 捡走判据换成「玩家武器槽里确实有这把武器」（本仓库 applemod12v12_weapon_drop.sp
+ *          的可靠做法），再叠加 m_hOwner / m_iState 互相印证。旧版只看实体索引是否有效，
+ *          而 L4D2 里近战武器被捡走后实体往往还在（只是变成玩家手上的武器），永远清不掉。
+ *       ③ 巡检同时校验 classname + melee_script_name，防实体索引被别的实体复用时误判「还在」。
  *   · 开关：l4d2_mitsr_glow（默认 1，=0 时一个 netprop 都不写、一个实体都不建）、
  *     l4d2_mitsr_glow_range（默认 800 HU，0=无限距离）。
  *   · 误发防护：换图/读图/出生点重定位时 player_left_start_area 可能乱发（本仓库 hdf.sp 踩过），
  *     这里用「回合开始后 2 秒内的事件一律不采信」挡住。
  */
 
-#define VERSION "3.2.0"
+#define VERSION "3.2.1"
 
 ArrayList
 	g_aMeleeScripts;
@@ -108,12 +116,30 @@ static const char
 // （换图 / 读图 / 出生点重定位时引擎可能乱发，本仓库 hdf.sp 踩过这个坑）
 #define LEFT_SAFEAREA_GRACE 2.0
 
-// 宿主（weapon_melee）与它的发光代理，三个列表严格同长度同下标，一起 Push / 一起 Erase。
+// 3.2.1 代理跟随：武器生成后会因重力落地、翻滚、被玩家/爆炸推挤而移动，
+// 而代理是 MOVETYPE_NONE 的静态实体，必须按宿主当前坐标重摆（旧版只摆一次 → 轮廓冻在半空）。
+#define GLOW_ALIGN_INTERVAL 0.1     // 生成后快速对齐 timer 的间隔（秒）
+#define GLOW_ALIGN_TICKS    20      // 20 × 0.1 = 生成后 2 秒内跟随，之后交给 2 秒巡检
+#define GLOW_MOVE_EPS       1.0     // 宿主相对代理位移超过这么多 HU 才重摆（静止就一次都不写）
+#define GLOW_TURN_EPS       1.0     // 角度变化超过这么多度才重摆
+
+// 宿主（weapon_melee）与它的发光代理，四个列表严格同长度同下标，一起 Push / 一起 Erase。
 // 存 EntRef 而不是裸索引：实体索引会被复用，直接存索引会误杀别人的实体。
 // g_aGlowTried 记录「这个宿主有没有尝试建过代理」，避免模型名一直读不到时无限刷实体。
+// g_aGlowScripts 记下宿主的 melee_script_name：EntityRef 只能证明索引/序列没被复用成
+// 新实体，再比一次 classname + 脚本名才能证明「还是当初那把近战武器」（见 bGlowHostIsOurs）。
 ArrayList g_aGlowHosts;
 ArrayList g_aGlowProxies;
 ArrayList g_aGlowTried;
+ArrayList g_aGlowScripts;
+
+// 3.2.1：巡检时一次性收集「当前被任何玩家拿在身上的武器实体」，槽位判断直接查这份列表，
+// 避免每个槽位都去遍历一次 客户端 × 武器槽。
+ArrayList g_aGlowHeld;
+
+// 3.2.1：生成后 2 秒内的快速对齐 timer（0.1 秒一跳，跳完自动停），以及剩余跳数
+Handle g_hGlowAlign;
+int    g_iGlowAlignTicks;
 
 // 待发光的宿主（生成武器的当帧只登记，下一帧再统一处理：
 // 武器实体在 DispatchSpawn 的同一帧里模型名/坐标还没落定）
@@ -183,6 +209,8 @@ public void OnPluginStart()
 	g_aGlowProxies = new ArrayList();
 	g_aGlowTried = new ArrayList();
 	g_aGlowPending = new ArrayList();
+	g_aGlowScripts = new ArrayList(64);     // 每格一个 melee_script_name（最长不到 32 字节）
+	g_aGlowHeld = new ArrayList();
 
 	HookEvent("round_end", Event_RoundEnd, EventHookMode_PostNoCopy);
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
@@ -578,8 +606,11 @@ int iCreateGlowProxy(int iHost, int iRange, bool bFlashing)
 		return 0;
 	}
 
-	// 直接摆到宿主所在位置：刻意**不**做 SetParent（SetParent 会保留局部坐标，
-	// 父实体不在世界原点时轮廓会画到别处）。近战武器生成后不会移动，所以只需摆一次。
+	// 先摆到宿主当前所在位置：刻意**不**做 SetParent（SetParent 会保留局部坐标，
+	// 父实体不在世界原点时轮廓会画到别处，同 applemod12v12_weapon_drop.sp:805-809）。
+	// 既然不 SetParent，代理就不会自己跟着武器走 —— 武器随后会重力落地、翻滚、
+	// 被玩家/爆炸推挤，所以这里摆的只是「初始位置」，之后由 bGlowAlignProxy() 持续对齐
+	// （生成后 2 秒内 0.1 秒一跳跟随，之后 2 秒巡检时按需重摆）。
 	TeleportEntity(iProxy, vPos, vAng, NULL_VECTOR);
 	SetEntityMoveType(iProxy, MOVETYPE_NONE);        // 不跟着重力掉下去
 
@@ -623,6 +654,9 @@ void vGlowDropSlot(int i, bool bKillProxy)
 
 	if(g_aGlowTried != null && i < g_aGlowTried.Length)
 		g_aGlowTried.Erase(i);
+
+	if(g_aGlowScripts != null && i < g_aGlowScripts.Length)
+		g_aGlowScripts.Erase(i);
 }
 
 /**
@@ -636,6 +670,16 @@ void vGlowClear()
 		KillTimer(g_hGlowSweep);
 		g_hGlowSweep = null;
 	}
+
+	// 3.2.1：快速对齐 timer 一并收掉（它的句柄本身不会自己消失）
+	if(g_hGlowAlign != null)
+	{
+		KillTimer(g_hGlowAlign);
+		g_hGlowAlign = null;
+	}
+
+	if(g_aGlowHeld != null)
+		g_aGlowHeld.Clear();
 
 	if(g_aGlowPending != null)
 	{
@@ -665,48 +709,293 @@ void vGlowEnsureSweep()
 }
 
 /**
+ * 读一把 weapon_melee 的 melee_script_name。
+ * 依据：datamap-dump.txt:13398-13399 —— 实体类 CTerrorMeleeWeapon（weapon_melee）的
+ * m_strMapSetScriptName（Prop_Data），键名就是创建武器时 DispatchKeyValue 的
+ * "melee_script_name"。读不到时返回 0，并把 sOut 置成空串（调用方不要据此判否）。
+ */
+int iGlowReadScriptName(int iEntity, char[] sOut, int iMaxLen)
+{
+	sOut[0] = '\0';
+
+	if(iEntity <= MaxClients || !IsValidEntity(iEntity))
+		return 0;
+
+	if(!HasEntProp(iEntity, Prop_Data, "m_strMapSetScriptName"))
+		return 0;
+
+	return GetEntPropString(iEntity, Prop_Data, "m_strMapSetScriptName", sOut, iMaxLen);
+}
+
+/**
+ * 槽位上的宿主是不是还是我们当初登记的那把近战武器。
+ * 返回 false = 实体索引还在，但已经不是那把武器（被复用 / 换了类）→ 必须收掉代理，
+ * 否则轮廓会挂在一把完全不相干的新实体上（「属性名对但实体类型不对」那类坑）。
+ *
+ * 三重证明：① EntRef 有效（调用方已确认）；② classname 仍是 weapon_melee；
+ * ③ melee_script_name 与登记值一致（读不到就不判否，避免不同 netclass 下误杀）。
+ */
+bool bGlowHostIsOurs(int iSlot, int iHost)
+{
+	char sClass[32];
+	if(GetEntityClassname(iHost, sClass, sizeof sClass) && !StrEqual(sClass, "weapon_melee", false))
+		return false;
+
+	if(g_aGlowScripts == null || iSlot < 0 || iSlot >= g_aGlowScripts.Length)
+		return true;
+
+	char sWant[64];
+	if(g_aGlowScripts.GetString(iSlot, sWant, sizeof sWant) <= 0)
+		return true;	// 当初就没读到脚本名：只靠 EntRef + classname 判定
+
+	char sNow[64];
+	if(iGlowReadScriptName(iHost, sNow, sizeof sNow) <= 0)
+		return true;	// 现在读不到了：不据此判否
+
+	return StrEqual(sWant, sNow, false);
+}
+
+/**
+ * 一次性把「当前被任何玩家（含 bot）拿在身上的武器实体」收进 g_aGlowHeld。
+ * 做法照抄本仓库 applemod12v12_weapon_drop.sp:938-957：世界上的可拾取武器
+ * m_hOwnerEntity 不一定是 -1（引擎行为不稳定），按玩家武器槽查才是可靠判据；
+ * bot 也会自动捡枪，所以不能跳过 bot。每轮巡检只扫一遍（客户端 × 5 个武器槽）。
+ */
+void vGlowCollectHeld()
+{
+	if(g_aGlowHeld == null)
+		return;
+
+	g_aGlowHeld.Clear();
+
+	for(int i = 1; i <= MaxClients; i++)
+	{
+		if(!IsClientInGame(i))
+			continue;
+
+		for(int slot; slot <= 4; slot++)
+		{
+			int iWeapon = GetPlayerWeaponSlot(i, slot);
+			if(iWeapon > MaxClients && IsValidEntity(iWeapon))
+				g_aGlowHeld.Push(iWeapon);
+		}
+	}
+}
+
+/**
+ * 宿主近战武器是否已经被玩家捡走（拿在身上）。
+ *
+ * 为什么不能只看「实体还有效」：L4D2 里近战武器被捡起时实体**往往不会被删除**，
+ * 而是直接变成玩家手上的那把武器。旧版 vGlowSweep 只判 EntRef + IsValidEntity，
+ * 所以这种「捡走但实体还在」的情况永远检测不到，代理就一直留在安全屋地上 ——
+ * 用户反馈的「拾取近战不一定会消除对应的武器轮廓」。
+ *
+ * 判据（bFull=true 的 2 秒巡检才用）：权威判据只有一条 —— 这把武器此刻在不在
+ * 某个玩家（含 bot）的武器槽里（vGlowCollectHeld 每轮巡检收一次，做法照抄
+ * applemod12v12_weapon_drop.sp 的可靠实现）。不拿 m_hOwner / m_iState 这类
+ * netprop 去猜：赌错的方向是"把地上的武器当成被捡走"，代价是开局一把轮廓都不亮。
+ *
+ * bFull=false（生成后 2 秒的快速对齐 timer）不做捡走判断，只摆正代理。
+ */
+bool bGlowHostCarried(int iHost, bool bFull)
+{
+	/* 只有 2 秒巡检才做"真的摘轮廓"的判断，而且只认一个权威判据：
+	   这把武器此刻是否出现在某个玩家的武器槽里（vGlowCollectHeld 每轮巡检收一次）。
+	   生成后 2 秒内的快速对齐只负责把代理摆正，**绝不**在这里摘轮廓 ——
+	   旧实现（3.2.1 初版）在快速窗口里还叠加了 m_hOwner / m_iState 两次 netprop 读，
+	   万一某套引擎对"扔在地上的武器"没有把这两个值清干净，开局就会一把轮廓都不亮。
+	   捡走的轮廓最晚多留 2 秒（巡检周期），换掉这个风险是值得的。 */
+	if (!bFull)
+		return false;
+
+	if (g_aGlowHeld == null)
+		return false;
+
+	return g_aGlowHeld.FindValue(iHost) != -1;
+}
+
+/**
+ * 读一个实体的世界坐标 + 朝向。
+ * 优先 datamap 的绝对坐标 m_vecAbsOrigin / m_angAbsRotation（datamap-dump.txt:98/107），
+ * 取不到就退回 netprop 的 m_vecOrigin / m_angRotation（DT_BaseEntity，netprop-dump.txt:12/44）。
+ * 停在安全屋地上的近战武器与它的代理都没有父实体，两种取法结果等价；
+ * 但只要有可用路径就能摆正，不会因为某个属性在这套引擎上查不到就整条对齐链失效。
+ */
+bool bGlowReadPosAng(int iEntity, float vPos[3], float vAng[3])
+{
+	if(HasEntProp(iEntity, Prop_Data, "m_vecAbsOrigin") && HasEntProp(iEntity, Prop_Data, "m_angAbsRotation"))
+	{
+		GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", vPos);
+		GetEntPropVector(iEntity, Prop_Data, "m_angAbsRotation", vAng);
+		return true;
+	}
+
+	if(HasEntProp(iEntity, Prop_Send, "m_vecOrigin") && HasEntProp(iEntity, Prop_Send, "m_angRotation"))
+	{
+		GetEntPropVector(iEntity, Prop_Send, "m_vecOrigin", vPos);
+		GetEntPropVector(iEntity, Prop_Send, "m_angRotation", vAng);
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * 把代理摆到宿主当前的绝对坐标/角度（3.2.1 的核心修复）。
+ *
+ * 代理是 MOVETYPE_NONE 的静态实体，不会跟着武器走；而武器生成后会重力落地、翻滚、
+ * 被玩家或爆炸推挤。旧版只在创建时摆一次（注释还写着「近战武器生成后不会移动」），
+ * 于是武器掉到地上、轮廓还冻在半空 —— 就是用户截图里的现象。
+ *
+ * 省开销判断：宿主相对代理的位移 ≤ GLOW_MOVE_EPS 且角度变化 ≤ GLOW_TURN_EPS 时，
+ * 这里一次 TeleportEntity 都不下发（武器静止之后每一跳都是纯读，没有网络写入）。
+ *
+ * 返回 true = 这一跳真的摆了。
+ */
+bool bGlowAlignProxy(int iHost, int iProxy)
+{
+	float vHostPos[3], vHostAng[3], vProxyPos[3], vProxyAng[3];
+
+	if(!bGlowReadPosAng(iHost, vHostPos, vHostAng) || !bGlowReadPosAng(iProxy, vProxyPos, vProxyAng))
+		return false;
+
+	if(GetVectorDistance(vHostPos, vProxyPos) <= GLOW_MOVE_EPS
+		&& GetVectorDistance(vHostAng, vProxyAng) <= GLOW_TURN_EPS)
+	{
+		return false;	// 已经对齐 / 武器已静止：不白摆
+	}
+
+	TeleportEntity(iProxy, vHostPos, vHostAng, NULL_VECTOR);
+	return true;
+}
+
+/**
+ * 巡检/对齐共用的单槽处理。返回 false = 这个槽位已被摘掉
+ * （调用方倒着遍历，继续处理 i-1 即可）。
+ *
+ * bFull=true  → 2 秒巡检：查玩家武器槽（权威）、允许补建一次代理；
+ * bFull=false → 生成后 2 秒内的快速对齐：只做廉价检查 + 跟随重摆。
+ */
+bool bGlowServiceSlot(int i, bool bFull)
+{
+	// 防御：四个列表按设计严格同长度同下标，万一被外部改乱（后期维护手误）就直接摘掉这个槽位，
+	// 绝不让 .Get() 抛 "Invalid index" 把插件打成半死状态。
+	if(g_aGlowProxies == null || i >= g_aGlowProxies.Length
+		|| g_aGlowTried == null || i >= g_aGlowTried.Length)
+	{
+		vGlowDropSlot(i, true);
+		return false;
+	}
+
+	int iHost = EntRefToEntIndex(g_aGlowHosts.Get(i));
+
+	// ① 宿主实体真的没了（武器被删除 / 换图）→ 连代理一起收
+	if(iHost <= 0 || !IsValidEntity(iHost))
+	{
+		vGlowDropSlot(i, true);
+		return false;
+	}
+
+	// ② 索引还在，但已经不是我们登记的那把近战武器 → 同样收掉，避免轮廓挂到别的实体上
+	if(!bGlowHostIsOurs(i, iHost))
+	{
+		vGlowDropSlot(i, true);
+		return false;
+	}
+
+	// ③ 被玩家捡走了：先把武器本体上的发光撤掉（拿在手里的武器不该继续发光），再收代理
+	if(bGlowHostCarried(iHost, bFull))
+	{
+		vGlowClearProps(iHost);
+		vGlowDropSlot(i, true);
+		return false;
+	}
+
+	int iProxy = EntRefToEntIndex(g_aGlowProxies.Get(i));
+
+	if(g_aGlowProxies.Get(i) != 0 && (iProxy <= 0 || !IsValidEntity(iProxy)))
+	{
+		g_aGlowProxies.Set(i, 0);
+		iProxy = 0;
+	}
+
+	// ④ 代理还在 → 让轮廓跟着武器走（旧版这里直接 continue，正是轮廓冻住的根因）
+	if(iProxy > 0)
+	{
+		bGlowAlignProxy(iHost, iProxy);
+		return true;
+	}
+
+	if(!bFull || g_aGlowTried.Get(i) != 0)
+		return true;
+
+	// ⑤ 代理一次都没建起来（生成那帧模型名还没落定）→ 只补一次，不无限刷实体
+	g_aGlowTried.Set(i, 1);
+
+	int iRetry = iCreateGlowProxy(iHost, g_hGlowRange.IntValue, true);
+	if(iRetry > 0)
+		g_aGlowProxies.Set(i, EntIndexToEntRef(iRetry));
+
+	return true;
+}
+
+/**
  * 2 秒一次的兜底巡检：
- *   · 宿主武器已经没了（近战武器被捡走就是实体被删）→ 连代理一起收掉；
+ *   · 宿主武器没了 / 已经不是那把近战武器 / 被玩家捡走 → 连代理一起收掉；
+ *   · 代理还在但宿主动了（被推挤、翻滚完）→ 按宿主当前坐标重摆（3.2.1）；
  *   · 代理没了 → 只清记录；
- *   · 代理一次都没建起来（生成那帧模型名还没落定）→ 只补一次，不无限刷实体。
+ *   · 代理一次都没建起来 → 只补一次，不无限刷实体。
  */
 void vGlowSweep()
 {
 	if(g_aGlowHosts == null)
 		return;
 
-	int iRange = g_hGlowRange.IntValue;
+	vGlowCollectHeld();
 
 	for(int i = g_aGlowHosts.Length - 1; i >= 0; i--)
+		bGlowServiceSlot(i, true);
+}
+
+/**
+ * 生成后 2 秒内的快速对齐窗口（3.2.1）。
+ * 武器从生成点落地、翻滚、被挤开主要就发生在这一小段时间里，所以要 0.1 秒一跳地跟；
+ * 跳完（2 秒）自动停表，之后完全交给 2 秒巡检，不会有任何「每帧」开销。
+ * 已经在跑时只续期，不重复建 timer。
+ */
+void vGlowStartAlign()
+{
+	g_iGlowAlignTicks = GLOW_ALIGN_TICKS;
+
+	if(g_hGlowAlign != null)
+		return;
+
+	g_hGlowAlign = CreateTimer(GLOW_ALIGN_INTERVAL, Timer_vGlowAlign, _, TIMER_REPEAT);
+}
+
+public Action Timer_vGlowAlign(Handle timer)
+{
+	if(timer != g_hGlowAlign)
+		return Plugin_Stop;
+
+	if(g_aGlowHosts == null || g_aGlowHosts.Length == 0
+		|| !g_hGlow.BoolValue || g_bGlowLeftSafeArea)
 	{
-		int iHost = EntRefToEntIndex(g_aGlowHosts.Get(i));
-
-		if(iHost <= 0 || !IsValidEntity(iHost))
-		{
-			vGlowDropSlot(i, true);
-			continue;
-		}
-
-		int iProxy = EntRefToEntIndex(g_aGlowProxies.Get(i));
-
-		if(g_aGlowProxies.Get(i) != 0 && (iProxy <= 0 || !IsValidEntity(iProxy)))
-		{
-			g_aGlowProxies.Set(i, 0);
-			iProxy = 0;
-		}
-
-		if(iProxy > 0)
-			continue;
-
-		if(g_aGlowTried.Get(i) != 0)
-			continue;
-
-		g_aGlowTried.Set(i, 1);
-
-		int iRetry = iCreateGlowProxy(iHost, iRange, true);
-		if(iRetry > 0)
-			g_aGlowProxies.Set(i, EntIndexToEntRef(iRetry));
+		g_hGlowAlign = null;
+		return Plugin_Stop;
 	}
+
+	// 倒着遍历：bGlowServiceSlot 可能把当前下标摘掉
+	for(int i = g_aGlowHosts.Length - 1; i >= 0; i--)
+		bGlowServiceSlot(i, false);
+
+	if(--g_iGlowAlignTicks <= 0)
+	{
+		g_hGlowAlign = null;
+		return Plugin_Stop;
+	}
+
+	return Plugin_Continue;
 }
 
 public Action Timer_vGlowSweep(Handle timer)
@@ -811,6 +1100,12 @@ void vGlowApply(int iHost)
 	g_aGlowProxies.Push((iProxy > 0) ? EntIndexToEntRef(iProxy) : 0);
 	g_aGlowTried.Push((iProxy > 0) ? 1 : 0);    // 已经建过代理就不再由巡检重试
 
+	// 3.2.1：记下这把武器的 melee_script_name（读不到就是空串，巡检里据此只做 classname 判定）
+	char sScript[64];
+	iGlowReadScriptName(iHost, sScript, sizeof sScript);
+	g_aGlowScripts.PushString(sScript);
+
 	vGlowEnsureSweep();
+	vGlowStartAlign();      // 3.2.1：生成后 2 秒内 0.1 秒一跳跟着武器摆正（这段时间正在落地/翻滚）
 }
 

@@ -114,6 +114,30 @@
  * 生成时机、位置 / 散布 / 弹药 / 发光 / 清理逻辑与全部 cvar 语义保持原样：第一个生成时刻仍然
  * 不早于 am12v12_wdrop_delay 秒（默认 1.0，晚于框架 round_start+0.3s 的武器清理）。
  * ===========================================================================
+ * 1.4.1（2026-11-17）修复「服务端重启后在 errors_*.log 里必然出现一条 wdrop 报错」
+ * ---------------------------------------------------------------------------
+ * 现场日志（每次重启都有，地图固定在 c2m1_highway）：
+ *   [optional/12v12/applemod12v12_weapon_drop.smx] [12v12 wdrop] 回合开始后 20.0 秒内尝试了 77 次，
+ *   仍然一把开局武器都没生成（窗口 am12v12_wdrop_retry_window=20.0，weapons="..."）。
+ *   原因：这段时间一直没有「在游戏内 + 生还者阵营 + 活着 + 已落地」的生还者。
+ *
+ * 为什么这不是故障：专用服务器重启后是先空载进图（c2m1_highway），此时
+ *   · round_start 照常触发 → BeginSpawnWatch 起了 0.25 秒轮询；
+ *   · 但服务器上一个玩家都没有，生还者根本不存在，20 秒里 77 次尝试必然全部落空；
+ *   · 窗口到点后走了 1.4.0 的「失败就 LogError」分支。
+ * 于是**每一个**空服启动周期都会往错误日志里写一条看起来像崩溃的 ERROR，运维每次都要排查一遍。
+ * （77 次 = 20 秒 / 0.25 秒轮询的实测次数，与代码一致。）
+ *
+ * 1.4.1 的做法：区分「这段时间根本没有生还者」和「有生还者却生成失败」两种情况。
+ *   · 新增 g_bHadSurvivor：窗口内只要某一刻存在「在游戏内 + 生还者阵营」的客户端就置位；
+ *     每回合在 BeginSpawnWatch / ResetRound 里清零。
+ *   · 窗口用完仍未生成时：
+ *       - g_bHadSurvivor 为假（空服启动 / 还没人进）→ 降级成 LogMessage，并在文末注明
+ *         「空服启动属正常」，不进错误日志；
+ *       - g_bHadSurvivor 为真（真的有人却一把枪都没生成）→ 仍然 LogError，这类才是要查的。
+ *   · 轮询本身、重试窗口、生成时机、位置 / 散布 / 弹药 / 发光 / 清理与全部 cvar 语义一律不动，
+ *     所以「第一回合有时不生成」那套 1.4.0 的修复完全保留。
+ * ===========================================================================
  */
 #pragma semicolon 1
 #pragma newdecls required
@@ -122,7 +146,7 @@
 #include <sdktools>
 #include <sdkhooks>          // OnEntityDestroyed / SDKHook_WeaponEquipPost
 
-#define PLUGIN_VERSION "1.4.0"
+#define PLUGIN_VERSION "1.4.1"
 
 ConVar g_hEnable, g_hWeapons, g_hMode, g_hDelay, g_hSpread, g_hDebug;
 ConVar g_hAmmoRifle, g_hAmmoChainsaw, g_hAmmoSniper;
@@ -143,6 +167,14 @@ bool g_bRoundStart, g_bSpawned;
 Handle g_hSpawnWatch;
 float  g_fLastSpawnAt;
 int    g_iSpawnAttempts;
+
+// 1.4.1：本回合的重试窗口内，是否真的出现过「在游戏内 + 生还者阵营」的客户端。
+// 用途只有一个 —— 决定窗口到点仍没生成时该记 LogError 还是 LogMessage：
+//   · 空服重启进图时这段窗口里根本没人，日志里那条 ERROR 属于噪声（本次要修的就是它）；
+//   · 有人却一把枪都没生成，才是需要排查的真问题，仍旧记 ERROR。
+// 判据故意比 IsDropAnchorReady() 宽（不要求活着 / 已落地）：只要有人是因为「他还没落地」
+// 而失败，那就已经是真问题了，不该被降级成普通消息。
+bool   g_bHadSurvivor;
 
 // 1.4.0：轮询步长（秒）。0.25 与同仓库 starting_items_edi.sp:120 的取法一致：
 // 足够细到「生还者一落地就能生成」，又便宜到可以连跑 20 秒。
@@ -434,6 +466,7 @@ void ResetRound()
 	g_bRoundStart = false;
 	g_bSpawned = false;
 	g_iSpawnAttempts = 0;
+	g_bHadSurvivor = false;
 
 	// 1.3.0：新回合重新允许「安全区内发光」
 	g_bLeftSafeArea = false;
@@ -468,6 +501,8 @@ void BeginSpawnWatch()
 	// 所以这里必须清掉 —— 否则上一回合的成功状态会让本回合直接跳过（1.3.0 的 ④ 号洞）。
 	g_bSpawned = false;
 	g_iSpawnAttempts = 0;
+	// 1.4.1：本回合窗口内是否出现过生还者，起窗口时清零（空服重启的判定依赖它）。
+	g_bHadSurvivor = false;
 
 	if (!g_hEnable.BoolValue)
 		return;
@@ -515,6 +550,11 @@ public Action Timer_SpawnWatch(Handle timer)
 
 	float fElapsed = GetGameTime() - g_fRoundStartAt;
 
+	// 1.4.1：每次 tick 顺便记一下「这段时间到底有没有生还者」。
+	// 空服重启进图时这里一直是 false，窗口到点就只写普通日志，不再往错误日志里塞 ERROR。
+	if (!g_bHadSurvivor && AnySurvivorInGame())
+		g_bHadSurvivor = true;
+
 	// 还没到延迟：继续等。延迟必须晚于框架 round_start+0.3s 的武器清理，
 	// 否则刚生成的枪（尤其是电锯）会被 ConfoglCompMod 当场删掉。
 	if (fElapsed < g_hDelay.FloatValue)
@@ -547,8 +587,23 @@ public Action Timer_SpawnWatch(Handle timer)
 		char sList[512];
 		g_hWeapons.GetString(sList, sizeof(sList));
 
-		LogError("[12v12 wdrop] 回合开始后 %.1f 秒内尝试了 %d 次，仍然一把开局武器都没生成（窗口 am12v12_wdrop_retry_window=%.1f，weapons=\"%s\"）。原因：这段时间一直没有「在游戏内 + 生还者阵营 + 活着 + 已落地」的生还者。",
+		if (g_bHadSurvivor)
+		{
+			// 有生还者却一把枪都没能落地 —— 这才是需要排查的真问题，仍旧进错误日志。
+			LogError("[12v12 wdrop] 回合开始后 %.1f 秒内尝试了 %d 次，仍然一把开局武器都没生成（窗口 am12v12_wdrop_retry_window=%.1f，weapons=\"%s\"）。期间出现过生还者，说明是「生还者始终没有可信的落地坐标」或「武器实体建不出来」。",
 				 fElapsed, g_iSpawnAttempts, fWindow, sList);
+		}
+		else
+		{
+			// 1.4.1：整段窗口里一个生还者都没有 —— 空服/刚重启进图就是这样，
+			// 这不是故障，降级成普通日志（不进 errors_*.log，不再让运维误判）。
+			LogMessage("[12v12 wdrop] 回合开始后 %.1f 秒内尝试了 %d 次，没有生成开局武器：这段时间服务器上没有任何「在游戏内 + 生还者阵营」的客户端（空服启动 / 玩家还没进入 / 回合在无人时开过）。属正常情况，无需处理。weapons=\"%s\"，窗口=%.1f 秒。",
+				 fElapsed, g_iSpawnAttempts, sList, fWindow);
+
+			if (g_hDebug.BoolValue)
+				PrintToServer("[12v12 wdrop] 空服启动：%d 次重试后仍未出现生还者，本回合不生成开局武器（非故障）", g_iSpawnAttempts);
+		}
+
 		return Plugin_Stop;
 	}
 
@@ -789,6 +844,20 @@ bool IsDropAnchorReady(int client)
 {
 	float vOrigin[3];
 	return GetDropAnchorOrigin(client, vOrigin);
+}
+
+// 1.4.1：此刻有没有任何「在游戏内 + 生还者阵营」的客户端（活着/已落地都不要求）。
+// 只用来区分「空服启动」与「有人却生成失败」，不参与生成判定本身，
+// 所以判据放到最宽 —— 宁可多报一次 ERROR，也不要把真问题降级成普通消息。
+bool AnySurvivorInGame()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && GetClientTeam(i) == 2)
+			return true;
+	}
+
+	return false;
 }
 
 bool GetDropAnchorOrigin(int client, float vOrigin[3])

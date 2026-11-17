@@ -25,7 +25,7 @@ native void SpecHud_TankHudDisable(int client);
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.6.0-12v12"
+#define PLUGIN_VERSION "2.6.1-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -73,12 +73,16 @@ native void SpecHud_TankHudDisable(int client);
 #define SIHUD_TANKHUD_SECONDS    5      // 克面板在坦克玩家屏幕上的显示总时间（秒，用户口径）
 #define SIHUD_DEFAULT_TANK_DELAY (SIHUD_TANKHUD_SECONDS + 1)    // sm_sihud_tank_delay 默认值 = 5 + 1 = 6
 #define SIHUD_MAX_TANK_LINES     3      // 坦克行最多画几只（2.6.0：多坦克同时存活时逐只一行）
-#define SIHUD_TANK_FULL_HEALTH   4000   // 取不到 m_iMaxHealth 时的坦克满血兜底（对抗坦克 4000）
-// 2.6.0：坦克行要显示"名称 + 血量 + 一控/二控"，这几个文案重新加回来（2.5.22 曾因"刷出过就整行不画"
-// 的需求删掉；现在的需求改成"坦克存活时逐只显示"，所以又需要它们了）。
-#define SIHUD_TXT_TANK_AI        "AI"   // AI 坦克：没有玩家名，也没有"几控"
-#define SIHUD_TXT_TANK_CTRL_FIRST  "1控" // 该玩家本回合第 1 次拿到坦克
-#define SIHUD_TXT_TANK_CTRL_SECOND "2控" // 该玩家本回合第 2 次及以上拿到坦克
+// 2.6.1（需求）：坦克行改成 `坦克1:4000 (1控/35%)` ——
+//   ① **不显示玩家名称**（原 2.6.0 是"前两个字符 + *"，玩家要求去掉）；
+//   ② 血量从"百分比"改成**具体血量**，且不显示上限（原来 `78%`，现在 `3120`）；
+//   ③ 一控/二控后面补上**具体控制权（怒气）百分比**，参考 spechud 的 tankhud（`怒气: %d%%`）；
+//   ④ 行首带序号 坦克1 / 坦克2 / 坦克3，多坦克同时存活时逐只一行，序号与行序一致。
+// 完整形式：`坦克1:4000 (1控/35%)`；AI 坦克没有"几控"，写成 `坦克1:4000 (AI/35%)`。
+#define SIHUD_TXT_TANK_AI        "AI"   // AI 坦克：没有"几控"，这一格用它顶替
+#define SIHUD_TXT_TANK_AI_PC     "电脑"  // AI 坦克的怒气：与 spechud 的"怒气: 电脑"同口径，不报数字
+#define SIHUD_TXT_TANK_CTRL_FIRST  "1控" // 该玩家本回合第 1 段完整控制权
+#define SIHUD_TXT_TANK_CTRL_SECOND "2控" // 该玩家本回合第 2 段及以上完整控制权（同一玩家拿回同一辆坦克）
 // 坦克玩家的面板交接状态（g_iSiHudTankPanel 的取值；见 SiHud_TankHandoverPanel）
 #define SIHUD_TANKPANEL_NONE     0      // 这只坦克还没替他处理过
 #define SIHUD_TANKPANEL_AUTO     1      // 面板是我们替他自动打开的（坦克结束后收回）
@@ -191,10 +195,26 @@ bool g_bSiHudSafeAreaNative = false;		// Left4DHooks 的 L4D_HasAnySurvivorLeftS
 // 坦克 / 女巫状态（面板最下面"坦克 / 女巫"两行的判定 + "坦克刷出与接管"事件的判定）
 int g_iSiHudTankClient = 0;					// 当前坦克玩家（含 AI bot；0=场上没有坦克）
 int g_iSiHudTankControl = 0;				// 当前这只坦克已经被几个真人控制过（1=一控 2=二控及以上；调试日志用）
-// 2.6.0：**按玩家**记"本回合第几次拿到坦克控制权"（1=一控，2=二控及以上）。
-//   为什么按玩家而不按坦克：本服的口径是"二控 = 同一名玩家在控制权被消耗之后又拿回同一辆坦克"，
-//   而且多只坦克同时在场时（决战/多坦克局）每一行都要显示各自的控数 —— 只有按玩家记才不会串。
-int g_iSiHudTankCtrl[MAXPLAYERS+1];
+// 2.6.1：一控/二控改成**按"坦克这条命 + 玩家 SteamID"**记（2.6.0 的 g_iSiHudTankCtrl[MAXPLAYERS+1] 已删除）。
+//   旧写法为什么"一直显示一控"：
+//     旧代码把"第几次拿到坦克"存在 **client 槽位** 上（g_iSiHudTankCtrl[client]），只在 tank_spawn
+//     事件和"1 秒轮询发现换了控制者"两条路径里 +1；而 12v12 里玩家转旁观 / 掉线重连 / 换槽位
+//     都会占用新槽位、计数从 0 重新开始，加上"AI 坦克 → 真人接手"这类接管路径经常没有 tank_spawn
+//     事件，于是绝大多数时候都数到 1 = 永远"一控"。
+//   本服"二控"的口径（见 Apex.sp 文件头 1.7.4）：**同一个玩家 A 在控制权被消耗掉之后，又把同一辆
+//   坦克拿回来，拿到第二次完整控制权** —— 所以判定必须跟着"坦克 + 玩家身份"走，不能跟着槽位走：
+//     · g_sSiHudTankKey[i]   = 这辆坦克（client i）当前这段控制权属于谁（SteamID；"AI"=无人）
+//     · g_iSiHudTankSeg[i]   = 该 key 在这辆坦克上已经拿到过几段完整控制权（1=一控 2+=二控）
+//     · g_iSiHudTankPrevFrus[i] = 上一次读到的怒气，用来发现"怒气被复位 = 控制权又给了一段"
+//   key 用 SteamID 而不是 client：掉线重连 / 换槽位后 SteamID 不变，判定不会被槽位复用打断。
+char g_sSiHudTankKey[MAXPLAYERS+1][64];		// 该坦克当前控制者 key（SteamID / "AI" / ""）
+int g_iSiHudTankSeg[MAXPLAYERS+1];			// 该 key 在这辆坦克上的完整控制权段数
+int g_iSiHudTankPrevFrus[MAXPLAYERS+1];		// 上一帧读到的 m_frustration（检测"被复位"）
+float g_fSiHudTankSegAt[MAXPLAYERS+1];		// 上一段被判定"消耗掉"的时刻（抑制抖动重复计数）
+// 上一名"真人"控制者的 key 与他的段数：控制权掉给 AI 之后不能把他的段数丢掉，
+// 否则同一名玩家从 AI 手里把同一辆坦克拿回来时会被重新数成"一控"（正是要修的 bug）。
+char g_sSiHudTankPrevHuman[MAXPLAYERS+1][64];
+int g_iSiHudTankPrevHumanSeg[MAXPLAYERS+1];
 bool g_bSiHudTankSpawned = false;			// 本回合坦克刷出过（→ 没坦克在场时不再画"坦克"行）
 // 2.5.22：面板不再区分"刷出还没死"和"刷出已经死"（刷出过的 boss 整行都不画，见 SiHud_GetBossLine），
 // 所以原来的 g_bSiHudTankDead / g_bSiHudWitchDead 两个标记删掉了（留着只会变成编译告警 204）。
@@ -209,6 +229,9 @@ bool g_bSiHudHighestNative = false;			// L4D_GetHighestFlowSurvivor
 bool g_bSiHudFurthestFlowNative = false;	// L4D2_GetFurthestSurvivorFlow
 bool g_bSiHudReadyUpNative = false;			// readyup 的 IsInReady（准备阶段不抢屏幕）
 bool g_bSiHudBossFlowNative = false;		// 坦克/女巫出生百分比位置（L4D2Direct_GetVS*FlowPercent 等）
+// 2.6.1：一控/二控的首选数据源 —— 引擎自己的"传克次数"（spechud 的 tankhud 显示"第N次"读的就是它）。
+// left4dhooks.inc:321 把它标成 optional，必须先探再用。
+bool g_bSiHudTankPassNative = false;		// L4D2Direct_GetTankPassedCount
 bool g_bSiHudSpecHudNative = false;			// spechud_appledmod 的 SpecHud_TankHudDisable（关 tankhud）
 
 // ---------------------------------------------------------------------------
@@ -2415,11 +2438,23 @@ bool AnySurvivorLeftSafeArea()
 //            （g_iSiHudTankPanel = AUTO，坦克结束后收回）。
 //        二控（换了一名玩家控制）按当前坦克玩家重新计时，并把交接状态复位。
 //     E. 面板最下面两行是"坦克 / 女巫"：
-//        ★2.6.0 坦克行：**有坦克活着**时逐只一行 `坦克: Ni* 78% 1控`
-//          （名称=前两个字符+*，血量=当前/最大，控数=该玩家本回合第几次拿到坦克；
-//            多只坦克同时存活时一只一行，最多 SIHUD_MAX_TANK_LINES 行，多的用一行"还有 N 只"提示）；
+//        ★2.6.1 坦克行（按需求重做，格式 `坦克1:4000 (1控/35%)`）：
+//          **有坦克活着**时逐只一行 ——
+//            · 行首序号：坦克1 / 坦克2 / 坦克3（与行序一致，方便玩家对上号）；
+//            · **不显示玩家名称**（2.6.0 的"前两个字符 + *"按需求整段去掉）；
+//            · 血量显示**具体血量**，不显示上限（2.6.0 是 `78%`，现在是 `3120`）；
+//            · 括号里是「控数/怒气」：控数 = 该玩家本回合第几段完整控制权（1控/2控，AI 坦克写 AI），
+//              怒气 = m_frustration 的百分比（与 spechud 的 tankhud `怒气: %d%%` 同一取法，
+//              左右 HUD 对得上；AI 坦克与 spechud 一样写"电脑"不报数字）；
+//            · 多只坦克同时存活时一只一行，最多 SIHUD_MAX_TANK_LINES 行，多的用一行"还有 N 只"提示；
 //          **没有坦克活着**时才回落到旧口径：按 Versus Director 的 boss flow percent 显示
 //          `坦克: 34%`，不是按 flow 刷的就 `坦克: 固定`，本回合已刷出过则整行不画。
+//        ★2.6.1 一控/二控判定修复：旧实现按"玩家的客户端槽位"累计次数（g_iSiHudTankCtrl[client]），
+//          而 12v12 里玩家换槽位 / 旁观再坐回来 / 掉线重连都会让同一个槽位重新从 1 开始数，
+//          于是**永远显示一控**。现在首选读引擎的传克计数 L4D2Direct_GetTankPassedCount()
+//          （与 spechud 的 tankhud "第N次"同源），多坦克局或 native 缺失时退回本插件按
+//          "坦克这条命 + 该玩家 SteamID"记的段数（见 SiHud_TankSegmentOf / SiHud_PlayerKey），
+//          与 Apex / l4d_tank_control_eq 的"二控 = 同一玩家第二段完整控制权"口径完全一致。
 //     G. 面板是 HUD，不是菜单：开关只由 !sihud 改变。SourceMod 的 Panel 收到任何按键（数字键、
 //        ESC……）都会被引擎关掉，这是引擎行为、改不了；但**不再**把它当成"玩家把面板关了"
 //        （2.5.21 之前用"面板提前消失 ⇒ 玩家自己关的"反推 ESC，玩家按数字键切武器就把面板按死，
@@ -2718,17 +2753,14 @@ public void Event_TankSpawn(Event event, const char[] name, bool dontBroadcast)
 	}
 
 	g_iSiHudTankClient = tank;
-	// 2.6.0：控数按玩家记（同一名玩家第几次拿到坦克 = 一控/二控），面板的坦克行直接读它
-	if (SiHud_IsHumanTank(tank))
-	{
-		if (tank > 0 && tank <= MaxClients)
-		{
-			g_iSiHudTankCtrl[tank]++;
-			g_iSiHudTankControl = g_iSiHudTankCtrl[tank];
-		}
-		else g_iSiHudTankControl = 1;
-	}
-	else g_iSiHudTankControl = 0;							// AI 坦克：没有"几控"
+	/* 2.6.1：控数改成"坦克这条命 + 玩家 SteamID"（见 SiHud_TankSegmentTick）。
+	   ★这里**不清零**、也不按槽位 +1：L4D2 里"AI 坦克交给玩家"和"同一玩家回控"都可能再发一次
+	     tank_spawn，在事件里计数/清零都会把二控又数回一控（旧代码正是这么错的）。
+	     段数完全由 SiHud_TankSegmentTick 按「控制者 key 变化」和「怒气被复位」两条判据推进，
+	     清零只发生在坦克死亡 / 场上没有坦克 / 换回合（见 Event_TankKilled、SiHud_PollBossState、
+	     SiHud_ResetBossState）。 */
+	if (tank > 0 && tank <= MaxClients) SiHud_TankSegmentTick(tank, GetGameTime());
+	g_iSiHudTankControl = SiHud_TankSegmentOf(tank);
 	g_bSiHudTankSpawned = true;
 	if (tank > 0 && tank <= MaxClients) g_iSiHudTankPanel[tank] = SIHUD_TANKPANEL_NONE;	// 新的一只坦克：交接状态重置
 
@@ -2740,6 +2772,13 @@ public void Event_TankKilled(Event event, const char[] name, bool dontBroadcast)
 {
 	g_iSiHudTankClient = 0;
 	g_bSiHudTankSpawned = true;
+	// 2.6.1：这只坦克死了 = 这条命结束，控数状态清掉（下一只坦克从一控开始数）
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client)) continue;
+		if (SiHud_IsTankClient(client)) continue;	// 同时还有另一只坦克活着：它的控数不能清
+		SiHud_ResetTankSegment(client);
+	}
 }
 
 // 女巫刷出 / 死亡：只影响面板最下面"女巫"那一行要不要画（刷出过就整行不画）
@@ -2768,6 +2807,17 @@ void SiHud_PollBossState()
 	{
 		// 场上没有坦克：等下一只（死亡由 tank_killed 标记）
 		g_iSiHudTankClient = 0;
+
+		/* 2.6.1：tank_killed 事件漏接的兜底 —— 场上确实已经没有坦克了，
+		   把所有"已经不是坦克"的槽位的控数状态清掉，下一只坦克从一控重新数。
+		   （不清的话，下一只坦克如果坐进同一槽位，会继承上一辆的段数显示成二控。） */
+		for (int client = 1; client <= MaxClients; client++)
+		{
+			if (!IsClientInGame(client)) continue;
+			if (SiHud_IsTankClient(client)) continue;
+			if (g_sSiHudTankKey[client][0] == '\0') continue;	// 本来就没记过，省掉
+			SiHud_ResetTankSegment(client);
+		}
 	}
 	else if (g_iSiHudTankClient == 0)
 	{
@@ -2775,6 +2825,7 @@ void SiHud_PollBossState()
 		g_iSiHudTankClient = tank;
 		g_iSiHudTankControl = SiHud_IsHumanTank(tank) ? 1 : 0;
 		g_bSiHudTankSpawned = true;
+		SiHud_TankSegmentTick(tank, GetGameTime());	// 2.6.1：按"坦克+玩家"记控制权段数
 		SiHud_OnTankEvent(tank, false);
 	}
 	else if (tank != g_iSiHudTankClient)
@@ -2789,14 +2840,17 @@ void SiHud_PollBossState()
 		{
 			bool bHuman = SiHud_IsHumanTank(tank);
 			g_iSiHudTankClient = tank;
+
+			/* 2.6.1：控制权段数统一由 SiHud_TankSegmentTick 判定（换 key / 怒气复位）。
+			   AI 接手（玩家掉线/放弃）也要记：AI 段是这辆坦克这条命的一部分，
+			   之后同一名玩家再坐回来时，靠这里的 key 变化才能认出"他拿回了同一辆坦克"。 */
+			SiHud_TankSegmentTick(tank, GetGameTime());
+			g_iSiHudTankControl = SiHud_TankSegmentOf(tank);
+
 			if (bHuman)
 			{
 				/* 上一任已经不再是坦克、这只坦克换成了真人控制 = 接管（二控）。
-				   需求：二控要按当前坦克玩家重新计时，所以走同一个坦克事件入口。
-				   AI 接手（玩家掉线/放弃）不触发事件，只更新跟踪对象。 */
-				g_iSiHudTankCtrl[tank]++;								// 按玩家累计：第几次拿到坦克
-				g_iSiHudTankControl = g_iSiHudTankCtrl[tank];
-				if (g_iSiHudTankControl > 2) g_iSiHudTankControl = 2;	// 日志只分一控/二控
+				   需求：二控要按当前坦克玩家重新计时，所以走同一个坦克事件入口。 */
 				/* 换了一名控制者 = 新的一段：交接状态复位，否则他上一段留下的
 				   SIHUD_TANKPANEL_DONE 会让 SiHud_TankHandoverPanel 直接 return，
 				   接管后他的面板就再也不会被打开（用户反馈的"接管坦克后面板短暂显示又关闭"的成因之一）。 */
@@ -2805,6 +2859,12 @@ void SiHud_PollBossState()
 				SiHud_OnTankEvent(tank, true);
 			}
 		}
+	}
+	else
+	{
+		// 2.6.1：跟踪对象没变也要每秒推进一次（同一玩家回控 = 怒气被复位 = 二控）
+		SiHud_TankSegmentTick(tank, GetGameTime());
+		g_iSiHudTankControl = SiHud_TankSegmentOf(tank);
 	}
 
 	// 女巫：只在"还没刷出过"时扫一次实体，扫到之后就不再扫
@@ -2853,6 +2913,195 @@ bool SiHud_IsHumanTank(int client)
 	if (client <= 0 || client > MaxClients) return false;
 	if (!IsClientInGame(client) || IsFakeClient(client)) return false;
 	return GetClientTeam(client) == TEAM_INFECTED;
+}
+
+// ------------------------------------------------------------------------
+// 一控 / 二控：按"坦克这条命 + 玩家 SteamID"记完整控制权段数（2.6.1 重写，见文件头 E 段）
+//   每辆坦克（client 槽位）各一份状态：
+//     g_sSiHudTankKey[i]     当前这段控制权属于谁（SteamID；AI 坦克 = "AI"；"" = 还没记过）
+//     g_iSiHudTankSeg[i]     该 key 在这辆坦克上的完整控制权段数（1 = 一控，2+ = 二控）
+//     g_iSiHudTankPrevFrus[i] 上一秒读到的 m_frustration
+//   两个"新的一段控制权"的来源：
+//     ① **换人**：key 变了（真人接手 / 换另一名玩家 / AI↔真人）→ 新 key 的段数 = 1；
+//        同一名玩家（同 SteamID）从别的槽位拿回来 → 沿用他自己的段数 +1；
+//     ② **同一玩家回控**：key 没变，但怒气被**复位**了（m_frustration 明显变小）——
+//        引擎/控制权插件把已经消耗掉的控制权又给了他一段（本服二控的标准形态）。
+//        这里不复位段数，直接 +1，并且只认"从高位掉下来"（>= SIHUD_TANK_SEG_DROP_FROM），
+//        避免怒气在 0 附近抖动时被反复计数。
+//   段数只在"这只坦克这条命"内累计：坦克死亡 / 插件清理 / 新回合全部清零。
+// ------------------------------------------------------------------------
+#define SIHUD_TANK_SEG_DROP_FROM  40	// 怒气从 >=40 掉到这个值的一半以下才算"又被给了一段控制权"
+#define SIHUD_TANK_SEG_MIN_GAP    1.0	// 两次计数之间至少隔这么多秒，挡住同一帧/相邻秒的重复判定
+#define SIHUD_KEY_LEN             64	// 身份 key（SteamID / "AI"）的缓冲区长度
+                                        // 注意：数组第二维不要用 sizeof(arr[][]) 取，SourcePawn 会对标量返回 1（warning 252）
+
+// 取玩家的身份 key：真人 = SteamID（掉线重连/换槽位不变）；bot = "AI"；取不到 = ""
+void SiHud_PlayerKey(int client, char[] out, int maxlen)
+{
+	out[0] = '\0';
+	if (client <= 0 || client > MaxClients) return;
+	if (!IsClientInGame(client)) return;
+
+	if (IsFakeClient(client))
+	{
+		strcopy(out, maxlen, "AI");
+		return;
+	}
+
+	if (!GetClientAuthId(client, AuthId_Steam2, out, maxlen, false))
+	{
+		// SteamID 拿不到（极少见：刚连接/匿名）：退化成槽位号，只保证"不会误判成同一个人"
+		FormatEx(out, maxlen, "slot%d", client);
+	}
+}
+
+// 把这辆坦克的"控制权段"推进一次（由 SiHud_PollBossState 每秒调用一次）
+//   ★状态的生命周期（重要，改之前先读）：
+//     · **不在 tank_spawn 里清零**。L4D2 里"AI 坦克交给玩家"、"同一玩家回控"都可能再发一次
+//       tank_spawn，如果在事件里清零，二控就会被重新数成一控 —— 正是要修的 bug 的翻版。
+//     · 清零只有三个入口：Event_TankKilled（这只坦克死了）、轮询发现场上已经没有坦克
+//       （事件漏接的兜底）、换回合 / 换图（SiHud_ResetBossState）。
+//     · 坦克槽位在"上一条命结束"时一定先变成"不再是坦克"，也就是一定先被清过一次；
+//       所以新坦克第一次出现在某个槽位时 key 是空的 → 从第一段开始数，不会继承上一辆坦克的段数。
+void SiHud_TankSegmentTick(int tank, float fNow)
+{
+	if (tank <= 0 || tank > MaxClients) return;
+
+	char key[64];
+	SiHud_PlayerKey(tank, key, sizeof(key));
+
+	int frus = GetEntProp(tank, Prop_Send, "m_frustration");
+	if (frus < 0) frus = 0;
+	else if (frus > 100) frus = 100;
+
+	int prevFrus = g_iSiHudTankPrevFrus[tank];
+	g_iSiHudTankPrevFrus[tank] = frus;
+
+	// ① 控制者换了（含 AI -> 真人、真人 -> AI、换另一名玩家、同一名玩家换槽位回来）
+	if (!StrEqual(key, g_sSiHudTankKey[tank], false))
+	{
+		char sOldKey[64];
+		strcopy(sOldKey, sizeof(sOldKey), g_sSiHudTankKey[tank]);
+
+		// 控制权从"真人"手里交出去（交给 AI / 交给另一名玩家）：把他的 key 与段数留一份，
+		// 这样同一名玩家之后把同一辆坦克拿回来时，能接着往上数成二控。
+		if (sOldKey[0] != '\0' && !StrEqual(sOldKey, "AI", false))
+		{
+			strcopy(g_sSiHudTankPrevHuman[tank], SIHUD_KEY_LEN, sOldKey);
+			g_iSiHudTankPrevHumanSeg[tank] = g_iSiHudTankSeg[tank];
+		}
+
+		strcopy(g_sSiHudTankKey[tank], SIHUD_KEY_LEN, key);
+
+		if (key[0] == '\0' || StrEqual(key, "AI", false))
+		{
+			// AI 段 / 还没人：没有"几控"（上一名真人的段数已经存档，不会丢）
+			g_iSiHudTankSeg[tank] = 0;
+		}
+		else if (g_sSiHudTankPrevHuman[tank][0] != '\0'
+			&& StrEqual(key, g_sSiHudTankPrevHuman[tank], false)
+			&& g_iSiHudTankPrevHumanSeg[tank] > 0)
+		{
+			/* 同一名真人把同一辆坦克拿回来（中间可能是 AI 段 / 掉线换人 / 换槽位）→ 二控。
+			   只认"这条命里他确实控制过"（prevHuman 有存档且有段数），
+			   新坦克第一次被占用的槽位 sOldKey 是空的、不会走到这里。 */
+			g_iSiHudTankSeg[tank] = g_iSiHudTankPrevHumanSeg[tank] + 1;
+		}
+		else
+		{
+			// 换的是另一名玩家 → 这一段是他的第一段
+			g_iSiHudTankSeg[tank] = 1;
+		}
+
+		g_fSiHudTankSegAt[tank] = fNow;
+
+		if (SiHudDebug != null && SiHudDebug.BoolValue)
+		{
+			LogMessage("[SV sihud] 坦克 %d 控制者 %s -> %s，记为第 %d 段控制权。",
+				tank, (sOldKey[0] == '\0') ? "(空)" : sOldKey, key, g_iSiHudTankSeg[tank]);
+		}
+
+		return;
+	}
+
+	// ② 同一名玩家、同一辆坦克：怒气被复位 = 引擎/控制权插件又给了他一段完整控制权
+	if (key[0] != '\0' && !StrEqual(key, "AI", false))
+	{
+		bool bDropped = (prevFrus >= SIHUD_TANK_SEG_DROP_FROM) && (frus * 2 < prevFrus);
+		bool bGapOk = (fNow - g_fSiHudTankSegAt[tank]) >= SIHUD_TANK_SEG_MIN_GAP;
+
+		if (bDropped && bGapOk)
+		{
+			g_iSiHudTankSeg[tank]++;
+			g_fSiHudTankSegAt[tank] = fNow;
+			// 真人段数同步进"上一名真人"的存档：这段被消耗掉之后再回来，还要接着往上数
+			strcopy(g_sSiHudTankPrevHuman[tank], SIHUD_KEY_LEN, key);
+			g_iSiHudTankPrevHumanSeg[tank] = g_iSiHudTankSeg[tank];
+
+			if (SiHudDebug != null && SiHudDebug.BoolValue)
+			{
+				LogMessage("[SV sihud] 坦克 %d 怒气 %d -> %d（被复位），%s 拿到第 %d 段控制权。",
+					tank, prevFrus, frus, key, g_iSiHudTankSeg[tank]);
+			}
+		}
+	}
+}
+
+// 该坦克的控制权段数（1 = 一控，>=2 = 二控）；AI 坦克返回 0（没有"几控"）
+//   数据源分两种场合：
+//   ① **场上只有一只坦克**（正常对局，99% 的情况）→ 直接读引擎自己的传克计数
+//      L4D2Direct_GetTankPassedCount()。spechud 的 tankhud 显示"第N次"读的就是它
+//      （spechud_appledmod.sp 的 `int passCount = L4D2Direct_GetTankPassedCount();`），
+//      所以两块 HUD 的控数天生一致 —— 玩家要的"参考 spechud 的 tankhud 显示"就是这一条。
+//      语义（left4dhooks.inc:5722-5730）：AI 交给玩家的那一次也算一次 pass，
+//      pass=1 = 一控、pass=2 = 二控、pass>=3 继续往上数；它由引擎 + 控制权插件
+//      （l4d_tank_control_eq 的 L4D2Direct_SetTankPassedCount）共同维护，
+//      玩家换槽位 / 掉线重连 / 转旁观再回来都不会清零 —— 这正是"一直显示一控"的根治点。
+//   ② **多只坦克同时存活**（终局/多坦克局）→ 改用本插件按"坦克 + SteamID"记的段数。
+//      原因：引擎那个计数是**全局一个数**，left4dhooks 文档明确写了"多坦克同时存活时可能出怪事"，
+//      两行会显示同一个数字。本插件的段数逐只坦克各算各的，这种场合反而更准。
+//   ③ native 不可用（旧版 left4dhooks）→ 一律用本插件自己的段数。
+int SiHud_TankSegmentOf(int tank)
+{
+	if (tank <= 0 || tank > MaxClients) return 0;
+	if (IsFakeClient(tank)) return 0;
+
+	bool bUseEngine = g_bSiHudTankPassNative && (SiHud_CountAliveTanks() <= 1);
+
+	if (bUseEngine)
+	{
+		int pass = L4D2Direct_GetTankPassedCount();
+		if (pass < 1) pass = 1;			// 引擎还没记上 / 刚刷出：按一控画
+		return pass;
+	}
+
+	if (g_iSiHudTankSeg[tank] < 1) return 1;	// 状态还没记上（刷出同一秒就画面板）：按一控画
+	return g_iSiHudTankSeg[tank];
+}
+
+// 场上活着的坦克数量（含 AI 坦克）
+int SiHud_CountAliveTanks()
+{
+	int count = 0;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || !IsPlayerAlive(client)) continue;
+		if (GetSiType(client) != ZC_TANK) continue;
+		count++;
+	}
+	return count;
+}
+
+// 清掉一辆坦克的控数状态（坦克死亡 / 玩家离开 / 回合重置时调）
+void SiHud_ResetTankSegment(int tank)
+{
+	if (tank < 0 || tank > MaxClients) return;
+	g_sSiHudTankKey[tank][0] = '\0';
+	g_iSiHudTankSeg[tank] = 0;
+	g_iSiHudTankPrevFrus[tank] = 0;
+	g_fSiHudTankSegAt[tank] = 0.0;
+	g_sSiHudTankPrevHuman[tank][0] = '\0';
+	g_iSiHudTankPrevHumanSeg[tank] = 0;
 }
 
 // ------------------------------------------------------------------------
@@ -3468,12 +3717,11 @@ enum
 
 // ------------------------------------------------------------------------
 // 面板最下面两行：坦克 / 女巫
-//   坦克行（2.6.0 重写，需求："当坦克存活时显示坦克名称（2 字符和星号）+ 血量百分比 +
-//   控制权是一控还是二控，并且要考虑多只坦克同时存活"）：
-//     · **有坦克活着**：每只坦克各一行 `坦克: Ni* 78% 1控`
-//       —— 名字复用 AWP/Scout 那套 SiHud_ShortName（前两个字符，超过两个补 '*'）；
-//          血量 = GetClientHealth / m_iMaxHealth（与 spechud 的坦克HUD 同口径）；
-//          控数 = 该玩家本回合第几次拿到坦克（1=一控，>=2=二控），按玩家记所以多坦克不会串；
+//   坦克行（2.6.1 按需求重做，格式 `坦克1:4000 (1控/35%)`）：
+//     · **有坦克活着**：每只坦克各一行 —— 序号（坦克1/坦克2/坦克3）+ 具体血量 + 「控数/怒气」；
+//       **不显示玩家名称**（2.6.0 的"前两个字符 + *"按需求去掉）；
+//       控数 = 这条坦克命里该玩家第几段完整控制权（1控/2控，AI 坦克写 AI），
+//       按"坦克 + SteamID"记，所以多坦克同时在场、玩家换槽位/掉线重连都不会串；
 //     · **没有坦克活着**：沿用旧口径 —— 本回合坦克按 flow 刷出、还没刷 → `坦克: 34%`；
 //       不是按 flow 刷的（静态 / 事件刷出）→ `坦克: 固定`；本回合已经刷出过（活着/死了）就整行不画。
 //   女巫行不变。
@@ -3499,9 +3747,10 @@ void SiHud_DrawBossLines(Panel panel)
 }
 
 // ------------------------------------------------------------------------
-// 坦克行（2.6.0）
+// 坦克行（2.6.1：`坦克1:4000 (1控/35%)`）
 //   多坦克同时存活时一只一行，最多 SIHUD_MAX_TANK_LINES 行（面板 511 字节预算有限，
 //   12v12 里同时 3 只以上坦克的场合极少；超出的用一行"还有 N 只"提示，不会静默丢掉）。
+//   血量不显示上限、不显示玩家名称，一行最多约 24 字节，3 行也远在预算内。
 // ------------------------------------------------------------------------
 void SiHud_DrawTankLines(Panel panel)
 {
@@ -3536,14 +3785,26 @@ void SiHud_DrawTankLines(Panel panel)
 		return;
 	}
 
-	char name[32];
+	// 2.6.1 坦克行：`坦克1:4000 (1控/35%)`
+	//   · 序号 坦克1/坦克2/坦克3 = 行序（多坦克同时存活时逐只一行）；
+	//   · 不显示玩家名称（原 2.6.0 的"前两个字符 + *"按需求去掉，SiHud_TankDisplayName 一并删除）；
+	//   · 血量 = 具体血量，不显示上限；
+	//   · 括号里 = 控数/怒气：控数取 SiHud_TankSegmentOf（1控/2控，AI 坦克写 AI），
+	//     怒气取 m_frustration 百分比，与 spechud 的 tankhud `怒气: %d%%` 完全同一取法；
+	//     AI 坦克和 spechud 一样不报数字（那边是"怒气: 电脑"），这里写 `坦克1:4000 (AI/电脑)`。
 	char control[16];
+	char rage[16];
 	for (int i = 0; i < shown; i++)
 	{
 		int tank = tanks[i];
-		SiHud_TankDisplayName(tank, name, sizeof(name));
 		SiHud_TankControlText(tank, control, sizeof(control));
-		FormatEx(line, sizeof(line), "坦克: %s %d%% %s", name, SiHud_TankHealthPercent(tank), control);
+
+		int ragePercent = SiHud_TankFrustrationPercent(tank);
+		if (ragePercent < 0) strcopy(rage, sizeof(rage), SIHUD_TXT_TANK_AI_PC);
+		else FormatEx(rage, sizeof(rage), "%d%%", ragePercent);
+
+		FormatEx(line, sizeof(line), "坦克%d:%d (%s/%s)",
+			i + 1, SiHud_TankHealth(tank), control, rage);
 		SiHud_DrawText(panel, line);
 	}
 
@@ -3554,41 +3815,42 @@ void SiHud_DrawTankLines(Panel panel)
 	}
 }
 
-// 坦克的显示名：真人 = 前两个字符 + '*'（SiHud_ShortName，与 AWP/Scout 行同一套规则）；
-// AI 坦克没有玩家名字，统一显示 "AI"。
-void SiHud_TankDisplayName(int tank, char[] out, int maxlen)
+// 坦克的具体血量（需求：显示血量而不是百分比，不显示上限）。
+//   只读 GetClientHealth；取不到（-1 / 已死亡）按 0 处理，绝不显示负数。
+int SiHud_TankHealth(int tank)
 {
-	out[0] = '\0';
-	if (tank <= 0 || tank > MaxClients) return;
-	if (IsFakeClient(tank))
-	{
-		strcopy(out, maxlen, SIHUD_TXT_TANK_AI);
-		return;
-	}
-	SiHud_ShortName(tank, out, maxlen);
-}
+	if (tank <= 0 || tank > MaxClients) return 0;
+	if (!IsClientInGame(tank)) return 0;
 
-// 坦克血量百分比：当前血量 / 最大血量（m_iMaxHealth 与 spechud 的坦克HUD 同一取法：
-// 优先 Prop_Send，取不到再退 Prop_Data，最后兜底 4000 = 对抗坦克满血）
-int SiHud_TankHealthPercent(int tank)
-{
 	int health = GetClientHealth(tank);
 	if (health < 0) health = 0;
+	return health;
+}
 
-	int maxHealth = HasEntProp(tank, Prop_Send, "m_iMaxHealth") ? GetEntProp(tank, Prop_Send, "m_iMaxHealth") : 0;
-	if (maxHealth <= 0 && HasEntProp(tank, Prop_Data, "m_iMaxHealth"))
-		maxHealth = GetEntProp(tank, Prop_Data, "m_iMaxHealth");
-	if (maxHealth <= 0) maxHealth = SIHUD_TANK_FULL_HEALTH;
+// 坦克的"控制权/怒气"百分比（需求：一控二控后面补上具体控制权，参考 spechud 的 tankhud）：
+//   与 spechud_appledmod.sp 的坦克HUD 完全同一取法（那里是 `FormatEx(info, ..., "怒气: %d%%",
+//   GetTankFrustration(tank))`）——GetTankFrustration 是 l4d2util_tanks.inc 的 stock：
+//   100 - m_frustration，也就是屏幕上显示的怒气百分比（怒气越高 = 控制权剩得越少）。
+//   左右两块 HUD 的数字因此一致，玩家不会看到两个不同的数。
+//   本插件只 include <left4dhooks>，没有引 l4d2util，所以这里按同一公式直接算，不额外加依赖。
+//   ★AI 坦克与 spechud 一样不报数字（那边显示"怒气: 电脑"），返回 -1 让调用方写"电脑"。
+int SiHud_TankFrustrationPercent(int tank)
+{
+	if (tank <= 0 || tank > MaxClients) return -1;
+	if (!IsClientInGame(tank)) return -1;
+	if (IsFakeClient(tank)) return -1;		// AI 坦克：怒气是引擎替身，报数字没有意义
 
-	int percent = RoundToNearest(float(health) / float(maxHealth) * 100.0);
-	if (percent < 0) percent = 0;
-	else if (percent > 100) percent = 100;
-	return percent;
+	int frustration = GetEntProp(tank, Prop_Send, "m_frustration");
+	if (frustration < 0) frustration = 0;
+	else if (frustration > 100) frustration = 100;
+
+	return 100 - frustration;
 }
 
 // 这只坦克是"一控"还是"二控"：
-//   按玩家累计（g_iSiHudTankCtrl），与文件头/Apex 的口径一致 —— 本服"二控"= 同一名玩家在
-//   控制权被消耗之后又拿回同一辆坦克；AI 坦克没有"几控"，显示 AI。
+//   2.6.1 起按"坦克这条命 + 玩家 SteamID"记（SiHud_TankSegmentOf，见文件头 E 段）——
+//   本服"二控"= 同一名玩家在控制权被消耗之后又拿回同一辆坦克；
+//   AI 坦克没有"几控"，这一格写 AI（与 spechud 的"控制: 电脑"同义）。
 void SiHud_TankControlText(int tank, char[] out, int maxlen)
 {
 	out[0] = '\0';
@@ -3599,7 +3861,7 @@ void SiHud_TankControlText(int tank, char[] out, int maxlen)
 		return;
 	}
 
-	int count = g_iSiHudTankCtrl[tank];
+	int count = SiHud_TankSegmentOf(tank);
 	if (count < 1) count = 1;
 	strcopy(out, maxlen, (count >= 2) ? SIHUD_TXT_TANK_CTRL_SECOND : SIHUD_TXT_TANK_CTRL_FIRST);
 }
@@ -3805,7 +4067,7 @@ void SiHud_ResetClient(int client)
 	g_bSiHudOn[client] = false;
 	g_bSiHudSent[client] = false;
 	g_bSiHudUserOff[client] = false;
-	g_iSiHudTankCtrl[client] = 0;
+	SiHud_ResetTankSegment(client);		// 2.6.1：控数按"坦克+SteamID"记，这里清掉该槽位的一份
 	g_fSiHudTankLockUntil[client] = 0.0;
 	g_fSiHudLastSendAt[client] = 0.0;
 	g_fSiHudForceUntil[client] = 0.0;
@@ -3840,7 +4102,7 @@ void SiHud_ResetRound()
 		g_fSiHudTankLockUntil[client] = 0.0;
 		g_fSiHudForceUntil[client] = 0.0;
 		g_bSiHudUserOff[client] = false;	// 新回合：允许再次自动打开面板
-		g_iSiHudTankCtrl[client] = 0;		// 新回合：控数重新从一开始（一控/二控）
+		SiHud_ResetTankSegment(client);		// 新回合：控数重新从一开始（一控/二控）
 		SiHud_ReleaseTankPanel(client);		// 上回合替坦克自动打开的面板不跨回合
 	}
 }
@@ -3852,6 +4114,8 @@ void SiHud_ResetBossState()
 	g_iSiHudTankControl = 0;
 	g_bSiHudTankSpawned = false;
 	g_bSiHudWitchSpawned = false;
+	// 2.6.1：控数状态跟着"本回合"一起清（坦克换图/换回合后是一辆新的坦克，从一控重新数）
+	for (int client = 0; client <= MaxClients; client++) SiHud_ResetTankSegment(client);
 }
 
 // Left4DHooks / 跨插件的 native 默认被标成 optional，
@@ -3872,11 +4136,15 @@ void SiHud_CheckNatives()
 		&& SiHud_NativeAvailable("L4D2Direct_GetVSWitchToSpawnThisRound");
 	// spechud_appledmod 的坦克HUD 关闭接口（不在场就关不掉 tankhud，面板其它功能不受影响）
 	g_bSiHudSpecHudNative = SiHud_NativeAvailable("SpecHud_TankHudDisable");
+	// 2.6.1：一控/二控首选读引擎的传克次数（与 spechud 的 tankhud 同源）；不可用时退回自己的段数跟踪
+	g_bSiHudTankPassNative = SiHud_NativeAvailable("L4D2Direct_GetTankPassedCount");
 
 	if (!g_bSiHudMaxFlowNative && SiHudDebug != null && SiHudDebug.BoolValue)
 		LogError("[SV sihud] L4D2Direct_GetMapMaxFlowDistance 不可用：当前路程百分比与坦克/女巫两行都不会显示。");
 	if (!g_bSiHudSpecHudNative && SiHudDebug != null && SiHudDebug.BoolValue)
 		LogError("[SV sihud] 找不到 spechud_appledmod 的 SpecHud_TankHudDisable：坦克刷出/接管时无法关闭 tankhud。");
+	if (!g_bSiHudTankPassNative && SiHudDebug != null && SiHudDebug.BoolValue)
+		LogError("[SV sihud] L4D2Direct_GetTankPassedCount 不可用：一控/二控退回本插件自己的段数跟踪（可能与 spechud 的 tankhud 不一致）。");
 }
 
 // 是否处在 readyup 的准备阶段（readyup 没加载时恒为 false）

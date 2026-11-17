@@ -73,6 +73,7 @@
  *      的生还者不再被传送回来（l4d2_cptele_skip_seen 1，默认）。
  *    - 全员都到过集合点 = 集合完毕：倒计时立刻结束（不再空转到 0），
  *      并且一个人都不传送（只把机关按钮解锁按下）。
+ *      → 1.2.9 起「立刻结束」这一半已取消，改为走满倒计时后再结算（见 1.2.9 段）。
  *    旧行为（只按「倒计时结束时是否还在区域内」判定）可用
  *    l4d2_cptele_skip_seen 0 还原。
  *
@@ -180,6 +181,45 @@
  *    - 「提前集合完毕」那条提示（FinishCountdownAllSeen 的
  *      「全员已进入%s，倒计时提前结束，无人需要传送」/「全员已到达集合点…」）
  *      完全未改动。
+ *      → 1.2.9 起这条提示只在倒计时**自然走满**后出现（不再有「提前结束」），
+ *        文案同步改成「倒计时结束，全员已进入%s，无需传送」（见 1.2.9 段）。
+ *
+ *  1.2.9 需求「倒计时期间不刷进入提示 / 集合完成又离开要继续倒计时」（2026-11-18）：
+ *    - 需求一、倒计时期间不显示「生还者进入集合点 / 安全屋」的提示。
+ *      · 现象：一触发传送倒计时，每有一个生还者走进区域就全服播一条
+ *        「N/M 名生还者已进入…」（聊天框 + 屏幕下方两条通道各来一条），
+ *        和每秒的倒计时提示混在一起，屏幕上一直是重复的同一句话。
+ *      · 根因：1.2.7 的 UpdateEnterNotices 由 Timer_Monitor 每秒无条件调用，
+ *        而且调用点放在「倒计时期间直接 return」之前 —— 倒计时跑着的时候，
+ *        「不在 -> 在」的跳变照播不误。1.2.8 放开 g_bAreaFired 这个静默条件之后
+ *        更明显（触发过的区域也照播）。
+ *      · 做法：UpdateEnterNotices 里把 g_bCountingDown 并入静默条件（聊天框与
+ *        PrintHintTextToAll 两条通道都不发），但**仍然每秒更新 g_bAreaPresence**
+ *        ——「静默但不丢状态」：如果连状态更新一起跳过，倒计时一结束就会把整段
+ *        倒计时里走进来的人当成同一 tick 的集体进入，反而一次性刷屏。
+ *        Timer_Monitor 的调用点同时挪到「倒计时判定」之后：触发倒计时的同一 tick
+ *        就已经是静默的，那条「N/M 名生还者已进入…」交给 StartCountdown 的首播
+ *        给出（文案完全相同），同一秒不会出现两条一模一样的话。
+ *        倒计时结束（FinishCountdown）/ 取消（CancelCountdown）时再调
+ *        SyncEnterNoticePresence，按此刻真实在场情况同步一次，跨过结束边界的
+ *        那一次进入也不会补播；此后玩家再走进来照常播报（恢复不受影响）。
+ *    - 需求二、提前集合完成不再结束倒计时，「集合了一下又离开」要接着走。
+ *      · 现象：倒计时还没走完，全员在集合点 / 安全屋集合了一下又散开去补给，
+ *        倒计时立刻结束、区域被标记成「已触发」；掉队者再也不会被传送，
+ *        关底安全屋凑不齐人，最后还得玩家自己开关一次门才过关。
+ *      · 根因：1.2.0（中途集合点「到过就算」）/ 1.2.5（安全屋「此刻全员在屋内」）
+ *        都在 Timer_Countdown 里判「全员到齐」就调 FinishCountdownAllSeen
+ *        提前结束倒计时，并顺手把 g_bAreaFired 置 true —— 该区域本回合唯一的一次
+ *        倒计时机会，被这次「集合了一下又走」用掉了。
+ *      · 做法：删掉 Timer_Countdown 里这条提前结束分支，倒计时一律走满。
+ *        到点时仍由 FinishCountdown 按那一刻的真实情况结算：
+ *        g_cvSkipSeen 对中途集合点「到过就不再被传送回来」的语义不变；
+ *        安全屋 / 救援点仍然只按「此刻必须在屋里」把掉队者传进来（1.2.5 不变）；
+ *        全员都在区域内时 moved == 0，照常走「全员已进入%s，无需传送」。
+ *        FinishCountdownAllSeen 保留下来换了个身份：不再是「结束器」，
+ *        只作为 FinishCountdown 在「无人需要传送」时的播报收尾（文案不变），
+ *        既保住「全员已到齐」这条信息，也不会留下未使用函数的 warning 203。
+ *        l4d2_cptele_skip_seen 的 cvar 描述同步改掉「立即结束」那半句。
  *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
@@ -194,7 +234,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.8"
+#define PLUGIN_VERSION      "1.2.9"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -458,7 +498,7 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSkipSeen = CreateConVar("l4d2_cptele_skip_seen", "1",
-		"1=倒计时期间已经到过集合点（哪怕随后离开、继续往前走）的生还者，倒计时结束时不再被传送回来；并且全员都到过时倒计时立即结束。0=旧行为（只看倒计时结束那一刻是否还在区域内）",
+		"1=倒计时期间已经到过集合点（哪怕随后离开、继续往前走）的生还者，倒计时结束时不再被传送回来（安全屋/救援点仍按「此刻必须在屋内」把掉队者传进来）；全员都到过也不会再提前结束倒计时，倒计时仍走满再结算。0=旧行为（只看倒计时结束那一刻是否还在区域内）",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSound = CreateConVar("l4d2_cptele_sound", "1",
@@ -473,7 +513,7 @@ public void OnPluginStart()
 	// 1.2.8：该区域本回合已经触发过传送之后仍然继续提示（1.2.7 曾经触发一次就永久静音）；
 	//        插件自己把人传送进来的那一次不算「进入」，不会额外多播一条。
 	g_cvEnterNotice = CreateConVar("l4d2_cptele_enter_notice", "1",
-		"1=有生还者进入安全屋/救援点/集合点区域时，向所有玩家在聊天框和屏幕下方提示可触发传送（只在进入那一刻播报，不会每 tick 刷屏；该区域已触发过传送后仍继续提示，插件自己的传送不算进入）。0=不播报",
+		"1=有生还者进入安全屋/救援点/集合点区域时，向所有玩家在聊天框和屏幕下方提示可触发传送（只在进入那一刻播报，不会每 tick 刷屏；该区域已触发过传送后仍继续提示，插件自己的传送不算进入；传送倒计时进行期间自动静音，倒计时结束/取消后恢复播报）。0=不播报",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSaferoom = CreateConVar("l4d2_cptele_saferoom", "1",
@@ -1516,13 +1556,17 @@ public Action Timer_Monitor(Handle timer)
 	bool bEscape = g_bNtvEscape && L4D_IsFinaleEscapeInProgress();
 
 	// 1.2.7 需求：有生还者「首次进入」某个集合区域时，向全服提示可触发传送。
-	// 必须放在「倒计时期间直接返回」之前——集合过程中人还在陆续走进来，
-	// 人数变化同样要提示。本函数只做提示，不碰倒计时 / 传送逻辑。
-	UpdateEnterNotices(bEscape);
-
-	// 倒计时期间由倒计时 timer 负责，这里不重复判
+	// 1.2.9：实际调用点挪到本函数末尾的「倒计时判定」之后（见那里的注释）。
+	//        倒计时期间仍然每秒调用一次，但那时 UpdateEnterNotices 只静默更新
+	//        在场状态、不播报（用户需求：倒计时期间不显示进入提示）。
+	// 本函数只做提示，不碰倒计时 / 传送逻辑。
 	if (g_bCountingDown || g_iAreaCount == 0)
 	{
+		// 倒计时期间由倒计时 timer 负责判人，这里不重复判；
+		// 但进入提示的在场状态必须继续跟踪，否则倒计时结束会出现「集体进入」
+		// 的假跳变并一次性刷屏（1.2.9 的「静默但不丢状态」硬约束）。
+		UpdateEnterNotices(bEscape);
+
 		return Plugin_Continue;
 	}
 
@@ -1584,6 +1628,13 @@ public Action Timer_Monitor(Handle timer)
 		}
 	}
 
+	// 1.2.9：进入提示放到倒计时判定**之后**。
+	// 这一 tick 如果刚好开始跑倒计时，g_bCountingDown 已经是 true，本 tick 就
+	// 不会再播一条「N/M 名生还者已进入…」；这条信息由 StartCountdown 自己的
+	// 首播给出（文案完全相同），因此同一秒不会出现两条一模一样的话。
+	// 反过来，本函数在倒计时期间也照常被调用 —— 只静默更新在场状态，不播报。
+	UpdateEnterNotices(bEscape);
+
 	return Plugin_Continue;
 }
 
@@ -1603,8 +1654,14 @@ public Action Timer_Monitor(Handle timer)
  *   - 1.2.8：插件自己把人传进区域的那一次不算「走进来」，由
  *     SuppressEnterNoticeForTeleport 在传送后预先登记，不会紧跟倒计时结束提示
  *     再刷一条「N/N 名生还者已进入…」。
+ *   - 1.2.9（需求：倒计时期间不显示进入提示）：从倒计时开始到结束（含被取消 /
+ *     提前结束）之间**一条都不播**，聊天框与 PrintHintTextToAll 两条通道都不发；
+ *     但 g_bAreaPresence 仍然每秒照常更新 ——「静默但不丢状态」是硬约束，跳过
+ *     更新会让倒计时结束时把整段倒计时里的进入当成一次集体跳变，反而刷屏。
+ *     结束 / 取消那一刻由 SyncEnterNoticePresence 再按真实在场情况同步一次，
+ *     跨过结束边界的那一次进入也不会补播。
  *
- * 由 Timer_Monitor 每秒调用一次（g_bCountingDown 期间也调用）。
+ * 由 Timer_Monitor 每秒调用一次（g_bCountingDown 期间也调用，但那时不播报）。
  *
  * @param bEscape   本帧是否处于逃离阶段（与 Timer_Monitor 的可见性规则共用）
  */
@@ -1627,12 +1684,17 @@ void UpdateEnterNotices(bool bEscape)
 	for (int i = 0; i < g_iAreaCount; i++)
 	{
 		// 1.2.8：只有「区域实体已经消失」才静默。
-		// 1.2.7 这里还带着 g_bAreaFired[i]，而它只在倒计时结束（传送完毕 /
-		// 提前集合完毕）时被置 true、且只有换回合才会清 —— 结果一旦触发过传送，
-		// 本回合剩下的时间里再走进集合区域就再也不提示（用户报的现象）。
+		// 1.2.7 这里还带着 g_bAreaFired[i]，而它只在倒计时结束时被置 true、
+		// 且只有换回合才会清 —— 结果一旦触发过传送，本回合剩下的时间里再走进
+		// 集合区域就再也不提示（用户报的现象）。
 		// 现在已触发过的区域照常播报，频率仍是「不在 -> 在」跳变播一次。
 		// 静默不等于不记录：下面照样更新 g_bAreaPresence，区域恢复时不会「集体进入」。
-		bool bQuiet = !IsAreaAlive(i);
+		//
+		// 1.2.9：倒计时期间同样静默（用户需求：触发传送倒计时后不再播进入提示，
+		// 否则倒计时提示与「N/M 名生还者已进入…」两条通道互相刷屏）。
+		// 这里**只**关播报，下面的 g_bAreaPresence 更新一律照常执行 ——
+		// 少了那一步，倒计时结束时会出现「集体进入」的假跳变并一次性刷屏。
+		bool bQuiet = g_bCountingDown || !IsAreaAlive(i);
 
 		if (!bQuiet)
 		{
@@ -1882,24 +1944,22 @@ public Action Timer_Countdown(Handle timer)
 	// 倒计时结束时不再被传送回来（c5m2 这类「集合完就往前走」地图的修复点）
 	MarkSeenInArea(index);
 
-	// 全员都到过集合点 = 集合完毕：倒计时立即结束，一个人都不传送。
-	// 否则会出现「人都走远了，倒计时还在空转，结束时把全队传回来」的问题。
-	// 1.2.5：安全屋 / 救援点必须"此刻全员都在区域内"才算集合完毕；
-	// 只按"到过就算"（g_bSeen）会把"进过安全屋又跑出去补给"的掉队者也判成已进入，
-	// 倒计时提前结束、一个人都不传送，最后关底门凑不齐"全员在屋内"（用户 2026-10-30 报的 bug）。
-	// 中途集合点（AREA_CHECKPOINT）保持 1.2.0 的"到过就算"语义：那边玩家集合完就往前走。
-	if (g_cvSkipSeen.BoolValue)
-	{
-		int iAlive = CountAliveSurvivors();
-		int iHere  = IsSafeAreaType(type) ? CountArrivedSurvivors(index) : CountSeenSurvivors();
-
-		if (iAlive > 0 && iHere >= iAlive)
-		{
-			FinishCountdownAllSeen(index);
-			g_hCountdown = null;
-			return Plugin_Stop;
-		}
-	}
+	// 1.2.9 需求：**不再「全员到齐就提前结束倒计时」**（用户需求：集合完成
+	// 又离开要接着倒计时）。
+	// 1.2.0~1.2.8 在这里判「全员到过（中途集合点）/ 全员此刻在区域内（安全屋、
+	// 救援点）」就调 FinishCountdownAllSeen 立刻结束倒计时，并把区域置成已触发
+	// （g_bAreaFired）。于是「倒计时中途集合完毕、随后又散开去补给 / 继续推进」
+	// 会把该区域本回合唯一的一次集合机会用掉：本回合不再倒计时，掉队者永远
+	// 不会被传送，关底安全屋凑不齐人。
+	// 现在倒计时一律走满，到点时由 FinishCountdown 按**那一刻**的真实情况结算：
+	//   · 中途集合点：g_cvSkipSeen 的「到过就不再被传送回来」语义完全不变
+	//     （FinishCountdown 里按 g_bSeen 跳过已经到过的人）；
+	//   · 安全屋 / 救援点：仍然只按「此刻必须在屋里」把掉队者补传进来（1.2.5 不变）；
+	//   · 全员此刻都在区域内时 moved == 0，FinishCountdown 会打
+	//     「全员已进入%s，无需传送」——「全员已到齐」这条信息价值保留，
+	//     只是不再抢在倒计时结束之前说出来。
+	// g_bSeen 的累积仍由上面的 MarkSeenInArea 每秒做，语义只剩「不把到过的人
+	// 传送回来」这一条，不再参与「是否提前结束」的判定。
 
 	// 掉回比例以下的处理策略
 	if (g_cvResetOnLeave.BoolValue)
@@ -1984,6 +2044,10 @@ void CancelCountdown(int index)
 	if (index >= 0 && index < g_iAreaCount)
 	{
 		g_fAreaCooldown[index] = GetGameTime() + CANCEL_COOLDOWN;
+
+		// 1.2.9：倒计时一取消，进入提示立刻恢复播报。先按此刻真实在场情况同步
+		// 一次，倒计时期间走进来的生还者不会被下一 tick 当成「集体进入」补播。
+		SyncEnterNoticePresence(index);
 	}
 
 	if (g_cvVerbose.BoolValue)
@@ -2006,6 +2070,11 @@ void FinishCountdown(int index)
 	g_iSecondsLeft = 0;
 	g_iActiveArea = -1;
 	g_bAreaFired[index] = true;
+
+	// 1.2.9：倒计时结束 = 进入提示恢复播报。先按此刻真实在场情况同步一次，
+	// 免得倒计时期间走进来的生还者在下一 tick 被当成「集体进入」补播一条
+	// （本次传送进区域的那些人，下面还会逐个 SuppressEnterNoticeForTeleport）。
+	SyncEnterNoticePresence(index);
 
 	int type = g_iAreaType[index];
 
@@ -2101,23 +2170,21 @@ void FinishCountdown(int index)
 
 			Format(sMsg, sizeof(sMsg), "找不到%s的传送位置，本次不传送", sName);
 		}
-		else if (IsSafeAreaType(type))
-		{
-			if (g_cvChat.BoolValue)
-			{
-				PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已进入%s，无需传送。", sName);
-			}
-
-			Format(sMsg, sizeof(sMsg), "全员已进入%s，无需传送", sName);
-		}
 		else
 		{
-			if (g_cvChat.BoolValue)
+			// 1.2.9：倒计时**自然走满**时无人需要传送 —— 要么全员此刻都在区域内
+			// （安全屋 / 救援点），要么中途集合点全员都到过（g_cvSkipSeen 语义）。
+			// 这条「全员已到齐，无需传送」的结算统一交给 FinishCountdownAllSeen：
+			// 它现在只负责播报，不再结束倒计时、不再改 g_bAreaFired / 不动机关与门。
+			FinishCountdownAllSeen(index);
+
+			if (g_cvVerbose.BoolValue)
 			{
-				PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已到达集合点，无需传送。");
+				PrintToServer("[cptele] 区域 #%d 完成 (type=%d source=%d moved=0 dest=1)",
+					index, type, g_iAreaSource[index]);
 			}
 
-			Format(sMsg, sizeof(sMsg), "全员已到达集合点，无需传送");
+			return;
 		}
 	}
 	else if (IsSafeAreaType(type))
@@ -2149,31 +2216,33 @@ void FinishCountdown(int index)
 }
 
 /**
- * 全员都已经到过集合点：集合完毕，倒计时提前结束，一个人都不传送。
+ * 「无人需要传送」的收尾播报：倒计时自然走满时全员都在区域内 / 全员都到过。
  *
- * 触发场景（用户报的 bug）：机关集合点（如 c5m2）倒计时开始后，玩家在倒计时
- * 结束前就集合完毕并继续往前走，旧逻辑会一直空转到 0 秒，然后把「不在区域内」
- * 的整队人传送回集合点。现在只要所有人都到过，就直接结束本次倒计时。
+ * 1.2.9 的语义变更（用户需求：集合完成又离开要继续倒计时）：
+ *   - 1.2.0~1.2.8：本函数在倒计时中途判定「全员到齐」时被调用，**直接结束倒计时**
+ *     并把区域标记成已触发（g_bAreaFired = true），本回合不再倒计时；
+ *     结果「集合完就走」的人把区域用掉了，掉队者再也不会被传送，安全屋凑不齐人。
+ *   - 1.2.9 起：那条提前结束的路径已删除。本函数不再是「结束器」，只是
+ *     FinishCountdown 在倒计时走满、moved == 0（此刻无需传送）时调用的播报收尾：
+ *     不再改 g_bCountingDown / g_iSecondsLeft / g_iActiveArea / g_bAreaFired，
+ *     也不再动机关与安全门 —— 这些统一由 FinishCountdown 处理（机关已在它里面
+ *     按过一次，这里再按一次会让按钮重复触发）。
+ *
+ * 保留本函数（而不是删掉）的理由：
+ *   · 「全员已到齐，无需传送」这条信息与 FinishCountdown 的「已把 N 名生还者
+ *     传送过去」并列，文案只保留在这一处，不会随两处代码漂移；
+ *   · 函数仍然被 FinishCountdown 调用，不会产生 warning 203（symbol is never used）。
+ *
+ * @param index 区域索引（调用方 FinishCountdown 已校验过范围）
  */
 void FinishCountdownAllSeen(int index)
 {
-	g_bCountingDown = false;
-	g_iSecondsLeft = 0;
-	g_iActiveArea = -1;
-	g_bAreaFired[index] = true;
+	if (index < 0 || index >= g_iAreaCount)
+	{
+		return;
+	}
 
 	int type = g_iAreaType[index];
-
-	// 集合完毕 = 该按的机关仍然要按下去（电梯 / 渡轮 / 桥等）
-	OpenAreaMechanism(index, type);
-
-	// 1.2.4（需求 #6 回归修复）：这条路径**不再**动门。
-	// 「全员已进入 -> 倒计时提前结束」意味着**一个人都没传送**，玩家是自己走进去的，
-	// 门也是他们自己开合的，引擎那条「开门 -> 关门 -> CheckpointDoorClosed」链本来
-	// 就是通的，我们没有任何理由插手。1.2.3 曾在这里也调 ScheduleSaferoomDoorFix，
-	// 结果是终局图（c6m3_port 电梯下来那一片）玩家正常路过就被关门+补发换图事件，
-	// 表现为「直接结算分数并换边/进下一关」。
-	// 真正需要补门状态的只有 FinishCountdown 里 moved > 0（传送过掉队者）那一种情况。
 
 	char sName[32];
 	char sMsg[192];
@@ -2184,26 +2253,26 @@ void FinishCountdownAllSeen(int index)
 	{
 		if (g_cvChat.BoolValue)
 		{
-			PrintToChatAll("\x05[集合点]\x01 全员已进入%s，倒计时提前结束，无人需要传送。", sName);
+			PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已进入%s，无需传送。", sName);
 		}
 
-		Format(sMsg, sizeof(sMsg), "全员已进入%s，倒计时提前结束", sName);
+		Format(sMsg, sizeof(sMsg), "全员已进入%s，无需传送", sName);
 	}
 	else
 	{
 		if (g_cvChat.BoolValue)
 		{
-			PrintToChatAll("\x05[集合点]\x01 全员已到达集合点，倒计时提前结束，无人需要传送。");
+			PrintToChatAll("\x05[集合点]\x01 倒计时结束，全员已到达集合点，无需传送。");
 		}
 
-		Format(sMsg, sizeof(sMsg), "全员已到达集合点，倒计时提前结束");
+		Format(sMsg, sizeof(sMsg), "全员已到达集合点，无需传送");
 	}
 
 	PrintHintTextToAll("%s", sMsg);
 
 	if (g_cvVerbose.BoolValue)
 	{
-		PrintToServer("[cptele] 区域 #%d 全集结完毕，提前结束 (type=%d source=%d 到过=%d 此刻在区域内=%d 存活=%d)",
+		PrintToServer("[cptele] 区域 #%d 全员到齐（倒计时自然结束，无需传送）(type=%d source=%d 到过=%d 此刻在区域内=%d 存活=%d)",
 			index, type, g_iAreaSource[index],
 			CountSeenSurvivors(), CountArrivedSurvivors(index), CountAliveSurvivors());
 	}
@@ -3214,6 +3283,47 @@ void SuppressEnterNoticeForTeleport(int index, int client)
 
 	g_bAreaPresence[index][client] = true;
 	g_fAreaEnterAt[index][client] = GetGameTime();
+}
+
+/**
+ * 1.2.9：把某个区域的「进入提示」在场状态按此刻真实情况同步一次。
+ *
+ * 用途：倒计时结束（FinishCountdown）/ 取消（CancelCountdown）的那一刻调用。
+ * 倒计时期间 UpdateEnterNotices 是静默的（只更新 g_bAreaPresence 不播报），
+ * 如果这期间有人刚好跨过判定边界走进来、或者插件自己把人传送进区域，结束后的
+ * 第一条 tick 很容易把「整段倒计时里的进入」当成一次跳变补播出去。这里先对齐：
+ *   - 此刻在区域内的存活生还者：登记成「已经在里面」，并刷新播报时刻 —— 这就是
+ *     SuppressEnterNoticeForTeleport 的同一套思路，只是按「所有人」做一遍；
+ *   - 此刻不在区域内的：清成 false，玩家之后真的走进来仍然照常播报。
+ *
+ * 只影响进入提示的状态，不碰倒计时 / 传送 / 区域判定。
+ */
+void SyncEnterNoticePresence(int index)
+{
+	if (index < 0 || index >= MAX_AREAS)
+	{
+		return;
+	}
+
+	float fNow = GetGameTime();
+
+	for (int c = 1; c <= MaxClients; c++)
+	{
+		if (!IsAliveSurvivor(c))
+		{
+			continue;
+		}
+
+		if (IsClientInArea(c, index))
+		{
+			g_bAreaPresence[index][c] = true;
+			g_fAreaEnterAt[index][c] = fNow;
+		}
+		else
+		{
+			g_bAreaPresence[index][c] = false;
+		}
+	}
 }
 
 /**

@@ -145,11 +145,42 @@
  *                  立刻 LeaveGuard，把 m_takedamage 与血量锁一起还原，绝不可能冻结死亡流程；
  *               ③ 不再对"掉边坠落"中的人做任何救起/守护写入（那是引擎的死亡流程）。
  *
+ *   1.5.0 变更（三条玩家需求，全部实装）：
+ *     - 需求1 修"倒地玩家手动旁观 / 掉线 → 再加入游戏 → 白拿一次自动起身"的漏洞：
+ *         根因：真人生还者倒地后切到旁观（或掉线被托管），引擎会把他的身体交给一个 bot
+ *               顶着（此时 IsFakeClient()==true），并在该 player 实体的 m_humanSpectatorUserID
+ *               里记下那个真人的 userid。旧逻辑只认"fake client + 生还者队 + 倒地"，
+ *               于是照样把这具"有主的身体"救起来 —— 玩家再加入（身体原样还给他）就是白起身，
+ *               而且这具身体当时如果被守护，还会白得一段免伤/免控/发光。
+ *         做法：新增 IsIdleBody()（L4D_GetIdlePlayerOfBot -> 属主 userid -> GetClientOfUserId
+ *               -> 确认那个 userid 还是个在服务器里旁观队的真人），自动起身与守护（免伤/免控/发光）
+ *               都跳过这类身体；真人彻底掉线（userid 失效）时判定不成立，
+ *               "无人接管就地兜底起身"的老用途不变。
+ *               移速那套**故意不跟着改**（理由见 IsIdleBody 上方注释）。
+ *               开关 l4d2_bot_guard_skip_idle_bodies 默认 1；=0 完全回到 1.4.0 的行为。
+ *     - 需求2 自动起身血量默认 30 -> 1（l4d2_bot_guard_revive_health 下界仍是 1）：
+ *         起身后实血写成 1 点、虚血一并清 0（否则"总血量"不是 1），并保持"当作没倒地过"
+ *         （m_currentReviveCount + m_bIsOnThirdStrike 在引擎起身之后清零，顺序不要调换）。
+ *         血量 1 会让 bot 起身瞬间就可能被再次打倒，与 0.1s 轮询叠加会变成
+ *         "起身 -> 倒地 -> 再起身"的循环，因此起身成功后开一个极短的伤害保护窗口
+ *         （REVIVE_PROTECT_TIME，只挡"这一下会当场再打倒他"的伤害；一个到期时间戳，无累积状态）。
+ *     - 需求3 起身提示文案去掉"无限/不限"的口径（玩家反馈"现在是无限起身"）：
+ *         旧文案在 revive_times<0 时写"倒地次数已清零"、状态页写"不限(无限救起)"，
+ *         读起来像"无限起身"。统一成"已自动起身（血量 N，倒地次数已清零）"，
+ *         有限次数模式保留剩余次数；cvar 描述与 sm_botguard_status 改成"不设上限"口径。
+ *
  * 安全设计（重要，改动前请先读）：
  *   - 守护状态只对"存活且未倒地、未挂边、未掉边坠落"的 bot 生效。倒地后守护会自动关闭，
- *     避免"倒地 + 免伤 + 不能流血死亡"造成永久卡关；倒地由自动救起兜底
- *     （1.4.0 起默认不限次数）。
+ *     避免"倒地 + 免伤 + 不能流血死亡"造成永久卡关；倒地由自动起身兜底
+ *     （1.4.0 起默认不设每回合上限）。
+ *   - 1.5.0：守护与自动起身都**不碰**"有真人主控的空闲身体"（IsIdleBody）：
+ *     玩家倒地后自己切旁观 / 掉线时，身体会被引擎托管成 bot，替它起身或免伤等于让玩家
+ *     "旁观一下再加入"白赚一次起身 + 一段无敌。开关 l4d2_bot_guard_skip_idle_bodies（默认 1）。
+ *     移速那套刻意不跟（理由见 IsIdleBody / ShouldApplyBotSpeed 的注释）。
+ *   - 起身血量默认 1 点（l4d2_bot_guard_revive_health），起身后 1 秒内只挡"会当场再打倒他"
+ *     的伤害（REVIVE_PROTECT_TIME），避免 1 血起身 -> 立刻倒地 -> 又起身的循环。
  *   - 保护线程里有一道硬保险：守护中的人一旦倒地/挂边/坠落/死亡，立刻退出守护。
+ *     1.5.0 起再加一条 0.1s 级的 ShouldGuard 复核（空闲身体 / 真人接管在 0.1 秒内撤守护）。
  *     这是防止"卡原地无敌"的最后一道闸，不要为了省开销删掉。
  *   - 守护结束时会把进入守护前的四个发光 netprop 原值写回去，
  *     避免污染其它插件的发光效果。
@@ -175,15 +206,25 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
-#define PLUGIN_VERSION		"1.4.0"
+#define PLUGIN_VERSION		"1.5.0"
 
-// 1.4.0：救起提示的全局节流（秒）。无限救起时如果每救一次就刷一条，12v12 会刷屏。
+// 1.4.0：起身提示的全局节流（秒）。次数不设上限时如果每救一次就刷一条，12v12 会刷屏。
 #define REVIVE_NOTIFY_COOLDOWN	3.0
 // 1.4.0：救起失败（引擎没把人拉起来）时的重试间隔（秒），避免每 tick 空转。
 #define REVIVE_RETRY_INTERVAL	0.5
 
+// 1.5.0：自动起身后的极短伤害保护窗口（秒）。
+// 起身血量默认只有 1 点，起身瞬间被任何一下摸到就会立刻再倒地；配合 0.1s 轮询 +
+// revive_delay 会变成"起身 -> 倒地 -> 再起身"的循环（聊天框反复刷提示、人机原地抽搐）。
+// 窗口内只挡"这一下会当场把他再打倒"的伤害（见 Hook_OnTakeDamage），不吞小伤害；
+// 状态就是一个到期时间戳（g_fReviveProtectUntil），到点自动失效，不累积、不需要清理。
+#define REVIVE_PROTECT_TIME	1.0
+
 #define TEAM_SURVIVOR		2
 #define TEAM_INFECTED		3
+// 1.5.0：旁观队（IsIdleBody 判定"真人正在旁观托管"用）。
+// 本文件不 include l4d2util，这里按 l4d2util_constants.inc 的同名值自己定义一份。
+#define TEAM_SPECTATOR		1
 
 // m_iGlowType = 3 是 L4D2 的"常亮轮廓"（参考 l4d2_tank_defib_revive 的写法）
 #define GLOW_TYPE_CONSTANT	3
@@ -208,10 +249,11 @@ ConVar g_cvMaxCount;		// 1.2.0：同时处于守护状态的未接管生还者�
 ConVar g_cvExcludeEndSaferoom;	// 1.3.4：计算守护名额时排除终点安全屋内的生还者
 ConVar g_cvBotSpeed;		// 1.2.0：未接管生还者移速（游戏单位，默认 330）
 ConVar g_cvBaseSpeed;		// 1.2.0：正常走路速度基数（默认 220），倍率 = bot_speed / base_speed
-ConVar g_cvReviveTimes;		// 每回合自动救起次数
-ConVar g_cvReviveHealth;	// 自动救起后的血量
-ConVar g_cvReviveDelay;		// 倒地后延迟多久救起（秒）
-ConVar g_cvNotify;			// 自动救起时是否聊天框提示
+ConVar g_cvReviveTimes;		// 每回合自动起身次数上限（-1 = 不设上限）
+ConVar g_cvReviveHealth;	// 自动起身后的血量
+ConVar g_cvReviveDelay;		// 倒地后延迟多久起身（秒）
+ConVar g_cvNotify;			// 自动起身时是否聊天框提示
+ConVar g_cvSkipIdleBodies;	// 1.5.0：跳过"有真人主控的空闲 bot 身体"（旁观/掉线托管）
 
 // 1.3.0：玩家特感攻击"守护中的 AI 生还者"时的提示（提示音 + 三渠道文字）
 ConVar g_cvWarn;			// 总开关
@@ -232,7 +274,7 @@ int		g_iOrigGlowRange[MAXPLAYERS + 1];	// 进入守护前的 m_nGlowRange
 int		g_iOrigGlowRangeMin[MAXPLAYERS + 1];	// 进入守护前的 m_nGlowRangeMin
 int		g_iOrigTakeDamage[MAXPLAYERS + 1];		// 进入守护前的 m_takedamage（1.2.2：守护期间引擎层免伤）
 float	g_fTempStash[MAXPLAYERS + 1];		// 守护开始时冻结的虚血值
-int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动救起次数（-1 = 不限次数）
+int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动起身次数（-1 = 不设每回合上限）
 float	g_fTestGlowUntil[MAXPLAYERS + 1];	// 调试用：到该时刻前强制给该客户端上轮廓
 bool	g_bSpeedApplied[MAXPLAYERS + 1];	// 1.2.0：本插件是否给该客户端写过移速（退出/失效时要还原）
 
@@ -242,6 +284,10 @@ bool	g_bSpeedApplied[MAXPLAYERS + 1];	// 1.2.0：本插件是否给该客户端�
 float	g_fReviveAt[MAXPLAYERS + 1];
 bool	g_bReviveCounted[MAXPLAYERS + 1];
 float	g_fNotifyNextAt;					// 1.4.0：救起提示的全局节流时间戳
+
+// 1.5.0：起身后的极短伤害保护窗口（REVIVE_PROTECT_TIME）。
+// 0 / 过期 = 没有保护；只有一个时间戳，到点自动失效，不会残留状态。
+float	g_fReviveProtectUntil[MAXPLAYERS + 1];
 
 float	g_fWarnLast[MAXPLAYERS + 1];		// 1.3.0：该特感玩家上次收到"打不动"提示的游戏时间
 char	g_sWarnSound[PLATFORM_MAX_PATH];	// 1.3.0：解析后的提示音路径（空 = 不播放）
@@ -276,7 +322,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动救起（1.4.0 起默认无限次，救起后倒地次数清零，改为轮询所有生还者状态并在倒地/挂边时立刻救起）；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动起身（默认不设每回合上限，起身后倒地次数清零，轮询所有生还者状态并在倒地/挂边时立刻起身）；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌；1.5.0 跳过有真人主控的空闲 bot 身体（旁观/掉线托管不再白拿起身与守护）、起身血量默认 1 点、起身提示文案去掉无限的口气",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -382,22 +428,32 @@ public void OnPluginStart()
 
 	g_cvReviveTimes = CreateConVar("l4d2_bot_guard_revive_times",
 		"-1",
-		"AI 生还者每回合可自动救起次数：-1=不限次数（默认，无限救起）；0=关闭自动救起；>0=每回合上限.",
+		"AI 生还者每回合可自动起身的次数上限：-1=不设每回合上限（默认）；0=关闭自动起身；>0=每回合上限。起身后倒地次数清零，与这里的次数上限无关.",
 		FCVAR_NOTIFY, true, -1.0, true, 99.0);
 
+	// 1.5.0：默认血量 30 -> 1（用户要求"至少将人机自动起身的血量改成 1 点"）。
+	// 下界仍是 1：写 0 会让起身的人立刻死亡，不如直接用 revive_times=0 关掉。
 	g_cvReviveHealth = CreateConVar("l4d2_bot_guard_revive_health",
-		"30",
-		"自动救起后设置的血量.",
+		"1",
+		"自动起身后设置的血量（实血；虚血会被一起清 0，保证起身瞬间总血量就是该值）. 默认 1 = 起身后只剩 1 点血.",
 		FCVAR_NOTIFY, true, 1.0, true, 100.0);
 
 	g_cvReviveDelay = CreateConVar("l4d2_bot_guard_revive_delay",
 		"1.0",
-		"AI 生还者倒地后延迟多少秒自动救起.",
+		"AI 生还者倒地后延迟多少秒自动起身.",
 		FCVAR_NOTIFY, true, 0.0, true, 30.0);
 
 	g_cvNotify = CreateConVar("l4d2_bot_guard_notify",
 		"1",
-		"自动救起时是否在聊天框提示. 0=关闭, 1=启用.",
+		"自动起身时是否在聊天框提示. 0=关闭, 1=启用.",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.5.0：跳过"有真人主控的空闲 bot 身体"（倒地后自己切旁观 / 掉线被托管的身体）。
+	// 这类身体虽然 IsFakeClient()==true，但归属于某个真人：替他起身 = 玩家旁观一下再
+	// 加回来就白赚一次起身（还会白拿一段守护），所以自动起身与守护都跳过它。
+	g_cvSkipIdleBodies = CreateConVar("l4d2_bot_guard_skip_idle_bodies",
+		"1",
+		"跳过「有真人主控的空闲 bot 身体」（玩家倒地后自己切旁观/掉线，身体被引擎交给 bot 顶着）. 1=跳过(默认): 不替这种身体自动起身、也不给它免伤/免控/发光, 玩家重新加入不会白拿起身; 0=旧行为(1.4.0). 注意: 真人彻底掉线(userid 失效)后该身体重新算无人接管, 照常兜底起身.",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// 1.3.0：玩家特感打守护中的 bot 时，提示音 + 三渠道文字
@@ -535,6 +591,8 @@ public void OnMapStart()
 		// 1.4.0：轮询式救起的计划全部作废
 		g_fReviveAt[i] = 0.0;
 		g_bReviveCounted[i] = false;
+		// 1.5.0：起身保护窗口用的是 GetGameTime()（换图归零），必须一起清掉
+		g_fReviveProtectUntil[i] = 0.0;
 	}
 
 	g_fNotifyNextAt = 0.0;
@@ -596,6 +654,8 @@ public void OnClientPutInServer(int client)
 	// 1.4.0：轮询式救起的计划
 	g_fReviveAt[client] = 0.0;
 	g_bReviveCounted[client] = false;
+	// 1.5.0：起身保护窗口跟着客户端一起重置
+	g_fReviveProtectUntil[client] = 0.0;
 
 	// 每个客户端都要挂伤害钩子（r ygive 同款做法：进服即挂）
 	SDKHook(client, SDKHook_OnTakeDamage, Hook_OnTakeDamage);
@@ -612,6 +672,7 @@ public void OnClientDisconnect(int client)
 	g_fWarnLast[client] = 0.0;
 	g_fReviveAt[client] = 0.0;
 	g_bReviveCounted[client] = false;
+	g_fReviveProtectUntil[client] = 0.0;
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -686,7 +747,13 @@ void StartProtectTimer()
       玩家的"挂边坠落卡原地无敌"就是缺了这一步：倒地/坠落时 m_takedamage 还是 0、
       血量还被回锁着，引擎的死亡流程走不完，人就永远卡在那里。这条检查必须在
       伤害/血量回锁之前做，绝不能省。
-   ④ 轮询救起 —— 扫描所有生还者状态（倒地 / 挂边），到点立刻救起（见 ProcessBotRevives）。 */
+   ④ 轮询救起 —— 扫描所有生还者状态（倒地 / 挂边），到点立刻救起（见 ProcessBotRevives）。
+
+   1.5.0：③ 后面再加一道 ⑤ —— 用 ShouldGuard 复核"这具身体现在到底该不该被守护"。
+   新出现的失效情形是"身体已经有真人主控"（IsIdleBody）：玩家倒地后自己切旁观 / 掉线，
+   身体交给 bot 顶着，此时给免伤就是让玩家旁观一下白拿保护；0.1s 的粒度保证
+   "玩家一切旁观，无敌在 0.1 秒内就撤掉"，不会留一个无敌的空闲身体在场上。
+   用的是与 Timer_Tick 同一个 ShouldGuard，两条线程口径不会打架。 */
 public Action Timer_Protect(Handle timer)
 {
 	if (!g_cvEnabled.BoolValue)
@@ -702,6 +769,18 @@ public Action Timer_Protect(Handle timer)
 
 		// 1.4.0 ③：硬保险。注意顺序：先判断要不要退出守护，再谈解控/回血。
 		if (!IsClientInGame(i) || !IsPlayerAlive(i) || IsIncapacitated(i) || IsOnLedge(i))
+		{
+			LeaveGuard(i);
+			continue;
+		}
+
+		// 1.5.0 ⑤：用 ShouldGuard 再做一道 0.1s 级的复核（1.4.0 只在 0.9s 的 Timer_Tick 里查）。
+		//   新增的失效情形有两个，都是"身体已经有真人主控，不该再白给无敌"：
+		//     ① 空闲身体：玩家倒地后自己切旁观 / 掉线，身体交给 bot 顶着（IsIdleBody）；
+		//     ② 玩家已经重新加入并接管（IsFakeClient 变 false，ShouldGuard 里直接排除）。
+		//   顺手也能把"血量回升到阈值以上"的守护在 0.1s 内撤掉，与 Timer_Tick 的判定完全一致，
+		//   不会出现两条口径打架。
+		if (!ShouldGuard(i))
 		{
 			LeaveGuard(i);
 			continue;
@@ -1215,6 +1294,14 @@ float GetBotSpeedScale()
 }
 
 // 是否该给该生还者上移速：存活、未倒地、未挂边、未被真人接管
+//
+// 1.5.0 取舍（用户要求"移速那套保持原样，别扩大改动面"）：这里**故意不**加 IsIdleBody。
+//   "有真人主控的空闲身体"照样吃 1.5 倍移速，理由：
+//     ① 移速是"所有未接管生还者"的统一调整，玩家重新接管后身体按真人自己的速度走，
+//        旁观期间也不会把任何收益转移给玩家（不像免伤/自动起身那样能被"旁观一下"兑现）；
+//     ② 1.2.0 的移速状态（g_bSpeedApplied）有自己独立的还原逻辑，动它要连带改
+//        UpdateBotSpeed 的失效路径，风险与收益不成比例。
+//   所以自动起身 / 守护（免伤/免控/发光）排除空闲身体，移速不排除 —— 这是刻意的差异。
 bool ShouldApplyBotSpeed(int client)
 {
 	if (!g_cvEnabled.BoolValue)
@@ -1436,7 +1523,11 @@ public Action Cmd_WarnTest(int client, int args)
 }
 
 // 是否应该进入守护状态
-bool ShouldGuard(int client)
+// bIgnoreIdleBody：唯一给 1.3.3 的"接管时打断继承吃药"用的口子 —— 那件事发生在
+// player_bot_replace（玩家离开身体 / 切旁观）的瞬间，判断依据应该是"这具身体的血量
+// 够不够守护"，与"它现在是不是空闲身体"无关；否则闲置身体会继承玩家手里的药并把药吃掉。
+// 其它调用点（UpdateGuardSet / Timer_Protect / Timer_Tick）一律用默认 false。
+bool ShouldGuard(int client, bool bIgnoreIdleBody = false)
 {
 	if (!g_cvEnabled.BoolValue)
 		return false;
@@ -1465,6 +1556,16 @@ bool ShouldGuard(int client)
 	//   m_takedamage=0 + 血量回锁会把死亡流程冻住 —— 这就是玩家反馈的
 	//   "挂边的 bot 卡在原地无敌，直到有人接管才结束，接管瞬间就死"。
 	if (IsOnLedge(client))
+		return false;
+
+	// 1.5.0（需求1）：有真人主控的空闲身体（玩家倒地后自己切旁观 / 掉线托管）不给守护。
+	//   理由与自动起身相同：替它免伤 = 让玩家"旁观 -> 再加入"白拿一段无敌。
+	//   玩家重新加入并接管后 IsFakeClient 变 false，上面那道判断已经先排除了，
+	//   因此接管后不会出现"又补一次守护"的情况。
+	//   注意：这里**只**管守护（免伤/免控/发光）；移速那套在 ShouldApplyBotSpeed 里
+	//   保持原样，不看 IsIdleBody（见 IsIdleBody 上方的取舍说明）。
+	//   bIgnoreIdleBody 只给"接管瞬间打断继承吃药"用，见函数头注释。
+	if (!bIgnoreIdleBody && IsIdleBody(client))
 		return false;
 
 	return GetTotalHealth(client) <= g_cvHealth.IntValue;
@@ -1611,13 +1712,22 @@ int ClampInt(int iValue)
 public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage,
 	int &damagetype, int &weapon, float damageForce[3], float damagePosition[3], int damagecustom)
 {
-	if (!g_cvInvincible.BoolValue || victim <= 0 || victim > MaxClients)
+	if (victim <= 0 || victim > MaxClients)
 		return Plugin_Continue;
 
 	// 已在守护状态：任何伤害一律吃掉，虚血继续冻结（保持 1.1.0 的原有逻辑）
 	// 1.2.0 起不再有"AI 数量超限就整段失效"的开关，改由名额本身控制谁能进守护
-	if (g_bGuarded[victim])
+	if (g_cvInvincible.BoolValue && g_bGuarded[victim])
 	{
+		// 1.5.0：这具身体如果已经变成"有真人主控的空闲身体"（玩家倒地后自己切旁观 / 掉线），
+		// 先退出守护再放行这次伤害 —— 否则"旁观一下"就能让身体一直无敌下去。
+		// （Timer_Protect 的 0.1s 复核也会撤，这里多一道，保证伤害路径上绝不吃错守护。）
+		if (IsIdleBody(victim) || !IsFakeClient(victim))
+		{
+			LeaveGuard(victim);
+			return Plugin_Continue;
+		}
+
 		// 1.4.0：守护中的人若已经进入倒地/挂边/坠落状态，先退出守护再放行这次伤害，
 		// 否则会把引擎的死亡流程一起吃掉（卡原地无敌）。
 		if (IsIncapacitated(victim) || IsOnLedge(victim))
@@ -1632,6 +1742,29 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 		damage = 0.0;
 		return Plugin_Handled;
 	}
+
+	// 1.5.0：自动起身后的极短保护窗口（REVIVE_PROTECT_TIME，见 ReviveBotNow）。
+	//   起身血量默认只有 1 点，同一波尸潮里"起身 -> 立刻再被摸倒 -> 又起身"会变成循环
+	//   （聊天框反复刷提示、人机在地上反复抽搐）。这里只挡"这一下会当场把他再打倒"的
+	//   伤害：不吞小伤害，也不写 m_takedamage，所以不是第二套无敌；
+	//   窗口只是一个到期时间戳，到点自动失效；玩家重新接管身体后 IsGuardTarget 返回 false。
+	//   条件顺序按"最便宜、最常为假"排：g_fReviveProtectUntil 几乎总是 0，先短路掉，
+	//   不给每一发子弹都去读血量/属性。
+	//   位置说明：它排在守护分支之后 —— 已守护的 bot 走上面那条（含"打不动"提示），
+	//   互不干扰；同时又排在 l4d2_bot_guard_invincible 之外，因为它是"自动起身"这条
+	//   需求自带的防循环措施，与"免伤"开关无关（关掉免伤也照样防这 1 秒的"起身即倒"）。
+	if (g_cvEnabled.BoolValue
+		&& g_fReviveProtectUntil[victim] > 0.0 && GetGameTime() < g_fReviveProtectUntil[victim]
+		&& damage > 0.0 && IsGuardTarget(victim)
+		&& !IsIncapacitated(victim) && !IsOnLedge(victim)
+		&& damage >= float(GetTotalHealth(victim)))
+	{
+		damage = 0.0;
+		return Plugin_Handled;
+	}
+
+	if (!g_cvInvincible.BoolValue)
+		return Plugin_Continue;
 
 	// 1.2.0 需求4："保命"判定
 	// 只有非玩家操控、存活未倒地的生还者才可能被保命
@@ -1805,31 +1938,39 @@ bool BlockControlOn(int victim)
 }
 
 // ============================================================================
-// 1.4.0：自动救起（轮询式，默认不限次数）
+// 1.4.0：自动起身（轮询式；次数默认 -1 = 不设每回合上限）
 //
 // 与旧实现的区别（这三点都是玩家反馈逼出来的）：
-//   ① 旧实现"每回合每人只有 1 次"，次数用完倒地就只能流血死 —— 现在默认无限（-1）。
+//   ① 旧实现"每回合每人只有 1 次"，次数用完倒地就只能流血死 —— 现在默认 -1 = 不设每回合上限。
 //   ② 旧实现只在 player_incapacitated 事件里排一个一次性 timer：事件漏接（插件晚加载、
 //      事件在插件就绪前发生）、或者人是"挂边"而不是"倒地"，就完全不会救。
 //      现在改成由 0.1s 的保护线程持续扫描**所有生还者**的状态 —— 只要看到
 //      "倒地 / 挂边" 且是本插件该管的 bot，就走救起流程，不依赖任何事件。
 //   ③ 旧实现救起后不管"倒地次数"，救起来的人仍然算"已经倒地过"（下一次倒地可能直接
-//      进黑白甚至直接死）。现在救起时把 m_currentReviveCount 与 m_bIsOnThirdStrike
+//      进黑白甚至直接死）。现在起身时把 m_currentReviveCount 与 m_bIsOnThirdStrike
 //      一起清零 = 当作没倒地过。
 //
+// 1.5.0：目标判定（IsGuardCandidate）里排除了"有真人主控的空闲身体"（IsIdleBody），
+//        所以"倒地 -> 自己切旁观 -> 身体被 bot 顶着 -> 插件替他起身 -> 再加入游戏"这条
+//        白拿起身的路子没有了。候选一旦失效（含玩家重新接管，IsFakeClient 变 false），
+//        下面第一道判断就会把 g_fReviveAt / g_bReviveCounted 清掉，不会"排期完再补一次"。
+//
 // 状态机（每个生还者各自一份）：
-//   g_fReviveAt      计划救起的时间；发现"需要救起"时排期（= 现在 + revive_delay）
-//   g_bReviveCounted 本次倒地/挂边是否已经扣过次数；救起失败会重试，重试不重复扣
+//   g_fReviveAt           计划起身的时间；发现"需要起身"时排期（= 现在 + revive_delay）
+//   g_bReviveCounted      本次倒地/挂边是否已经扣过次数；起身失败会重试，重试不重复扣
+//   g_fReviveProtectUntil 起身成功后的极短伤害保护窗口（1.5.0，默认 1 秒，到期自动失效）
 // ============================================================================
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-	// 回合开始时重置每名客户端的自动救起次数（-1 = 不限次数）
+	// 回合开始时重置每名客户端的自动救起次数（-1 = 不设每回合上限）
 	for (int i = 0; i <= MaxClients; i++)
 	{
 		g_iReviveLeft[i] = g_cvReviveTimes.IntValue;
 		g_fReviveAt[i] = 0.0;
 		g_bReviveCounted[i] = false;
+		// 1.5.0：起身保护窗口不跨回合（它只有 1 秒，跨回合保留没有意义还会误挡）
+		g_fReviveProtectUntil[i] = 0.0;
 	}
 
 	g_fNotifyNextAt = 0.0;
@@ -1846,7 +1987,7 @@ bool ProcessBotRevives()
 	if (!g_cvEnabled.BoolValue)
 		return false;
 
-	// 0 = 关闭自动救起
+	// 0 = 关闭自动起身
 	if (g_cvReviveTimes.IntValue == 0)
 		return false;
 
@@ -1860,7 +2001,13 @@ bool ProcessBotRevives()
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		// 不是本插件该管的生还者（真人 / 已接管 / 已死亡 / 非生还者队）→ 清状态
+		// 不是本插件该管的生还者（真人 / 已接管 / 已死亡 / 非生还者队 / 1.5.0 有真人主控的空闲身体）
+		// → 清状态，不救。
+		// 1.5.0：这条同时是"接管前排期、接管后补起身"的封堵点 —— 玩家重新加入接管后
+		//   IsFakeClient 变 false，候选立刻失效，排期（g_fReviveAt）与扣次标记（g_bReviveCounted）
+		//   在这里被清零，绝不会隔一帧再补一次起身。
+		// 注意顺序：这一道必须先于 NeedsReviveNow —— 它内部会读 m_isIncapacitated 等
+		// Prop_Send，对"已经不在游戏中 / 非生还者队"的索引读属性是错的，不能拿它当前置过滤。
 		if (!IsGuardCandidate(i))
 		{
 			g_fReviveAt[i] = 0.0;
@@ -1868,11 +2015,20 @@ bool ProcessBotRevives()
 			continue;
 		}
 
-		// 现在不需要救起（站着 / 或者已经掉边坠落交给引擎）→ 结束这一轮，清状态
+		// 现在不需要起身（站着 / 或者已经掉边坠落交给引擎）→ 结束这一轮，清状态
 		if (!NeedsReviveNow(i))
 		{
 			g_fReviveAt[i] = 0.0;
 			g_bReviveCounted[i] = false;
+			continue;
+		}
+
+		// 1.5.0：起身保护窗口内不重复起身。正常情况下窗口内打不倒他；
+		// 万一被不经过 OnTakeDamage 的伤害（例如酸液）打回倒地，也至少隔一个窗口再起身，
+		// 保证"起身-倒地"的频率有上界。（窗口是时间戳，过期即失效，不会卡住救起）
+		if (g_fReviveProtectUntil[i] > 0.0 && fNow < g_fReviveProtectUntil[i])
+		{
+			g_fReviveAt[i] = 0.0;
 			continue;
 		}
 
@@ -1923,9 +2079,23 @@ bool ProcessBotRevives()
 // 注意收尾（血量 / 倒地次数）是**无条件**写的，不等复查通过：
 // 引擎有时要下一帧才清 m_isIncapacitated，如果等复查通过才写，这一次救起的收尾就会漏掉
 // （人已经站起来，但血还是倒地时的 1，倒地次数也没清）。重复写这些属性是无害的。
+//
+// 1.5.0 顺序说明（不要调换）：L4D_ReviveSurvivor -> SetEntityHealth -> 清虚血 ->
+//   清 m_currentReviveCount / m_bIsOnThirdStrike -> 开保护窗口。
+//   引擎在 ReviveSurvivor 内部会按"黑白/第三人称打击"的规则重写这几个值，所以清零必须
+//   放在它之后；这两个属性都是 Prop_Send（netprop-dump：m_currentReviveCount 8bit、
+//   m_bIsOnThirdStrike 1bit），后者是位属性，必须显式传 size=1。
 bool ReviveBotNow(int client)
 {
 	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+		return false;
+
+	// 1.5.0 最后一道闸（需求1）：真到了"动手拉人"的这一刻，再复核一次这具身体
+	//   还归不归本插件管 —— 玩家可能刚好在这一帧重新加入了（IsFakeClient 变 false），
+	//   也可能身体已经被挂机托管（IsIdleBody）。两种都不许替他把人拉起来。
+	//   返回 false 后调用方会在 REVIVE_RETRY_INTERVAL 后再试，下一轮候选判定就会把
+	//   g_fReviveAt / g_bReviveCounted 清掉，因此不会出现"接管后补一次起身"。
+	if (!IsFakeClient(client) || IsIdleBody(client))
 		return false;
 
 	// Left4DHooks: 让倒地/挂边生还者起身
@@ -1941,7 +2111,12 @@ bool ReviveBotNow(int client)
 
 	SetEntityHealth(client, iHealth);
 
-	// 1.4.0 需求：救起后"当作没倒地过"。
+	// 1.5.0：起身血量默认改成 1 点。只写实血不够 —— "总血量"是本插件 GetTotalHealth
+	// 的口径（实血 + 虚血），引擎起身时会留一段虚血，虚血留着的话"1 点血"就只是名义上的
+	// 1 点（总血可能还是几十）。这里把虚血一起清 0，保证起身瞬间真的是 1 点血。
+	L4D_SetTempHealth(client, 0.0);
+
+	// 1.4.0 需求：起身后"当作没倒地过"。
 	//   m_currentReviveCount  已经倒地过几次 —— 决定下一次倒地是不是"第三次打击"
 	//   m_bIsOnThirdStrike    第三次打击（黑白 / 再倒直接死）的标记位
 	// 两个都要清：只清前者的话黑白画面和"再倒就死"的判定还会留着。
@@ -1952,12 +2127,24 @@ bool ReviveBotNow(int client)
 	if (NeedsReviveNow(client))
 		return false;
 
+	// 1.5.0：起身成功 -> 开一个极短的伤害保护窗口（默认 1 秒）。
+	// 血量 1 点 + 0.1s 轮询 = 起身那一瞬间被摸到就立刻再倒地，再被轮询到又起身，
+	// 形成"起身-倒地"循环（聊天反复刷提示、人机原地抽搐）。窗口只挡"这一下会当场把他
+	// 再打倒"的伤害（见 Hook_OnTakeDamage），不吞小伤害、不写 m_takedamage，
+	// 所以不是第二套无敌；它只是 1 个到期时间戳，到点自动失效，也不需要额外的清理逻辑。
+	g_fReviveProtectUntil[client] = GetGameTime() + REVIVE_PROTECT_TIME;
+
 	NotifyBotRevived(client);
 
 	return true;
 }
 
-// 1.4.0：救起提示（全局节流 REVIVE_NOTIFY_COOLDOWN，无限救起时不会刷屏）
+// 1.4.0：起身提示（全局节流 REVIVE_NOTIFY_COOLDOWN，次数不设上限时不会刷屏）。
+// 1.5.0：文案去掉"无限/不限"的口径（玩家反馈"现在是无限起身"，旧文案读起来像无限）。
+//   统一口径：
+//     - 次数不设上限（cvar < 0）："[提示] AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零）。"
+//     - 有限次数还有剩余的：追加"本回合剩余自动起身 %d 次"
+//     - 有限次数已用完的：追加"本回合自动起身次数已用完"（这一次是最后一次）
 void NotifyBotRevived(int client)
 {
 	if (!g_cvNotify.BoolValue)
@@ -1970,18 +2157,25 @@ void NotifyBotRevived(int client)
 
 	g_fNotifyNextAt = fNow + REVIVE_NOTIFY_COOLDOWN;
 
+	// 起身后的血量就是 cvar 的值（下界 1），文案里直接报出来，方便服主对照
+	int iHealth = g_cvReviveHealth.IntValue;
+	if (iHealth < 1)
+		iHealth = 1;
+
 	if (g_cvReviveTimes.IntValue < 0)
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（倒地次数已清零）。", client);
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零）。",
+			client, iHealth);
 	}
 	else if (g_iReviveLeft[client] > 0)
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合剩余自动救起 %d 次，倒地次数已清零）。",
-			client, g_iReviveLeft[client]);
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零；本回合剩余自动起身 %d 次）。",
+			client, iHealth, g_iReviveLeft[client]);
 	}
 	else
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动救起（本回合自动救起次数已用完，倒地次数已清零）。", client);
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零；本回合自动起身次数已用完）。",
+			client, iHealth);
 	}
 }
 
@@ -2067,7 +2261,10 @@ public void Event_PlayerBotReplace(Event event, const char[] name, bool dontBroa
 		return;
 
 	// 只处理"接管后应当被守护"的人机（总血量已经掉到阈值以下的那批）
-	if (!ShouldGuard(bot))
+	// 1.5.0：这里必须 bIgnoreIdleBody=true —— player_bot_replace 的这一刻，身体刚刚变成
+	// "有真人主控的空闲身体"，若跟着 IsIdleBody 一起跳过，玩家临走前手里正在吃的药/针
+	// 会被 bot 服完（1.3.3 修过的问题会回来）。判断依据只该是"血量低到值得守护"。
+	if (!ShouldGuard(bot, true))
 		return;
 
 	RefreshHeldHealItem(bot);
@@ -2112,7 +2309,79 @@ void RefreshHeldHealItem(int client)
 // 工具
 // ============================================================================
 
-// 是否是"非玩家操控的生还者"（自动救起的目标）
+// 1.5.0：判断"这具身体虽然现在是 bot，但其实有真人主控"（= 空闲/托管身体）。
+//
+// 场景（需求1 的根因）：真人生还者倒地后自己切旁观（team 1）或掉线，引擎会把他的身体
+// 交给一个 bot 顶着 —— 这一刻该 player 实体满足 IsFakeClient()==true，但它的
+// m_humanSpectatorUserID（Prop_Send，integer/bits 32，netprop-dump 里
+// SurvivorBot(DT_SurvivorBot) 那一项，offset 17188）会记下那个真人的 userid，
+// 于是角色头顶显示"闲置：某某"。
+// 旧逻辑只认"fake client + 生还者队 + 倒地"，于是照样替他起身 —— 玩家再加入游戏重新
+// 接管身体时，人已经是站着的，等于"旁观一下就能白起身"。
+//
+// 判定手法与本仓库既有写法保持一致（l4d2_player_suicide.sp 的 IsClientIdle /
+// IsGetBotOfIdlePlayer、l4d2_fix_team_shuffle_edi.sp 的 HasIdlePlayer、以及
+// Left4DHooks 的 L4D_GetIdlePlayerOfBot 都是同一套）：
+//   ① HasEntProp 先探测：m_humanSpectatorUserID 只在"正被托管"的 player 实体上才有，
+//      未托管的 bot 直接读会抛 'Property "m_humanSpectatorUserID" not found'；
+//   ② GetClientOfUserId 把 userid 换回客户端索引；
+//   ③ 还要确认"这个索引确实还是个真人客户端"（>0、在游戏中、!IsFakeClient），
+//      并且他此刻**在旁观队**（= 人不在操控任何身体，身体交给 AI 顶着）。
+//      这样真人**彻底掉线**（userid 失效 -> GetClientOfUserId 返回 0）时判定不成立，
+//      "没人接管的 bot 倒地就兜底起身"这个老用途完全不受影响。
+//
+//   实际取属主用的是 Left4DHooks 的 stock `L4D_GetIdlePlayerOfBot(bot)`
+//   （left4dhooks_stocks.inc:525，官方注释 "Returns idle survivor player of survivor bot"）——
+//   它内部就是 GetEntityNetClass + FindSendPropInfo("m_humanSpectatorUserID") + GetClientOfUserId，
+//   与本仓库手写的那几份（l4d2_player_suicide.sp 的 IsClientIdle、l4d2_fix_team_shuffle_edi.sp
+//   的 HasIdlePlayer）是同一套判定，找不到时返回 -1，不会读不存在的属性。
+//   取到属主之后仍然自己复核"在游戏中 / 不是 bot / 在旁观队"，不直接信这个返回值。
+//
+// 取舍（为什么守护/起身排除它、移速不排除）：
+//   本 cvar 的目标是"别让玩家靠旁观白拿东西"。自动起身和守护（免伤/免控/发光）都是
+//   **实打实的收益**，给了就等于让玩家"旁观 -> 再加入"白赚一次起身 + 一段无敌，所以必须排除。
+//   移速（m_flLaggedMovementValue）不一样：它是"所有未接管生还者"的统一调整，玩家重新
+//   接管后身体照旧按真人自己的速度走，旁观期间也不会把任何收益转移给玩家；
+//   而且 1.2.0 的移速逻辑写在 ShouldApplyBotSpeed 里、与守护名额互不相干 ——
+//   为了不扩大改动面，这里保持原样（空闲身体照样吃移速设置）。
+bool IsIdleBody(int bot)
+{
+	// cvar = 0 时完全回到 1.4.0 的行为（方便服主临时对照）
+	if (!g_cvSkipIdleBodies.BoolValue)
+		return false;
+
+	if (bot <= 0 || bot > MaxClients || !IsClientInGame(bot))
+		return false;
+
+	// 只有"身体现在是 bot"时才有托管这回事；真人正在操控的身体不走这条路径
+	if (!IsFakeClient(bot))
+		return false;
+
+	// Left4DHooks 的 stock：取"这具 bot 身体是哪个闲置玩家的"
+	// （left4dhooks_stocks.inc:525 L4D_GetIdlePlayerOfBot，内部就是
+	//   FindSendPropInfo("m_humanSpectatorUserID") + GetClientOfUserId，找不到返回 -1）
+	int iOwner = L4D_GetIdlePlayerOfBot(bot);
+
+	if (iOwner <= 0 || iOwner > MaxClients || !IsClientInGame(iOwner))
+		return false;
+
+	// 属主必须还是个真人（不是另一个 bot），而且不能是这具身体自己
+	if (iOwner == bot || IsFakeClient(iOwner))
+		return false;
+
+	// 属主此刻在旁观队（= 人不在操控任何身体，身体交给 AI 顶着：
+	// 无论是自己按旁观 / 挂机闲置，还是倒地后切旁观，引擎都会把 m_humanSpectatorUserID
+	// 指到他身上）。与本仓库既有写法一致（l4d2_fix_team_shuffle_edi.sp 的 HasIdlePlayer：
+	// owner>0 && IsClientInGame && !IsFakeClient && GetClientTeam(owner)==TEAM_SPECTATOR；
+	// l4d2_player_suicide.sp 的 IsGetBotOfIdlePlayer 用 IsClientIdle(i)==client 反查，本质相同）。
+	// 真人彻底掉线时 userid 失效 -> GetClientOfUserId 返回 0，上面那步已经放过，
+	// 所以"没人接管的 bot 倒地就兜底起身"这个老用途完全不受影响。
+	// 这里**不**接受 team 2：属主若还在生还者队，说明那条托管链接是残留
+	// （l4d_superversus.sp 的 ClearIdleLink 就是在清这种残留），不该因此少救一个真 AI。
+	return GetClientTeam(iOwner) == TEAM_SPECTATOR;
+}
+
+// 是否是"非玩家操控的生还者"（自动起身的目标）
 bool IsGuardTarget(int client)
 {
 	if (client <= 0 || client > MaxClients)
@@ -2127,7 +2396,17 @@ bool IsGuardTarget(int client)
 	if (!IsFakeClient(client))
 		return false;
 
-	return IsPlayerAlive(client);
+	if (!IsPlayerAlive(client))
+		return false;
+
+	// 1.5.0：有真人主控的空闲身体不算"无人接管的生还者"。
+	// 这里与 IsGuardCandidate 必须同时排除，否则"保命"（OnTakeDamage）与救起保护窗口
+	// 会绕开自动起身那道门，继续把无敌/保护送给可被玩家重新接管的身体。
+	// 放在"存活"判断之后：先做最便宜的检查，再碰 netprop。
+	if (IsIdleBody(client))
+		return false;
+
+	return true;
 }
 
 bool IsIncapacitated(int client)
@@ -2156,7 +2435,16 @@ bool IsOnLedge(int client)
 }
 
 // 1.4.0：守护候选 —— 只看"这个生还者是不是本插件该管的（非玩家操控的存活生还者）"，
-// 不看血量 / 倒地 / 挂边。倒地、挂边的人要做的是"立刻救起"而不是"免伤"。
+// 不看血量 / 倒地 / 挂边。倒地、挂边的人要做的是"立刻起身"而不是"免伤"。
+//
+// 1.5.0（需求1）：再排除"有真人主控的空闲身体"（IsIdleBody）。
+//   两种时机都覆盖：
+//     ① 真人正在旁观：身体是 fake client（IsFakeClient 为 true），但 m_humanSpectatorUserID
+//        指向那个真人 -> IsIdleBody 返回 true -> 这里排除，不替他起身、也不给他守护；
+//     ② 真人已经重新加入并接管：IsFakeClient 变 false -> 上面那道判断直接排除；
+//        另外 ProcessBotRevives 的候选失效分支会把 g_fReviveAt / g_bReviveCounted 清零，
+//        所以"接管前一帧刚排好期"也不会在接管后补一次起身（见 ProcessBotRevives 注释）。
+//   cvar l4d2_bot_guard_skip_idle_bodies = 0 时 IsIdleBody 恒 false，完全回到 1.4.0 行为。
 bool IsGuardCandidate(int client)
 {
 	if (!g_cvEnabled.BoolValue)
@@ -2175,7 +2463,14 @@ bool IsGuardCandidate(int client)
 	if (!IsFakeClient(client))
 		return false;
 
-	return IsPlayerAlive(client);
+	if (!IsPlayerAlive(client))
+		return false;
+
+	// 1.5.0：还是 fake client，但其实是"有真人主控的空闲身体"（旁观 / 掉线托管）-> 同样排除
+	if (IsIdleBody(client))
+		return false;
+
+	return true;
 }
 
 // 1.4.0：这个 bot 现在要不要救起 —— 倒地 或 挂边。
@@ -2189,7 +2484,7 @@ bool NeedsReviveNow(int client)
 	return IsIncapacitated(client) || IsHangingFromLedge(client);
 }
 
-// 1.4.0：还有没有救起次数。cvar < 0 = 不限次数（无限救起，默认）
+// 1.4.0：还有没有起身次数。cvar < 0 = 不设每回合上限（1.5.0 起文案不再叫"不限/无限"）
 bool HasReviveLeft(int client)
 {
 	if (g_cvReviveTimes.IntValue < 0)
@@ -2213,6 +2508,21 @@ int GetTotalHealth(int client)
 	return iReal + RoundToNearest(fTemp);
 }
 
+// 1.5.0：当前场上有几个"有真人主控的空闲身体"（只给 sm_botguard_status 做读数用）。
+// 判定与 IsIdleBody 完全一致，所以这里的数字就是被自动起身 / 守护排除掉的那批身体。
+int CountIdleBodies()
+{
+	int iCount = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsIdleBody(i))
+			iCount++;
+	}
+
+	return iCount;
+}
+
 // ============================================================================
 // 排查 / 验证命令（管理员）
 // ============================================================================
@@ -2220,18 +2530,19 @@ int GetTotalHealth(int client)
 // sm_botguard_status：把插件"眼里的状态"全部打印出来。
 // 之前出现"看不到光"时只能猜，这条命令让排查变成读数：
 //   - 存活未接管生还者数量 / 倒地人数 / 阶梯值 / 可守护数 / 当前守护名单 / 阈值
-//   - 每个 bot 的实血、虚血、总血、是否被接管、移速值、守护状态、剩余救起次数
+//   - 每个 bot 的实血、虚血、总血、是否被接管、是否空闲身体（1.5.0）、移速值、守护状态、剩余起身次数
 //   - 发光 netprop 当前值 + HasEntProp 结果（false 说明该客户端读不到属性表，但插件仍会照写）
 public Action Cmd_Status(int client, int args)
 {
-	// 1.4.0：自动救起次数改成"无限时显示不限"（cvar = -1）
+	// 1.4.0：自动起身次数改成"cvar < 0 时不设上限"的写法
+	// 1.5.0：文案从"不限(无限救起)"改成"不设上限"（玩家反馈"现在是无限起身"）
 	char sReviveTimes[32];
 	if (g_cvReviveTimes.IntValue < 0)
-		strcopy(sReviveTimes, sizeof(sReviveTimes), "不限(无限救起)");
+		strcopy(sReviveTimes, sizeof(sReviveTimes), "不设上限");
 	else
 		IntToString(g_cvReviveTimes.IntValue, sReviveTimes, sizeof(sReviveTimes));
 
-	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 自动救起=%s | 守护上限=%d（按未倒地比例分配） | 移速 %.0f/%.0f = x%.2f",
+	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 每回合起身上限=%s | 守护上限=%d（按未倒地比例分配） | 移速 %.0f/%.0f = x%.2f",
 		PLUGIN_VERSION,
 		g_cvEnabled.IntValue,
 		g_cvHealth.IntValue,
@@ -2246,6 +2557,16 @@ public Action Cmd_Status(int client, int args)
 		g_cvBotSpeed.FloatValue,
 		g_cvBaseSpeed.FloatValue,
 		GetBotSpeedScale());
+
+	// 1.5.0：空闲身体排除（需求1）的生效条件 + 现场读数。
+	//   空闲身体 = 有真人主控的 bot 身体（玩家倒地后自己切旁观 / 掉线，身体被引擎托管）。
+	//   这些身体的 idle=1，插件不会替它们起身、也不给守护；移速照旧（见 ShouldApplyBotSpeed）。
+	//   现场验证方法：玩家倒地 -> 自己切旁观 -> 这里 idle 应该变 1、且不会出现起身提示；
+	//   玩家重新加入接管后 idle 变回 0（身体已经不归插件管，IsFakeClient=0）。
+	ReplyToCommand(client, "\x04[BotGuard]\x01 跳过空闲身体: 开关=%d | 当前空闲身体数=%d（idle=1 的身体不参与自动起身/守护/免伤，移速照旧）| 起身保护窗口=%.1fs",
+		g_cvSkipIdleBodies.IntValue,
+		CountIdleBodies(),
+		REVIVE_PROTECT_TIME);
 
 	// 1.3.0：打守护 bot 的提示配置（提示音路径 + 三渠道开关 + 节流）
 	// 1.3.1：附上"服务器端文件探测"结果，仅作诊断（0 也可能正常播放）
@@ -2310,15 +2631,16 @@ public Action Cmd_Status(int client, int args)
 		char sName[MAX_NAME_LENGTH];
 		GetClientName(i, sName, sizeof(sName));
 
-		// 1.4.0：补 hang / fall 两个挂边状态位，并显示"剩余救起"为不限时的写法
+		// 1.4.0：补 hang / fall 两个挂边状态位，并显示"剩余起身"，不设上限时写文案
+		// 1.5.0：不设上限的文案改成"不设上限"（不再写"不限"）
 		char sLeft[32];
 		if (g_cvReviveTimes.IntValue < 0)
-			strcopy(sLeft, sizeof(sLeft), "不限");
+			strcopy(sLeft, sizeof(sLeft), "不设上限");
 		else
 			IntToString(g_iReviveLeft[i], sLeft, sizeof(sLeft));
 
 		ReplyToCommand(client,
-			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d | 实血=%d 虚血=%.1f 总血=%d | 移速=%.2f | 守护=%d(免伤位=%d) 本回合剩余救起=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
+			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d idle=%d | 实血=%d 虚血=%.1f 总血=%d | 移速=%.2f | 守护=%d(免伤位=%d) 本回合剩余起身=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
 			i, sName,
 			IsFakeClient(i) ? 0 : 1,
 			IsFakeClient(i) ? 1 : 0,
@@ -2326,6 +2648,7 @@ public Action Cmd_Status(int client, int args)
 			IsIncapacitated(i) ? 1 : 0,
 			IsHangingFromLedge(i) ? 1 : 0,
 			IsFallingFromLedge(i) ? 1 : 0,
+			IsIdleBody(i) ? 1 : 0,
 			GetClientHealth(i),
 			L4D_GetTempHealth(i),
 			GetTotalHealth(i),

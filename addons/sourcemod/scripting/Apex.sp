@@ -10,6 +10,41 @@
 /* ===========================================================================
 	版本变更记录(只追加, 不覆盖历史)
 	---------------------------------------------------------------------------
+	1.7.6-applefix (2026-11-18)  修"插件掉控明显快于游戏" + 新增坦克控制权写入日志
+	   * 根因(不是把数字改小, 是有代码证据的叠加): 1.7.5 的"看不见-接管"写入分支在落后引擎时,
+	     除了"不写小", 还顺手把插件累加器抬到引擎读数上 ——
+	         if (iWant < iMeter) { iWant = iMeter; g_fVisionMeterF[i] = float(iMeter); }
+	     (1.7.5 的行 4907~4911)。这一句让引擎自己涨上去的那几点被**继承**进插件读数, 下一个
+	     tick 又在引擎的新值上再加一整笔 fRate*fDt -> 引擎 5%/秒 + 插件 5~7%/秒 = 10~12%/秒,
+	     0->100 只要 8~10 秒(原生 20 秒)。本服 l4d2_tankvision_force_blind=1 时引擎自己一定在
+	     累积, l4d2_tankvision_force 又是默认 1(不让位), 所以这条叠加是**常开**的。
+	     旁证: 1.7.4 及以前这里是"无条件覆盖写" —— 会写小(用户报的"看得见就回满"), 但速率反而
+	     正好是 5/6/7; 1.7.5 修好"回满"的同时把"两笔叠加"带了进来, 这正好解释"改过之后更快"。
+	     数值复核(按同一算法逐 tick 模拟, 引擎 1 秒 1 笔 +5):
+	       插件 5 点/秒那档: 原生 20.00 秒 -> 1.7.5 只用 11.25 秒(≈8.9 点/秒) -> 修正后 20.00 秒;
+	       插件 6 点/秒那档: 1.7.4 是 16.75 秒 -> 1.7.5 只用 10.00 秒(10 点/秒) -> 修正后 16.00 秒;
+	       插件 7 点/秒那档: 1.7.4 是 14.25 秒 -> 修正后 14.00 秒。
+	     = 1.7.5 的叠加让实际掉控速度翻了一倍左右, 与玩家反馈的"明显快于游戏掉控速度"一致。
+	   * 修法(保守, 可逆): 落后时只把**这一笔要写的值**抬到 iMeter, 插件累加器一律不动 ——
+	     两条速率从"相加"变成"取大"(引擎 5%/秒 与插件 6%/秒 并行 = 6%/秒, 不是 11%/秒),
+	     期望回到 5/6/7 点/秒。"看得见不回满""绝不把怒气写小"两条既有约束原样保留
+	     (仍然只在 iWant > iMeter 时才写)。
+	   * 单帧兜底(针对"二控/回控/AI 转真人一帧秒掉"): 一次写入最多写 fRate*fDt + 1 点; 单帧跨度
+	     fDt 超过 2*interval+0.2 就按该值结算, 并写一条日志。任何意外都只会让这一帧少扣,
+	     不会一帧扣满 100。
+	   * g_fVisionSampleAt 不再被 VisionClearTracking 清成 0(= fDt 变成几百秒的来源), 改成写
+	     "离开跟踪的这一刻"; AI 坦克段只在自己的起点置一次采样点、之后整段 continue 不更新,
+	     "AI 坦克 -> 同一槽位的真人"这一跳会拿着几分钟前的采样点进结算 —— 单帧上限正好兜住。
+	   * gate=1(怒气闸门常开)/ force_blind=1 不再与插件速率叠加: 上面的"取大"同样管这一路,
+	     引擎自己那份算一份, 插件那份只有更靠前时才写上去, 不会两笔相加。
+	   * 新增 cvar l4d2_tankvision_write_log(默认 1 = 开, 用户要求; 0 = 关): 插件**每一次**写
+	     坦克控制权都记一条 `[tankvision-write]` 到 SourceMod 日志(addons/sourcemod/logs/),
+	     内容 = 服务器本地时间(FormatTime) + GetGameTime() 秒数 + 玩家名/客户端号 + 旧值 -> 新值
+	     + 这一笔的 delta + 速率与来源(基础/存活满门限/跟踪石) + 原因标签(看得见-冻结 /
+	     看不见-接管 / 开闸门 / 强制掉控 / 二阶控制段续期 / 指令写入)。
+	     它跟 l4d2_tankvision_debug 完全独立: debug=0 时这些日志照样写, 现场不用开 debug 就能核对
+	     "插件到底在什么时候、把谁的怒气从多少改到多少"。只在真的发生写入时才拼字符串,
+	     "看不见但没写"的路径没有额外开销。
 	1.7.5-applefix (2026-11-17)  看得见不再"回满控制权" + 两条秒数提示不再混用同一个数字
 	   * 根因一(用户报"坦克看到生还者就将控制权回满"): Timer_TankVision 的"看得见"分支在
 	     l4d2_tankvision_seen_clear=1 时直接 "m_frustration"=0(1.7.4 的行 4678~4681) ——
@@ -110,7 +145,7 @@
 #define PLG_NAME		   "Tank Attack Control Plus"
 #define PLG_AUTH		   "游而戏之,apples1949"
 #define PLG_DESC		   "-"
-#define PLG_VERS		   "1.7.5-applefix"
+#define PLG_VERS		   "1.7.6-applefix"
 #define PLG_URLS		   "-"
 
 #define IsValidClient(%1)  (0 < %1 <= MaxClients && IsClientInGame(%1))
@@ -261,6 +296,12 @@ ConVar Apex[52];
 	    涨, 所以看不见时怒气会从冻结点继续涨到 100 -> 引擎自己的 tank_frustrated 掉控照常生效。
 	  * 两条秒数提示各说各的语义(1.7.5): “视野范围阶梯门槛”(t1/t2/t3_time) 只决定多远算看得见;
 	    “接管门槛”(start_time) 只决定插件从第几秒开始扣控制权。提示里两个数字都带标签, 不混用。
+	  * 与引擎“取大”, 不叠加(1.7.6): 玩家坦克的怒气是引擎每秒 +5 累加的, 只要
+	    force_blind=1 引擎就一定在涨; 插件这一笔只在**更靠前**时才写上去(iWant > iMeter),
+	    落后时只抬这一笔要写的值、不改插件自己的累加器 —— 所以面板上的速度是
+	    max(引擎, 插件) 而不是 engine + plugin(后者会让实际掉控时间砍半)。
+	  * 每次写怒气都会按 l4d2_tankvision_write_log(默认 1=开)记一条 `[tankvision-write]` 日志:
+	    服务器本地时间 + GetGameTime 秒数 + 玩家/客户端号 + 旧值->新值 + delta + 速率来源 + 原因。
 ----------------------------------------------------------- */
 #define APEX_TV_ENABLE		28	/* 1=接管(看得见不掉控/看不见按阶梯扣) 0=关闭(原版) */
 #define APEX_TV_RANGE		29	/* 基准可见范围(单位), 0=无限 */
@@ -284,6 +325,7 @@ ConVar Apex[52];
 #define APEX_TV_GATE		47	/* 0=不碰引擎内存 1=强制打开闸门 2=只在扣满100时打开 */
 #define APEX_TV_FORCE_DROP	48	/* 1=扣满100且引擎不判掉控时, 由插件走原生换控(备用) */
 #define APEX_TV_FORCE_BLIND	49	/* 1=插件判定看不见时, 把引擎的"最后看见时间"写老, 让引擎自己走原生掉控 */
+#define APEX_TV_WRITE_LOG	50	/* 1=记录插件每一次写坦克控制权(时间/新旧值/delta/原因) 0=关; 与 debug 无关 */
 
 /* 引擎原始 m_frustration: 0 -> 100 累加, 到顶即掉控(把坦克交给 AI) */
 #define TV_FRUSTRATION_MAX	100
@@ -612,6 +654,7 @@ public void
 	Apex[APEX_TV_GATE]        = CreateConVar("l4d2_tankvision_gate", "0", "默认 0=完全不碰引擎内存(怒气闸门保持引擎自己的值). 1=强制打开(引擎恢复原生累积) 2=只在插件扣满100时打开", _, true, 0.0, true, 2.0);
 	Apex[APEX_TV_FORCE_DROP]  = CreateConVar("l4d2_tankvision_force_drop", "0", "1=怒气扣满 100 后引擎不判掉控时, 由插件用原生 ReplaceTank 走二控(有玩家)/交给AI(没玩家); 0=只在怒气满时挂着等引擎", _, true, 0.0, true, 1.0);
 	Apex[APEX_TV_FORCE_BLIND] = CreateConVar("l4d2_tankvision_force_blind", "1", "1=插件判定看不见时, 把引擎记录的「最后看见生还者时刻」写老, 让引擎自己也判定看不见 -> 走原生掉控(有玩家=二控, 没玩家=AI); 0=不碰引擎内存", _, true, 0.0, true, 1.0);
+	Apex[APEX_TV_WRITE_LOG]   = CreateConVar("l4d2_tankvision_write_log", "1", "坦克控制权写入日志: 1=插件每一次写 m_frustration 都记一条([tankvision-write] 服务器本地时间 + GetGameTime 秒数 + 玩家 + 旧值->新值 + delta + 速率来源 + 原因), 写进 SourceMod 日志 logs/; 与 l4d2_tankvision_debug 无关. 0=不记录", _, true, 0.0, true, 1.0);
 
 	/* 版本/关键参数落一条日志: 现场核对"服务器跑的到底是不是这个 build" */
 	LogMessage("[tankvision] build %s loaded: enable=%d base=%.1f start=%.0fs alive=%.0fs extra=%.1f/%.1f force=%d seen_clear=%d",
@@ -2972,7 +3015,10 @@ void VisionClearTracking(int client)
 	g_fVisionMeterF[client]    = 0.0;
 	g_fVisionSeenHold[client]  = -1.0;
 	g_fVisionPayAt[client]     = 0.0;
-	g_fVisionSampleAt[client]  = 0.0;
+	/* 采样点不接受 0: 0 会让下一次结算算出 fDt = GetGameTime() - 0 = 几百秒, 一帧把怒气
+	   涨满(玩家体感 = 二控/回控/换人后瞬间掉控)。这里写"离开跟踪的这一刻", 于是任何漏了
+	   初始化的重启路径最多也只是少扣一帧; 真正的初始化在各控制段起点(见 Timer_TankVision)。 */
+	g_fVisionSampleAt[client]  = GetGameTime();
 	g_fVisionChatAt[client]    = 0.0;
 }
 
@@ -3362,6 +3408,13 @@ void VisionRenewSegment(int client, float fNow, const char[] reason)
 	g_fVisionSampleAt[client] = fNow;
 	g_fVisionPayAt[client]	  = fNow;
 
+	/* 写入日志(独立开关): 这一段是"又重新拿到一次控制权", 怒气读数被重新对齐; 记一条便于核对 */
+	if (Apex[APEX_TV_WRITE_LOG] != null && Apex[APEX_TV_WRITE_LOG].IntValue >= 1)
+	{
+		char sRenew[160];
+		FormatEx(sRenew, sizeof(sRenew), "二阶控制段续期(%s)", reason);
+		VisionWriteLogNote(client, sRenew);
+	}
 	VisionLogKey("%N 开始第 %d 段控制权(%s): 存活计时不动 %.0f 秒, 掉控闩锁/写满/强制掉控标记全部复位",
 		client, g_iVisionSegment[client], reason, VisionAliveSeconds(client));
 }
@@ -4065,6 +4118,73 @@ void VisionLogKey(const char[] fmt, any ...)
 	LogMessage("[tankvision] %s", buf);
 }
 
+/* ---------------------------------------------------------------------------
+	坦克控制权写入日志(1.7.6 新增)
+   ---------------------------------------------------------------------------
+	独立受 l4d2_tankvision_write_log 控制(默认 1 开), 与 l4d2_tankvision_debug /
+	VisionLog / VisionLogKey 完全无关 —— 用户要求"记录插件修改的控制权", 不能因为现场
+	没开 debug 就什么都不留。只在**真的发生写入/控制权变更**时调用, 所以"看不见但没写"
+	的路径上没有额外的字符串拼接开销。
+	每条同时给两种时间, 方便和服务器日志、引擎时间对齐:
+	  FormatTime 的服务器本地时间字符串(人看) + GetGameTime() 秒数(和插件里其它计时同源)。
+--------------------------------------------------------------------------- */
+void VisionWriteLog(int client, int iOld, int iNew, const char[] reason, float fRate)
+{
+	if (Apex[APEX_TV_WRITE_LOG] == null || Apex[APEX_TV_WRITE_LOG].IntValue < 1)
+		return;
+
+	/* 槽位号在范围内但已断线时 GetClientName 会刷 "Invalid client index", 所以先判在游戏 */
+	if (client < 1 || client > MaxClients || !IsClientInGame(client))
+		return;
+
+	char sTime[32];
+	FormatTime(sTime, sizeof(sTime), "%Y-%m-%d %H:%M:%S", -1);
+
+	char sName[64];
+	GetClientName(client, sName, sizeof(sName));
+
+	float fAlive = VisionAliveSeconds(client);
+	int   iDelta = iNew - iOld;
+
+	char sDelta[16];
+	FormatEx(sDelta, sizeof(sDelta), "%s%d", (iDelta >= 0) ? "+" : "", iDelta);
+
+	/* 速率来源: 与 VisionRate 的三项一一对应(基础 / 存活满门限 / 跟踪石命中) */
+	char sSrc[160];
+
+	if (fRate > 0.0)
+		FormatEx(sSrc, sizeof(sSrc), "速率 %.2f/秒 = 基础 %.1f%s%s",
+			fRate, VisionBaseStep(),
+			(VisionAliveTime() > 0.0 && fAlive >= VisionAliveTime()) ? " + 存活满门限" : "",
+			g_bVisionTracHit[client] ? " + 跟踪石" : "");
+	else
+		FormatEx(sSrc, sizeof(sSrc), "不扣控(冻结/指令写入)");
+
+	LogMessage("[tankvision-write] %s | t=%.3f | %s(#%d) 存活 %.0f 秒 | 怒气 %d -> %d (delta %s) | %s | 原因: %s",
+		sTime, GetGameTime(), sName, client, fAlive, iOld, iNew, sDelta, sSrc, reason);
+}
+
+/* 不写 m_frustration、但改变了坦克控制权走向的事件(开闸门 / 强制掉控 / 新的控制段续期 /
+   结算跨度异常): 同样受 l4d2_tankvision_write_log 控制, 只多带一条"当时读数"的快照。 */
+void VisionWriteLogNote(int client, const char[] reason)
+{
+	if (Apex[APEX_TV_WRITE_LOG] == null || Apex[APEX_TV_WRITE_LOG].IntValue < 1)
+		return;
+
+	if (client < 1 || client > MaxClients || !IsClientInGame(client))
+		return;
+
+	char sTime[32];
+	FormatTime(sTime, sizeof(sTime), "%Y-%m-%d %H:%M:%S", -1);
+
+	char sName[64];
+	GetClientName(client, sName, sizeof(sName));
+
+	LogMessage("[tankvision-write] %s | t=%.3f | %s(#%d) 存活 %.0f 秒 | 怒气 %d(本条未写怒气) | 原因: %s",
+		sTime, GetGameTime(), sName, client, VisionAliveSeconds(client),
+		GetEntProp(client, Prop_Send, "m_frustration"), reason);
+}
+
 /* -----------------------------------------------------------
 	坦克视野测试指令(与原 l4d2_tank_vision.sp 同名)
 	  sm_tankvision                 查看当前坦克的视野/扣控状态
@@ -4083,7 +4203,7 @@ Action Cmd_TankVision(int client, int args)
 		Apex[APEX_TV_INTERVAL].FloatValue, Apex[APEX_TV_DEBUG].IntValue,
 		(g_fVisionRangeOverride > 0.0) ? "有(测试)" : "无");
 
-	ReplyToCommand(client, "[坦克视野] 生效参数: range=%.0f 阶梯 %.0f@%.0fs/%.0f@%.0fs/%.0f@%.0fs | 扣控 step=%.1f +存活%.1f(满%.0fs) +跟踪石%.1f | start_time=%.0fs | dot=%.2f seen_clear=%d force=%d gate=%d force_drop=%d force_blind=%d",
+	ReplyToCommand(client, "[坦克视野] 生效参数: range=%.0f 阶梯 %.0f@%.0fs/%.0f@%.0fs/%.0f@%.0fs | 扣控 step=%.1f +存活%.1f(满%.0fs) +跟踪石%.1f | start_time=%.0fs | dot=%.2f seen_clear=%d force=%d gate=%d force_drop=%d force_blind=%d write_log=%d",
 		Apex[APEX_TV_RANGE].FloatValue,
 		Apex[APEX_TV_T1_RANGE].FloatValue, Apex[APEX_TV_T1_TIME].FloatValue,
 		Apex[APEX_TV_T2_RANGE].FloatValue, Apex[APEX_TV_T2_TIME].FloatValue,
@@ -4091,7 +4211,8 @@ Action Cmd_TankVision(int client, int args)
 		VisionBaseStep(), Apex[APEX_TV_ALIVE_EXTRA].FloatValue, VisionAliveTime(), Apex[APEX_TV_TRAC_EXTRA].FloatValue,
 		VisionStartTime(), Apex[APEX_TV_DOT].FloatValue, Apex[APEX_TV_SEEN_CLEAR].IntValue,
 		Apex[APEX_TV_FORCE].IntValue, Apex[APEX_TV_GATE].IntValue,
-		Apex[APEX_TV_FORCE_DROP].IntValue, Apex[APEX_TV_FORCE_BLIND].IntValue);
+		Apex[APEX_TV_FORCE_DROP].IntValue, Apex[APEX_TV_FORCE_BLIND].IntValue,
+		Apex[APEX_TV_WRITE_LOG].IntValue);
 
 	int iShown = 0;
 
@@ -4399,8 +4520,10 @@ Action Cmd_TankVisionFrust(int client, int args)
 			if (iVal > TV_FRUSTRATION_MAX)
 				iVal = TV_FRUSTRATION_MAX;
 
+			int iCmdOld = GetEntProp(i, Prop_Send, "m_frustration");
 			SetEntProp(i, Prop_Send, "m_frustration", iVal);
 			g_bVisionDropped[i] = false;
+			VisionWriteLog(i, iCmdOld, iVal, "指令写入(sm_tankvision_frust)", 0.0);
 
 			ReplyToCommand(client, "[坦克视野] %N 怒气设为 %d (0=满控制权, 100=掉控), 掉控闩锁已解开", i, iVal);
 		}
@@ -4429,6 +4552,7 @@ void VisionOpenGate(int client, const char[] reason)
 	{
 		StoreToAddress(addrGate, view_as<int>(1.0), NumberType_Int32);
 		LogMessage("[tankvision] %N 怒气闸门 %.3f -> 1.0 (%s, 偏移 +0x%X)", client, fGate, reason, g_iTVGateOffset);
+		VisionWriteLogNote(client, "开闸门(引擎开始自己累积怒气)");
 	}
 }
 
@@ -4480,6 +4604,7 @@ void VisionForceDrop(int tank)
 	PrintToChatAll("%s坦克 {lightgreen}%N{default} 控制权由插件收回(%s)", TAG, tank, bBot ? "交给 AI" : "二控给下一位");
 	LogMessage("[tankvision] %N 强制掉控 -> %N (bot=%d)", tank, target, bBot ? 1 : 0);
 
+	VisionWriteLogNote(tank, bBot ? "强制掉控(怒气满 100, 交给 AI)" : "强制掉控(怒气满 100, 二控给下一位)");
 	L4D_ReplaceTank(tank, target);
 }
 
@@ -4610,6 +4735,7 @@ Action Timer_TankVision(Handle timer)
 				{
 					g_fVisionAliveBias[i] = fCarryAge;
 					g_fTankCtrlStart[i]	  = fNow;
+					g_fVisionSampleAt[i]  = fNow; /* 1.7.6: 重新起算存活计时 = 重新起算结算跨度 */
 
 					VisionLifeBind(i, fNow, fCarryAge);
 				}
@@ -4662,9 +4788,24 @@ Action Timer_TankVision(Handle timer)
 			}
 		}
 
+		/* 单帧跨度: 采样点是"这个 client 上一次被结算的时刻"。任何"重新开始跟踪"的路径都必须
+		   把它置成 fNow(VisionClearTracking / VisionBeginControlSegment / VisionRenewSegment /
+		   tank_spawn / AI 坦克段起点 / 迟到接手都已经这么做), 否则这里会算出一个几百秒的跨度
+		   -> 插件读数一帧涨满 100 -> 瞬间掉控。1.7.6 再加一道上限兜底: 跨度超过
+		   2*interval+0.2 就按该值结算, 这样即使将来某条新路径漏了初始化, 这一帧也只是
+		   "少扣", 绝不会"一帧扣满"。 */
 		float fDt = fNow - g_fVisionSampleAt[i];
 		if (fDt < 0.01)
 			fDt = 0.01;
+
+		float fDtMax = 2.0 * Apex[APEX_TV_INTERVAL].FloatValue + 0.2;
+
+		if (fDt > fDtMax)
+		{
+			VisionWriteLogNote(i, "结算跨度异常(>2*interval+0.2), 已按上限结算, 本帧少扣");
+			fDt = fDtMax;
+		}
+
 		g_fVisionSampleAt[i] = fNow;
 
 		float fAlive = VisionAliveSeconds(i);
@@ -4791,7 +4932,9 @@ Action Timer_TankVision(Handle timer)
 				{
 					if ((iMeter - iHold) <= VISION_SEEN_HOLD_TOL)
 					{
+						int iHoldOld = iMeter;
 						SetEntProp(i, Prop_Send, "m_frustration", iHold);
+						VisionWriteLog(i, iHoldOld, iHold, "看得见-冻结(只停扣, 不回满)", 0.0);
 						iMeter = iHold;
 					}
 					else
@@ -4895,7 +5038,16 @@ Action Timer_TankVision(Handle timer)
 		   引擎实际值"的结果(例如刚进接管时 iMeter=90、meterF=80 -> iWant=81), 那一笔等于把
 		   9 点控制权还给坦克 —— 与"看得见就回满"是同一类错误。现在:
 		     iWant > iMeter -> 写上去(插件速率生效);
-		     iWant < iMeter -> 跟上引擎的读数, 一个点都不退回。 */
+		     iWant < iMeter -> 跟上引擎的读数, 一个点都不退回。
+		   1.7.6(用户报"掉控明显快于游戏"的主因): 1.7.5 在下面"落后"那条分支里多写了一句
+		   `g_fVisionMeterF[i] = float(iMeter);` —— 本意是"跟上引擎", 实际效果却是把引擎自己
+		   涨上去的那几点**继承进插件的累加器**, 于是下一个 tick 在引擎的新读数上再加一整笔
+		   fRate*fDt: 引擎 5%/秒 + 插件 5~7%/秒 = 10~12%/秒, 0->100 只要 8~10 秒(原生 20 秒)。
+		   而 force_blind=1 时引擎自己一定在累积, 所以这条叠加在 12v12 配置下是常开的。
+		   1.7.4 及以前这里无条件覆盖写(会写小 = 用户报的"回满"), 速率反而正好是 5/6/7 ——
+		   这正好解释"改成只往上覆盖之后反而掉得更快"。
+		   修法: 落后时只把**这一笔要写的值**抬到 iMeter(绝不写小), 插件累加器一律不动 ——
+		   两条速率从"相加"变成"取大": 引擎 5%/秒 与 插件 6%/秒 并行, 结果是 6%/秒不是 11%/秒。 */
 		g_fVisionMeterF[i] += fRate * fDt;
 		if (g_fVisionMeterF[i] < 0.0)
 			g_fVisionMeterF[i] = 0.0;
@@ -4906,12 +5058,36 @@ Action Timer_TankVision(Handle timer)
 
 		if (iWant < iMeter)
 		{
+			/* 引擎/别的插件已经扣得比我们多: 跟它的读数走(绝不写小), 但**不把它的增量继承
+			   进 g_fVisionMeterF** —— 继承就是"两笔叠加"的全部来源(见上面 1.7.6 说明)。 */
 			iWant = iMeter;
-			g_fVisionMeterF[i] = float(iMeter);
 		}
 		else if (iWant > iMeter)
 		{
+			/* 单帧写幅上限: 一次最多写"这一帧该扣的量" = fRate * fDt, 再留 1 点取整余量。
+			   任何意外(fDt 异常 / 定时器补跑 / 引擎那边跳变)都只会让这一帧**少扣**,
+			   而不是一帧扣满 100 -> 秒掉控。正常节奏下 fRate*fDt 正好等于每帧该走的量,
+			   所以这条上限在日常运行里从不触发。 */
+			bool bClamped = false;
+			int  iStepMax = RoundToNearest(fRate * fDt) + 1;
+
+			if (iStepMax < 1)
+				iStepMax = 1;
+
+			if (iWant - iMeter > iStepMax)
+			{
+				iWant = iMeter + iStepMax;
+				g_fVisionMeterF[i] = float(iWant); /* 被夹住的部分不再累积, 免得下一帧又凭空多一笔 */
+				bClamped = true;
+			}
+
+			int iOld = iMeter;
 			SetEntProp(i, Prop_Send, "m_frustration", iWant);
+
+			if (bClamped)
+				VisionWriteLog(i, iOld, iWant, "看不见-插件接管(单帧写幅已夹到上限)", fRate);
+			else
+				VisionWriteLog(i, iOld, iWant, "看不见-插件接管", fRate);
 		}
 
 		g_iVisionMeter[i] = iWant;

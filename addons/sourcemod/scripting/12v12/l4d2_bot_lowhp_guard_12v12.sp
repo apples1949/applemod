@@ -93,12 +93,11 @@
  *     - 新增管理员命令 sm_botguard_warntest [目标]，不节流地演示一遍提示（验证音效是否存在）。
  *
  *   1.2.0 变更（四条新需求，全部实装）：
- *     - 需求1 移速：所有"未被玩家接管的生还者"（生还者队里 IsFakeClient 的客户端）
- *       移动速度按 m_flLaggedMovementValue 放大，
- *       倍率 = l4d2_bot_guard_bot_speed / l4d2_bot_guard_base_speed（默认 330 / 220 = 1.5）。
- *       只在存活、未倒地、未挂边时写；被真人接管 / 死亡 / 倒地 / 挂边 / 插件卸载
- *       立刻把 m_flLaggedMovementValue 恢复成 1.0，绝不残留。
- *       移速与"是否被守护"无关，也不受守护名额限制。
+ *     - 需求1 移速（**1.6.0 已整段删除**，见下）：
+ *       原实现把未接管生还者的 m_flLaggedMovementValue 放大到
+ *       l4d2_bot_guard_bot_speed / l4d2_bot_guard_base_speed（330 / 220 = 1.5）。
+ *       1.6.0 按用户要求取消：插件不再写 m_flLaggedMovementValue，也不再有这两个 cvar；
+ *       人机移动速度完全交还引擎/其它插件。
  *     - 需求2 守护上限：同一时刻最多 l4d2_bot_guard_max_count（默认 3）个未接管生还者
  *       处于守护状态（免疫 / 免控 / 自动救起那套）。**删除** 1.1.0 的
  *       "AI 生还者数量 > l4d2_bot_guard_max_bots 就全部关掉"旧规则（它和新阶梯矛盾），
@@ -156,8 +155,8 @@
  *               -> 确认那个 userid 还是个在服务器里旁观队的真人），自动起身与守护（免伤/免控/发光）
  *               都跳过这类身体；真人彻底掉线（userid 失效）时判定不成立，
  *               "无人接管就地兜底起身"的老用途不变。
- *               移速那套**故意不跟着改**（理由见 IsIdleBody 上方注释）。
  *               开关 l4d2_bot_guard_skip_idle_bodies 默认 1；=0 完全回到 1.4.0 的行为。
+ *               （1.6.0 起本插件已不再写移速，这条"移速不排除空闲身体"的取舍随之作废。）
  *     - 需求2 自动起身血量默认 30 -> 1（l4d2_bot_guard_revive_health 下界仍是 1）：
  *         起身后实血写成 1 点、虚血一并清 0（否则"总血量"不是 1），并保持"当作没倒地过"
  *         （m_currentReviveCount + m_bIsOnThirdStrike 在引擎起身之后清零，顺序不要调换）。
@@ -169,6 +168,35 @@
  *         读起来像"无限起身"。统一成"已自动起身（血量 N，倒地次数已清零）"，
  *         有限次数模式保留剩余次数；cvar 描述与 sm_botguard_status 改成"不设上限"口径。
  *
+ *   1.6.0 变更（用户两条要求，全部实装）：
+ *     - 需求1 起身提示不再输出"倒地次数已清零"：
+ *         1.5.0 把每一次成功起身都写成"已自动起身（血量 N，倒地次数已清零）"，
+ *         玩家反馈这句不该出现。现在文案只报"血量 N"（有限次数模式仍报剩余/已用完），
+ *         不再提倒地次数；属性照旧清零（m_currentReviveCount / m_bIsOnThirdStrike），
+ *         只是**不显示**，行为不变。
+ *     - 需求2 取消修改人机移速：删除 1.2.0 的整套移速逻辑
+ *         （l4d2_bot_guard_bot_speed / l4d2_bot_guard_base_speed 两个 cvar、
+ *          GetBotSpeedScale / ShouldApplyBotSpeed / UpdateBotSpeed、g_bSpeedApplied、
+ *          卸载与换图时的还原、OnConVarChanged 里的立即重写、sm_botguard_status 的移速读数）。
+ *         插件从此不再写 m_flLaggedMovementValue，人机移速完全按引擎原版。
+ *         注意：cfg 里原来那两行 confogl_addcvar 也一并删掉 —— cvar 不存在时 confogl 会把它
+ *         记成"pending late-bind"并在每次 confogl_setcvars 报 missing，留着会刷日志。
+ *   1.6.1 修复（用户反馈"有时守护状态下的人机不会正确提示守护"）：
+ *     - 根因1（主因）：节流表按「攻击者」一维存放（g_fWarnLast[attacker]）。
+ *       同一名特感玩家在 l4d2_bot_guard_warn_cooldown（默认 1 秒）内攻击**第二只**守护中的人机时，
+ *       整条提示（提示音 + 三渠道文字）被直接吞掉；而节流命中前又已经记过时间戳，
+ *       玩家看到的上一条提示里写的还是上一只 bot 的名字 —— 表现就是"有时打了守护中的人机却没正确提示"。
+ *       12v12 同时最多 3 只人机处于守护，这条路径很容易踩到。
+ *       修复：节流表改成 g_fWarnLast[attacker][victim] 二维表，按「攻击者 × 目标 bot」成对计时；
+ *       同一只 bot 仍然按冷却节流（防连点爪击刷屏刷音），换一只 bot 立刻重新提示，名字一定是刚打的那只。
+ *     - 根因2：提示只挂在"伤害被拦截"和六个前置 forward 上，**强制解控**这条路完全不提示。
+ *       典型场景：低血人机还没轮到守护（Timer_Tick 每 0.9 秒一轮），特感先扑住 / 拖走它，
+ *       下一轮进入守护时由 EnterGuard / Timer_Protect / Timer_Tick 里的 ReleaseControl 强行解控 ——
+ *       技能凭空失效，特感玩家却收不到任何提示。
+ *       修复：ReleaseControl 现在返回被解掉的控制者，三个调用点用它补发同一条提示（仍然走节流，不会刷屏）。
+ *     - 未改动：免疫判定、守护名额分配、发光、自动起身逻辑一律不动；
+ *       提示仍然只发给"玩家操控的特感"（IsWarnTarget），AI 特感不刷屏。
+ *
  * 安全设计（重要，改动前请先读）：
  *   - 守护状态只对"存活且未倒地、未挂边、未掉边坠落"的 bot 生效。倒地后守护会自动关闭，
  *     避免"倒地 + 免伤 + 不能流血死亡"造成永久卡关；倒地由自动起身兜底
@@ -176,7 +204,6 @@
  *   - 1.5.0：守护与自动起身都**不碰**"有真人主控的空闲身体"（IsIdleBody）：
  *     玩家倒地后自己切旁观 / 掉线时，身体会被引擎托管成 bot，替它起身或免伤等于让玩家
  *     "旁观一下再加入"白赚一次起身 + 一段无敌。开关 l4d2_bot_guard_skip_idle_bodies（默认 1）。
- *     移速那套刻意不跟（理由见 IsIdleBody / ShouldApplyBotSpeed 的注释）。
  *   - 起身血量默认 1 点（l4d2_bot_guard_revive_health），起身后 1 秒内只挡"会当场再打倒他"
  *     的伤害（REVIVE_PROTECT_TIME），避免 1 血起身 -> 立刻倒地 -> 又起身的循环。
  *   - 保护线程里有一道硬保险：守护中的人一旦倒地/挂边/坠落/死亡，立刻退出守护。
@@ -184,8 +211,8 @@
  *     这是防止"卡原地无敌"的最后一道闸，不要为了省开销删掉。
  *   - 守护结束时会把进入守护前的四个发光 netprop 原值写回去，
  *     避免污染其它插件的发光效果。
- *   - 移速是独立于守护状态的另一套状态（g_bSpeedApplied 记录写过谁），
- *     任何失效条件都会把 m_flLaggedMovementValue 写回 1.0。
+ *   - 1.6.0 起本插件**不写** m_flLaggedMovementValue（人机移速交给引擎/其它插件），
+ *     所以没有任何移速状态需要在退出/卸载时还原。
  * ============================================================================
  */
 
@@ -206,7 +233,7 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
-#define PLUGIN_VERSION		"1.5.0"
+#define PLUGIN_VERSION		"1.6.1"
 
 // 1.4.0：起身提示的全局节流（秒）。次数不设上限时如果每救一次就刷一条，12v12 会刷屏。
 #define REVIVE_NOTIFY_COOLDOWN	3.0
@@ -229,11 +256,6 @@
 // m_iGlowType = 3 是 L4D2 的"常亮轮廓"（参考 l4d2_tank_defib_revive 的写法）
 #define GLOW_TYPE_CONSTANT	3
 
-// 移速：接管的判定用 IsFakeClient（真人接管 bot 后该客户端 IsFakeClient 会变 false），
-// 倍率写进 m_flLaggedMovementValue（DT_BasePlayer，float，Prop_Send）
-#define MOVEMENT_PROP		"m_flLaggedMovementValue"
-#define MOVEMENT_DEFAULT	1.0
-
 ConVar g_cvEnabled;			// 总开关
 ConVar g_cvHealth;			// 触发阈值（实血 + 虚血 合计 <= 该值）
 ConVar g_cvGlow;			// 是否闪白色轮廓
@@ -247,8 +269,6 @@ ConVar g_cvInvincible;		// 免疫任何伤害
 ConVar g_cvBlockControl;	// 免疫特感控制 + 已控则解控
 ConVar g_cvMaxCount;		// 1.2.0：同时处于守护状态的未接管生还者数量硬上限（原 max_bots）
 ConVar g_cvExcludeEndSaferoom;	// 1.3.4：计算守护名额时排除终点安全屋内的生还者
-ConVar g_cvBotSpeed;		// 1.2.0：未接管生还者移速（游戏单位，默认 330）
-ConVar g_cvBaseSpeed;		// 1.2.0：正常走路速度基数（默认 220），倍率 = bot_speed / base_speed
 ConVar g_cvReviveTimes;		// 每回合自动起身次数上限（-1 = 不设上限）
 ConVar g_cvReviveHealth;	// 自动起身后的血量
 ConVar g_cvReviveDelay;		// 倒地后延迟多久起身（秒）
@@ -276,7 +296,6 @@ int		g_iOrigTakeDamage[MAXPLAYERS + 1];		// 进入守护前的 m_takedamage（1.
 float	g_fTempStash[MAXPLAYERS + 1];		// 守护开始时冻结的虚血值
 int		g_iReviveLeft[MAXPLAYERS + 1];		// 本回合剩余的自动起身次数（-1 = 不设每回合上限）
 float	g_fTestGlowUntil[MAXPLAYERS + 1];	// 调试用：到该时刻前强制给该客户端上轮廓
-bool	g_bSpeedApplied[MAXPLAYERS + 1];	// 1.2.0：本插件是否给该客户端写过移速（退出/失效时要还原）
 
 // 1.4.0：轮询式救起的状态
 //   g_fReviveAt        计划救起的游戏时间（0 = 当前没有计划）
@@ -289,7 +308,9 @@ float	g_fNotifyNextAt;					// 1.4.0：救起提示的全局节流时间戳
 // 0 / 过期 = 没有保护；只有一个时间戳，到点自动失效，不会残留状态。
 float	g_fReviveProtectUntil[MAXPLAYERS + 1];
 
-float	g_fWarnLast[MAXPLAYERS + 1];		// 1.3.0：该特感玩家上次收到"打不动"提示的游戏时间
+// 1.6.1：节流表从「按攻击者」的一维表改成「攻击者 × 目标 bot」二维表。
+// 一维表会让同一名特感玩家在冷却内打第二只守护中的人机时整条提示被吞掉（见文件头 1.6.1）。
+float	g_fWarnLast[MAXPLAYERS + 1][MAXPLAYERS + 1];	// [attacker][victim] 上次收到"打不动"提示的游戏时间
 char	g_sWarnSound[PLATFORM_MAX_PATH];	// 1.3.0：解析后的提示音路径（空 = 不播放）
 
 int		g_iGlowColorPacked;					// 打包后的颜色值（R | G<<8 | B<<16）
@@ -322,7 +343,7 @@ public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动起身（默认不设每回合上限，起身后倒地次数清零，轮询所有生还者状态并在倒地/挂边时立刻起身）；1.2.0 追加未接管生还者移速与守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌；1.5.0 跳过有真人主控的空闲 bot 身体（旁观/掉线托管不再白拿起身与守护）、起身血量默认 1 点、起身提示文案去掉无限的口气",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动起身（默认不设每回合上限，轮询所有生还者状态并在倒地/挂边时立刻起身）；1.2.0 追加守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌；1.5.0 跳过有真人主控的空闲 bot 身体（旁观/掉线托管不再白拿起身与守护）、起身血量默认 1 点；1.6.0 取消修改人机移速（不再写 m_flLaggedMovementValue）、起身提示不再显示倒地次数；1.6.1 修复「有时守护中的人机不提示」：提示节流改为按「攻击者 × 目标人机」成对计时，并补上强制解控时的提示",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -414,21 +435,12 @@ public void OnPluginStart()
 
 	// 1.2.1：可守护数改为"按比例"计算（见 ComputeAllowedGuards），
 	// 1.2.0 的三条固定阶梯 cvar（down_tier1/2/3）已删除
-
-	// 1.2.0：未接管生还者移速（写 m_flLaggedMovementValue = bot_speed / base_speed）
-	g_cvBotSpeed = CreateConVar("l4d2_bot_guard_bot_speed",
-		"330",
-		"未被玩家接管的生还者移动速度（游戏单位）。正常走路 220，默认 330 = 1.5 倍.",
-		FCVAR_NOTIFY, true, 0.0, true, 1000.0);
-
-	g_cvBaseSpeed = CreateConVar("l4d2_bot_guard_base_speed",
-		"220",
-		"正常走路速度基数（游戏单位），用于换算 m_flLaggedMovementValue 倍率。默认 220.",
-		FCVAR_NOTIFY, true, 1.0, true, 1000.0);
+	// 1.6.0：1.2.0 的两个移速 cvar（l4d2_bot_guard_bot_speed / l4d2_bot_guard_base_speed）
+	//        已整段删除，插件不再写 m_flLaggedMovementValue —— 人机移速交还引擎。
 
 	g_cvReviveTimes = CreateConVar("l4d2_bot_guard_revive_times",
 		"-1",
-		"AI 生还者每回合可自动起身的次数上限：-1=不设每回合上限（默认）；0=关闭自动起身；>0=每回合上限。起身后倒地次数清零，与这里的次数上限无关.",
+		"AI 生还者每回合可自动起身的次数上限：-1=不设每回合上限（默认）；0=关闭自动起身；>0=每回合上限。这里的次数上限与引擎的倒地计数无关.",
 		FCVAR_NOTIFY, true, -1.0, true, 99.0);
 
 	// 1.5.0：默认血量 30 -> 1（用户要求"至少将人机自动起身的血量改成 1 点"）。
@@ -464,7 +476,7 @@ public void OnPluginStart()
 
 	g_cvWarnCooldown = CreateConVar("l4d2_bot_guard_warn_cooldown",
 		"1.0",
-		"同一名特感玩家两次提示的最小间隔(秒). 默认 1.0 = 1 秒, 防止连点爪击时提示音刷屏. 0 = 不节流.",
+		"同一名特感玩家对同一只 AI 生还者两次提示的最小间隔(秒)；按「攻击者 × 目标人机」成对计时：打另一只守护中的人机会立刻重新提示。默认 1.0 = 1 秒，防止连点爪击时刷屏。0 = 不节流。",
 		FCVAR_NOTIFY, true, 0.0, true, 60.0);
 
 	g_cvWarnSound = CreateConVar("l4d2_bot_guard_warn_sound",
@@ -500,9 +512,7 @@ public void OnPluginStart()
 	g_cvGlowColor.AddChangeHook(OnConVarChanged);
 	g_cvInterval.AddChangeHook(OnConVarChanged);
 	g_cvProtectInterval.AddChangeHook(OnConVarChanged);
-	// 1.2.0：移速倍率改了要立刻重写一遍（不必等下一 tick）
-	g_cvBotSpeed.AddChangeHook(OnConVarChanged);
-	g_cvBaseSpeed.AddChangeHook(OnConVarChanged);
+	// 1.6.0：移速 cvar 已删除，这里不再挂"倍率改了立刻重写"的钩子
 	// 1.3.0：提示音路径改了要重新解析/预缓存
 	g_cvWarnSound.AddChangeHook(OnConVarChanged);
 
@@ -531,7 +541,7 @@ public void OnPluginStart()
 
 	// 排查/验证用（不给玩家用）：状态查询 + 强制上轮廓
 	RegAdminCmd("sm_botguard_status", Cmd_Status, ADMFLAG_GENERIC,
-		"打印低血 AI 生还者守护状态：血量、存活未接管数量、倒地数、阶梯值、可守护数、守护名单、移速");
+		"打印低血 AI 生还者守护状态：血量、存活未接管数量、倒地数、可守护数、守护名单");
 	RegAdminCmd("sm_botguard_test", Cmd_TestGlow, ADMFLAG_GENERIC,
 		"强制给目标客户端闪轮廓，用于确认发光是否可见: sm_botguard_test <#userid|名字> [秒]");
 
@@ -585,9 +595,7 @@ public void OnMapStart()
 	{
 		g_bGuarded[i] = false;
 		g_fTempStash[i] = 0.0;
-		// 换图后实体重建，m_flLaggedMovementValue 自然是 1.0，只需要清掉标记
-		g_bSpeedApplied[i] = false;
-		g_fWarnLast[i] = 0.0;
+		ResetWarnLast(i);
 		// 1.4.0：轮询式救起的计划全部作废
 		g_fReviveAt[i] = 0.0;
 		g_bReviveCounted[i] = false;
@@ -632,15 +640,7 @@ public void OnPluginEnd()
 		}
 	}
 
-	// 1.2.0：卸载时把移速还原成 1.0，绝不给后来的插件留一份 1.5 倍速
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && g_bSpeedApplied[i])
-		{
-			SetEntPropFloat(i, Prop_Send, MOVEMENT_PROP, MOVEMENT_DEFAULT);
-			g_bSpeedApplied[i] = false;
-		}
-	}
+	// 1.6.0：本插件不再写 m_flLaggedMovementValue，卸载时没有移速要还原
 }
 
 public void OnClientPutInServer(int client)
@@ -649,8 +649,7 @@ public void OnClientPutInServer(int client)
 	g_bGlowProps[client] = false;
 	g_fTempStash[client] = 0.0;
 	g_iReviveLeft[client] = g_cvReviveTimes.IntValue;
-	g_bSpeedApplied[client] = false;
-	g_fWarnLast[client] = 0.0;
+	ResetWarnLast(client);
 	// 1.4.0：轮询式救起的计划
 	g_fReviveAt[client] = 0.0;
 	g_bReviveCounted[client] = false;
@@ -667,9 +666,7 @@ public void OnClientDisconnect(int client)
 	g_bGlowProps[client] = false;
 	g_fTempStash[client] = 0.0;
 	g_iReviveLeft[client] = 0;
-	// 客户端已经离开，实体随后销毁，不需要再写属性，只清标记
-	g_bSpeedApplied[client] = false;
-	g_fWarnLast[client] = 0.0;
+	ResetWarnLast(client);
 	g_fReviveAt[client] = 0.0;
 	g_bReviveCounted[client] = false;
 	g_fReviveProtectUntil[client] = 0.0;
@@ -693,11 +690,6 @@ public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] n
 	else if (convar == g_cvProtectInterval)
 	{
 		StartProtectTimer();
-	}
-	else if (convar == g_cvBotSpeed || convar == g_cvBaseSpeed)
-	{
-		// 1.2.0：倍率变了立刻生效，不用等下一 tick
-		UpdateBotSpeed();
 	}
 	else if (convar == g_cvWarnSound)
 	{
@@ -787,7 +779,7 @@ public Action Timer_Protect(Handle timer)
 		}
 
 		if (bBlockControl)
-			ReleaseControl(i);
+			NotifyGuardBlocked(ReleaseControl(i), i);
 
 		if (bInvincible && g_iGuardHealth[i] > 0 && GetClientHealth(i) < g_iGuardHealth[i])
 			SetEntityHealth(i, g_iGuardHealth[i]);
@@ -857,11 +849,10 @@ public Action Timer_Tick(Handle timer)
 
 		// 已被控住的立即解控（"被控时血量掉到阈值及以下就取消控制"）
 		if (g_cvBlockControl.BoolValue)
-			ReleaseControl(i);
+			NotifyGuardBlocked(ReleaseControl(i), i);
 	}
 
-	// 第四步：移速 —— 所有未接管生还者都生效，与是否被守护无关，也不受名额限制
-	UpdateBotSpeed();
+	// 第四步：1.6.0 起不再有移速那一步（插件不写 m_flLaggedMovementValue）
 
 	// 间歇闪烁：每 tick 翻转一次相位（闪烁不受名额限制影响，只受 g_cvGlow 控制）
 	if (g_cvGlow.BoolValue)
@@ -1270,99 +1261,18 @@ bool IsCandidateBefore(int iClient, int iHealth, int iOther)
 }
 
 // ============================================================================
-// 1.2.0：未接管生还者移速（m_flLaggedMovementValue）
-// ============================================================================
-
-// 倍率 = l4d2_bot_guard_bot_speed / l4d2_bot_guard_base_speed（默认 330/220 = 1.5）
-float GetBotSpeedScale()
-{
-	float fBase = g_cvBaseSpeed.FloatValue;
-
-	if (fBase <= 0.0)
-		return MOVEMENT_DEFAULT;
-
-	float fScale = g_cvBotSpeed.FloatValue / fBase;
-
-	// 兜底：配置写坏了也不能把 bot 变成钉子/火箭
-	if (fScale < 0.1)
-		fScale = 0.1;
-
-	if (fScale > 5.0)
-		fScale = 5.0;
-
-	return fScale;
-}
-
-// 是否该给该生还者上移速：存活、未倒地、未挂边、未被真人接管
-//
-// 1.5.0 取舍（用户要求"移速那套保持原样，别扩大改动面"）：这里**故意不**加 IsIdleBody。
-//   "有真人主控的空闲身体"照样吃 1.5 倍移速，理由：
-//     ① 移速是"所有未接管生还者"的统一调整，玩家重新接管后身体按真人自己的速度走，
-//        旁观期间也不会把任何收益转移给玩家（不像免伤/自动起身那样能被"旁观一下"兑现）；
-//     ② 1.2.0 的移速状态（g_bSpeedApplied）有自己独立的还原逻辑，动它要连带改
-//        UpdateBotSpeed 的失效路径，风险与收益不成比例。
-//   所以自动起身 / 守护（免伤/免控/发光）排除空闲身体，移速不排除 —— 这是刻意的差异。
-bool ShouldApplyBotSpeed(int client)
-{
-	if (!g_cvEnabled.BoolValue)
-		return false;
-
-	if (GetClientTeam(client) != TEAM_SURVIVOR)
-		return false;
-
-	// 被真人接管后 IsFakeClient 变成 false，这里直接排除
-	if (!IsFakeClient(client))
-		return false;
-
-	if (!IsPlayerAlive(client))
-		return false;
-
-	if (IsIncapacitated(client))
-		return false;
-
-	if (IsHangingFromLedge(client))
-		return false;
-
-	return true;
-}
-
-// 每 tick 刷新一遍全部客户端的移速状态。
-// 注意：只要有任何一个条件失效（被接管 / 死亡 / 倒地 / 挂边 / 总开关关闭），
-// 就把 m_flLaggedMovementValue 写回 1.0，绝不残留。
-void UpdateBotSpeed()
-{
-	float fScale = GetBotSpeedScale();
-
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsClientInGame(i))
-		{
-			g_bSpeedApplied[i] = false;
-			continue;
-		}
-
-		if (ShouldApplyBotSpeed(i))
-		{
-			SetEntPropFloat(i, Prop_Send, MOVEMENT_PROP, fScale);
-			g_bSpeedApplied[i] = true;
-		}
-		else if (g_bSpeedApplied[i])
-		{
-			SetEntPropFloat(i, Prop_Send, MOVEMENT_PROP, MOVEMENT_DEFAULT);
-			g_bSpeedApplied[i] = false;
-		}
-	}
-}
-
-// ============================================================================
 // 1.3.0：玩家特感攻击"守护中的 AI 生还者"时的提示
 //
 //   - 提示音：默认 ui/beep_error01.wav（= 本仓库 l4d_votes_5_VS 投票未通过用的同一个
 //     音效文件，服务器上绝对存在）。改 l4d2_bot_guard_warn_sound 可换成任意
 //     game_sounds 路径（相对 sound/ 目录），留空则不播。
-//   - 三渠道文字：① 聊天框 ② PrintHintText ③ HUD 文字，各自有开关。
-//   - 节流：同一名特感玩家默认 1 秒内只提示一次（提示音也一起节流），
-//     连点爪击不会刷屏刷音。
+//   - 三渠道文字：①聊天框 ② PrintHintText ③ HUD 文字，各自有开关。
+//   - 1.6.1 节流口径：按「攻击者 × 目标 bot」成对计时（默认 1 秒），不是按攻击者一个人计时。
+//     旧口径下同一名特感玩家在冷却内打第二只守护中的人机，整条提示（音效 + 三渠道文字）
+//     会被吞掉，而且提示里写的还是上一只 bot 的名字 —— 这是"有时不提示"的主因。
+//   - 覆盖的触发点：SDKHook_OnTakeDamage（守护中吃伤害 / 保命判定），
+//     舌头 / 扑击 / 骑乘 / 牛抱人 / 牛捶打 / 牛撞墙六个前置拦截 forward，
+//     以及 1.6.1 补上的「强制解控」路径（ReleaseControl：EnterGuard / Timer_Protect / Timer_Tick）。
 // ============================================================================
 
 // 解析 l4d2_bot_guard_warn_sound，并（在地图开始时可）预缓存。
@@ -1418,6 +1328,18 @@ bool IsWarnTarget(int client)
 	return GetClientTeam(client) == TEAM_INFECTED;
 }
 
+// 1.6.1：清掉某个客户端在节流表里的整行（作为攻击者）与整列（作为目标 bot）。
+// 换图 / 进服 / 离服都要清 —— 二维表必须行列一起清，否则客户端槽位被复用时会带着
+// 上一个玩家的冷却时间戳，又变成"有时不提示"。
+void ResetWarnLast(int client)
+{
+	for (int i = 0; i <= MaxClients; i++)
+	{
+		g_fWarnLast[client][i] = 0.0;
+		g_fWarnLast[i][client] = 0.0;
+	}
+}
+
 // 带节流的入口：守护中的 AI 生还者被玩家特感攻击时调用
 void NotifyGuardBlocked(int attacker, int victim)
 {
@@ -1427,16 +1349,25 @@ void NotifyGuardBlocked(int attacker, int victim)
 	if (!IsWarnTarget(attacker))
 		return;
 
+	// 1.6.1：提示只针对"打到某一只具体的人机"。目标索引无效（世界伤害 / 实体伤害）直接返回，
+	//   同时也避免下面二维节流表用非法索引越界。
+	if (victim < 1 || victim > MaxClients)
+		return;
+
 	float fNow = GetGameTime();
 	float fCooldown = g_cvWarnCooldown.FloatValue;
 	if (fCooldown < 0.0)
 		fCooldown = 0.0;
 
-	// 1 秒播放检测：同一个人在这个窗口内只提示一次（提示音与三渠道文字共用）
-	if (fCooldown > 0.0 && g_fWarnLast[attacker] > 0.0 && fNow - g_fWarnLast[attacker] < fCooldown)
+	// 1.6.1：节流按「攻击者 × 目标 bot」成对计时。旧实现只有 g_fWarnLast[attacker] 一维表，
+	//   同一名特感玩家 1 秒内打第二只守护中的人机时整条提示被吞掉，而且提示文案里的名字
+	//   还是上一只 bot 的 —— 玩家反馈的"有时守护状态下的人机不会正确提示守护"就是这条路。
+	//   现在：同一只 bot 仍然按 warn_cooldown 节流（防连点刷屏），换一只 bot 立刻重新提示。
+	if (fCooldown > 0.0 && g_fWarnLast[attacker][victim] > 0.0
+		&& fNow - g_fWarnLast[attacker][victim] < fCooldown)
 		return;
 
-	g_fWarnLast[attacker] = fNow;
+	g_fWarnLast[attacker][victim] = fNow;
 
 	ShowGuardBlockedHint(attacker, victim);
 }
@@ -1512,7 +1443,8 @@ public Action Cmd_WarnTest(int client, int args)
 		}
 	}
 
-	g_fWarnLast[target] = 0.0;
+	for (int i = 0; i <= MaxClients; i++)
+		g_fWarnLast[target][i] = 0.0;
 	ShowGuardBlockedHint(target, victim);
 
 	ReplyToCommand(client, "\x04[BotGuard]\x01 已向 #%d 发送一次演示提示（音效=%s，服务器端文件探测=%d，节流已跳过）。",
@@ -1562,8 +1494,6 @@ bool ShouldGuard(int client, bool bIgnoreIdleBody = false)
 	//   理由与自动起身相同：替它免伤 = 让玩家"旁观 -> 再加入"白拿一段无敌。
 	//   玩家重新加入并接管后 IsFakeClient 变 false，上面那道判断已经先排除了，
 	//   因此接管后不会出现"又补一次守护"的情况。
-	//   注意：这里**只**管守护（免伤/免控/发光）；移速那套在 ShouldApplyBotSpeed 里
-	//   保持原样，不看 IsIdleBody（见 IsIdleBody 上方的取舍说明）。
 	//   bIgnoreIdleBody 只给"接管瞬间打断继承吃药"用，见函数头注释。
 	if (!bIgnoreIdleBody && IsIdleBody(client))
 		return false;
@@ -1611,7 +1541,11 @@ void EnterGuard(int client)
 	// 进入守护的瞬间若正被控制，立即解控
 	// 1.2.0：名额已经由 UpdateGuardSet / OnTakeDamage 判定过，这里不再看旧的数量开关
 	if (g_cvBlockControl.BoolValue)
-		ReleaseControl(client);
+	{
+		// 1.6.1：进守护时若正被控制，解控的同时把"守护中"提示发给控制者。
+		//   以前这里是静默解控：特感玩家眼看技能生效又被凭空解开，却没有任何提示。
+		NotifyGuardBlocked(ReleaseControl(client), client);
+	}
 }
 
 void LeaveGuard(int client)
@@ -1827,29 +1761,63 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 // ============================================================================
 
 // 参考 rygive.sp: ReleaseControl()
-void ReleaseControl(int victim)
+//
+// 1.6.1：返回值 = 本次被"守护"强行解掉的控制者里第一个玩家特感的客户端索引（没有则 0）。
+//   "技能被守护挡掉"也是需要提示的一件事。以前只有六个前置 forward 与伤害拦截会提示，
+//   "已经在控 / 刚进守护时被强制解控"这条路完全静默：低血人机在轮到守护之前被扑住、
+//   拖走，下一轮进入守护时由这里解开，特感玩家毫无反馈。
+//   调用点用返回值补发同一条提示，节流仍然生效，不会刷屏。
+int ReleaseControl(int victim)
 {
 	int attacker;
+	int iController = 0;
 
 	attacker = GetEntPropEnt(victim, Prop_Send, "m_tongueOwner");
 	if (attacker > 0 && attacker <= MaxClients)
+	{
 		L4D_Smoker_ReleaseVictim(victim, attacker);
+
+		if (iController == 0)
+			iController = attacker;
+	}
 
 	attacker = GetEntPropEnt(victim, Prop_Send, "m_pounceAttacker");
 	if (attacker > 0 && attacker <= MaxClients)
+	{
 		L4D_Hunter_ReleaseVictim(victim, attacker);
+
+		if (iController == 0)
+			iController = attacker;
+	}
 
 	attacker = GetEntPropEnt(victim, Prop_Send, "m_jockeyAttacker");
 	if (attacker > 0 && attacker <= MaxClients)
+	{
 		L4D2_Jockey_EndRide(victim, attacker);
+
+		if (iController == 0)
+			iController = attacker;
+	}
 
 	attacker = GetEntPropEnt(victim, Prop_Send, "m_carryAttacker");
 	if (attacker > 0 && attacker <= MaxClients)
+	{
 		L4D2_Charger_EndCarry(victim, attacker);
+
+		if (iController == 0)
+			iController = attacker;
+	}
 
 	attacker = GetEntPropEnt(victim, Prop_Send, "m_pummelAttacker");
 	if (attacker > 0 && attacker <= MaxClients)
+	{
 		L4D2_Charger_EndPummel(victim, attacker);
+
+		if (iController == 0)
+			iController = attacker;
+	}
+
+	return iController;
 }
 
 // 舌头：前置 forward 拦下等于"抓不到"
@@ -2141,8 +2109,9 @@ bool ReviveBotNow(int client)
 
 // 1.4.0：起身提示（全局节流 REVIVE_NOTIFY_COOLDOWN，次数不设上限时不会刷屏）。
 // 1.5.0：文案去掉"无限/不限"的口径（玩家反馈"现在是无限起身"，旧文案读起来像无限）。
-//   统一口径：
-//     - 次数不设上限（cvar < 0）："[提示] AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零）。"
+// 1.6.0：**不再输出"倒地次数已清零"**（用户要求）—— 属性照旧清零，只是不显示。
+//   现行口径：
+//     - 次数不设上限（cvar < 0）："[提示] AI 生还者 %N 已自动起身（血量 %d）。"
 //     - 有限次数还有剩余的：追加"本回合剩余自动起身 %d 次"
 //     - 有限次数已用完的：追加"本回合自动起身次数已用完"（这一次是最后一次）
 void NotifyBotRevived(int client)
@@ -2164,17 +2133,17 @@ void NotifyBotRevived(int client)
 
 	if (g_cvReviveTimes.IntValue < 0)
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零）。",
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d）。",
 			client, iHealth);
 	}
 	else if (g_iReviveLeft[client] > 0)
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零；本回合剩余自动起身 %d 次）。",
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d；本回合剩余自动起身 %d 次）。",
 			client, iHealth, g_iReviveLeft[client]);
 	}
 	else
 	{
-		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d，倒地次数已清零；本回合自动起身次数已用完）。",
+		PrintToChatAll("\x03[提示] \x01AI 生还者 %N 已自动起身（血量 %d；本回合自动起身次数已用完）。",
 			client, iHealth);
 	}
 }
@@ -2337,13 +2306,10 @@ void RefreshHeldHealItem(int client)
 //   的 HasIdlePlayer）是同一套判定，找不到时返回 -1，不会读不存在的属性。
 //   取到属主之后仍然自己复核"在游戏中 / 不是 bot / 在旁观队"，不直接信这个返回值。
 //
-// 取舍（为什么守护/起身排除它、移速不排除）：
+// 取舍（为什么守护/起身排除它）：
 //   本 cvar 的目标是"别让玩家靠旁观白拿东西"。自动起身和守护（免伤/免控/发光）都是
 //   **实打实的收益**，给了就等于让玩家"旁观 -> 再加入"白赚一次起身 + 一段无敌，所以必须排除。
-//   移速（m_flLaggedMovementValue）不一样：它是"所有未接管生还者"的统一调整，玩家重新
-//   接管后身体照旧按真人自己的速度走，旁观期间也不会把任何收益转移给玩家；
-//   而且 1.2.0 的移速逻辑写在 ShouldApplyBotSpeed 里、与守护名额互不相干 ——
-//   为了不扩大改动面，这里保持原样（空闲身体照样吃移速设置）。
+//   （1.6.0 起插件不再修改人机移速，所以"空闲身体要不要吃移速"这条取舍已经不存在了。）
 bool IsIdleBody(int bot)
 {
 	// cvar = 0 时完全回到 1.4.0 的行为（方便服主临时对照）
@@ -2414,7 +2380,7 @@ bool IsIncapacitated(int client)
 	return GetEntProp(client, Prop_Send, "m_isIncapacitated", 1) != 0;
 }
 
-// 1.2.0：是否挂在边缘（挂边时不能走路，移速要还原成 1.0）
+// 1.2.0：是否挂在边缘（挂边的人不算"站着的低血 bot"，不进守护、也不参与自动起身）
 bool IsHangingFromLedge(int client)
 {
 	return GetEntProp(client, Prop_Send, "m_isHangingFromLedge", 1) != 0;
@@ -2529,8 +2495,9 @@ int CountIdleBodies()
 
 // sm_botguard_status：把插件"眼里的状态"全部打印出来。
 // 之前出现"看不到光"时只能猜，这条命令让排查变成读数：
-//   - 存活未接管生还者数量 / 倒地人数 / 阶梯值 / 可守护数 / 当前守护名单 / 阈值
-//   - 每个 bot 的实血、虚血、总血、是否被接管、是否空闲身体（1.5.0）、移速值、守护状态、剩余起身次数
+//   - 存活未接管生还者数量 / 倒地人数 / 可守护数 / 当前守护名单 / 阈值
+//   - 每个 bot 的实血、虚血、总血、是否被接管、是否空闲身体（1.5.0）、守护状态、剩余起身次数
+//   - （1.6.0 起不再显示移速：插件已不修改人机移速）
 //   - 发光 netprop 当前值 + HasEntProp 结果（false 说明该客户端读不到属性表，但插件仍会照写）
 public Action Cmd_Status(int client, int args)
 {
@@ -2542,7 +2509,7 @@ public Action Cmd_Status(int client, int args)
 	else
 		IntToString(g_cvReviveTimes.IntValue, sReviveTimes, sizeof(sReviveTimes));
 
-	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 每回合起身上限=%s | 守护上限=%d（按未倒地比例分配） | 移速 %.0f/%.0f = x%.2f",
+	ReplyToCommand(client, "\x04[BotGuard]\x01 版本 %s | 开关=%d 阈值=%d 轮廓=%d(颜色=%d) 闪烁=%d 节奏=%.2fs | 免伤=%d 免控=%d 每回合起身上限=%s | 守护上限=%d（按未倒地比例分配） | 人机移速=引擎原版（本插件不修改）",
 		PLUGIN_VERSION,
 		g_cvEnabled.IntValue,
 		g_cvHealth.IntValue,
@@ -2553,17 +2520,14 @@ public Action Cmd_Status(int client, int args)
 		g_cvInvincible.IntValue,
 		g_cvBlockControl.IntValue,
 		sReviveTimes,
-		g_cvMaxCount.IntValue,
-		g_cvBotSpeed.FloatValue,
-		g_cvBaseSpeed.FloatValue,
-		GetBotSpeedScale());
+		g_cvMaxCount.IntValue);
 
 	// 1.5.0：空闲身体排除（需求1）的生效条件 + 现场读数。
 	//   空闲身体 = 有真人主控的 bot 身体（玩家倒地后自己切旁观 / 掉线，身体被引擎托管）。
-	//   这些身体的 idle=1，插件不会替它们起身、也不给守护；移速照旧（见 ShouldApplyBotSpeed）。
+	//   这些身体的 idle=1，插件不会替它们起身、也不给守护。
 	//   现场验证方法：玩家倒地 -> 自己切旁观 -> 这里 idle 应该变 1、且不会出现起身提示；
 	//   玩家重新加入接管后 idle 变回 0（身体已经不归插件管，IsFakeClient=0）。
-	ReplyToCommand(client, "\x04[BotGuard]\x01 跳过空闲身体: 开关=%d | 当前空闲身体数=%d（idle=1 的身体不参与自动起身/守护/免伤，移速照旧）| 起身保护窗口=%.1fs",
+	ReplyToCommand(client, "\x04[BotGuard]\x01 跳过空闲身体: 开关=%d | 当前空闲身体数=%d（idle=1 的身体不参与自动起身/守护/免伤）| 起身保护窗口=%.1fs",
 		g_cvSkipIdleBodies.IntValue,
 		CountIdleBodies(),
 		REVIVE_PROTECT_TIME);
@@ -2640,7 +2604,7 @@ public Action Cmd_Status(int client, int args)
 			IntToString(g_iReviveLeft[i], sLeft, sizeof(sLeft));
 
 		ReplyToCommand(client,
-			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d idle=%d | 实血=%d 虚血=%.1f 总血=%d | 移速=%.2f | 守护=%d(免伤位=%d) 本回合剩余起身=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
+			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d idle=%d | 实血=%d 虚血=%.1f 总血=%d | 守护=%d(免伤位=%d) 本回合剩余起身=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
 			i, sName,
 			IsFakeClient(i) ? 0 : 1,
 			IsFakeClient(i) ? 1 : 0,
@@ -2652,7 +2616,6 @@ public Action Cmd_Status(int client, int args)
 			GetClientHealth(i),
 			L4D_GetTempHealth(i),
 			GetTotalHealth(i),
-			GetEntPropFloat(i, Prop_Send, MOVEMENT_PROP),
 			g_bGuarded[i] ? 1 : 0,
 			GetEntProp(i, Prop_Data, "m_takedamage", 1),
 			sLeft,

@@ -221,6 +221,29 @@
  *        既保住「全员已到齐」这条信息，也不会留下未使用函数的 warning 203。
  *        l4d2_cptele_skip_seen 的 cvar 描述同步改掉「立即结束」那半句。
  *
+ *  1.3.0 需求「c5m2 中途集合点全员集合完毕后倒计时还在跑」（2026-11-19）：
+ *    - 现象：c5m2 中间的集合点上，所有生还者都到过集合点、机关也已经被玩家
+ *      自己触发之后，屏幕上的「N 秒后传送未到集合点的生还者」还在继续走；
+ *      倒计时走满时因为全员都到过（g_cvSkipSeen）一个人都不传送，
+ *      只播一条「全员已到达集合点，无需传送」——倒计时等于空转。
+ *    - 根因：1.2.9「需求二」为了让「集合一下又散开去补给」还能继续倒计时，
+ *      把 Timer_Countdown 里「全员到齐就提前结束」的分支整条删掉了，
+ *      倒计时一律走满。于是「集合完毕」这件事只能在倒计时自然结束时才被承认。
+ *    - 做法（**只作用于中途集合点 AREA_CHECKPOINT**，安全屋 / 救援点仍是 1.2.9
+ *      的「走满再结算」，1.2.5 / 1.2.9 的语义一个字都没动）：
+ *      Timer_Countdown 每秒判一次 IsCheckpointGatherComplete()：
+ *        本次倒计时期间「所有当前存活的生还者都已经到过该集合点」
+ *        （CountSeenSurvivors() >= CountAliveSurvivors()）就算集合完毕，
+ *        立刻走 FinishCheckpointGathered()：结束倒计时、把区域标记成本回合已触发、
+ *        照常开机关（电梯按钮之类）、播报「全员已集合完毕，传送倒计时结束」。
+ *      判定与 g_cvSkipSeen 绑定：只有「到过就不再被传送回来」这一语义生效时，
+ *      「全员到过」才等于「没人需要传送」，否则提前结束会把到过又离开的人漏掉。
+ *      新开关 l4d2_cptele_checkpoint_finish_all_seen（默认 1）；设 0 = 回到 1.2.9
+ *      的「集合完毕也把倒计时走满」，安全屋 / 救援点始终不受本开关影响。
+ *    - 边界：区域已触发（g_bAreaFired）后 monitor 不会再起倒计时，不会出现
+ *      「提前结束 -> 下一秒重新开始」的循环；全员集合完毕时 moved 必然为 0，
+ *      不传送任何人，也不会触发安全屋关门状态机。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -234,7 +257,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.2.9"
+#define PLUGIN_VERSION      "1.3.0"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -311,6 +334,7 @@ ConVar g_cvPercent;             // 安全屋 / 救援点 到齐比例
 ConVar g_cvTime;                // 安全屋 / 救援点 倒计时
 ConVar g_cvCpPercent;           // 中途集合点 到齐比例
 ConVar g_cvCpTime;              // 中途集合点 倒计时
+ConVar g_cvCpFinishAllSeen;     // 1.3.0：中途集合点全员到过即结束倒计时
 ConVar g_cvResetOnLeave;
 ConVar g_cvSkipSeen;
 ConVar g_cvSound;
@@ -479,6 +503,12 @@ public void OnPluginStart()
 		"[中途集合点] 到达比例达标后的倒计时秒数，倒计时结束时传送未到达的生还者并开启机关。默认 30",
 		FCVAR_NOTIFY, true, 1.0, true, 600.0);
 
+	// 1.3.0 需求（c5m2）：中途集合点「全员集合完毕」后不再让倒计时空转。
+	// 只影响中途集合点（AREA_CHECKPOINT）；安全屋 / 救援点仍是「走满再结算」。
+	g_cvCpFinishAllSeen = CreateConVar("l4d2_cptele_checkpoint_finish_all_seen", "1",
+		"[中途集合点] 1=本次倒计时期间所有当前存活的生还者都到过该集合点（判定口径同 l4d2_cptele_skip_seen）时，立刻结束倒计时并开机关，不再空转到 0 之后再播「无需传送」。仅在 l4d2_cptele_skip_seen 1 时生效。0=回到旧行为（集合完毕也把倒计时走满）。安全屋/救援点不受本开关影响",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	// ---- 检测来源 ---------------------------------------------------------
 	g_cvPreset = CreateConVar("l4d2_cptele_preset", "1",
 		"1=优先使用预设地图配置（configs 下的 KeyValues 文件）判定地图中途集合点，命中后不再走原版地点表与动态按钮登记。0=不读预设文件",
@@ -498,7 +528,7 @@ public void OnPluginStart()
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSkipSeen = CreateConVar("l4d2_cptele_skip_seen", "1",
-		"1=倒计时期间已经到过集合点（哪怕随后离开、继续往前走）的生还者，倒计时结束时不再被传送回来（安全屋/救援点仍按「此刻必须在屋内」把掉队者传进来）；全员都到过也不会再提前结束倒计时，倒计时仍走满再结算。0=旧行为（只看倒计时结束那一刻是否还在区域内）",
+		"1=倒计时期间已经到过集合点（哪怕随后离开、继续往前走）的生还者，倒计时结束时不再被传送回来（安全屋/救援点仍按「此刻必须在屋内」把掉队者传进来）。中途集合点在全员都到过时会立刻结束倒计时，见 l4d2_cptele_checkpoint_finish_all_seen；安全屋/救援点仍走满再结算。0=旧行为（只看倒计时结束那一刻是否还在区域内，全员到过也不会提前结束倒计时）",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_cvSound = CreateConVar("l4d2_cptele_sound", "1",
@@ -1944,22 +1974,40 @@ public Action Timer_Countdown(Handle timer)
 	// 倒计时结束时不再被传送回来（c5m2 这类「集合完就往前走」地图的修复点）
 	MarkSeenInArea(index);
 
-	// 1.2.9 需求：**不再「全员到齐就提前结束倒计时」**（用户需求：集合完成
-	// 又离开要接着倒计时）。
+	// 1.3.0 需求（c5m2 中途集合点）：**中途集合点全员集合完毕就立刻结束倒计时**。
+	// 现象：所有生还者都到过集合点、机关也被玩家自己触发之后，屏幕上还在刷
+	// 「N 秒后传送未到集合点的生还者」，倒计时走满时因为全员都到过（g_cvSkipSeen）
+	// 一个人都不传送，只播一条「无需传送」——纯空转。
+	// 判定口径与 g_cvSkipSeen 严格一致：只有「到过就不再被传送回来」成立时，
+	// 「全员都到过」才等于「没人需要传送」，所以两者都用才提前结束。
+	// **只作用于 AREA_CHECKPOINT**：安全屋 / 救援点仍是 1.2.9 的「走满再结算」，
+	// 1.2.5（此刻全员在屋内才算集合完毕）与 1.2.9（集合一下又散开要继续倒计时）
+	// 的语义一个字都没动。
+	// 提前结束后 g_bAreaFired = true，monitor 不会再为同一区域起倒计时，
+	// 不会出现「结束 -> 下一秒重开」的循环。
+	if (IsCheckpointGatherComplete(index, type))
+	{
+		FinishCheckpointGathered(index, type);
+		g_hCountdown = null;
+		return Plugin_Stop;
+	}
+
+	// 1.2.9 需求：安全屋 / 救援点**不再「全员到齐就提前结束倒计时」**（用户需求：
+	// 集合完成又离开要接着倒计时）。
 	// 1.2.0~1.2.8 在这里判「全员到过（中途集合点）/ 全员此刻在区域内（安全屋、
 	// 救援点）」就调 FinishCountdownAllSeen 立刻结束倒计时，并把区域置成已触发
 	// （g_bAreaFired）。于是「倒计时中途集合完毕、随后又散开去补给 / 继续推进」
 	// 会把该区域本回合唯一的一次集合机会用掉：本回合不再倒计时，掉队者永远
 	// 不会被传送，关底安全屋凑不齐人。
-	// 现在倒计时一律走满，到点时由 FinishCountdown 按**那一刻**的真实情况结算：
+	// 现在安全屋 / 救援点倒计时一律走满，到点时由 FinishCountdown 按**那一刻**的
+	// 真实情况结算：
 	//   · 中途集合点：g_cvSkipSeen 的「到过就不再被传送回来」语义完全不变
 	//     （FinishCountdown 里按 g_bSeen 跳过已经到过的人）；
 	//   · 安全屋 / 救援点：仍然只按「此刻必须在屋里」把掉队者补传进来（1.2.5 不变）；
 	//   · 全员此刻都在区域内时 moved == 0，FinishCountdown 会打
 	//     「全员已进入%s，无需传送」——「全员已到齐」这条信息价值保留，
 	//     只是不再抢在倒计时结束之前说出来。
-	// g_bSeen 的累积仍由上面的 MarkSeenInArea 每秒做，语义只剩「不把到过的人
-	// 传送回来」这一条，不再参与「是否提前结束」的判定。
+	// g_bSeen 的累积仍由上面的 MarkSeenInArea 每秒做。
 
 	// 掉回比例以下的处理策略
 	if (g_cvResetOnLeave.BoolValue)
@@ -2033,6 +2081,101 @@ public Action Timer_Countdown(Handle timer)
 	}
 
 	return Plugin_Continue;
+}
+
+/**
+ * 1.3.0：中途集合点是不是已经「全员集合完毕」。
+ *
+ * 判定口径 = 本次倒计时期间「所有**当前存活**的生还者都已经到过该集合点」
+ * （g_bSeen 由 MarkSeenInArea 每秒累积，"到过" 包含此刻已离开、继续往前走的人）。
+ * 全员到过 ⇒ FinishCountdown 里按 g_cvSkipSeen 会跳过所有人 ⇒ moved 必然为 0
+ * ⇒ 倒计时剩下那几十秒纯属空转，这正是 c5m2 用户报的现象。
+ *
+ * 三条硬约束，缺一不可：
+ *   1) 只对 AREA_CHECKPOINT 生效。安全屋 / 救援点必须保持 1.2.9 的「走满再结算」：
+ *      它们要的是「此刻全员在屋内」（1.2.5），提前结束会让掉队者留在门外、
+ *      关门状态机也不启动，正是 1.2.5 / 1.2.9 修过的那两个 bug。
+ *   2) l4d2_cptele_checkpoint_finish_all_seen = 0 时完全走旧行为（走满再结算）。
+ *   3) l4d2_cptele_skip_seen = 0 时不生效：那种模式下「到过」不再等于
+ *      「不需要传送」，提前结束会把"到过又离开"的人漏在外面，语义自相矛盾。
+ *
+ * @param index 区域索引
+ * @param type  区域类型
+ * @return true = 集合完毕，可以立刻结束倒计时
+ */
+bool IsCheckpointGatherComplete(int index, int type)
+{
+	if (index < 0 || index >= g_iAreaCount)
+	{
+		return false;
+	}
+
+	if (type != AREA_CHECKPOINT)
+	{
+		return false;
+	}
+
+	if (!g_cvCpFinishAllSeen.BoolValue || !g_cvSkipSeen.BoolValue)
+	{
+		return false;
+	}
+
+	int total = CountAliveSurvivors();
+
+	if (total <= 0)
+	{
+		return false;
+	}
+
+	return CountSeenSurvivors() >= total;
+}
+
+/**
+ * 1.3.0：中途集合点「全员集合完毕」的收尾 —— 结束倒计时，一个人都不传送。
+ *
+ * 与 FinishCountdown 的区别（为什么不直接复用它）：
+ *   · FinishCountdown 要多走一整轮传送判定（逐人算 IsClientInArea / g_bSeen /
+ *     固定传送点抖动）再得出 moved == 0；这里已经确定「没人需要传送」，
+ *     不需要那套判定，也就不会误碰安全屋关门状态机（ScheduleSaferoomDoorFix
+ *     只在 moved > 0 时启动）。
+ *   · 播报文案不同：这里是「全员已集合完毕，倒计时结束」，不是倒计时走满之后
+ *     的「全员已到达集合点，无需传送」——用户能一眼看出是集合完毕主动收的。
+ *
+ * 收尾动作与 FinishCountdown 保持一致的部分：
+ *   · g_bAreaFired = true：本回合该集合点不再起倒计时（monitor 会跳过），
+ *     避免「结束 -> 下一秒重开」的循环；
+ *   · SyncEnterNoticePresence：跨过结束边界的那一次进入不补播（1.2.9 约束）；
+ *   · OpenAreaMechanism：机关照常开（电梯按钮这类地图靠这一步才走得了）。
+ *
+ * @param index 区域索引（调用方已校验范围）
+ * @param type  区域类型
+ */
+void FinishCheckpointGathered(int index, int type)
+{
+	g_bCountingDown = false;
+	g_iSecondsLeft = 0;
+	g_iActiveArea = -1;
+	g_bAreaFired[index] = true;
+
+	SyncEnterNoticePresence(index);
+
+	OpenAreaMechanism(index, type);
+
+	char sMsg[192];
+
+	if (g_cvChat.BoolValue)
+	{
+		PrintToChatAll("\x05[集合点]\x01 全员已集合完毕，集合传送倒计时结束，无需传送。");
+	}
+
+	Format(sMsg, sizeof(sMsg), "全员已集合完毕，传送倒计时结束");
+	PrintHintTextToAll("%s", sMsg);
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 区域 #%d 全员集合完毕，倒计时提前结束 (type=%d source=%d 到过=%d 存活=%d)",
+			index, type, g_iAreaSource[index], CountSeenSurvivors(), CountAliveSurvivors());
+	}
 }
 
 void CancelCountdown(int index)
@@ -3694,6 +3837,10 @@ public Action Cmd_Status(int client, int args)
 	ReplyToCommand(client, "[cptele] 安全屋/救援点: %d%%(%d名) %d秒 | 中途集合点: %d%%(%d名) %d秒",
 		g_cvPercent.IntValue, AreaRequiredCount(AREA_SAFEROOM, total), g_cvTime.IntValue,
 		g_cvCpPercent.IntValue, AreaRequiredCount(AREA_CHECKPOINT, total), g_cvCpTime.IntValue);
+
+	// 1.3.0：集合完毕提前结束的口径也一并打出来，排错时一眼能看出「为什么倒计时自己停了」
+	ReplyToCommand(client, "[cptele] 中途集合点全员到过即结束倒计时=%d（需 skip_seen=1，当前 %d）| 已到过=%d",
+		g_cvCpFinishAllSeen.BoolValue, g_cvSkipSeen.BoolValue, CountSeenSurvivors());
 
 	for (int i = 0; i < g_iAreaCount; i++)
 	{

@@ -14,9 +14,8 @@
    这段时间内仍然沿用落地前的高度; 超出即判定为普通(地面)突袭, 高度按 0 计 */
 #define POUNCE_LAND_GRACE           0.3
 
-/* 参考 Hunter 高扑机制: 落差不足 300u 不产生高扑伤害, 1300u 达到伤害曲线峰值(= cap, 默认 25)
-   起算高度现由 cvar l4d2_JockeyPounce_minheight 控制(默认 300), 峰值高度固定 1300 */
-#define POUNCE_MAX_HEIGHT           1300.0
+/* 起算高度由 cvar l4d2_JockeyPounce_minheight控制(默认300u,低于此落差不计高扑伤害);
+达到起算高度后,伤害按旧版平方曲线计算(见 DistanceJumped) */
 
 ConVar g_hEnabled;
 ConVar g_hBlindAmount;
@@ -42,15 +41,15 @@ public Plugin myinfo =
 	name = "L4D2 Jockey Pounce Damage Confogl Edition",
 	author = "apples1949",
 	description = "Inflicts distance bonus damage to the jockey's victim if the latter has been pounced from a great height.",
-	version = "1.4"
+	version = "1.5"
 };
 
 public void OnPluginStart()
 {
 	g_hEnabled			= CreateConVar("l4d2_JockeyPounce_enabled", "1", "启用/禁用插件");
 	g_hBlindAmount		= CreateConVar("l4d2_JockeyPounce_blind", "200", "jockey使玩家致盲的程度 (0: 不致盲, 255:完全致盲 RGB值)");
-	g_hPounceScale		= CreateConVar("l4d2_JockeyPounce_scale", "0.5", "实际伤害倍数 (伤害曲线参考 Hunter 高扑: 300u 起算, 1300u 到峰值; 0.5 = 实际伤害减半)");
-	g_hPounceCap		= CreateConVar("l4d2_JockeyPounce_cap", "25", "高扑伤害上限 (同时是 1300u 落差时的曲线峰值)");
+	g_hPounceScale		= CreateConVar("l4d2_JockeyPounce_scale", "0.5", "实际伤害倍数 (旧版平方公式:落差/100取整后平方 *0.8 +1,再乘此倍数;0.5 =减半)");
+	g_hPounceCap		= CreateConVar("l4d2_JockeyPounce_cap", "25", "高扑伤害上限");
 	g_hPounceMinShow	= CreateConVar("l4d2_JockeyPounce_minshow", "1", "至少造成多少突袭伤害才会显示相关提示信息");
 	g_hPounceDisplay	= CreateConVar("l4d2_JockeyPounce_display", "1", "如何显示相关提示信息, 0 - 关闭, 1 - 聊天框, 2 - 屏幕中心");
 	g_hPounceDisplayAI	= CreateConVar("l4d2_JockeyPounce_display_ai", "1", "AI(非玩家操控)猴子的高扑是否也显示提示信息. 0=只在真人猴子时提示, 1=AI 也提示(默认)");
@@ -201,41 +200,36 @@ float GetPounceHeight(int client)
 
 void DistanceJumped(int client, int victim)
 {
-	/* 高扑高度(游戏单位): 只认本次连续滞空期内的落差 */
+	/* 高扑高度(游戏单位):只认本次连续滞空期内的落差 */
 	float pounceHeight = GetPounceHeight(client);
 
-	/* 参考 Hunter 高扑机制: 落差不足 minheight(默认 300u) 没有高扑伤害;
-	   minheight → 1300u 线性涨到曲线峰值(cap, 默认 25), 落差再大也只取峰值;
-	   最后乘 scale 得到实际伤害(默认 0.5 = 减半) */
+	/* 落差不足 minheight(默认300u)不计高扑伤害 */
 	float minHeight = g_hPounceMinHeight.FloatValue;
-	float maxHeight = POUNCE_MAX_HEIGHT;
-	/* minheight 被配到接近/超过峰值时, 让曲线退化为"够了就给满伤害" */
-	if (maxHeight <= minHeight)
-	{
-		maxHeight = minHeight + 1.0;
-	}
 
-	float actualDamage = 0.0;
+	int damage = 0;
 	if (pounceHeight >= minHeight)
 	{
-		float ratio = (pounceHeight - minHeight) / (maxHeight - minHeight);
-		if (ratio > 1.0)
-		{
-			ratio = 1.0;
-		}
+		/* 恢复旧版的高度→伤害算法(8c0ba88a /6695e257 / e8500481一直沿用的公式,
+		   7ba5978b(v1.3)曾把它换成 Hunter式300u→1300u线性曲线):
+		   落差取整 → /100再取整 →平方 *0.8 +1 →乘 scale →不超过 cap.
+		   旧版用 startPosition/endPosition相减取落差,这里用等价的连续滞空落差 pounceHeight. */
+		int heightUnits = RoundFloat(pounceHeight);
 
-		actualDamage = ratio * g_hPounceCap.FloatValue * g_hPounceScale.FloatValue;
-
-		/* scale > 1 时兜底: 实际伤害同样不超过上限 */
-		if (actualDamage > g_hPounceCap.FloatValue)
+		/* 旧版对"落差为负"(Jockey反而上升)直接跳过 */
+		if (heightUnits >= 0)
 		{
-			actualDamage = g_hPounceCap.FloatValue;
+			int heightSteps = RoundFloat(heightUnits / 100.0);
+
+			damage = RoundFloat((((heightSteps * heightSteps) * 0.8) + 1) * g_hPounceScale.FloatValue);
+
+			if (damage > g_hPounceCap.IntValue)
+			{
+				damage = g_hPounceCap.IntValue;
+			}
 		}
 	}
 
-	int damage = RoundFloat(actualDamage);
-
-	/* 不足 1 点(含 < 300u 的非高扑): 不结算、不提示、不发特感伤害数字 */
+	/* 不足1点(含 < minheight的非高扑):不结算、不提示、不发特感伤害数字 */
 	if (damage <= 0)
 	{
 		return;

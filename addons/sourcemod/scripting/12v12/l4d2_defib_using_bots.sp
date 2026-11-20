@@ -45,6 +45,27 @@
  *     两个条件任一不满足就立刻释放已在工作的机器人并退出，绝不干预真人玩家；
  *     全是真人、或还没人死的时候，本插件每个 tick 什么都不做。
  *
+ *  ---- 1.1.0 新增的「前往尸体」双重门槛（2026-11-19 需求）----
+ *  10. 每次让机器人「前往目标点位」之前都要复核【场上是否还有死亡的生还者】：
+ *      · 场景：机器人正赶路去电某具尸体，中途队友被别人（真人 / 别的 bot）先救活了，
+ *        尸体实体在场上一时没消失，机器人还是往那儿跑，白跑一趟。
+ *      · 做法：CanBotGoToBody() = IsStillValidBot + IsBodyStillNeeded + 距离上限，
+ *        在三个地方统一调用：新指派、赶路中每拍重新下移动指令前、
+ *        以及 MaintainAssignedBots 对本拍不再需要处理的机器人做兜底释放。
+ *      · IsBodyStillNeeded() 判定：尸体实体仍有效 → 场上仍有死亡生还者
+ *        (HasDeadSurvivor)。这两条永远生效。
+ *        可选加固 sm_defib_bots_strict_corpse_check（默认 0）：再要求「尸体的
+ *        m_nCharacterType 能对上某个仍然死着的同角色生还者」，更早甩掉复活后的
+ *        残留模型；因为依赖两条 netprop 口径一致，默认关闭，建议实测后再开。
+ *      · 另外 defibrillator_used 事件里补一手：有人被救活时，立刻释放所有
+ *        「正在前往这具尸体（复活点附近）」的机器人并复位 AI。
+ *  11. 距离硬上限 sm_defib_bots_max_range（默认 1000）：机器人当前位置到尸体的
+ *      直线距离超过该值就不再前往；已经在赶路的立刻放弃并复位 AI。
+ *      实际生效上限 = min(sm_defib_bots_chase_range, sm_defib_bots_max_range)：
+ *      chase_range 是「要不要开始追」，max_range 是「绝对不许超过多远」，
+ *      两个都满足才允许出发/继续走。默认 800 / 1000 → 现在实际是 800；
+ *      想让机器人从 1000 码外出发，把 chase_range 调到 ≥ 1000 即可。
+ *
  *  ---- 依赖 ----
  *  仅 sourcemod + sdktools，无 gamedata、无 DHooks、无 Left4DHooks。
  *  建议与 12v12/Defib_Fix.sp 同时启用（它修引擎层"电击索引失效"的 bug，能让电击更可靠）。
@@ -61,7 +82,7 @@
 #include <sourcemod>
 #include <sdktools>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.1.0"
 
 #define TEAM_SURVIVOR 2
 #define TEAM_INFECTED 3
@@ -86,12 +107,19 @@ enum
 #define DEFIB_ARM_DELAY 0.2
 // 单次电击尝试的最长强制开火时间（秒），超时即松手，防止机器人永久卡在开火状态
 #define DEFIB_FIRE_TIMEOUT 5.0
+// 有人被救活时，距离复活点这么近（HU）的尸体都算「已经不新鲜了」，
+// 正赶向它的机器人立刻放弃（1.1.0 需求：防止中途复活还往尸体处跑）
+#define REVIVE_RELEASE_RADIUS 300.0
 
 int g_iShoot[MAXPLAYERS + 1];           // 当前是否由本插件替该机器人按住开火
 int g_iTarget[MAXPLAYERS + 1];          // 该机器人正在处理的尸体实体索引（0 = 空闲）
 float g_flArmAt[MAXPLAYERS + 1];        // 允许开始按键的游戏时间
 float g_flFireDeadline[MAXPLAYERS + 1]; // 强制开火的超时时刻
 float g_flRetryAfter[MAXPLAYERS + 1];   // 冷却结束前不再被指派
+
+// 1.1.0：尸体角色属性是否可用（m_nCharacterType ↔ m_survivorCharacter）。
+// 运行期先探测一次，拿不到就关掉「角色匹配」这一层判定，绝不对无效属性每拍刷错误日志。
+bool g_bCharPropsOk;
 
 ConVar g_cvEnabled;
 ConVar g_cvInterval;
@@ -100,6 +128,8 @@ ConVar g_cvUseRange;
 ConVar g_cvRequireQuiet;
 ConVar g_cvAssistGate;
 ConVar g_cvRetryDelay;
+ConVar g_cvMaxRange;      // 1.1.0：前往尸体的绝对距离上限（默认 1000）
+ConVar g_cvStrictCorpse;  // 1.1.0：是否额外做「尸体角色 ↔ 死着的同角色玩家」匹配
 
 Handle g_hScanTimer;
 
@@ -146,7 +176,24 @@ public void OnPluginStart()
 		"电击失败或被打断后，同一机器人重新尝试的冷却时间（秒）。范围 1.0~30.0。",
 		_, true, 1.0, true, 30.0);
 
+	// 1.1.0 需求：距尸体超过 1000 码就不再前往。
+	g_cvMaxRange = CreateConVar("sm_defib_bots_max_range", "1000.0",
+		"【绝对距离上限】机器人当前位置到阵亡尸体位置的直线距离超过该值（游戏单位）时，不再前往该尸体；已经出发的立刻放弃并复位 AI。默认 1000。实际生效上限 = min(chase_range, max_range)，两个条件都要满足。范围 100.0~5000.0。",
+		_, true, 100.0, true, 5000.0);
+
+	// 1.1.0：更严格的「这具尸体是不是复活后的残留」判定（角色匹配）。
+	// 默认 0：只靠「场上还有没有死亡生还者」+「复活事件」判定，行为最稳。
+	// 打开后额外要求「同角色的生还者里必须还有人死着」，能更早甩掉残留尸体模型，
+	// 但依赖 m_nCharacterType / m_survivorCharacter 口径一致，建议先进服实测再开。
+	g_cvStrictCorpse = CreateConVar("sm_defib_bots_strict_corpse_check", "0",
+		"1=额外做尸体角色匹配：尸体的 m_nCharacterType 必须能对上某个仍然死亡着的同角色生还者，否则视作复活后的残留尸体，不再前往。更早甩掉残留模型，但依赖两条 netprop 口径一致，建议实测后再开。0=只用「场上还有死亡生还者 + 复活事件」判定（默认，最稳）",
+		_, true, 0.0, true, 1.0);
+
 	g_cvInterval.AddChangeHook(OnIntervalChanged);
+
+	// 1.1.0：探测尸体 / 玩家角色属性是否真的存在，探测不到就关闭角色匹配这一层
+	g_bCharPropsOk = (FindSendPropInfo("CSurvivorDeathModel", "m_nCharacterType") != -1
+	               && FindSendPropInfo("CTerrorPlayer", "m_survivorCharacter") != -1);
 
 	HookEvent("defibrillator_used", Event_DefibUsed, EventHookMode_Post);
 	HookEvent("defibrillator_used_fail", Event_DefibFailed, EventHookMode_Post);
@@ -254,6 +301,15 @@ public Action Timer_Scan(Handle timer)
 		return Plugin_Continue;
 	}
 
+	// 1.1.0 需求：场上必须**真的还有人死着**。
+	// survivor_death_model 不保证在「被救活」的同一帧消失，所以只判实体在不在不够；
+	// 一个人都没死的时候，任何「前往尸体处」的行动都只是白跑。
+	if (!HasDeadSurvivor())
+	{
+		ResetAllBots(true, false);
+		return Plugin_Continue;
+	}
+
 	float flNow = GetGameTime();
 	MaintainAssignedBots(flNow);
 	AssignBotsToBodies(flNow);
@@ -312,6 +368,14 @@ void MaintainAssignedBots(float flNow)
 
 		if (g_iShoot[i] != SHOOT_ON)
 		{
+			// 1.1.0 需求：赶路途中也要复核「场上还有死亡生还者」与「距离上限」，
+			// 不满足就立刻放弃这具尸体并复位 AI，别再往那边跑。
+			// 真正的移动指令由 AssignBotsToBodies 每拍重新下发，那里有同一道门槛。
+			if (!CanBotGoToBody(i, g_iTarget[i]))
+			{
+				ReleaseBot(i, 0.0, true);
+			}
+
 			continue; // 还在赶路，交给 AssignBotsToBodies 下发移动指令
 		}
 
@@ -350,6 +414,14 @@ void AssignBotsToBodies(float flNow)
 			continue;
 		}
 
+		// 1.1.0 需求：遍历到每一具尸体时先确认它「还作数」——
+		// 场上还有死亡生还者、且这具尸体没有被别人先救活（残留尸体）。
+		// 不作数就一个人都不派过去（已在赶路的会在上面那道门槛里被释放）。
+		if (!IsBodyStillNeeded(iBody))
+		{
+			continue;
+		}
+
 		float vecBody[3];
 		GetEntPropVector(iBody, Prop_Send, "m_vecOrigin", vecBody);
 
@@ -371,15 +443,19 @@ void AssignBotsToBodies(float flNow)
 				continue; // 正在电，别打断
 			}
 
+			// 1.1.0 需求：每次让机器人「前往目标点位」之前统一过这道门槛 ——
+			// ①机器人自身仍可用 ②场上还有死亡生还者、这具尸体仍然作数
+			// ③当前距离没超过 chase_range / max_range 的较低者。
+			// 任一不满足：放弃这具尸体并复位 AI（ReleaseBot 第 3 参数 = 发 CommandABot({cmd=3})）。
+			if (!CanBotGoToBody(iAssigned, iBody))
+			{
+				ReleaseBot(iAssigned, 0.0, true);
+				continue;
+			}
+
 			float vecBot[3];
 			GetClientAbsOrigin(iAssigned, vecBot);
 			float flDist = GetVectorDistance(vecBot, vecBody);
-
-			if (flDist > g_cvChaseRange.FloatValue)
-			{
-				ReleaseBot(iAssigned, 0.0, true); // 越追越远，放弃这具尸体
-				continue;
-			}
 
 			if (flDist > g_cvUseRange.FloatValue)
 			{
@@ -414,7 +490,7 @@ void AssignBotsToBodies(float flNow)
 			GetClientAbsOrigin(i, vecBot);
 			float flDist = GetVectorDistance(vecBot, vecBody);
 
-			if (flDist > g_cvChaseRange.FloatValue)
+			if (flDist > EffectiveTravelRange())
 			{
 				continue;
 			}
@@ -446,6 +522,14 @@ void AssignBotsToBodies(float flNow)
 // 切枪 + 对准 + 进入"0.2 秒后开始按住开火"状态
 void BeginDefib(int client, int iBody)
 {
+	// 1.1.0 需求：真正开始电之前再复核一次（调用方可能刚拿到新鲜的距离，
+	// 但「尸体还作不作数」必须由同一道门槛统一判定）
+	if (!CanBotGoToBody(client, iBody))
+	{
+		ReleaseBot(client, 0.0, true);
+		return;
+	}
+
 	if (!IsHoldingActiveDefib(client))
 	{
 		if (FindDefibWeapon(client) == 0)
@@ -567,6 +651,12 @@ public void Event_DefibUsed(Event event, const char[] name, bool dontBroadcast)
 
 	// 成功救人：立即松手，0.4 秒后复位 AI（等电击结束动画收尾）
 	CancelForcedFire(client, 0.0, 0.4);
+
+	// 1.1.0 需求：被救的那个人已经活了，尸体不再作数 ——
+	// 立刻释放所有还在往这具尸体（复活点附近）赶路的机器人。
+	int iSubject = GetClientOfUserId(event.GetInt("subject"));
+
+	ReleaseBotsNearRevivedClient(iSubject);
 }
 
 public void Event_DefibFailed(Event event, const char[] name, bool dontBroadcast)
@@ -861,6 +951,166 @@ bool HasAliveSurvivor()
 	}
 
 	return false;
+}
+
+// 1.1.0 需求：场上是否还有「死亡的生还者」。
+// 与 HasDeathModel() 的区别：那只说明场上还有 survivor_death_model 实体；
+// 复活瞬间实体不一定立刻消失，所以「还要不要去尸体处」必须同时看人是不是还死着。
+bool HasDeadSurvivor()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || IsClientInKickQueue(i))
+		{
+			continue;
+		}
+
+		if (GetClientTeam(i) != TEAM_SURVIVOR)
+		{
+			continue;
+		}
+
+		if (IsPlayerAlive(i))
+		{
+			continue;
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+// 1.1.0 需求：这具尸体是否还「值得去电」。
+//   · 实体仍然存在且类名没被复用（IsDeathModel）
+//   · 场上至少还有一名死亡生还者（HasDeadSurvivor）
+//   —— 上面两条永远生效，就是需求要求的「每次前往前都检测场上还有没有死的生还者」。
+//   · 可选加固（sm_defib_bots_strict_corpse_check，默认 0）：尸体的 m_nCharacterType
+//     必须能对上某个仍然死着的同角色生还者，否则视作「被救活之后留下的残留模型」。
+//     该匹配依赖两条 netprop 口径一致，默认关闭；角色对不上任何玩家时不做否决。
+bool IsBodyStillNeeded(int iBody)
+{
+	if (!IsDeathModel(iBody))
+	{
+		return false;
+	}
+
+	if (!HasDeadSurvivor())
+	{
+		return false;
+	}
+
+	// 属性取不到 / 该引擎版本没有这两条 netprop → 跳过角色匹配，不做否决
+	// 默认不启用角色匹配（sm_defib_bots_strict_corpse_check 0）：
+	// 需求要求的「场上还有没有死亡生还者」上面已经判过，这一层是更早甩掉残留模型的加固。
+	if (!g_cvStrictCorpse.BoolValue || !g_bCharPropsOk)
+	{
+		return true;
+	}
+
+	int iCharType = GetEntProp(iBody, Prop_Send, "m_nCharacterType");
+
+	if (iCharType < 0 || iCharType > 31)
+	{
+		return true; // 拿不到合法角色类型 → 不做否决
+	}
+
+	bool bKnown = false;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || GetClientTeam(i) != TEAM_SURVIVOR)
+		{
+			continue;
+		}
+
+		if (GetEntProp(i, Prop_Send, "m_survivorCharacter") != iCharType)
+		{
+			continue;
+		}
+
+		bKnown = true;
+
+		if (!IsPlayerAlive(i))
+		{
+			return true; // 同角色的人还死着 → 这具尸体还有用
+		}
+	}
+
+	if (!bKnown)
+	{
+		return true; // 场上没有任何玩家用这个角色 → 口径不一致，不做否决
+	}
+
+	// 同角色的人全部活着 = 这具尸体是复活后的残留
+	return false;
+}
+
+// 1.1.0：实际生效的「出发半径」= chase_range（要不要开始追）
+// 与 max_range（绝对不许超过多远，默认 1000）的较低者。
+float EffectiveTravelRange()
+{
+	float flChase = g_cvChaseRange.FloatValue;
+	float flMax = g_cvMaxRange.FloatValue;
+
+	return (flMax < flChase) ? flMax : flChase;
+}
+
+// 1.1.0 需求：每次让机器人「前往尸体处」之前必须同时满足的完整门槛。
+//   ① 机器人本身仍然可用（存活 / AI / 未倒地未挂边未被控 / 不在踢人队列）
+//   ② 这具尸体仍然作数（见 IsBodyStillNeeded：场上还有死亡生还者）
+//   ③ 当前位置到尸体的直线距离 <= EffectiveTravelRange()（即 <= max_range 1000）
+bool CanBotGoToBody(int client, int iBody)
+{
+	if (!IsStillValidBot(client))
+	{
+		return false;
+	}
+
+	if (!IsBodyStillNeeded(iBody))
+	{
+		return false;
+	}
+
+	float vecBot[3];
+	float vecBody[3];
+
+	GetClientAbsOrigin(client, vecBot);
+	GetEntPropVector(iBody, Prop_Send, "m_vecOrigin", vecBody);
+
+	return GetVectorDistance(vecBot, vecBody) <= EffectiveTravelRange();
+}
+
+// 1.1.0 需求：有人被电击救活时，立刻让「正赶向这具尸体」的机器人放弃。
+// 时间窗口很窄（尸体实体可能还挂着），所以除了事件这一手，
+// 每拍的 CanBotGoToBody 还会再复核一次，双保险。
+void ReleaseBotsNearRevivedClient(int client)
+{
+	if (client < 1 || client > MaxClients || !IsClientInGame(client))
+	{
+		return;
+	}
+
+	float vecRevived[3];
+	GetClientAbsOrigin(client, vecRevived);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (g_iTarget[i] == 0 || !IsDeathModel(g_iTarget[i]))
+		{
+			continue;
+		}
+
+		float vecBody[3];
+		GetEntPropVector(g_iTarget[i], Prop_Send, "m_vecOrigin", vecBody);
+
+		if (GetVectorDistance(vecRevived, vecBody) > REVIVE_RELEASE_RADIUS)
+		{
+			continue;
+		}
+
+		ReleaseBot(i, 0.0, true);
+	}
 }
 
 // 除自己以外，是否还有队友正倒地/挂边/被控（原版 IsAssistNeeded 的 12v12 版本）

@@ -27,7 +27,8 @@
  *    1) 预设地图配置   addons/sourcemod/configs/l4d2_cptele_presets.cfg
  *                      （KeyValues，按地图预置：targetname 实体 / 坐标+半径 /
  *                        固定传送点）。命中本图即以预设为准。
- *    2) 原版按地点检测 内置表（GetLegacySite），搬自 alasfourom
+ *    2) 原版按地点检测 配置表（configs/l4d2_cptele_legacy.cfg，1.3.1 起从
+ *       代码里的 GetLegacySite 搬进 cfg），数据搬自 alasfourom
  *                      "L4D Elevator Teleport" 的「地图 → 机关实体 + 传送点」，
  *                      只在预设没有命中本图时才启用。
  *    3) 运行时自动侦测 安全屋 info_changelevel（退回 trigger_changelevel）、
@@ -244,6 +245,77 @@
  *      「提前结束 -> 下一秒重新开始」的循环；全员集合完毕时 moved 必然为 0，
  *      不传送任何人，也不会触发安全屋关门状态机。
  *
+ *  1.3.1 修复「c4m2 电梯上人齐 / 按按钮都不触发传送倒计时」+ 原版地点表搬进 cfg
+ *        （2026-11-23）：
+ *    - 现象（用户回报）：c4m2_sugarmill_a 甘蔗田尽头那台货运电梯，无论按按钮
+ *      还是全员到齐，屏幕都不出「N 秒后传送未到集合点的生还者」，电梯机关也不会
+ *      被插件打开。
+ *    - 根因一（数据选错实体）：内置表给 c4m2 的集合点是车厢里的
+ *      button_inelevator。实测 c4m2_sugarmill_a.bsp 的实体块：
+ *        · button_inelevator  func_button  parentname=elevator  origin z≈170
+ *          （车厢开局停在井底 z=154，top=634），并且 OnPressed 里有 "!self Kill"
+ *          自删；
+ *        · 上面那层（z≈660）真正的集合按钮是 button_callelevator（无父级，
+ *          OnPressed → elevator Movetofloor top，即「把车厢叫上来」）。
+ *      生还者到达的是顶层，插件盯的却是井底车厢里的按钮。
+ *    - 根因二（父实体坐标不世界化，**这条是主因，影响 5 张图**）：
+ *      父实体（parentname）下的 m_vecOrigin 是相对父级的局部坐标——引擎
+ *      SetParent 时已经把父实体的原点/角度减掉了。GetEntityCenter() 以前直接
+ *      把 m_vecOrigin 当世界坐标 + (mins+maxs)/2，于是这些条目的区域中心全部
+ *      塌到「局部坐标」（≈ 地图原点附近，几个单位），生还者站在电梯上离那个
+ *      幻影中心还有几千 HU，CountArrivedSurvivors() 恒为 0，
+ *      Timer_Monitor 永远达不到 ceil(50% × 存活) 的到齐人数 → 倒计时永不触发。
+ *      受影响的条目（都是父实体的子按钮）：c1m1_hotel elevator_button
+ *      （parent elevator_1）、c1m4_atrium button_elev_3rdfloor（parent elevator）、
+ *      c3m1_plankcountry ferry_tram_button（parent ferry_tram）、
+ *      c4m2/c4m3 button_inelevator（parent elevator）。唯一没出问题的是
+ *      c5m2_park 的 trigger_multiple（走 L4D_IsTouchingTrigger，与坐标无关），
+ *      这也解释了此前所有修复反馈为什么都集中在 c5m2。
+ *    - 做法：
+ *      ① GetEntityWorldOrigin()：沿 m_pParent 链逐级还原世界坐标（每级的局部
+ *         偏移先按该父实体的角度旋转），层数上限 8 层防循环父级；
+ *         GetEntityCenter() 改用它，所有读实体的判定（距离 / nav 落点）一起修好。
+ *      ② GetAreaCenter()：半径类区域的判定中心改成**每次实时算**——电梯/渡轮
+ *         一动，快照坐标立刻过期；纯坐标区域仍用预设给的坐标，实体消失时退回快照。
+ *         IsClientInArea() / GetAreaDestination() / sm_cptele 全部改走它。
+ *      ③ 数据修正：c4m2 的集合实体改成顶层 button_callelevator（radius 700），
+ *         c4m3 保留车厢按钮（那一关生还者本来就在井下，按它才上行）。
+ *      ④ 顺手把判定中心打进 sm_cptele 输出，再遇到同类问题一眼能看出是
+ *         「中心塌到 0」还是「实体找不到」。
+ *    - 原版地点表搬进 cfg（用户要求）：删掉 GetLegacySite() 的硬编码表，
+ *      改成读 configs/l4d2_cptele_legacy.cfg（新 ConVar
+ *      l4d2_cptele_legacy_file）。键名与 l4d2_cptele_presets.cfg 完全一致，
+ *      两张表共用同一个槽位解析器 LoadConfigSlot()（只靠 source 区分
+ *      SRC_PRESET / SRC_LEGACY）；文件不存在时静默回落到运行时侦测，
+ *      改完 sm_cptele_reload 即时生效，不用重编译。
+ *    - 边界：本图预设一旦提供中途集合点，原版地点表整份跳过（与旧行为一致）；
+ *      ResetRound / OnMapStart / OnMapEnd / sm_cptele_reload 都会释放并重读两张表；
+ *      原版地点表解析失败只写一条 error 日志，不影响安全屋 / 救援点的自动侦测。
+ *
+ *  1.3.2 需求「c6m3_port 也要能正常集合」+ 救援区忽略名单（2026-11-23）：
+ *    - 现象/结论：c6m3_port 不写任何条目时，安全屋层不注册（唯一的
+ *      info_changelevel 是 spawnflags=2、map 指向自己的回退项，见
+ *      FindLastChangelevel 的注释），中途集合点是空集，只剩救援层；而救援层是
+ *      按「trigger_multiple + m_iEntireTeam == 2」整类抓的，这张图有两个这样的
+ *      体积：trigger_escape(8 -2832 48) 和 generator_elevator_trigger(-760 -580 344)。
+ *      于是终局流程（升罐电梯 → 发电机）之前完全没有倒计时，逃离阶段一开始又要
+ *      和「升罐电梯」那个体积抢倒计时，抢到就先把掉队者往起点侧传。
+ *    - 做法一（数据）：预设表新增 c6m3_port 的集合点 —— **坐标型**，取升罐电梯
+ *      顶层平台（-760 -580 340，radius 700）。刻意不绑 generator_elevator_button：
+ *      那个按钮 parentname=generator_elevator、spawnflags=3073 锁住，地图自己的
+ *      generator_elevator_trigger 会在全员上台时 Unlock 它；插件绑它就会在倒计时
+ *      结束时替玩家 unlock+use，把 12v12 里没到场的一半人留在下面（1.2.4 的老问题）。
+ *      命中预设后 g_bSiteAuthority=true，动态按钮登记也一并被抑制。
+ *    - 做法二（代码）：新增「救援区忽略名单」。两张配置表都支持保留段
+ *      （段名以 '_' 或 '#' 开头一律不登记成集合点），其中
+ *        "_ignore" { "rescue" "名字1,名字2" }
+ *      会在 DetectAreas 注册 AREA_RESCUE 之前按 targetname（m_iName，大小写
+ *      不敏感、逗号/空格/分号分隔）过滤掉整个team触发体积；名单最多 8 条，
+ *      随回合清空、随配置重读，verbose 下会打出每个被忽略的实体。
+ *    - 边界：忽略名单只作用于救援层，不影响安全屋 / 中途集合点；名单随预设表 /
+ *      原版地点表一起读取，那两张表被关掉（l4d2_cptele_preset 0 /
+ *      l4d2_cptele_legacy 0）时名单也不生效；超过 8 条只写一条 error 不刷屏。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -257,7 +329,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.3.0"
+#define PLUGIN_VERSION      "1.3.2"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -275,6 +347,7 @@
 #define DEST_JITTER         32.0        // 固定传送点附近的散开抖动（HU）
 
 #define PRESET_DEFAULT_FILE "l4d2_cptele_presets.cfg"   // 预设文件名（相对 configs/）
+#define LEGACY_DEFAULT_FILE "l4d2_cptele_legacy.cfg"    // 原版地点表文件名（相对 configs/，1.3.1 起从代码搬到 cfg）
 
 // 安全门修复：传送落位后等多久再去检查 / 动门（等一帧以上，让 TeleportEntity
 // 与 L4D_WarpToValidPositionIfStuck 的落点、以及引擎的触发体积 touching 状态稳定）
@@ -301,7 +374,7 @@
 // 宁可不开门也不能误开别处的门（例如起点安全屋的门）。
 #define SAFEROOM_DOOR_MAX_DIST  2000.0
 
-// 预设槽位解析结果：LoadPresetSlot 的返回值
+// 配置槽位解析结果：LoadConfigSlot 的返回值（预设表与原版地点表共用）
 #define PRESET_SLOT_NONE        0       // 未登记（配置写错 / 实体找不到 / 区域已满）
 #define PRESET_SLOT_OTHER       1       // 登记了安全屋 / 救援点
 #define PRESET_SLOT_CHECKPOINT  2       // 登记了中途集合点
@@ -322,7 +395,7 @@ enum
 enum
 {
 	SRC_AUTO = 0,           // 运行时自动侦测
-	SRC_LEGACY,             // 原版按地点检测（内置表）
+	SRC_LEGACY,             // 原版按地点检测（配置表）
 	SRC_PRESET              // 预设地图配置
 };
 
@@ -349,7 +422,8 @@ ConVar g_cvMechanismUnlocked;
 ConVar g_cvMechRadius;
 ConVar g_cvPreset;              // 预设地图检测
 ConVar g_cvPresetFile;
-ConVar g_cvLegacy;              // 原版按地点检测（内置表）
+ConVar g_cvLegacy;              // 原版按地点检测（配置表）
+ConVar g_cvLegacyFile;
 ConVar g_cvRevive;
 ConVar g_cvReleaseSi;
 ConVar g_cvRemoveInfected;
@@ -377,6 +451,12 @@ int   g_iAreaCount;
 // ---------------------------------------------------------------------------
 KeyValues g_hPresets;
 bool      g_bPresetsTried;
+
+// ---------------------------------------------------------------------------
+// 原版地点表（1.3.1 起从 GetLegacySite 的硬编码搬到 configs/l4d2_cptele_legacy.cfg）
+// ---------------------------------------------------------------------------
+KeyValues g_hLegacy;
+bool      g_bLegacyTried;
 
 // ---------------------------------------------------------------------------
 // 倒计时 / 监控状态
@@ -435,6 +515,27 @@ bool   g_bLateLoad;
 bool   g_bSacrificeFinale;
 bool   g_bRescueReady;          // 救援车是否已到位（finale_vehicle_ready）
 bool   g_bSiteAuthority;        // 本图集合点已由「预设 / 原版地点」提供
+
+// ---------------------------------------------------------------------------
+// 1.3.2：救援区忽略名单（按地图，写在预设表 / 原版地点表的 "_ignore" 段里）
+//
+// 背景：救援层是按「trigger_multiple + m_iEntireTeam == 2」整类抓的，而终局图上
+// 满足这个字段的体积往往不止逃生点一个 —— 例如 c6m3_port 既有桥尾的
+// trigger_escape，也有升罐电梯上的 generator_elevator_trigger（它只是用来在全员
+// 站上升降台时 Unlock 车厢按钮）。后者被当成救援区后，逃离阶段一旦对冲就先起
+// 60 秒倒计时，把掉队者往「起点侧」传送。cfg 里删条目删不掉它（它不是 cfg 登记
+// 的区域），所以在注册阶段加一层名单过滤。
+//
+// 名单随预设表 / 原版地点表一起读取，换图 / 换回合清空后重新解析；
+// 名字比较大小写不敏感，与目标实体的 targetname（m_iName）对齐。
+// ---------------------------------------------------------------------------
+#define RESCUE_IGNORE_MAX   8
+#define RESCUE_IGNORE_LEN   128
+#define RESCUE_IGNORE_SECTION "_ignore"   // 保留段名：_ignore { "rescue" "名字,名字" }
+
+int  g_iRescueIgnoreCount;
+char g_sRescueIgnore[RESCUE_IGNORE_MAX][RESCUE_IGNORE_LEN];
+bool g_bRescueIgnoreOverflowLogged;   // 名单超长只 warn 一次（每张图），不按回合刷日志
 
 // ---------------------------------------------------------------------------
 // 运行期 native 可用性
@@ -519,8 +620,12 @@ public void OnPluginStart()
 		FCVAR_NOTIFY);
 
 	g_cvLegacy = CreateConVar("l4d2_cptele_legacy", "1",
-		"1=启用「原版按地点检测」内置表（搬自 L4D Elevator Teleport：已知电梯/机关图的地图名 → 机关 targetname + 传送点）。仅在预设没有命中本图时生效。0=只用预设与运行时侦测",
+		"1=启用「原版按地点检测」配置表（configs/l4d2_cptele_legacy.cfg：地图名 → 机关实体 targetname + 传送点，搬自 L4D Elevator Teleport，1.3.1 起从代码搬到 cfg）。仅在预设没有命中本图时生效。0=只用预设与运行时侦测",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_cvLegacyFile = CreateConVar("l4d2_cptele_legacy_file", LEGACY_DEFAULT_FILE,
+		"原版地点表文件名，相对 addons/sourcemod/configs/。文件不存在时静默跳过（不报错、不打日志刷屏），自动回落到运行时侦测。改完 sm_cptele_reload 即可生效，不用重编译",
+		FCVAR_NOTIFY);
 
 	// ---- 通用行为 ---------------------------------------------------------
 	g_cvResetOnLeave = CreateConVar("l4d2_cptele_reset_on_leave", "0",
@@ -679,6 +784,14 @@ public void OnMapStart()
 	g_hPresets = null;
 	g_bPresetsTried = false;
 
+	// 1.3.1：原版地点表同样是「每张图读一次」，换图 / 重载一并释放
+	delete g_hLegacy;
+	g_hLegacy = null;
+	g_bLegacyTried = false;
+
+	// 1.3.2：救援区忽略名单的「超长已告警」标记按图重置
+	g_bRescueIgnoreOverflowLogged = false;
+
 	ResetRound();
 
 	// 插件晚加载（sm plugins load / 换图后手动加载）：此时本图的
@@ -705,6 +818,11 @@ public void OnMapEnd()
 	delete g_hPresets;
 	g_hPresets = null;
 	g_bPresetsTried = false;
+
+	// 1.3.1：原版地点表同样是「每张图读一次」，换图 / 重载一并释放
+	delete g_hLegacy;
+	g_hLegacy = null;
+	g_bLegacyTried = false;
 
 	g_bMapStarted = false;
 	g_bSacrificeFinale = false;
@@ -837,16 +955,17 @@ void DetectAreas()
 		}
 	}
 
-	// ---- 2) 原版按地点检测（内置表） ------------------------------------
+	// ---- 2) 原版按地点检测（配置表 configs/l4d2_cptele_legacy.cfg） --------
 	if (iSiteCp == 0 && g_cvLegacy.BoolValue)
 	{
-		int iLegacy = LoadLegacySite();
+		int iLegacyCp = 0;
+		int iLegacy = LoadLegacyAreas(iLegacyCp);
 
 		iSiteAreas += iLegacy;
 
-		if (iLegacy > 0)
+		if (iLegacyCp > 0)
 		{
-			iSiteCp += iLegacy;
+			iSiteCp += iLegacyCp;
 			strcopy(sSiteOwner, sizeof(sSiteOwner), "原版地点表");
 		}
 	}
@@ -914,11 +1033,29 @@ void DetectAreas()
 					continue;
 				}
 
+				/* 1.3.2：忽略名单过滤。终局图上 entireteam==2 的体积经常不止逃生点
+				 * 一个（c6m3_port 的 generator_elevator_trigger 只是「全员站上升降台
+				 * 就 Unlock 车厢按钮」），被当成救援区后会在逃离阶段抢先把掉队者
+				 * 往起点侧传送。名单写在预设 / 原版地点表的 "_ignore" 段。 */
+				char sTarget[128];
+				sTarget[0] = '\0';
+				GetEntPropString(entity, Prop_Data, "m_iName", sTarget, sizeof(sTarget));
+
+				if (IsRescueTargetIgnored(sTarget))
+				{
+					if (g_cvVerbose.BoolValue)
+					{
+						PrintToServer("[cptele] 救援区忽略: trigger_multiple[%s] #%d", sTarget, entity);
+					}
+
+					continue;
+				}
+
 				AddArea(entity, AREA_RESCUE, SRC_AUTO, NULL_VECTOR, 0.0, NULL_VECTOR, false);
 
 				if (g_cvVerbose.BoolValue)
 				{
-					PrintToServer("[cptele] 救援关区域: trigger_multiple #%d", entity);
+					PrintToServer("[cptele] 救援关区域: trigger_multiple[%s] #%d", sTarget, entity);
 				}
 			}
 		}
@@ -939,6 +1076,27 @@ void DetectAreas()
 
 			PrintToServer("[cptele]   区域 #%d 类型=%s 来源=%s 实体=%d 距离判定=%d 固定传送点=%d",
 				i, sType, sSrc, GetAreaEntity(i), g_bAreaRadius[i], g_bAreaDest[i]);
+
+			/* 1.3.1：半径类实体区域把「快照中心」和「原始 m_vecOrigin」一起打出来。
+			 * 父实体下的按钮，两者会差一个父实体原点——这就是 1.3.0 及以前区域中心
+			 * 塌到地图原点附近、到达人数恒为 0 的根因。排错时看这一行即可确认。 */
+			if (g_bAreaRadius[i] && !g_bAreaCoord[i])
+			{
+				int entity = GetAreaEntity(i);
+
+				if (entity != -1)
+				{
+					float vCenter[3];
+					float vRaw[3];
+
+					GetAreaCenter(i, vCenter);
+					GetEntPropVector(entity, Prop_Send, "m_vecOrigin", vRaw);
+
+					PrintToServer("[cptele]     世界中心 %.1f %.1f %.1f | 原始 m_vecOrigin %.1f %.1f %.1f | 父实体=%d",
+						vCenter[0], vCenter[1], vCenter[2],
+						vRaw[0], vRaw[1], vRaw[2], GetEntityParent(entity));
+				}
+			}
 		}
 	}
 }
@@ -1189,7 +1347,15 @@ int LoadPresetAreas(int &iCheckpoints)
 		char sSlot[64];
 		g_hPresets.GetSectionName(sSlot, sizeof(sSlot));
 
-		int iResult = LoadPresetSlot(sMap, sSlot);
+		// 1.3.2：保留段（_ignore / _comment 之类）不登记成集合点
+		if (IsReservedSlotName(sSlot))
+		{
+			LoadReservedSlot(g_hPresets, sMap, sSlot);
+
+			continue;
+		}
+
+		int iResult = LoadConfigSlot(g_hPresets, sMap, sSlot, SRC_PRESET);
 
 		if (iResult > 0)
 		{
@@ -1209,20 +1375,27 @@ int LoadPresetAreas(int &iCheckpoints)
 }
 
 /**
- * 解析并登记预设文件里的一个槽位（一个槽位 = 一个集合点）。
+ * 解析并登记一张配置表里的一个槽位（一个槽位 = 一个集合点）。
+ *
+ * 预设表（l4d2_cptele_presets.cfg）与原版地点表（l4d2_cptele_legacy.cfg）
+ * 格式完全一致，共用本函数，只靠 source 参数区分登记来源。
  *
  * 支持两种写法：
  *   1) 坐标写法：origin + radius，地图上没有任何合适实体时也能用
  *   2) 实体写法：classname（+ 可选 targetname），站到该实体附近即算到达
  * 两者都支持可选的 dest（倒计时结束时统一传送到该坐标）。
  *
+ * @param kv        已经停在某个槽位键上的 KeyValues（g_hPresets / g_hLegacy）
+ * @param sMap      地图名，仅用于日志
+ * @param sSlot     槽位名，仅用于日志
+ * @param source    区域来源：SRC_PRESET = 预设表，SRC_LEGACY = 原版地点表
  * @return PRESET_SLOT_NONE = 未登记；PRESET_SLOT_OTHER = 登记了安全屋/救援点；
  *         PRESET_SLOT_CHECKPOINT = 登记了中途集合点
  */
-int LoadPresetSlot(const char[] sMap, const char[] sSlot)
+int LoadConfigSlot(KeyValues kv, const char[] sMap, const char[] sSlot, int source)
 {
 	char sType[32];
-	g_hPresets.GetString("type", sType, sizeof(sType), "checkpoint");
+	kv.GetString("type", sType, sizeof(sType), "checkpoint");
 
 	int type = AREA_CHECKPOINT;
 
@@ -1238,7 +1411,7 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 	int iResult = (type == AREA_CHECKPOINT) ? PRESET_SLOT_CHECKPOINT : PRESET_SLOT_OTHER;
 
 	// 半径：预设没写就用全局默认
-	float fRadius = g_hPresets.GetFloat("radius", 0.0);
+	float fRadius = kv.GetFloat("radius", 0.0);
 
 	if (fRadius <= 0.0)
 	{
@@ -1250,7 +1423,7 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 	float vDest[3];
 	bool bHasDest = false;
 
-	g_hPresets.GetString("dest", sDest, sizeof(sDest), "");
+	kv.GetString("dest", sDest, sizeof(sDest), "");
 
 	if (sDest[0] != '\0')
 	{
@@ -1266,7 +1439,7 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 	char sOrigin[128];
 	float vPos[3];
 
-	g_hPresets.GetString("origin", sOrigin, sizeof(sOrigin), "");
+	kv.GetString("origin", sOrigin, sizeof(sOrigin), "");
 
 	if (sOrigin[0] != '\0')
 	{
@@ -1280,7 +1453,7 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 			return PRESET_SLOT_NONE;
 		}
 
-		if (AddArea(0, type, SRC_PRESET, vPos, fRadius, vDest, bHasDest) == -1)
+		if (AddArea(0, type, source, vPos, fRadius, vDest, bHasDest) == -1)
 		{
 			if (g_cvVerbose.BoolValue)
 			{
@@ -1303,8 +1476,8 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 	char sClass[64];
 	char sTarget[128];
 
-	g_hPresets.GetString("classname", sClass, sizeof(sClass), "func_button");
-	g_hPresets.GetString("targetname", sTarget, sizeof(sTarget), "");
+	kv.GetString("classname", sClass, sizeof(sClass), "func_button");
+	kv.GetString("targetname", sTarget, sizeof(sTarget), "");
 
 	int entity = FindEntityByClassTargetName(sClass, sTarget);
 
@@ -1318,7 +1491,7 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 		return PRESET_SLOT_NONE;
 	}
 
-	if (AddArea(entity, type, SRC_PRESET, NULL_VECTOR, fRadius, vDest, bHasDest) == -1)
+	if (AddArea(entity, type, source, NULL_VECTOR, fRadius, vDest, bHasDest) == -1)
 	{
 		if (g_cvVerbose.BoolValue)
 		{
@@ -1337,148 +1510,310 @@ int LoadPresetSlot(const char[] sMap, const char[] sSlot)
 }
 
 // ===========================================================================
-//  检测路径 2：原版按地点检测（内置表）
+//  配置表里的「保留段」与救援区忽略名单（1.3.2）
 // ===========================================================================
 
 /**
- * 原版插件的「按地点检测」数据表。
+ * 段名是不是保留段（`_` 或 `#` 开头）。
  *
- * 搬自 alasfourom "L4D Elevator Teleport"（参考插件）：那张表把
- *   「地图名 -> 机关实体（classname + targetname） + 统一传送点坐标」
- * 写死在一起，玩家按下/站上该机关即视为到达集合点。
- *
- * 增加一张新地图时优先改预设文件 configs/l4d2_cptele_presets.cfg，
- * 只有希望「服务器默认就带」时才往这里加一条，保持这张表尽量小。
+ * 预设表 / 原版地点表里每个子段默认都被当成「一个集合点」去解析实体，
+ * 所以说明性的、控制性的段必须排除掉，否则 "_comment" 这种段会被当成
+ * 「classname 默认 func_button、targetname 为空」，进而把地图上第一个
+ * func_button 登记成集合点。
  */
-stock bool GetLegacySite(const char[] sMap,
-	char[] sClass, int iClassLen, char[] sTarget, int iTargetLen, float vDest[3])
+bool IsReservedSlotName(const char[] sName)
 {
-	vDest[0] = 0.0;
-	vDest[1] = 0.0;
-	vDest[2] = 0.0;
+	return (sName[0] == '_' || sName[0] == '#');
+}
 
-	if (StrEqual(sMap, "c1m1_hotel", false))
+void ClearRescueIgnore()
+{
+	g_iRescueIgnoreCount = 0;
+}
+
+/**
+ * 解析救援区忽略名单：`"rescue" "名字1,名字2"`，逗号 / 空格 / 分号 / Tab 都能分隔。
+ */
+void ParseRescueIgnoreList(const char[] sMap, const char[] sList)
+{
+	int len = strlen(sList);
+	int i = 0;
+
+	while (i < len)
 	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "elevator_button");
-		vDest[0] = 2171.0;  vDest[1] = 5810.0;  vDest[2] = 2529.0;
-		return true;
+		while (i < len && (sList[i] == ' ' || sList[i] == '\t' || sList[i] == ',' || sList[i] == ';'))
+		{
+			i++;
+		}
+
+		if (i >= len)
+		{
+			break;
+		}
+
+		int start = i;
+
+		while (i < len && sList[i] != ' ' && sList[i] != '\t' && sList[i] != ',' && sList[i] != ';')
+		{
+			i++;
+		}
+
+		int n = i - start;
+
+		if (n <= 0)
+		{
+			continue;
+		}
+
+		if (n > RESCUE_IGNORE_LEN - 1)
+		{
+			n = RESCUE_IGNORE_LEN - 1;
+		}
+
+		if (g_iRescueIgnoreCount >= RESCUE_IGNORE_MAX)
+		{
+			// 每张图只报一次：DetectAreas 每回合都会重新解析，按回合刷 error 日志没意义
+			if (!g_bRescueIgnoreOverflowLogged)
+			{
+				g_bRescueIgnoreOverflowLogged = true;
+				LogError("[cptele] %s 的救援区忽略名单超过 %d 条，多余条目已忽略", sMap, RESCUE_IGNORE_MAX);
+			}
+
+			return;
+		}
+
+		char sToken[RESCUE_IGNORE_LEN];
+
+		for (int k = 0; k < n; k++)
+		{
+			sToken[k] = sList[start + k];
+		}
+
+		sToken[n] = '\0';
+
+		strcopy(g_sRescueIgnore[g_iRescueIgnoreCount], RESCUE_IGNORE_LEN, sToken);
+		g_iRescueIgnoreCount++;
+
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 救援区忽略名单（%s）：%s", sMap, sToken);
+		}
+	}
+}
+
+/**
+ * 这个 targetname 是否在救援区忽略名单里（大小写不敏感）。
+ */
+bool IsRescueTargetIgnored(const char[] sTarget)
+{
+	if (g_iRescueIgnoreCount <= 0 || sTarget[0] == '\0')
+	{
+		return false;
 	}
 
-	if (StrEqual(sMap, "c1m4_atrium", false))
+	for (int i = 0; i < g_iRescueIgnoreCount; i++)
 	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "button_elev_3rdfloor");
-		vDest[0] = -4039.0; vDest[1] = -3402.0; vDest[2] = 598.0;
-		return true;
-	}
-
-	if (StrEqual(sMap, "c3m1_plankcountry", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "ferry_tram_button");
-		vDest[0] = -5246.0; vDest[1] = 6060.0;  vDest[2] = 50.0;
-		return true;
-	}
-
-	// c4m2 / c4m3 是同一台电梯，targetname 相同、只有高度不同
-	if (StrEqual(sMap, "c4m2_sugarmill_a", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "button_inelevator");
-		vDest[0] = -1475.0; vDest[1] = -9558.0; vDest[2] = 660.0;
-		return true;
-	}
-
-	if (StrEqual(sMap, "c4m3_sugarmill_b", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "button_inelevator");
-		vDest[0] = -1479.0; vDest[1] = -9558.0; vDest[2] = 175.0;
-		return true;
-	}
-
-	if (StrEqual(sMap, "c5m2_park", false))
-	{
-		strcopy(sClass, iClassLen, "trigger_multiple");
-		strcopy(sTarget, iTargetLen, "finale_decon_trigger");
-		vDest[0] = -9667.0; vDest[1] = -5970.0; vDest[2] = -170.0;
-		return true;
-	}
-
-	// 1.2.4（需求 #6）**刻意移除** c6m3_port（The Passing 终局）的 legacy 集合点。
-	// 实测 c6m3_port.bsp：全部 changelevel 只有 1 个且 spawnflags=2、map 指向自己
-	// （「往回走到 c6m2」的回退触发），说明本图没有关底安全屋；过关走 trigger_finale。
-	// 而 generator_elevator_button(origin -716 -552 342) 属于终局「罐油发电机 → 电梯」
-	// 这套逃生流程的按钮，不是中途集合点。旧版把它当中途集合点：倒计时结束时既把
-	// 掉队者传到发电机旁、又替玩家 unlock+use 按下它 —— 玩家表现为
-	// 「做电梯下来到罐油发电机就直接结算分数并换边/进下一关」。
-	// 现在该图既不注册 AREA_SAFEROOM，也不再注册这个按钮。
-
-	// 1.2.4（需求 #6）**刻意移除** c7m3_port（The Sacrifice 终局）的 legacy 集合点。
-	// 实测 c7m3_port.bsp：一个 changelevel 都没有；trigger_finale 是
-	// type=2 / StartDisabled=1 / IsSacrificeFinale=1 的牺牲结局逃生装置。
-	// bridge_start_button(origin -120 -1781 460) 是「启动吊桥/电梯」这个逃生动作的按钮，
-	// 插件替玩家 unlock+use 它，等于主动启动逃生流程 => 直接结算换边。
-	// 现在该图既不注册 AREA_SAFEROOM，也不再注册这个按钮。
-
-	// 医院楼顶电梯（L4D1 的 c8m4 / 对战版）
-	if (StrEqual(sMap, "c8m4_interior", false)
-	 || StrEqual(sMap, "l4d_hospital04_interior", false)
-	 || StrEqual(sMap, "l4d_vs_hospital04_interior", false))
-	{
-		strcopy(sClass, iClassLen, "func_button");
-		strcopy(sTarget, iTargetLen, "elevator_button");
-		vDest[0] = 13427.0; vDest[1] = 15225.0; vDest[2] = 475.0;
-		return true;
+		if (StrEqual(g_sRescueIgnore[i], sTarget, false))
+		{
+			return true;
+		}
 	}
 
 	return false;
 }
 
 /**
- * 命中内置表就登记集合点区域；地图上没有对应实体时安静回落。
- * @return 登记成功的区域数（0 或 1）
+ * 处理保留段。目前只认 `_ignore`：
+ *   "_ignore"
+ *   {
+ *       "rescue" "generator_elevator_trigger"
+ *   }
+ * 其余 `_` / `#` 开头的段只在 verbose 下提示一下，不做任何登记。
  */
-int LoadLegacySite()
+void LoadReservedSlot(KeyValues kv, const char[] sMap, const char[] sSlot)
 {
-	char sMap[128];
-	GetCurrentMap(sMap, sizeof(sMap));
-
-	char sClass[64];
-	char sTarget[128];
-	float vDest[3];
-
-	if (!GetLegacySite(sMap, sClass, sizeof(sClass), sTarget, sizeof(sTarget), vDest))
+	if (StrEqual(sSlot, RESCUE_IGNORE_SECTION, false))
 	{
-		return 0;
-	}
+		char sList[256];
+		kv.GetString("rescue", sList, sizeof(sList), "");
 
-	int entity = FindEntityByClassTargetName(sClass, sTarget);
-
-	if (entity == -1)
-	{
-		if (g_cvVerbose.BoolValue)
+		if (sList[0] != '\0')
 		{
-			PrintToServer("[cptele] 原版地点表命中 %s，但地图上没有 %s[%s]，回落到运行时侦测",
-				sMap, sClass, sTarget);
+			ParseRescueIgnoreList(sMap, sList);
 		}
 
-		return 0;
-	}
-
-	if (AddArea(entity, AREA_CHECKPOINT, SRC_LEGACY, NULL_VECTOR, 0.0, vDest, true) == -1)
-	{
-		return 0;
+		return;
 	}
 
 	if (g_cvVerbose.BoolValue)
 	{
-		PrintToServer("[cptele] 原版地点集合点 %s: %s[%s] #%d -> 传送点 %.0f %.0f %.0f",
-			sMap, sClass, sTarget, entity, vDest[0], vDest[1], vDest[2]);
+		PrintToServer("[cptele] 配置段 %s/%s 是保留段（_ / # 开头），不作为集合点登记", sMap, sSlot);
+	}
+}
+
+// ===========================================================================
+//  检测路径 2：原版按地点检测（配置表）
+// ===========================================================================
+//
+//  1.3.1 起这张表从代码里搬到 configs/l4d2_cptele_legacy.cfg（原来的
+//  GetLegacySite() 硬编码表已删除）：
+//    · 改地图不用重编译，管理员改完 sm_cptele_reload 立刻生效；
+//    · 与 l4d2_cptele_presets.cfg 用同一套键名、同一个槽位解析器
+//      （type / origin / radius / classname / targetname / dest），
+//      只是根节点叫 "cptele_legacy"、区域来源标记为 SRC_LEGACY；
+//    · 文件不存在 = 正常情况（静默回落到运行时侦测），不报错、不刷日志。
+//
+//  表里的数据搬自 alasfourom "L4D Elevator Teleport"（参考插件）：把
+//  「地图名 → 机关实体（classname + targetname） + 统一传送点坐标」写在一起，
+//  玩家站在该机关附近（三维距离 <= 该槽位 radius / l4d2_cptele_mech_radius）
+//  即视为到达集合点。
+//
+//  ⚠ 给新地图选实体时的硬要求：**优先挑不动的按钮**
+//    父实体（parentname）下的 m_vecOrigin 是相对父级的局部坐标，引擎在
+//    SetParent 时就换算过了。1.3.0 及以前 GetEntityCenter() 直接把它当世界
+//    坐标用，于是 c1m1 / c1m4 / c3m1 / c4m2 / c4m3 这些「映射到电梯/渡轮上的
+//    按钮」的条目中心全部塌到地图原点附近 → 到达人数恒为 0 → 倒计时永不触发。
+//    1.3.1 已在 GetEntityWorldOrigin() 里做父实体感知（并且会跟着移动的电梯
+//    实时重算），但选实体时仍应优先挑固定不动的那个：例如 c4m2 该用顶层的
+//    button_callelevator，而不是车厢里的 button_inelevator（后者按一次还会自删）。
+
+/**
+ * 载入原版地点表文件（每张图只读一次，换图 / 重载时释放）。
+ * 文件不存在属于正常情况，与预设文件同策略：静默跳过。
+ */
+void LoadLegacyConfig()
+{
+	g_bLegacyTried = true;
+
+	delete g_hLegacy;
+	g_hLegacy = null;
+
+	char sFile[PLATFORM_MAX_PATH];
+	char sPath[PLATFORM_MAX_PATH];
+
+	g_cvLegacyFile.GetString(sFile, sizeof(sFile));
+	TrimString(sFile);
+
+	if (sFile[0] == '\0')
+	{
+		strcopy(sFile, sizeof(sFile), LEGACY_DEFAULT_FILE);
 	}
 
-	return 1;
+	BuildPath(Path_SM, sPath, sizeof(sPath), "configs/%s", sFile);
+
+	if (!FileExists(sPath, false))
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 未找到原版地点表 %s，自动回落到运行时侦测", sPath);
+		}
+
+		return;
+	}
+
+	KeyValues kv = CreateKeyValues("cptele_legacy");
+
+	if (!FileToKeyValues(kv, sPath))
+	{
+		delete kv;
+		LogError("[cptele] 原版地点表 %s 解析失败（KeyValues 语法错误？），本图忽略该表", sPath);
+		return;
+	}
+
+	g_hLegacy = kv;
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 已载入原版地点表 %s", sPath);
+	}
+}
+
+/**
+ * 从原版地点表里取出当前地图的区域；地图上没有对应实体时安静回落。
+ *
+ * @param iCheckpoints  输出：其中「中途集合点」类型的个数
+ * @return              成功登记的区域总数
+ */
+int LoadLegacyAreas(int &iCheckpoints)
+{
+	iCheckpoints = 0;
+
+	if (!g_cvLegacy.BoolValue)
+	{
+		return 0;
+	}
+
+	if (g_hLegacy == null)
+	{
+		if (g_bLegacyTried)
+		{
+			return 0;
+		}
+
+		LoadLegacyConfig();
+
+		if (g_hLegacy == null)
+		{
+			return 0;
+		}
+	}
+
+	char sMap[128];
+	GetCurrentMap(sMap, sizeof(sMap));
+
+	g_hLegacy.Rewind();
+
+	if (!g_hLegacy.JumpToKey(sMap))
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 原版地点表里没有本图 %s 的条目，回落到运行时侦测", sMap);
+		}
+
+		// 回到根节点，避免下次读取踩到子节点
+		g_hLegacy.Rewind();
+
+		return 0;
+	}
+
+	if (!g_hLegacy.GotoFirstSubKey())
+	{
+		g_hLegacy.Rewind();
+		return 0;
+	}
+
+	int iAdded = 0;
+
+	do
+	{
+		char sSlot[64];
+		g_hLegacy.GetSectionName(sSlot, sizeof(sSlot));
+
+		// 1.3.2：保留段（_ignore / _comment 之类）不登记成集合点
+		if (IsReservedSlotName(sSlot))
+		{
+			LoadReservedSlot(g_hLegacy, sMap, sSlot);
+
+			continue;
+		}
+
+		int iResult = LoadConfigSlot(g_hLegacy, sMap, sSlot, SRC_LEGACY);
+
+		if (iResult != PRESET_SLOT_NONE)
+		{
+			iAdded++;
+
+			if (iResult == PRESET_SLOT_CHECKPOINT)
+			{
+				iCheckpoints++;
+			}
+		}
+	}
+	while (g_hLegacy.GotoNextKey());
+
+	g_hLegacy.Rewind();
+
+	return iAdded;
 }
 
 // ===========================================================================
@@ -3616,6 +3951,7 @@ bool IsClientInArea(int client, int index)
 	if (g_bAreaRadius[index])
 	{
 		float vClient[3];
+		float vCenter[3];
 		float fNeeded = g_fAreaRadius[index];
 
 		if (fNeeded <= 0.0)
@@ -3625,7 +3961,10 @@ bool IsClientInArea(int client, int index)
 
 		GetClientAbsOrigin(client, vClient);
 
-		return GetVectorDistance(vClient, g_vAreaPos[index]) <= fNeeded;
+		/* 1.3.1：中心实时算（父实体感知 + 跟随移动的电梯），不再用回合开始时的快照 */
+		GetAreaCenter(index, vCenter);
+
+		return GetVectorDistance(vClient, vCenter) <= fNeeded;
 	}
 
 	int entity = GetAreaEntity(index);
@@ -3682,7 +4021,9 @@ bool GetAreaDestination(int index, float vDest[3])
 
 	if (g_bAreaCoord[index] || g_bAreaRadius[index])
 	{
-		CopyVec(g_vAreaPos[index], vOrigin);
+		/* 1.3.1：半径类区域（按钮 / 坐标）走实时中心，电梯移动后落点才不会
+		 * 还是回合开始时的位置；纯坐标区域没有实体，GetAreaCenter 会用快照。 */
+		GetAreaCenter(index, vOrigin);
 	}
 	else
 	{
@@ -3847,8 +4188,14 @@ public Action Cmd_Status(int client, int args)
 		GetAreaTypeName(g_iAreaType[i], sType, sizeof(sType));
 		GetAreaSourceName(g_iAreaSource[i], sSrc, sizeof(sSrc));
 
-		ReplyToCommand(client, "  #%d %s/%s ent=%d 距离判定=%d 已到达=%d 已触发=%d",
+		/* 1.3.1：把判定中心一起打出来。父实体下的按钮如果中心塌到接近 (0,0,0)，
+		 * 一眼就能看出是「实体坐标不世界化」的问题，不用再靠猜。 */
+		float vCenter[3];
+		GetAreaCenter(i, vCenter);
+
+		ReplyToCommand(client, "  #%d %s/%s ent=%d 距离判定=%d 中心=%.0f %.0f %.0f 已到达=%d 已触发=%d",
 			i, sType, sSrc, GetAreaEntity(i), g_bAreaRadius[i],
+			vCenter[0], vCenter[1], vCenter[2],
 			CountArrivedSurvivors(i), g_bAreaFired[i]);
 	}
 
@@ -3867,6 +4214,11 @@ public Action Cmd_ReloadPresets(int client, int args)
 	delete g_hPresets;
 	g_hPresets = null;
 	g_bPresetsTried = false;
+
+	// 1.3.1：原版地点表同样是「每张图读一次」，换图 / 重载一并释放
+	delete g_hLegacy;
+	g_hLegacy = null;
+	g_bLegacyTried = false;
 
 	// ResetRound() 会清掉 g_bRescueReady，但排错时重读配置不该把
 	// 「救援车已到位」这个事实一起忘掉，否则终局图会重新等一次事件。
@@ -4097,15 +4449,133 @@ stock int FindEntityByClassTargetName(const char[] sClass, const char[] sTarget)
 }
 
 /**
- * 取实体的「几何中心」。
+ * 取实体的父实体索引（没有父级返回 -1）。
+ *
+ * m_pParent 在 datamap 里是 edict 句柄，换图 / 实体回收后会残留，
+ * 所以这里统一做「越界 / 自指 / 无效」三重校验，避免顺着残影往上爬。
+ */
+stock int GetEntityParent(int entity)
+{
+	if (entity <= 0 || !IsValidEntity(entity))
+	{
+		return -1;
+	}
+
+	if (!HasEntProp(entity, Prop_Data, "m_pParent"))
+	{
+		return -1;
+	}
+
+	int parent = GetEntPropEnt(entity, Prop_Data, "m_pParent");
+
+	if (parent <= 0 || parent == entity || parent == INVALID_ENT_REFERENCE || !IsValidEntity(parent))
+	{
+		return -1;
+	}
+
+	return parent;
+}
+
+/**
+ * 把「父实体局部坐标系里的偏移」旋成世界方向。
+ *
+ * Source 的局部轴就是三个基准向量：局部 X = 父的前向，Y = 父的右向，Z = 父的上向。
+ */
+stock void RotateLocalOffset(const float vOffset[3], const float vAngles[3], float vOut[3])
+{
+	float vForward[3];
+	float vRight[3];
+	float vUp[3];
+
+	GetAngleVectors(vAngles, vForward, vRight, vUp);
+
+	/* vOffset 可能与 vOut 是同一块内存（就地旋转），逐元素写不会互相踩：
+	 * 读到 vOffset[1] 时 vOut[1] 还没被写，vOffset[2] 同理。 */
+	for (int i = 0; i < 3; i++)
+	{
+		vOut[i] = vForward[i] * vOffset[0] + vRight[i] * vOffset[1] + vUp[i] * vOffset[2];
+	}
+}
+
+/**
+ * 取实体的「世界坐标原点」（父实体感知）。
+ *
+ * 1.3.1 新增。**这是 1.3.0 及以前最致命的坑**：父实体（parentname）下的
+ * m_vecOrigin 是相对父级的局部坐标——引擎在 SetParent 时把世界坐标减掉了
+ * 父实体的原点与角度，之后 GetAbsOrigin() / CalcAbsolutePosition() 才按父级
+ * 变换算回世界坐标。插件以前直接读 m_vecOrigin 当世界坐标用，于是
+ *
+ *   c1m1_hotel    elevator_button        (parent elevator_1)
+ *   c1m4_atrium   button_elev_3rdfloor   (parent elevator)
+ *   c3m1_plankcountry ferry_tram_button  (parent ferry_tram)
+ *   c4m2/c4m3     button_inelevator      (parent elevator)
+ *
+ * 这些条目的区域中心全部塌到「局部坐标」（≈ 几个单位，接近地图原点），
+ * 生还者站到电梯上距离那个幻影中心还有几千 HU，CountArrivedSurvivors()
+ * 恒为 0 → Timer_Monitor 永远达不到到齐比例 → 传送倒计时永不触发。
+ * 表现就是「电梯上人齐也不倒计时，按按钮也没反应」。
+ *
+ * 处理方式：从实体自身往上逐级累加父实体的世界原点，并且每一级的局部
+ * 偏移先按该父实体的角度旋转（电梯/渡轮这类父实体角度通常是 0，旋转只是
+ * 兜底，保证换了模型朝向的图也不会算错）。层数上限 8 层，足够覆盖地图里
+ * 的「按钮→车厢→门框」这类三级挂接，同时防止循环父级把服务器卡死。
+ */
+stock void GetEntityWorldOrigin(int entity, float vOut[3])
+{
+	GetEntPropVector(entity, Prop_Send, "m_vecOrigin", vOut);
+
+	int current = entity;
+
+	for (int depth = 0; depth < 8; depth++)
+	{
+		int parent = GetEntityParent(current);
+
+		if (parent == -1)
+		{
+			break;
+		}
+
+		float vParentOrigin[3];
+		float vParentAngles[3];
+
+		GetEntPropVector(parent, Prop_Send, "m_vecOrigin", vParentOrigin);
+
+		if (HasEntProp(parent, Prop_Send, "m_angRotation"))
+		{
+			GetEntPropVector(parent, Prop_Send, "m_angRotation", vParentAngles);
+		}
+		else
+		{
+			vParentAngles[0] = 0.0;
+			vParentAngles[1] = 0.0;
+			vParentAngles[2] = 0.0;
+		}
+
+		RotateLocalOffset(vOut, vParentAngles, vOut);
+
+		for (int i = 0; i < 3; i++)
+		{
+			vOut[i] += vParentOrigin[i];
+		}
+
+		current = parent;
+	}
+}
+
+/**
+ * 取实体的「几何中心」（世界坐标）。
  *
  * brush 实体（trigger_multiple / info_changelevel / trigger_finale）的
  * m_vecOrigin 往往是 (0,0,0)，真正的体积写在 m_vecMins / m_vecMaxs 里，
  * 而且这两个值已经是世界坐标。点实体（如部分 func_button）反过来是
  * m_vecOrigin 有值、mins/maxs 为 0。
  *
- * center = origin + (mins + maxs) / 2 同时覆盖两种情况：
- * 点实体因为 mins = maxs = 0，结果就是 origin。
+ * center = 世界原点 + (mins + maxs) / 2 同时覆盖两种情况：
+ * 点实体因为 mins = maxs = 0，结果就是世界原点。
+ *
+ * 1.3.1：原点的读取换成 GetEntityWorldOrigin()（父实体感知）。
+ * mins/maxs 的半宽没有跟着父级角度旋转——它的量级只有实体自身的尺寸
+ * （按钮这类 ≤ 十几 HU），旋转与否对「距离 <= 半径」的判定没有影响。
  */
 stock void GetEntityCenter(int entity, float vCenter[3])
 {
@@ -4113,7 +4583,7 @@ stock void GetEntityCenter(int entity, float vCenter[3])
 	float vMins[3];
 	float vMaxs[3];
 
-	GetEntPropVector(entity, Prop_Send, "m_vecOrigin", vOrigin);
+	GetEntityWorldOrigin(entity, vOrigin);
 	GetEntPropVector(entity, Prop_Send, "m_vecMins", vMins);
 	GetEntPropVector(entity, Prop_Send, "m_vecMaxs", vMaxs);
 
@@ -4121,6 +4591,31 @@ stock void GetEntityCenter(int entity, float vCenter[3])
 	{
 		vCenter[i] = vOrigin[i] + (vMins[i] + vMaxs[i]) * 0.5;
 	}
+}
+
+/**
+ * 取区域的判定中心（世界坐标），**每次调用实时算**。
+ *
+ * 1.3.1 新增。电梯 / 渡轮 / 移动平台当集合点时，按钮跟着父实体一起走，
+ * 回合开始时快照下来的 g_vAreaPos 会在车一动之后立刻过期。所以：
+ *   · 纯坐标区域（预设里只写了 origin）：用存下来的坐标；
+ *   · 实体区域：实时按 GetEntityCenter() 重算（父实体原地不动时结果相同）。
+ * 实体已经消失（例如 c4m2 的车厢按钮按下后自删）时退回快照坐标。
+ */
+stock void GetAreaCenter(int index, float vCenter[3])
+{
+	if (!g_bAreaCoord[index])
+	{
+		int entity = GetAreaEntity(index);
+
+		if (entity != -1)
+		{
+			GetEntityCenter(entity, vCenter);
+			return;
+		}
+	}
+
+	CopyVec(g_vAreaPos[index], vCenter);
 }
 
 void ResetRound()
@@ -4159,6 +4654,9 @@ void ResetRound()
 	g_bSiteAuthority = false;
 
 	ClearSeenFlags();
+
+	// 1.3.2：救援区忽略名单也跟着回合清空，等 DetectAreas 读配置时重新解析
+	ClearRescueIgnore();
 
 	// 1.2.7：进入区域提示的在场/播报状态也要清（换图、换回合）
 	ClearEnterNoticeState();

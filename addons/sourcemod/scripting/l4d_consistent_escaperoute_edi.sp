@@ -155,6 +155,8 @@ bool g_bCheckActive = false;
 bool g_bCheckQueued = false;
 int  g_iCheckFrames = 0;
 bool g_bReportedThisMap = false;
+bool g_bPatchFailReported = false;  // 本图内「补丁启用失败」只报一次，避免每次 flow 都刷 errors
+bool g_bDuplicateWarned = false;    // 原版残留只报一次
 
 ArrayList g_SavedRoute;    // 基准 area id 列表（int）
 ArrayList g_StableRoute;   // 本轮读到的快照
@@ -200,6 +202,49 @@ public void OnPluginStart()
 	g_PrevRoute = new ArrayList();
 
 	ResetCheckState(false);
+
+	// 先立刻查一次；再用 timer 查一次，防止原版插件比本插件晚加载时漏检
+	WarnIfOriginalLoaded();
+	CreateTimer(1.0, Timer_CheckDuplicate, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_CheckDuplicate(Handle timer)
+{
+	WarnIfOriginalLoaded();
+	return Plugin_Stop;
+}
+
+// ----------------------------------------------------------------------------
+//  原版插件残留检测
+//  原版 l4d_consistent_escaperoute.smx 与本事発版挂的是同一组 DHook、同一份
+//  gamedata，并且各自持有同一个 skip_spawn_position_idx 的 MemoryPatch。
+//  两份同时在跑时：先 Enable() 的那份成功，另一份 Validation 失败；
+//  但两边的 Disable() 都会把自己存下来的“原始字节”写回去 ——
+//  真正的补丁状态被打乱，逃跑路线就会真的算出不同的 area 列表。
+//  SourceScramble 的 MemoryPatch.Enable() 文档明确：内存已被打过补丁时返回 false，
+//  所以只要本插件出现过“无法启用 skip_spawn_position_idx”，就说明还有第二份在跑。
+// ----------------------------------------------------------------------------
+void WarnIfOriginalLoaded()
+{
+	if (g_bDuplicateWarned)
+		return;
+
+	Handle iter = GetPluginIterator();
+	while (MorePlugins(iter))
+	{
+		Handle pl = ReadPlugin(iter);
+		char name[128];
+		GetPluginInfo(pl, PlInfo_Name, name, sizeof(name));
+
+		if (StrEqual(name, "[L4D & 2] Consistent Escape Route"))
+		{
+			LogError("[%s] 检测到原版插件【[L4D & 2] Consistent Escape Route】仍在加载：两份插件会重复挂同一组 DHook 和同一个 skip_spawn_position_idx 补丁，后一份必然启用失败、逃跑路线会真的漂移。请删除或改名 plugins/fixes/l4d_consistent_escaperoute.smx（本仓库已改名为 .smx.off）后重启服务器。", PLUGIN_TAG);
+			g_bDuplicateWarned = true;
+			break;
+		}
+	}
+
+	CloseHandle(iter);
 }
 
 public void OnPluginEnd()
@@ -236,6 +281,7 @@ void ResetCheckState(bool clearBaseline)
 	g_bCheckQueued = false;
 	g_iCheckFrames = 0;
 	g_bReportedThisMap = false;
+	g_bPatchFailReported = false;
 
 	if (g_StableRoute != null) g_StableRoute.Clear();
 	if (g_PrevRoute != null) g_PrevRoute.Clear();
@@ -293,14 +339,19 @@ MRESReturn DTR_GetPlayerSpawnPosition(DHookReturn hReturn, DHookParam hParams)
 	if (!g_bInComputeFlowDistances)
 		return MRES_Ignored;
 
-	g_bPatchedThisBuild = true;
-
 	if (!g_bPatchApplied) {
-		if (g_patch_SkipSpawnPosIdx.Enable())
+		if (g_patch_SkipSpawnPosIdx.Enable()) {
 			g_bPatchApplied = true;
-		else
-			LogError("[%s] 无法启用 skip_spawn_position_idx 补丁，本次 flow 计算的出生点索引不会被固定", PLUGIN_TAG);
+		}
+		else if (!g_bPatchFailReported) {
+			g_bPatchFailReported = true;
+			LogError("[%s] 无法启用 skip_spawn_position_idx 补丁：内存里已经是打过补丁的状态，通常说明另一份 escaperoute 插件（原版 l4d_consistent_escaperoute.smx）也在跑。本次 flow 计算不算作本插件接管，不采样基准、不参与一致性自检，避免误报。", PLUGIN_TAG);
+		}
 	}
+
+	// 只有补丁真的由本插件持有，这次构建才算“本插件接管过”（否则基准会被污染）
+	if (g_bPatchApplied)
+		g_bPatchedThisBuild = true;
 
 	return MRES_Ignored;
 }

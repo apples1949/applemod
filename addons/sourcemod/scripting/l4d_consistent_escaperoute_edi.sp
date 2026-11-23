@@ -60,7 +60,41 @@
  *  已逆向确认（Linux server_srv.so）：AddArea 内部就会 AddNode 并把 [this+0x3448] 指向该 area，
  *  FinishPath 又会把 [this+0x3448] 追加一次并再 AddNode —— 终点 area 天然重复一项。
  *  盲重建得到的节点数量与引擎自己建的不是同一形状，风险远大于「只报告」。
- * ============================================================================
+ *
+ *  ============================================================================
+ *  2026-11-23 追加（修「诊断输出被当成错误在刷屏」）
+ *
+ *  现象：errors_*.log 每张图刷一条
+ *    [l4d_consistent_escaperoute] 逃跑路线与基准不一致（第 N 个区域不一致：基准 #A，当前 #B）
+ *  c2m4_barns / c8m1_apartment / c5m2_park / c5m3_cemetery / c2m1_highway / c1m3_mall 等图反复出现，
+ *  同一张图还会在「基准 #52590，当前 #38776」与「基准 #38776，当前 #52590」之间反转。
+ *
+ *  已确认的事实（先排除两个错误猜测）：
+ *    1) 本插件的基准【只存在内存里】（ArrayList g_SavedRoute），没有任何 cfg/KeyValues/文件写入，
+ *       OnMapStart/OnMapEnd 都会清空 —— 所以不存在「多服共享同一份缓存被互相覆盖」，
+ *       仓库里也没有任何 escaperoute 的缓存文件。反转来自「同一张图存在两种合法路线形状」，
+ *       而不是某一份缓存被写坏。
+ *    2) 路线里的 area id 本身在同一台服务器同一次地图里是稳定的；跨服务器/跨 nav 版本
+ *       （自定义 nav、stripper 改动区块、不同 area 编号）才会整体位移，所以 id 不能跨构建当
+ *       稳定标识用 —— 但同一次会话内它仍是有效标识。
+ *
+ *  真正的误报机制：
+ *    · 自检对「任何一次 flow 重建后的稳定路线」都做比较，包括【本插件没有接管的构建】。
+ *      未接管的构建里 GetPlayerSpawnPosition 走引擎随机索引，起点区域漂移 →
+ *      路线本来就该不一样。此时报「不一致」是拿「打过补丁的基准」去比「没打补丁的样本」，
+ *      属于必然误报，也正是日志里值来回反转的原因（哪一次构建被采样成基准是随机的）。
+ *    · 另外这块输出写在 errors 日志里，等于把诊断信息当错误上报。
+ *
+ *  本次修复（不改动任何补丁/起点固定逻辑，功能零变化）：
+ *    A. 比较前先要求「本次构建也被本插件接管过」（g_bPatchedThisBuild），否则只写 debug，
+ *       不再下结论 —— 误报条件从此不成立。
+ *    B. 比较改用「稳定标识」：area id 相同即视为同一区域；id 不同时再看该 area 的中心坐标
+ *       （量化到 CELL 单位后比对），相同则视为同一地点（nav 重编号/版本不同导致的 id 位移
+ *       不再算不一致），只有「地点确实不同」才算真不一致。
+ *    C. 新增 ConVar l4d_escaperoute_report：0 = 完全静默（只 debug）、
+ *       1 = 每张图首次写一行普通日志（默认，不写 errors）、2 = 每张图首次写 error（旧行为）。
+ *    D. 报告里带上地图名，方便按图反馈；同一张图仍然只报一次。
+ *  ============================================================================
  */
 
 enum struct SDKCallParamsWrapper {
@@ -135,6 +169,7 @@ methodmap Address {}
 
 #define MAX_ROUTE_AREAS   512   // CEscapeRoute 内部上限 0x1FF(511)，+1 给 FinishPath 的终点节点
 #define MAX_CHECK_FRAMES  10    // 等路线稳定的最大帧数
+#define CELL_SIZE         4.0   // area 中心的量化单位（导航网格 cell 的粗粒度），用于「同一地点」判定
 
 int g_iOffs_m_nMainPathAreaCount;
 int g_offs_m_id;
@@ -144,6 +179,7 @@ Handle g_call_Checkpoint_GetLargestArea;
 
 ConVar g_cvCheck;
 ConVar g_cvDebug;
+ConVar g_cvReport;
 
 int  g_iFlowDepth = 0;             // ComputeFlowDistances 嵌套深度
 bool g_bInComputeFlowDistances = false;
@@ -161,6 +197,14 @@ bool g_bDuplicateWarned = false;    // 原版残留只报一次
 ArrayList g_SavedRoute;    // 基准 area id 列表（int）
 ArrayList g_StableRoute;   // 本轮读到的快照
 ArrayList g_PrevRoute;     // 上一帧读到的快照（用于稳定性判定）
+
+// area 中心坐标（float[3]，已量化），与上面三个 id 列表一一对应。
+// area id 会随 nav 版本/编号变化，中心坐标才是「同一个地点」的稳定标识。
+ArrayList g_SavedCenter;
+ArrayList g_StableCenter;
+ArrayList g_PrevCenter;
+
+char g_sBaselineMap[64];   // 基准所属地图名（防止跨图残留的基准参与比较）
 
 public Plugin myinfo =
 {
@@ -191,15 +235,21 @@ public void OnPluginStart()
 	delete gd;
 
 	g_cvCheck = CreateConVar("l4d_escaperoute_check", "1",
-			"是否启用逃跑路线一致性自检。\n0 = 关闭（不比较、不报错）\n1 = 启用（默认，怀疑路线不一致时会写一条错误日志）",
+			"是否启用逃跑路线一致性自检。\n0 = 关闭（不比较、不报错）\n1 = 启用（默认，只比较本插件真正接管过的构建）",
 			FCVAR_NONE, true, 0.0, true, 1.0);
 	g_cvDebug = CreateConVar("l4d_escaperoute_debug", "0",
 			"是否输出逃跑路线自检的详细过程日志。\n0 = 只输出结论（默认）\n1 = 逐帧输出快照、等待与比较过程",
 			FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvReport = CreateConVar("l4d_escaperoute_report", "1",
+			"检测到逃跑路线不一致时怎么记。\n0 = 完全静默（只写 debug 日志）\n1 = 每张图首次写一行普通日志（默认，不写 errors）\n2 = 每张图首次写 error（旧行为）",
+			FCVAR_NONE, true, 0.0, true, 2.0);
 
 	g_SavedRoute = new ArrayList();
 	g_StableRoute = new ArrayList();
 	g_PrevRoute = new ArrayList();
+	g_SavedCenter = new ArrayList(3);
+	g_StableCenter = new ArrayList(3);
+	g_PrevCenter = new ArrayList(3);
 
 	ResetCheckState(false);
 
@@ -285,10 +335,14 @@ void ResetCheckState(bool clearBaseline)
 
 	if (g_StableRoute != null) g_StableRoute.Clear();
 	if (g_PrevRoute != null) g_PrevRoute.Clear();
+	if (g_StableCenter != null) g_StableCenter.Clear();
+	if (g_PrevCenter != null) g_PrevCenter.Clear();
 
 	if (clearBaseline) {
 		g_bBaselineValid = false;
 		if (g_SavedRoute != null) g_SavedRoute.Clear();
+		if (g_SavedCenter != null) g_SavedCenter.Clear();
+		g_sBaselineMap[0] = '\0';
 	}
 }
 
@@ -413,6 +467,7 @@ void StartRouteCheck()
 	g_bCheckActive = true;
 	g_iCheckFrames = 0;
 	g_PrevRoute.Clear();
+	g_PrevCenter.Clear();
 
 	QueueRouteCheck();
 }
@@ -439,13 +494,13 @@ void Frame_CheckRoute()
 		return;
 	}
 
-	if (!ReadRoute(entity, g_StableRoute)) {
+	if (!ReadRoute(entity, g_StableRoute, g_StableCenter)) {
 		RetryRouteCheck("路线尚未就绪（数量为 0 或含空指针）");
 		return;
 	}
 
-	if (!RoutesEqual(g_StableRoute, g_PrevRoute)) {
-		CopyRoute(g_StableRoute, g_PrevRoute);
+	if (!RoutesEqual(g_StableRoute, g_StableCenter, g_PrevRoute, g_PrevCenter)) {
+		CopyRoute(g_StableRoute, g_StableCenter, g_PrevRoute, g_PrevCenter);
 		RetryRouteCheck("路线仍在变化，等待稳定");
 		return;
 	}
@@ -476,13 +531,35 @@ void HandleStableRoute()
 			return;
 		}
 
-		CopyRoute(g_StableRoute, g_SavedRoute);
+		CopyRoute(g_StableRoute, g_StableCenter, g_SavedRoute, g_SavedCenter);
 		g_bBaselineValid = true;
-		LogMessage("[%s] 记录逃跑路线基准：%d 个区域", PLUGIN_TAG, g_SavedRoute.Length);
+		GetCurrentMap(g_sBaselineMap, sizeof(g_sBaselineMap));
+		LogMessage("[%s] 记录逃跑路线基准：地图 %s，%d 个区域", PLUGIN_TAG, g_sBaselineMap, g_SavedRoute.Length);
 		return;
 	}
 
-	if (RoutesEqual(g_StableRoute, g_SavedRoute)) {
+	// 【2026-11-23 修复】只比较「本插件接管过」的构建。
+	// 未接管的构建里起点是引擎随机选择的，路线本来就该和打过补丁的基准不同；
+	// 以前无条件比较，等于把「随机」当成「不一致」上报 —— 这就是 errors 日志里那条反复出现、
+	// 且同一张图会在两个值之间来回反转的自检输出。
+	if (!g_bPatchedThisBuild) {
+		DebugPrint("本轮 flow 计算未经本插件接管，跳过一致性比较（不产生结论）");
+		return;
+	}
+
+	// 基准必须是同一张图的（OnMapStart 已经清过一次，这里再兜一层）
+	char sMap[64];
+	GetCurrentMap(sMap, sizeof(sMap));
+	if (g_sBaselineMap[0] != '\0' && !StrEqual(sMap, g_sBaselineMap)) {
+		DebugPrint("基准属于地图 %s，当前地图 %s，改为重新采样基准", g_sBaselineMap, sMap);
+		g_bBaselineValid = false;
+		g_SavedRoute.Clear();
+		g_SavedCenter.Clear();
+		HandleStableRoute();
+		return;
+	}
+
+	if (RoutesEqual(g_StableRoute, g_StableCenter, g_SavedRoute, g_SavedCenter)) {
 		DebugPrint("逃跑路线与基准一致");
 		return;
 	}
@@ -497,38 +574,58 @@ void ReportMismatch()
 	int diffIndex = -1;
 
 	for (int i = 0, size = (savedCount < nowCount ? savedCount : nowCount); i < size; ++i) {
-		if (g_SavedRoute.Get(i) != g_StableRoute.Get(i)) {
+		if (!RouteEntrySame(i, g_SavedRoute, g_SavedCenter, g_StableRoute, g_StableCenter)) {
 			diffIndex = i;
 			break;
 		}
 	}
 
-	char detail[192];
+	char sMap[64];
+	GetCurrentMap(sMap, sizeof(sMap));
+
+	char detail[224];
 	if (diffIndex >= 0) {
-		FormatEx(detail, sizeof(detail), "第 %d 个区域不一致：基准 #%d，当前 #%d",
-				diffIndex + 1, g_SavedRoute.Get(diffIndex), g_StableRoute.Get(diffIndex));
+		FormatEx(detail, sizeof(detail), "地图 %s 第 %d 个区域不一致：基准 #%d，当前 #%d",
+				sMap, diffIndex + 1, g_SavedRoute.Get(diffIndex), g_StableRoute.Get(diffIndex));
 	} else if (savedCount != nowCount) {
-		FormatEx(detail, sizeof(detail), "区域数量不一致：基准 %d 个，当前 %d 个", savedCount, nowCount);
+		FormatEx(detail, sizeof(detail), "地图 %s 区域数量不一致：基准 %d 个，当前 %d 个",
+				sMap, savedCount, nowCount);
 	} else {
-		FormatEx(detail, sizeof(detail), "区域数量与内容均未发现差异");
+		FormatEx(detail, sizeof(detail), "地图 %s 区域数量与内容均未发现差异", sMap);
 	}
 
-	// 真不一致：每张图只报一次错误，避免刷 errors 日志；后续重复走普通日志
+	// 同一张图只出一次结论：默认写普通日志（logs/*.log），不再写 errors_*.log。
+	// 想在 errors 里看到旧的报错形式，把 l4d_escaperoute_report 设成 2。
+	int level = g_cvReport.IntValue;
+	if (level <= 0) {
+		DebugPrint("逃跑路线与基准不一致（%s）", detail);
+		return;
+	}
+
 	if (!g_bReportedThisMap) {
 		g_bReportedThisMap = true;
-		LogError("[%s] 逃跑路线与基准不一致（%s）。若本条只出现一次可忽略；反复出现请记录地图名后反馈作者。",
-				PLUGIN_TAG, detail);
+		if (level >= 2) {
+			LogError("[%s] 逃跑路线与基准不一致（%s）。若本条只出现一次可忽略；反复出现请记录地图名后反馈作者。",
+					PLUGIN_TAG, detail);
+		} else {
+			LogMessage("[%s] 逃跑路线与基准不一致（%s）。这是诊断信息，不影响服务器运行；如反复出现请记录地图名后反馈作者。",
+					PLUGIN_TAG, detail);
+		}
 	} else {
-		LogMessage("[%s] 逃跑路线仍与基准不一致（%s）", PLUGIN_TAG, detail);
+		DebugPrint("逃跑路线仍与基准不一致（%s）", detail);
 	}
 }
 
 // ----------------------------------------------------------------------------
 //  快照读取（全部空指针/越界防护）
+//  同时记录每个 area 的量化中心坐标：area id 会随 nav 版本/编号变化，
+//  中心坐标才是「同一个地点」的稳定标识（用于跨构建比较）。
 // ----------------------------------------------------------------------------
-bool ReadRoute(int entity, ArrayList out)
+bool ReadRoute(int entity, ArrayList ids, ArrayList centers)
 {
-	out.Clear();
+	ids.Clear();
+	if (centers != null)
+		centers.Clear();
 
 	Address pRoute = GetEntityAddress(entity);
 	if (pRoute == Address_Null)
@@ -540,6 +637,8 @@ bool ReadRoute(int entity, ArrayList out)
 
 	Address pAreas = pRoute + view_as<Address>(g_iOffs_m_nMainPathAreaCount + 8);
 
+	float center[3];
+
 	for (int i = 0; i < count; ++i) {
 		Address pArea = view_as<Address>(LoadFromAddress(pAreas + view_as<Address>(i * 4), NumberType_Int32));
 		if (pArea == Address_Null)
@@ -549,30 +648,75 @@ bool ReadRoute(int entity, ArrayList out)
 		if (id <= 0)
 			return false;
 
-		out.Push(id);
+		ids.Push(id);
+
+		if (centers != null) {
+			center[0] = 0.0;
+			center[1] = 0.0;
+			center[2] = 0.0;
+			L4D_GetNavAreaCenter(pArea, center);
+			for (int a = 0; a < 3; ++a)
+				center[a] = float(RoundToNearest(center[a] / CELL_SIZE)) * CELL_SIZE;
+			centers.PushArray(center, sizeof(center));
+		}
 	}
 
 	return true;
 }
 
-bool RoutesEqual(ArrayList a, ArrayList b)
+// 单个位置是否「同一区域」：id 相同直接算；id 不同时看中心坐标是否落在同一量化格。
+bool RouteEntrySame(int i, ArrayList aId, ArrayList aCenter, ArrayList bId, ArrayList bCenter)
 {
-	if (a.Length != b.Length)
+	int idA = aId.Get(i);
+	int idB = bId.Get(i);
+	if (idA == idB)
+		return true;
+
+	if (aCenter == null || bCenter == null || i >= aCenter.Length || i >= bCenter.Length)
 		return false;
 
-	for (int i = 0, size = a.Length; i < size; ++i) {
-		if (a.Get(i) != b.Get(i))
+	float ca[3], cb[3];
+	aCenter.GetArray(i, ca, sizeof(ca));
+	bCenter.GetArray(i, cb, sizeof(cb));
+
+	// 量化后完全相同 = 同一地点（nav 重编号/area 版本差异不再误判）
+	for (int k = 0; k < 3; ++k)
+		if (ca[k] != cb[k])
 			return false;
-	}
 
 	return true;
 }
 
-void CopyRoute(ArrayList from, ArrayList to)
+bool RoutesEqual(ArrayList aId, ArrayList aCenter, ArrayList bId, ArrayList bCenter)
 {
-	to.Clear();
-	for (int i = 0, size = from.Length; i < size; ++i)
-		to.Push(from.Get(i));
+	if (aId.Length != bId.Length)
+		return false;
+
+	for (int i = 0, size = aId.Length; i < size; ++i)
+		if (!RouteEntrySame(i, aId, aCenter, bId, bCenter))
+			return false;
+
+	return true;
+}
+
+void CopyRoute(ArrayList fromId, ArrayList fromCenter, ArrayList toId, ArrayList toCenter)
+{
+	toId.Clear();
+	for (int i = 0, size = fromId.Length; i < size; ++i)
+		toId.Push(fromId.Get(i));
+
+	if (toCenter == null)
+		return;
+
+	toCenter.Clear();
+	if (fromCenter == null)
+		return;
+
+	float c[3];
+	for (int i = 0, size = fromCenter.Length; i < size; ++i) {
+		fromCenter.GetArray(i, c, sizeof(c));
+		toCenter.PushArray(c, sizeof(c));
+	}
 }
 
 methodmap TerrorNavArea < Address

@@ -1,15 +1,20 @@
 // English by StarterX4
 // Traditional Chinese by HarryPotter
 // Simplified Chinese by HarryPotter
+//
+// 注意：本文件已不再包含任何硬编码的 [12V12] / [AFK] 模式前缀。
+// 模式前缀由插件在运行时按实际加载的配置名（confogl 的 l4d_ready_cfg_name）拼接：
+// 配置名含 12v12 → "[12V12] "，含 8v8 → "[8V8] "，否则不加前缀（可用 l4d2_afk_prefix 覆盖）。
+// 因此这里的每条文案只写正文；#format 占位符数量必须与 .sp 里的调用点一致。
 
 "Phrases"
 {
 	"You're spectating. Join any team to play."
 	{
-		"en"	"You're spectating. Join any team to play."
-		"zho"	"輸入 !jg 自動加入（不要按 M，按 M 容易卡住）..."
-		"chi"	"输入 !jg 自动加入（不要按 M，按 M 容易卡住）..."
-		"hu"	"Néző vagy. Csatlakozz bármelyik csapathoz, hogy játszhass. !join"
+		"en"	"Spectating: !jg to join."
+		"zho"	"旁觀中：輸入 !jg 自動加入（不要按 M，按 M 容易卡住）。"
+		"chi"	"旁观中：输入 !jg 自动加入（不要按 M，按 M 容易卡住）。"
+		"hu"	"Csatlakozas: !jg."
 	}	
 	"[AFK] Inactivity detected! 1"
 	{
@@ -37,18 +42,18 @@
 	"[AFK] Inactivity detected! 3"
 	{
 		"#format"		"{1:d}"
-		"en"	"[AFK] Detected that you can join the game now! Type !jg to join the game or you will be kicked off the server in {1} seconds. Don't be a dick!"
-		"zho"	"[AFK] 檢測到目前可以加入對局! 輸入 !jg 自動加入（不要按 M，按 M 容易卡住）\n 否則妳將于 {1} 秒後踢出服務器. 別占著茅坑不拉屎!"
-		"chi"	"[AFK] 检测到目前可以加入对局! 输入 !jg 自动加入（不要按 M，按 M 容易卡住）\n 否则你将于 {1} 秒后踢出服务器. 别占着茅坑不拉屎!"
-		"hu"	"[AFK] Észleltem, hogy most már csatlakozhatsz a játékhoz! Nyomd meg az M gombot a játékhoz való csatlakozáshoz, különben {1} másodperc múlva kirúgunk a szerverről. Ne légy pöcs!"
+		"en"	"[AFK] Open slot: !jg to join. Join within {1} seconds or be kicked."
+		"zho"	"[AFK] 有空位：輸入 !jg 自動加入（不要按 M，按 M 容易卡住）\n請在 {1} 秒內補位，否則踢出。"
+		"chi"	"[AFK] 有空位：输入 !jg 自动加入（不要按 M，按 M 容易卡住）\n请在 {1} 秒内补位，否则踢出。"
+		"hu"	"[AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz {1} masodpercen belul, kulonben kirugunk."
 	}
 	"[AFK] Inactivity detected! 4"
 	{
 		"#format"		"{1:d}"
-		"en"	"[AFK] Detected that you are currently available to join the game! Type !jg to join the game\n Once someone leaves the safe zone you will be kicked off the server. Don't be a dick!"
-		"zho"	"[AFK] 檢測到目前可以加入對局! 輸入 !jg 自動加入（不要按 M，按 M 容易卡住）\n 壹旦有人離開安全區域妳將踢出服務器. 別占著茅坑不拉屎!"
-		"chi"	"[AFK] 检测到目前可以加入对局! 输入 !jg 自动加入（不要按 M，按 M 容易卡住）\n 一旦有人离开安全区域你将踢出服务器. 别占着茅坑不拉屎!"
-		"hu"	"[AFK] Érzékeltük, hogy jelenleg elérhető vagy a játékhoz való csatlakozáshoz! Nyomd meg az M-et a játékhoz való csatlakozáshoz\n Ha valaki elhagyja a biztonságos zónát, ki leszel rúgva a szerverről. Ne légy szarházi!"
+		"en"	"[AFK] Open slot: use !jg. Join before the survivors leave the safe area."
+		"zho"	"[AFK] 有空位：輸入 !jg（不要按 M，按 M 容易卡住），在生還者離開安全區域前補位。"
+		"chi"	"[AFK] 有空位：输入 !jg（不要按 M，按 M 容易卡住），在生还者离开安全区域前补位。"
+		"hu"	"[AFK] Van szabad hely: !join, !sur vagy !inf. Csatlakozz, mielott a tulelok elhagyjak a biztonsagos teruletet."
 	}
 	"have been kicked from server due to inactivity"
 	{
@@ -60,10 +65,10 @@
 	}	
 	"afkForceSpectate"
 	{
-		"en"	"[AFK] You have been switched to {lightgreen}Spectators"
-		"zho"	"[AFK] 你已被轉換到 {lightgreen}旁觀者"
-		"chi"	"[AFK] 你已被移动到 {lightgreen}旁观"
-		"hu"	"[AFK] Átkerültél a {lightgreen}nézők közé!"
+		"en"	"[AFK] Moved to {lightgreen}Spectators. Return with !jg."
+		"zho"	"[AFK] 你已轉為 {lightgreen}旁觀。輸入 !jg 自動加入（不要按 M，按 M 容易卡住）。"
+		"chi"	"[AFK] 你已转为 {lightgreen}旁观。输入 !jg 自动加入（不要按 M，按 M 容易卡住）。"
+		"hu"	"[AFK] Atkerultel a {lightgreen}nezok koze. Visszateres: !join, !sur vagy !inf."
 	}
 	"[AFK] Inactivity detected! 5"
 	{
@@ -90,4 +95,3 @@
 		"hu"	"[AFK] Kirúgtak a szerverről, mert több mint {1} másodpercig néző voltál, és nem csatlakoztál a játékhoz!"
 	}
 }
-

@@ -112,11 +112,76 @@ static Action CVS_SetCvars_Cmd(int args)
 	SetEnforcedCvars();
 	bTrackingStarted = true;
 	PrintToServer("[Confogl] CVar settings committed: tracked=%d | pending=%d", CvarSettingsArray.Length, PendingCvarsArray.Length);
-	if (PendingCvarsArray.Length > 0) {
-		LogError("[%s] %d tracked CVar(s) are still missing after commit. Run sm_confoglstatus to see pending names.", CVS_MODULE_NAME, PendingCvarsArray.Length);
-	}
+	CVS_ReportPendingAfterCommit();
 
 	return Plugin_Handled;
+}
+
+// ----------------------------------------------------------------------------
+//  commit 之后仍有 pending 的 cvar：直接把是哪些打出来
+//
+//  旧日志只有一句 "2 tracked CVar(s) are still missing after commit."，看日志无法定位，
+//  而且每张图（每次配置执行）都会往 errors_*.log 写一条，等于把一个配置问题变成刷屏。
+//
+//  现在：
+//   · 打印 name + 期望值（最多列 12 条，其余给总数），下次看 errors 日志就能直接定位；
+//   · pending 集合与上一次【相同】时只写普通日志（logs/*.log），不再进 errors；
+//     集合发生变化（或首次出现）才写一条 error，保证问题仍然可见但不会刷屏；
+//   · 提示这是「配置里设置了本模式没有加载的插件所拥有的 cvar」这一类问题。
+// ----------------------------------------------------------------------------
+static char sLastPendingSig[512];
+
+static void CVS_ReportPendingAfterCommit()
+{
+	int iSize = PendingCvarsArray.Length;
+
+	if (iSize <= 0) {
+		sLastPendingSig[0] = '\0';
+		return;
+	}
+
+	char sDetail[768];
+	char sSig[512];
+	sDetail[0] = '\0';
+	sSig[0] = '\0';
+
+	CVSPending pendingEntry;
+	int iShown = 0;
+	const int iMaxShown = 12;
+
+	for (int i = 0; i < iSize; i++) {
+		PendingCvarsArray.GetArray(i, pendingEntry, sizeof(pendingEntry));
+
+		char sOne[128];
+		StrCat(sSig, sizeof(sSig), pendingEntry.CVSP_name);	// 去重签名只用名字
+		StrCat(sSig, sizeof(sSig), ";");
+
+		if (iShown >= iMaxShown) {
+			continue;
+		}
+
+		FormatEx(sOne, sizeof(sOne), "%s%s=%s", iShown ? ", " : "", pendingEntry.CVSP_name, pendingEntry.CVSP_newval);
+		StrCat(sDetail, sizeof(sDetail), sOne);
+		iShown++;
+	}
+
+	if (iSize > iMaxShown) {
+		char sMore[64];
+		FormatEx(sMore, sizeof(sMore), " ...(共 %d 条)", iSize);
+		StrCat(sDetail, sizeof(sDetail), sMore);
+	}
+
+	bool bChanged = !StrEqual(sSig, sLastPendingSig);
+	strcopy(sLastPendingSig, sizeof(sLastPendingSig), sSig);
+
+	if (bChanged) {
+		LogError("[%s] %d 个被跟踪的 CVar 在 commit 后仍不存在：%s。最常见原因是配置文件给「本模式没有加载的插件」的 cvar 赋了值（插件没加载/加载失败），其次是插件尚未 OnPluginStart 就 commit。用 sm_confoglstatus 可再次确认。",
+				CVS_MODULE_NAME, iSize, sDetail);
+	} else {
+		// 与上次完全相同：配置问题没有变化，不再重复写 errors 日志
+		LogMessage("[%s] %d 个被跟踪的 CVar 仍不存在（与上次相同，不再重复报错）：%s",
+				CVS_MODULE_NAME, iSize, sDetail);
+	}
 }
 
 bool CVS_IsTrackingStarted()

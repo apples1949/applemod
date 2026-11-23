@@ -4,7 +4,7 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-#define PLUGIN_VERSION "2.2.6"
+#define PLUGIN_VERSION "2.4.0-merged"
 
 #define TEAM_NONE      0
 #define TEAM_SPECTATOR 1
@@ -13,6 +13,21 @@
 
 // 独立日志文件（相对 addons/sourcemod，即 addons/sourcemod/logs/）
 #define FIX_LOG_FILE "logs/l4d2_fix_team_shuffle_edi.log"
+
+/* 拿不到 SteamID（非 Steam 客户端 / 授权还没完成）时的授权宽限。
+   2.3.9 起按"真实时间"算：个人计时器从 1.0s 改成 0.2s 之后，原先按 tick 计数的
+   `> 5` 实际只等到约 1 秒，远不够慢速授权完成。
+   合并版把这件事交回服主：l4d2_fix_team_shuffle_no_auth_grace（默认 5.0 秒）
+   + l4d2_fix_team_shuffle_no_auth_grace_by_tick（0=按真实时间，1=按 tick 次数=4v4 旧语义）。 */
+
+/* ========== 合并说明：4v4 2.2.6 + 12v12 2.3.9-12v12 -> 单一源码 ==========
+   底稿 = 12v12 2.3.9（更新的一支），4v4 独有的行为/修复按"差异清单 TS-01…TS-28"补回。
+   两版之间的**每一个行为差异**都收敛成 l4d2_fix_team_shuffle_* 开关（见 CreateBehaviorCvars），
+   默认值 = 12v12 现状，注释里写明「4v4 建议值」。开关全部在读用处直接取 ConVar 值，
+   因此 sm_cvar 热改后**下一次换图/新回合**即生效，不需要重载插件。
+   原 addons/sourcemod/scripting/12v12/l4d2_fix_team_shuffle_edi.sp 已删除：
+   只有一个源码、一份 smx；plugins/optional/another/ 与 plugins/optional/12v12/
+   放的是同一份二进制。 */
 
 // ========== 主要状态变量 ==========
 
@@ -26,9 +41,9 @@ StringMap g_hShuffleTargets;
 StringMap g_hTargetTeams;
 bool g_bTargetsFrozen;     // 目标是否已冻结（冻结后换边标志再变也不影响已定目标）
 bool g_bTargetsFlipped;    // 冻结目标时用的换边标志，用于发现"冻早了"并重算
-char g_sTargetsMap[64];    // 冻结目标时所在的地图，防止拿上一张图的目标去改这一张图的人
 int g_iRestoredCount;      // 本次修复已经成功归位的人数（判断是否还能安全地重新冻结）
 int g_iEvictBudget;        // 本次修复还允许"腾位/踢 AI"的次数上限，防止来回互踢
+char g_sTargetsMap[64];    // 冻结目标时所在的地图，防止拿上一张图的目标去改这一张图的人
 
 int g_iPendingCount;      // 尚未还原成功的人数
 bool g_bTeamLock;         // 当前是否处于队伍锁定（还原进行中）
@@ -52,14 +67,28 @@ bool g_bFixStartLogged;             // 本次修复的"开始修复"表头是否
 bool g_bChecked[MAXPLAYERS + 1];      // 某玩家是否正在等待自己的还原计时器
 int g_iFailureCount[MAXPLAYERS + 1];  // 某玩家还原失败的次数
 bool g_bJoinTeamUsed[MAXPLAYERS + 1]; // 插件自己执行队伍转移期间临时放行 jointeam
-int g_iNoAuthTicks[MAXPLAYERS + 1];   // 连续拿不到 SteamID 的秒数（非 Steam 客户端/授权未完成）
+float g_fNoAuthSince[MAXPLAYERS + 1]; // 连续拿不到 SteamID 的起始时刻（GetGameTime，0.0=当前能拿到）
+int g_iNoAuthTicks[MAXPLAYERS + 1];   // no_auth_grace_by_tick=1 时按个人计时器触发次数记宽限（4v4 旧语义）
 
 Handle g_hCheckTimer = INVALID_HANDLE;   // 5 秒检查计时器
 Handle g_hTimeoutTimer = INVALID_HANDLE; // 超时兜底计时器
 Handle g_hClientTimer[MAXPLAYERS + 1];   // 每个玩家的 1 秒还原计时器
+Handle g_hStartTimer;                   // round_start / OnMapStart 共用的延迟启动
+Handle g_hFreezeTimer = INVALID_HANDLE; // freeze_delay>0 时延后冻结目标的计时器（4v4 行为）
+bool g_bMapReady;
 
 bool g_bEventsHooked = false;
 bool g_bVoteHooksInstalled = false;
+
+// ========== 待入队名单（分队结束后自动平均入队） ==========
+
+/* 本次分队里被插件自己请到旁观、又"不在记录表"的玩家。
+   钥匙：能拿到 SteamID 时用 SteamID（断线重连也能对上），否则用 "uid:<userid>"。
+   ForceToUnlock 之后延迟 1 秒执行一次平均入队，执行完立即清空；
+   不允许跨回合/跨地图残留（KeepTeams / AbortProcess / OnMapStart / 关闭总开关都会清）。 */
+StringMap g_hAutoJoin;
+Handle g_hAutoJoinTimer = INVALID_HANDLE;
+int g_iAutoJoinRetry;   // 解锁瞬间又被重新锁队（管理员手动启动等）时的重试次数
 
 GlobalForward g_hFwdFixComplete;
 
@@ -77,12 +106,34 @@ ConVar g_cvLog;
 ConVar g_cvNoAuthSpectate;
 ConVar g_hZMaxPlayerZombies;
 
+/* ===== 4v4 / 12v12 行为差异开关（合并版新增 18 个） =====
+   全部在用到的地方直接读 ConVar（.BoolValue / .IntValue / .FloatValue），所以热改即生效。
+   默认值 = 12v12(2.3.9-12v12) 现状；注释里给出 4v4(2.2.6) 建议值。 */
+ConVar g_cvAutoJoin;          // ① 待入队自动放回子系统总开关
+ConVar g_cvAutoJoinDelay;     //    自动放回延迟秒数
+ConVar g_cvAutoJoinRetry;     //    解锁瞬间又被锁队时的重试次数
+ConVar g_cvShuffleBalance;    // ② 打乱时平均分配 vs 按记录生还者人数
+ConVar g_cvSlotCheck;         // ③ 名额判断是否无条件生效
+ConVar g_cvKickAi;            // ⑩ 名额满时是否踢 AI 特感腾位
+ConVar g_cvMapStartDelay;     // ④ 换图后整体推迟启动的秒数（0=同步启动）
+ConVar g_cvFreezeDelay;       // ④ 目标冻结/打乱判定的推迟秒数（0=与启动同刻）
+ConVar g_cvClientRetryDelay;  // ④ 个人还原计时器间隔（1.0 vs 0.2）
+ConVar g_cvCheckInterval;     // ④ 完成检查计时器间隔（5.0 vs 1.0）
+ConVar g_cvNoAuthGrace;       // ⑤ 无 SteamID 宽限值
+ConVar g_cvNoAuthGraceTick;   // ⑤ 宽限按 tick 计数（4v4）vs 按真实时间（12v12）
+ConVar g_cvIdleCheck;         // ⑥ HasIdlePlayer/IsClientIdle 严格判定（12v12）vs 旧判定（4v4）
+ConVar g_cvLockBackfill;      // ⑦ 已锁队时给漏掉的玩家补发个人计时器（4v4 有、12v12 丢了）
+ConVar g_cvCoopBranch;        // ⑧ 保留合作模式分支（4v4 有）
+ConVar g_cvSpectateNotice;    // ⑨ 被赶去旁观/让位时的提示文案
+ConVar g_cvTakeoverRollback;  // TakeOverBot 失败回滚托管链接（12v12）vs 不检查（4v4）
+ConVar g_cvLockEarly;         // 已排定启动即算锁队（12v12）vs 只认真正锁队（4v4）
+
 bool g_bCvarEnabled;
 bool g_bCvarNotify;
 bool g_bCvarNoVotes;
 int g_iCvarAttempts;
 float g_fCvarTime;
-int g_iCvarFinalMapDisable;   // final_map_disable 的整数取值（0/1/2/3）
+int g_iCvarFinalMapDisable;   // final_map_disable 的整数取值（0/1/2）
 bool g_bCvarChangeMapDisable;
 bool g_bCvarIgnoreOffline;
 bool g_bCvarLog;
@@ -93,7 +144,7 @@ int g_iZMaxPlayerZombies;
 
 public Plugin myinfo =
 {
-	name = "L4D2 - Fix team shuffle (unscramble style)",
+	name = "L4D2 - Fix team shuffle",
 	author = "Altair Sossai, edited by apples1949",
 	description = "Restore versus teams after round transitions with team lock, per-player retry timers and bot takeover",
 	version = PLUGIN_VERSION,
@@ -115,12 +166,13 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 
 public any Native_Keep(Handle plugin, int numParams)
 {
-	KeepTeams();
+	KeepTeams(false);
 	return 0;
 }
 
 public any Native_Start(Handle plugin, int numParams)
 {
+	// "开始修复"表头由 FreezeRestoreTargets() 在冻结那一刻统一写，这里不需要补
 	StartProcess();
 	return 0;
 }
@@ -133,7 +185,7 @@ public any Native_Abort(Handle plugin, int numParams)
 
 public any Native_IsFixComplete(Handle plugin, int numParams)
 {
-	return !g_bTeamLock;
+	return !IsRestoreLocked();
 }
 
 // ========== OnPluginStart ==========
@@ -146,6 +198,7 @@ public void OnPluginStart()
 	g_hPendingRecords = new StringMap();
 	g_hShuffleTargets = new StringMap();
 	g_hTargetTeams = new StringMap();
+	g_hAutoJoin = new StringMap();
 
 	g_hFwdFixComplete = new GlobalForward("L4D2_FixTeamShuffle_OnFixComplete", ET_Ignore);
 
@@ -211,6 +264,8 @@ public void OnPluginStart()
 		"拿不到 SteamID 的玩家（非 Steam 客户端/授权未完成）是否让到旁观：1=让到旁观（默认，避免其占着队伍名额把该归位的人挤掉）；0=不处理，保持引擎分配的队伍",
 		FCVAR_NONE, true, 0.0, true, 1.0);
 
+	CreateBehaviorCvars();
+
 	g_bCvarLog = g_cvLog.BoolValue;
 	InitFixLogFile();
 
@@ -239,6 +294,105 @@ public void OnPluginStart()
 		"立即启动队伍还原（需要先 sm_fixteams_keep 记录）");
 	RegAdminCmd("sm_fixteams_abort", Command_FixTeamsAbort, ADMFLAG_ROOT,
 		"立即中止队伍还原并解锁（公告并触发完成前向）");
+}
+
+// ========== 4v4 / 12v12 行为差异开关（默认值 = 12v12 现状） ==========
+
+void CreateBehaviorCvars()
+{
+	g_cvAutoJoin = CreateConVar("l4d2_fix_team_shuffle_auto_join", "1",
+		"【① 自动入队】被插件请到旁观的玩家，分队完成后是否按「两队平均」自动放回：1=自动放回（12v12 默认）；0=只请到旁观，让玩家自己选队（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvAutoJoinDelay = CreateConVar("l4d2_fix_team_shuffle_auto_join_delay", "1.0",
+		"【① 自动入队】解锁后延迟多少秒执行自动放回（12v12 默认 1.0；auto_join=0 时无意义）",
+		FCVAR_NONE, true, 0.0, true, 30.0);
+
+	g_cvAutoJoinRetry = CreateConVar("l4d2_fix_team_shuffle_auto_join_retry", "3",
+		"【① 自动入队】解锁瞬间又被重新锁队时，自动放回最多重试几次（12v12 默认 3；0=不重试）",
+		FCVAR_NONE, true, 0.0, true, 10.0);
+
+	g_cvShuffleBalance = CreateConVar("l4d2_fix_team_shuffle_shuffle_balance", "1",
+		"【② 打乱分边】final_map_disable=2/3 随机分队时如何划分生还者名额：1=两队平均 (总数+1)/2 并按生还者上限夹住（12v12 默认）；0=沿用记录时的生还者人数（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvSlotCheck = CreateConVar("l4d2_fix_team_shuffle_slot_check", "1",
+		"【③ 名额判断】名额判断（survivor_limit / z_max_player_zombies / l4d_*_limit）是否无条件生效：1=总是判定（12v12 默认）；0=只在存在多人插件 cvar(l4d_survivor_limit/l4d_infected_limit) 时判定，4v4 无这些 cvar 于是整套跳过（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvKickAi = CreateConVar("l4d2_fix_team_shuffle_kick_ai", "1",
+		"【⑩ 踢 AI 腾位】把玩家放进特感队时，名额被 AI 特感占满是否踢掉一个 AI 腾位（Tank 不动）：1=总是踢（12v12 默认）；0=只在名额判断生效（多人插件环境）时才踢，4v4 下不踢（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvMapStartDelay = CreateConVar("l4d2_fix_team_shuffle_map_start_delay", "0.5",
+		"【④ 时序】换图后整个启动流程（锁队+冻结+发个人计时器）推迟多少秒：0.5=等引擎换边完成再启动（12v12 默认）；0=OnMapStart/round_start 里同步启动（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 10.0);
+
+	g_cvFreezeDelay = CreateConVar("l4d2_fix_team_shuffle_freeze_delay", "0.0",
+		"【④ 时序】目标冻结/打乱判定的推迟秒数：0=与启动同刻冻结（12v12 默认）；0.5=先启动锁队、0.5 秒后才冻结目标（4v4 建议 0.5）。建议保持小于 client_retry_delay",
+		FCVAR_NONE, true, 0.0, true, 10.0);
+
+	g_cvClientRetryDelay = CreateConVar("l4d2_fix_team_shuffle_client_retry_delay", "0.2",
+		"【④ 时序】每个玩家的个人还原计时器间隔秒数：0.2=满员换队也能在 1~3 秒内收尾（12v12 默认）；1.0=旧版每秒一次（4v4 建议 1.0）",
+		FCVAR_NONE, true, 0.1, true, 5.0);
+
+	g_cvCheckInterval = CreateConVar("l4d2_fix_team_shuffle_check_interval", "1.0",
+		"【④ 时序】完成检查（全部归位 -> 解锁）计时器间隔秒数：1.0=12v12 默认；5.0=旧版 5 秒（4v4 建议 5.0）",
+		FCVAR_NONE, true, 0.2, true, 30.0);
+
+	g_cvNoAuthGrace = CreateConVar("l4d2_fix_team_shuffle_no_auth_grace", "5.0",
+		"【⑤ 无 SteamID 宽限】拿不到 SteamID 的玩家在多久之后按「不在记录中」处理（请到旁观）：单位见 no_auth_grace_by_tick。12v12/4v4 默认都是 5.0",
+		FCVAR_NONE, true, 0.0, true, 120.0);
+
+	g_cvNoAuthGraceTick = CreateConVar("l4d2_fix_team_shuffle_no_auth_grace_by_tick", "0",
+		"【⑤ 无 SteamID 宽限】宽限按什么计时：0=真实秒数（12v12 默认，配合 0.2s 间隔也真等 5 秒）；1=个人计时器触发次数（4v4 旧语义，间隔 1s 时约 5 秒；4v4 建议 1）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvIdleCheck = CreateConVar("l4d2_fix_team_shuffle_idle_check", "1",
+		"【⑥ 托管判定】挂机托管（idle）判定是否用严格版：1=HasIdlePlayer 还要求托管者在线/非 bot/在旁观，IsClientIdle 不要求身体存活（12v12 默认）；0=旧判定（userid 非 0 即算托管、要求 bot 存活）（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvLockBackfill = CreateConVar("l4d2_fix_team_shuffle_lock_backfill", "0",
+		"【⑦ 补发计时器】已处于锁队时，round_start 是否给「记录里还没归位但当前没有计时器」的在线玩家补发个人计时器：1=补发（4v4 建议 1，2.2.6 有这段）；0=不补发（12v12 默认，2.3.9 重构时丢了这段）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvCoopBranch = CreateConVar("l4d2_fix_team_shuffle_coop_branch", "0",
+		"【⑧ 合作分支】TurnClientToSurvivors 是否保留合作/生存/写实分支（非对抗模式）：1=保留（4v4 建议 1）；0=非对抗模式直接失败、只在对抗模式工作（12v12 默认）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvSpectateNotice = CreateConVar("l4d2_fix_team_shuffle_spectate_notice", "0",
+		"【⑨ 提示文案】被请到旁观/被让位时的聊天文案：0=自动入队版（「分队完成后会自动把你随机放进人少的一队」，并附带 12v12 新增的让位/复查提示）（12v12 默认）；1=手动选队版（「解锁后可以自行选队」，且不发 12v12 新增提示）（4v4 建议 1）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvTakeoverRollback = CreateConVar("l4d2_fix_team_shuffle_takeover_rollback", "1",
+		"【转移】L4D_TakeOverBot 失败时是否回滚托管链接 m_humanSpectatorUserID：1=检查失败并回滚后交给重试（12v12 默认）；0=不检查返回值、一律按成功处理（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+
+	g_cvLockEarly = CreateConVar("l4d2_fix_team_shuffle_lock_early", "1",
+		"【锁队语义】已排定「延迟 map_start_delay 秒启动」的窗口期是否也算锁队（jointeam 拦截 / native 报未完成）：1=算（12v12 默认）；0=只认真正锁队（4v4 建议 0）",
+		FCVAR_NONE, true, 0.0, true, 1.0);
+}
+
+/* 名额判断是否生效（slot_check）：
+     1 = 无条件生效（12v12 默认）；
+     0 = 只在"存在多人插件 cvar"时生效（4v4 建议）—— 4v4 没有 l4d_*_limit，
+         于是整套名额判断被跳过，行为与 2.2.6 一致。 */
+bool UseTeamLimits()
+{
+	if (g_cvSlotCheck.BoolValue)
+		return true;
+
+	return FindConVar("l4d_survivor_limit") != null
+		|| FindConVar("l4d_infected_limit") != null;
+}
+
+/* 旁观/让位的聊天提示：0=自动入队版文案，1=手动选队版文案（spectate_notice） */
+void PrintSpectateNotice(int client, const char[] sAutoJoinMsg, const char[] sManualMsg)
+{
+	if (g_cvSpectateNotice.BoolValue)
+		PrintToChat(client, "\x04[队伍修正]\x01 %s", sManualMsg);
+	else
+		PrintToChat(client, "\x04[队伍修正]\x01 %s", sAutoJoinMsg);
 }
 
 void GetCvars()
@@ -296,6 +450,8 @@ public void OnCvarChange_Enabled(ConVar convar, const char[] oldValue, const cha
 	if (g_bTeamLock)
 		LogFixSummary("总开关被关闭");
 
+	// 待入队名单一并作废：插件已关闭，不再自动改任何人的队伍
+	ClearAutoJoin();
 	ClearVars();
 
 	if (g_bCvarEnabled)
@@ -446,48 +602,21 @@ void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	if (!g_bCvarEnabled || !L4D_IsVersusMode())
 		return;
 
-	/* 同图第二半场 / 半场重打（mp_restartgame、Ready Up 重开）不会触发 OnMapStart，
-	   只有 round_start。旧实现只在 OnMapStart 里 Start()，这类换边就完全没还原
-	   —— 玩家停留在上一半的队伍里，看起来也是"修复不对"。
-	   这里延后 0.5 秒（等引擎完成换边、读到的 m_bAreTeamsFlipped 才是最终值）再启动。 */
-	if (!g_bTeamLock && g_bMapTransition && g_iPendingCount > 0)
+	/* 已经在锁队中（或已排定延迟启动）：给"记录里还没归位、但当前没有计时器"的
+	   在线玩家补发个人计时器。4v4(2.2.6) 有这段，12v12(2.3.9) 重构 ScheduleRestore
+	   时丢掉了，导致"有路径不进服事件"的玩家永远拿不到计时器。
+	   开关 l4d2_fix_team_shuffle_lock_backfill：默认 0（=12v12 现状），4v4 建议 1。 */
+	if (g_bTeamLock || (g_cvLockEarly.BoolValue && g_hStartTimer != INVALID_HANDLE))
 	{
-		CreateTimer(0.5, Timer_RoundStartRestore, _, TIMER_FLAG_NO_MAPCHANGE);
+		if (g_cvLockBackfill.BoolValue)
+			BackfillClientTimers();
+
 		return;
 	}
 
-	// 已经在锁队：给"记录里还没归位、但当前没有计时器"的在线玩家补发计时器
-	// （有些路径不会触发进服事件；已归位的玩家不再重开计时器，避免刷重复日志）
-	if (g_bTeamLock)
-	{
-		for (int client = 1; client <= MaxClients; client++)
-		{
-			if (!IsClientInGame(client) || IsFakeClient(client) || g_bChecked[client])
-				continue;
-
-			char auth[MAX_AUTHID_LENGTH];
-			if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
-				continue;
-
-			// 只给"还在待修复名单里"的玩家补发，已归位的人不重开计时器
-			if (!g_hPendingRecords.ContainsKey(auth))
-				continue;
-
-			StartClientRestore(client);
-		}
-	}
-}
-
-// 同图半场重打时的延迟启动：此时没有换图，不要剔除"暂时没连回来"的记录玩家
-public Action Timer_RoundStartRestore(Handle timer)
-{
-	if (!g_bCvarEnabled || !L4D_IsVersusMode() || g_bTeamLock)
-		return Plugin_Stop;
-
-	if (g_bMapTransition && g_iPendingCount > 0)
-		StartProcess(false);
-
-	return Plugin_Stop;
+	// 同图第二半场不会触发 OnMapStart。延后一帧以上等待引擎完成换边，
+	// 并为已经在线、不会再次触发 OnClientPutInServer 的玩家启动还原。
+	ScheduleRestore();
 }
 
 public Action Command_Changelevel(int client, const char[] command, int argc)
@@ -533,6 +662,9 @@ void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 
 	CancelProcessTimers();
 	ResetClientFlags();
+
+	// 新一轮记录 = 上一轮分队彻底结束：上一轮的待入队名单不能带过来
+	ClearAutoJoin();
 
 	g_hTeamRecords.Clear();
 	g_hPendingRecords.Clear();
@@ -655,9 +787,9 @@ void KeepTeams(bool roundEnded = true, bool inGameOnly = false)
 
 /* 为什么必须冻结：
    个人还原计时器是"每人每秒各自跑一次"，不同玩家会在 1s、2s、3s… 陆续完成。
-   原实现在每次计时器里重读 m_bAreTeamsFlipped 再算 IsTeamSwapped()，一旦引擎在
-   还原过程中才完成换边（换图/半场重开/跨战役都会出现），先完成的玩家按"未换边"
-   归位、后完成的按"已换边"归位 —— 同一队的人被拆到两边，表现就是"修复不对"。
+   若在每次计时器里重读 m_bAreTeamsFlipped 再算 IsTeamSwapped()，一旦引擎在还原
+   过程中才完成换边（换图/半场重开/跨战役都会出现），先完成的玩家按"未换边"归位、
+   后完成的按"已换边"归位 —— 同一队的人被拆到两边，表现就是"修复不对"。
    现在改为启动时按当时的换边判定算一次最终目标，执行期间只查表、不再重算。 */
 void FreezeTargets()
 {
@@ -780,7 +912,11 @@ bool ResolveTargetTeam(const char[] auth, int &targetTeam)
 
 public void OnMapStart()
 {
+	g_bMapReady = true;
 	g_bFinalMap = L4D_IsMissionFinalMap();
+
+	// 换图后上一张图的待入队名单必须作废：那些人已经不在这张图上了
+	ClearAutoJoin();
 
 	PrecacheSurvivorModels();
 
@@ -803,33 +939,25 @@ public void OnMapStart()
 	if (g_bTeamLock && !g_bMapTransition)
 		AbortProcess(false, "本次没有新记录，清除残留锁队");
 
-	// 0.5 秒后读取新地图的换边标志；个人还原计时器 1 秒后才第一次执行
-	CreateTimer(0.5, Timer_UpdateTeamFlipped, _, TIMER_FLAG_NO_MAPCHANGE);
-
 	// 本图确实是由上一张图换过来的（KeepTeams 置位、Start 消费）：跨战役判定的前提
 	if (g_bMapTransition)
 		g_bMapChangedSinceRecord = true;
 
-	Start();
-
-	/* 打乱判定、目标冻结、日志表头都放到 0.5 秒后的 Timer_UpdateTeamFlipped 里做：
-	   引擎是在换图/回合切换过程中才更新 m_bAreTeamsFlipped，OnMapStart 时读到的
-	   往往还是上一张图的值。若此刻就冻结目标，整队人会"一致地"错到同一侧。
-	   个人还原计时器是 1 秒后才第一次跑，所以在 0.5 秒冻结不会漏掉任何玩家。 */
-
-	// 消费本次换图标记：Start 执行时它必须仍为真
-	g_bMapTransition = false;
+	ScheduleRestore();
 }
 
 public void OnMapEnd()
 {
+	g_bMapReady = false;
+
 	/* 换图时引擎会销毁所有 TIMER_FLAG_NO_MAPCHANGE 计时器，句柄从此刻起失效。
-	   必须**先**把这些句柄置空，再做后面的 KeepTeams ——
-	   它会 KillTimer 这些句柄，对已销毁的句柄调用会抛 "Invalid timer handle"，
-	   而 SourcePawn 的运行时错误会直接中断当前回调：OnMapEnd 剩下的代码
-	   （包括原本放在函数末尾的句柄复位）全被跳过，死句柄就永久留在全局变量里。
-	   之后每一次 OnClientPutInServer / OnClientDisconnect / ResetClientFlags /
-	   下一次 OnMapEnd 都会报同一条错，而且报错会连带跳过调用方后面的清理。 */
+	   必须**先**把这些句柄置空，再做后面的 KeepTeams / ClearAutoJoin ——
+	   它们都会 KillTimer / delete 这些句柄，对已销毁的句柄调用会抛
+	   "Invalid timer handle"，而 SourcePawn 的运行时错误会直接中断当前回调：
+	   OnMapEnd 剩下的代码（包括原本放在函数末尾的句柄复位）全被跳过，
+	   死句柄就永久留在全局变量里。之后每一次 OnClientPutInServer /
+	   OnClientDisconnect / ResetClientFlags / 下一次 OnMapEnd 都会报同一条错，
+	   而且报错会连带跳过调用方后面的清理（checked 标记、待入队名单都清不掉）。 */
 	DropMapChangeTimers();
 
 	// 兜底记录：地图要换了，但本次没走"回合结束记录"——换图插件/管理员用
@@ -850,33 +978,92 @@ public void OnMapEnd()
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
+		g_fNoAuthSince[client] = 0.0;
+		g_iNoAuthTicks[client] = 0;
 	}
 }
 
-/* 把"换图即失效"的计时器句柄全部置空，不调用 KillTimer：
+/* 把"换图即失效"的计时器句柄全部置空，不调用 KillTimer / delete：
    换图时这些计时器已由引擎销毁，再关一次就是 "Invalid timer handle"。 */
 void DropMapChangeTimers()
 {
 	g_hCheckTimer = INVALID_HANDLE;
 	g_hTimeoutTimer = INVALID_HANDLE;
+	g_hStartTimer = INVALID_HANDLE;
+	g_hFreezeTimer = INVALID_HANDLE;
+	g_hAutoJoinTimer = INVALID_HANDLE;
 
 	for (int client = 1; client <= MaxClients; client++)
 		g_hClientTimer[client] = INVALID_HANDLE;
 }
 
-public Action Timer_UpdateTeamFlipped(Handle timer)
+bool IsRestoreLocked()
+{
+	if (g_bTeamLock)
+		return true;
+
+	/* 12v12：已排定"延迟 map_start_delay 秒启动"也算锁队 —— 这段窗口里 jointeam
+	   已经被拦截、native 也报"未完成"，AFK 插件据此不会误判可补位。
+	   4v4(lock_early=0)：只认真正锁队的 g_bTeamLock。 */
+	return g_cvLockEarly.BoolValue && g_hStartTimer != INVALID_HANDLE;
+}
+
+void ScheduleRestore()
+{
+	if (!g_bMapReady || !g_bCvarEnabled || !g_bMapTransition || g_iPendingCount <= 0
+		|| g_bTeamLock || g_hStartTimer != null)
+		return;
+	float fDelay = g_cvMapStartDelay.FloatValue;
+
+	// 0 = 4v4 旧行为：OnMapStart / round_start 里同步启动（冻结另由 freeze_delay 控制）
+	if (fDelay <= 0.0)
+	{
+		StartProcess(false);
+		return;
+	}
+
+	g_hStartTimer = CreateTimer(fDelay, Timer_StartRestore, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_StartRestore(Handle timer)
+{
+	if (timer != g_hStartTimer)
+		return Plugin_Stop;
+	g_hStartTimer = INVALID_HANDLE;
+
+	// 自动还原不在刚开始加载地图时删除暂未连接的记录，留给检查器。
+	// "开始修复"表头由 FreezeRestoreTargets() 在冻结那一刻统一写，这里不补写。
+	if (g_bMapReady)
+		StartProcess(false);
+
+	return Plugin_Stop;
+}
+
+/* 读最终换边标志 -> 判定打乱 -> 冻结每人目标 -> 写"开始修复"表头。
+   顺序不能变：个人计时器只查冻结表，表头里的模式/目标人数也必须等冻结后才是最终值。 */
+void FreezeRestoreTargets()
 {
 	g_bNewTeamFlipped = view_as<bool>(GameRules_GetProp("m_bAreTeamsFlipped"));
 
-	// 此刻换边标志才是最终值：确定本次是"按记录归位"还是"随机打乱"，
-	// 把每人目标冻结下来（之后执行期间不再重算），再写"开始修复"表头
-	if (g_bTeamLock && !g_bTargetsFrozen)
-	{
-		PrepareShuffleMode();
-		FreezeTargets();
-		LogFixStart();
-	}
+	PrepareShuffleMode();
+	FreezeTargets();
 
+	LogFixStart();
+}
+
+// freeze_delay>0 时的延后冻结（4v4 行为：OnMapStart 同步启动，0.5 秒后才冻结目标）
+public Action Timer_FreezeRestore(Handle timer)
+{
+	if (timer != g_hFreezeTimer)
+		return Plugin_Stop;
+
+	g_hFreezeTimer = INVALID_HANDLE;
+
+	// 锁队已被解除（超时 / 中止 / Ready Up）：冻结没有意义
+	if (!g_bTeamLock || !g_bCvarEnabled)
+		return Plugin_Stop;
+
+	FreezeRestoreTargets();
 	return Plugin_Stop;
 }
 
@@ -891,14 +1078,15 @@ bool Start()
 		g_bTeamLock = true;
 
 		CancelProcessTimers();
-		g_hCheckTimer = CreateTimer(5.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+		// 完成检查间隔：12v12 默认 1.0s（配合 0.2s 换队重试，开打前收尾）；4v4 建议 5.0s
+		g_hCheckTimer = CreateTimer(g_cvCheckInterval.FloatValue, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 		g_hTimeoutTimer = CreateTimer(g_fCvarTime, Timer_AllowTeamChanges, _, TIMER_FLAG_NO_MAPCHANGE);
 	}
 	else
 	{
 		// 已经锁队（例如管理员连续调用 Start）：只补建换图时被销毁的计时器
 		if (g_hCheckTimer == INVALID_HANDLE)
-			g_hCheckTimer = CreateTimer(5.0, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+			g_hCheckTimer = CreateTimer(g_cvCheckInterval.FloatValue, Timer_CheckConnected, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 
 		if (g_hTimeoutTimer == INVALID_HANDLE)
 			g_hTimeoutTimer = CreateTimer(g_fCvarTime, Timer_AllowTeamChanges, _, TIMER_FLAG_NO_MAPCHANGE);
@@ -912,25 +1100,38 @@ bool Start()
 
 // 管理员命令 / Native 使用的完整启动：启动成功后立即更新换边标志，
 // 并给所有已在游戏内的人类玩家补发个人还原计时器。
-// pruneOffline：是否把已离线的记录玩家直接剔除（自动路径在刚加载地图时不要剔除，
-// 留给 5 秒检查器，否则还没连回来的玩家会被当成"未记录"赶去旁观）
 bool StartProcess(bool pruneOffline = true)
 {
-	if (g_bCvarIgnoreOffline && pruneOffline)
+	// coop_branch=1（4v4 建议）时允许在非对抗模式手动启动（2.2.6 保留合作分支）
+	if (!g_bCvarEnabled || (!L4D_IsVersusMode() && !g_cvCoopBranch.BoolValue))
+		return false;
+
+	Handle startTimer = g_hStartTimer;
+	g_hStartTimer = INVALID_HANDLE;
+	delete startTimer;
+
+	if (pruneOffline && g_bCvarIgnoreOffline)
 		DropOfflineTeams();
 
 	if (!Start())
 		return false;
 
-	g_bNewTeamFlipped = view_as<bool>(GameRules_GetProp("m_bAreTeamsFlipped"));
-
-	// 管理员命令 / Native 启动不会经过 OnMapStart，这里补上打乱判定与目标冻结，
-	// 否则个人计时器拿不到冻结目标（会退回实时计算，又回到"执行期间漂移"的老问题）
-	PrepareShuffleMode();
-	FreezeTargets();
-
-	// 表头在冻结之后写：模式、目标人数都已确定
-	LogFixStart();
+	/* 打乱判定 + 目标冻结：12v12 在启动这一刻就冻结（个人计时器只查冻结表）；
+	   4v4 则是"OnMapStart 同步启动、0.5 秒后才冻结"（未冻结期间 ResolveTargetTeam
+	   退回按记录 + 当前换边标志实时计算）。由 freeze_delay 选择：
+	     freeze_delay = 0   -> 立刻冻结（12v12 默认）
+	     freeze_delay > 0   -> 延后冻结（4v4 建议 0.5，须小于 client_retry_delay） */
+	float fFreezeDelay = g_cvFreezeDelay.FloatValue;
+	if (fFreezeDelay > 0.0 && g_hFreezeTimer == INVALID_HANDLE)
+	{
+		g_hFreezeTimer = CreateTimer(fFreezeDelay, Timer_FreezeRestore, _, TIMER_FLAG_NO_MAPCHANGE);
+		if (g_hFreezeTimer == INVALID_HANDLE)
+			FreezeRestoreTargets();
+	}
+	else if (g_hFreezeTimer == INVALID_HANDLE)
+	{
+		FreezeRestoreTargets();
+	}
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
@@ -949,6 +1150,7 @@ public void OnClientPutInServer(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
+	g_fNoAuthSince[client] = 0.0;
 	g_iNoAuthTicks[client] = 0;
 
 	if (!g_bTeamLock || IsFakeClient(client))
@@ -966,7 +1168,17 @@ public void OnClientDisconnect(int client)
 	g_bChecked[client] = false;
 	g_iFailureCount[client] = 0;
 	g_bJoinTeamUsed[client] = false;
+	g_fNoAuthSince[client] = 0.0;
 	g_iNoAuthTicks[client] = 0;
+
+	// 按 userid 记的待入队条目对这个人已经失效，立刻清掉（userid 不会复用，
+	// 但没必要留一份指向已断线玩家的名单）
+	if (g_hAutoJoin != null)
+	{
+		char sKey[32];
+		FormatEx(sKey, sizeof(sKey), "uid:%d", GetClientUserId(client));
+		g_hAutoJoin.Remove(sKey);
+	}
 }
 
 void StartClientRestore(int client)
@@ -976,7 +1188,9 @@ void StartClientRestore(int client)
 	g_bChecked[client] = true;
 	g_iFailureCount[client] = 0;
 
-	Handle timer = CreateTimer(1.0, Timer_RestoreClient, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	/* 重试间隔：12v12 默认 0.2s —— 满员换队要靠"腾位→下一个 tick 落位"，1 秒一次
+	   会把整队 swap 拖成几十秒，玩家观感就是"开打半天了才被换走"；4v4 建议 1.0s。 */
+	Handle timer = CreateTimer(g_cvClientRetryDelay.FloatValue, Timer_RestoreClient, GetClientUserId(client), TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
 	if (timer == INVALID_HANDLE)
 	{
 		// 计时器创建失败：不要留下永远为真的 checked 标记
@@ -987,6 +1201,26 @@ void StartClientRestore(int client)
 	g_hClientTimer[client] = timer;
 }
 
+/* 已锁队时给"记录里还没归位、当前却没有计时器"的在线玩家补发个人计时器（lock_backfill）。
+   只补仍在待修复名单里的人：已归位的玩家不重开计时器，避免刷重复日志。 */
+void BackfillClientTimers()
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || g_bChecked[client])
+			continue;
+
+		char auth[MAX_AUTHID_LENGTH];
+		if (!GetClientAuthId(client, AuthId_Steam2, auth, sizeof(auth)))
+			continue;
+
+		if (!g_hPendingRecords.ContainsKey(auth))
+			continue;
+
+		StartClientRestore(client);
+	}
+}
+
 void StopClientRestoreTimer(int client)
 {
 	if (client <= 0 || client > MaxClients)
@@ -995,7 +1229,7 @@ void StopClientRestoreTimer(int client)
 	/* 先取值并把槽位置空，再 KillTimer：
 	   万一这个句柄已经失效（换图销毁、或上一次 KillTimer 抛错留下的残留），
 	   KillTimer 会抛运行时错误并中断当前回调；若"置空"写在它后面，
-	   就会永远留下一个死句柄——之后每次调用都报同一条错，
+	   就会永远留下一个死句柄 —— 之后每次调用都报同一条错，
 	   而且调用方（OnClientDisconnect / ResetClientFlags 等）后续清理全部被跳过。 */
 	Handle timer = g_hClientTimer[client];
 	g_hClientTimer[client] = INVALID_HANDLE;
@@ -1041,59 +1275,78 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		/* 拿不到 SteamID（非 Steam 客户端 / 授权还没完成）⇒ 无法与记录表比对。
 		   以前这里直接返回 Plugin_Continue：这种玩家既不会被当成"换图后新加入"
 		   赶去旁观，也不会被腾位逻辑选中，却实实在在占着一个真人名额，
-		   满员时就把本该归位的人挤在旁观里
+		   12v12 满员时就把本该归位的人挤在旁观里
 		   （2026-10-24 23:06 c2m4_barns：无 SteamID 的 JOJO 占了生还者第 12 席，
 		   apples1949 一直回不去）。
-		   现在给 5 秒授权宽限，之后按"不在记录中"处理：先移到旁观腾出名额；
-		   计时器不结束，万一之后授权到位、能对上记录，再按正常流程归位。 */
-		g_iNoAuthTicks[client]++;
+		   现在给按真实时间计算的 5 秒授权宽限（2.3.9 把个人计时器改成 0.2s 之后，
+		   原来按 tick 计数的"5 秒"实际只剩约 1.2 秒），之后按"不在记录中"处理：
+		   先移到旁观腾出名额；计时器不结束，万一之后授权到位、能对上记录，
+		   再按正常流程归位。被这样请到旁观的人记入待入队名单，分队结束后自动放回。 */
+		if (g_fNoAuthSince[client] <= 0.0)
+			g_fNoAuthSince[client] = GetGameTime();
 
 		// 开关关闭（l4d2_fix_team_shuffle_no_auth_spectate 0）：不处理，
 		// 保持引擎分配的队伍（即修复前的旧行为）
 		if (!g_bCvarNoAuthSpectate)
 			return Plugin_Continue;
 
-		if (g_iNoAuthTicks[client] > 5)
+		/* 宽限未满：继续等授权（个人计时器只是"查一下"，不改队伍）。
+		   两种口径由 l4d2_fix_team_shuffle_no_auth_grace_by_tick 选择：
+		     0 = 按真实时间算 no_auth_grace 秒（12v12 默认：配合 0.2s 间隔也真等满 5 秒）
+		     1 = 按个人计时器触发次数算（4v4 旧语义：>5 次；间隔 1.0s 时约 5 秒） */
+		if (g_cvNoAuthGraceTick.BoolValue)
 		{
-			// 旁观里挂机托管着生还者 Bot 同样占名额：先接管回来，再退回旁观
-			if (currentTeam == TEAM_SPECTATOR && IsClientIdle(client))
+			g_iNoAuthTicks[client]++;
+			if (g_iNoAuthTicks[client] <= g_cvNoAuthGrace.IntValue)
+				return Plugin_Continue;
+		}
+		else if (GetGameTime() - g_fNoAuthSince[client] < g_cvNoAuthGrace.FloatValue)
+		{
+			return Plugin_Continue;
+		}
+
+		// 旁观里挂机托管着生还者 Bot 同样占名额：先接管回来，再退回旁观
+		if (currentTeam == TEAM_SPECTATOR && IsClientIdle(client))
+		{
+			L4D_TakeOverBot(client);
+
+			if (g_bCvarLog)
+				FixLogClient(client, "修复：拿不到 SteamID 且正挂机托管 Bot，先接管解除托管");
+		}
+
+		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
+			g_bJoinTeamUsed[client] = true;
+			ChangeClientTeam(client, TEAM_SPECTATOR);
+			g_bJoinTeamUsed[client] = false;
+
+			// 玩家视角的提示：突然被移出队伍必须给个原因（文案随 spectate_notice 切换）
+			PrintSpectateNotice(client,
+				"读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；分队完成后会自动把你随机放进人少的一队。",
+				"读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；解锁后可以自行选队。");
+
+			// 分队结束后随机放回队伍（拿不到 SteamID，按 userid 记）
+			if (GetClientTeam(client) == TEAM_SPECTATOR)
+				AddAutoJoinCandidate(client);
+
+			if (g_bCvarLog)
 			{
-				L4D_TakeOverBot(client);
+				char sBefore[16], sAfter[16];
+				GetTeamLabel(currentTeam, sBefore, sizeof(sBefore));
+				GetTeamLabel(GetClientTeam(client), sAfter, sizeof(sAfter));
 
-				if (g_bCvarLog)
-					FixLogClient(client, "修复：拿不到 SteamID 且正挂机托管 Bot，先接管解除托管");
-			}
-
-			if (GetClientTeam(client) != TEAM_SPECTATOR)
-			{
-				g_bJoinTeamUsed[client] = true;
-				ChangeClientTeam(client, TEAM_SPECTATOR);
-				g_bJoinTeamUsed[client] = false;
-
-				// 玩家视角的提示：突然被移出队伍必须给个原因
-				PrintToChat(client, "\x04[队伍修正]\x01 读不到你的 SteamID，无法核对队伍记录，先把你放到旁观；解锁后可以自行选队。");
-
-				if (g_bCvarLog)
-				{
-					char sBefore[16], sAfter[16];
-					GetTeamLabel(currentTeam, sBefore, sizeof(sBefore));
-					GetTeamLabel(GetClientTeam(client), sAfter, sizeof(sAfter));
-
-					FixLogClient(client, "修复：拿不到 SteamID，无法核对记录，%s -> %s", sBefore, sAfter);
-				}
+				FixLogClient(client, "修复：拿不到 SteamID，无法核对记录，%s -> %s", sBefore, sAfter);
 			}
 		}
 
 		return Plugin_Continue;
 	}
 
-	// 授权已到位：清空宽限计数
+	// 授权已到位：清空宽限起始时刻
+	g_fNoAuthSince[client] = 0.0;
 	g_iNoAuthTicks[client] = 0;
 
-	/* 目标在启动时已经冻结，这里只查表。
-	   旧实现在这里每秒重读 m_bAreTeamsFlipped 再算 IsTeamSwapped()：不同玩家的
-	   计时器在不同秒触发，一旦引擎在还原过程中才完成换边，先完成的按"未换边"
-	   归位、后完成的按"已换边"归位 —— 同一队的人被拆到两边，就是"修复不对"。 */
+	// 本轮的换边目标在延迟启动时冻结；不能在不同玩家的重试之间改变目标。
 
 	/* 防"冻早了"：个别地图/模式引擎比 0.5 秒更晚才翻转 m_bAreTeamsFlipped。
 	   只要还没有任何人成功归位（没人被移动过），发现标志变了就重新冻结一次，
@@ -1116,15 +1369,33 @@ public Action Timer_RestoreClient(Handle timer, any data)
 	int targetTeam;
 	if (!ResolveTargetTeam(auth, targetTeam))
 	{
-		// 记录表中查不到 = 换图后才新加入的玩家：一次性赶去旁观
+		/* 记录表中查不到 = 换图后才新加入的玩家：先请到旁观，
+		   等本次分队结束（ForceToUnlock 之后）再由 Timer_AutoJoin 按两队平均放回。
+		   注意：只有"确实被我们挪走"的人才进待入队名单——本来就在旁观
+		   （自己选的旁观 / 刚连进来还没选队）的玩家不替他们做决定。 */
 		bool isIdle = (currentTeam == TEAM_SPECTATOR && IsClientIdle(client));
+		bool bMovedToSpectator = false;
 
 		g_bJoinTeamUsed[client] = true;
 		if (isIdle)
 			L4D_TakeOverBot(client);
 		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
 			ChangeClientTeam(client, TEAM_SPECTATOR);
+			bMovedToSpectator = (GetClientTeam(client) == TEAM_SPECTATOR);
+		}
 		g_bJoinTeamUsed[client] = false;
+
+		if (bMovedToSpectator)
+		{
+			// 玩家视角的提示：说明为什么被挪走、挪走之后会怎样（文案随 spectate_notice 切换）
+			PrintSpectateNotice(client,
+				"队伍记录里没有你（换图后才加入），先把你放到旁观；分队完成后会自动把你随机放进人少的一队。",
+				"队伍记录里没有你（换图后才加入），先把你放到旁观；解锁后可以自行选队。");
+
+			// 记入待入队名单：解锁后延迟 1 秒按"两队平均"放回队伍
+			AddAutoJoinCandidate(client);
+		}
 
 		if (g_bCvarLog)
 		{
@@ -1140,8 +1411,8 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		return Plugin_Stop;
 	}
 
-	// final_map_disable=2/3 的打乱目标与"换边对调"都已在 FreezeTargets 里算进
-	// g_hTargetTeams，这里不再重算，直接用查表结果。
+	// 打乱目标与"换边对调"都已在 FreezeTargets 里算进 g_hTargetTeams，
+	// 这里不再重算，直接用查表结果（避免执行期间目标漂移）
 
 	bool isIdle = (currentTeam == TEAM_SPECTATOR && IsClientIdle(client));
 
@@ -1189,6 +1460,12 @@ public Action Timer_RestoreClient(Handle timer, any data)
 			// 先转旁观再找 Bot 接管
 			ChangeClientTeam(client, TEAM_SPECTATOR);
 			attemptedMove = true;
+
+			// 12v12 追加提示：从特感被拽走也要说明原因与去处（4v4 无此提示，故随 spectate_notice 关闭）。
+			// 只有确实离开了特感才提示，避免转移失败时每 0.2s 刷一句
+			if (!g_cvSpectateNotice.BoolValue && GetClientTeam(client) == TEAM_SPECTATOR)
+				PrintToChat(client, "\x04[队伍修正]\x01 你的队伍记录是生还者，正在把你从特感移回生还者队（中间会先经过旁观）。");
+
 			TurnClientToSurvivors(client, false);
 		}
 	}
@@ -1218,7 +1495,8 @@ public Action Timer_RestoreClient(Handle timer, any data)
 		FixLogClient(client, "修复：移动 %s -> %s（目标=%s，模式=%s）", sBefore, sAfter, sTarget, sMode);
 	}
 
-	if (iTeamAfterMove == targetTeam)
+	if (iTeamAfterMove == targetTeam
+		&& !(targetTeam == TEAM_SPECTATOR && IsClientIdle(client)))
 	{
 		// 走到这里且移动前后队伍相同，只可能是"目标旁观 + 正在挂机托管"：
 		// 先接管 Bot 再退回旁观，队伍号不变但确实执行了转移
@@ -1359,7 +1637,8 @@ bool IsNewChapterSwitch()
 	return L4D_IsFirstMapInScenario();
 }
 
-// final_map_disable=2/3：不按记录归位，而是按记录的人数规模随机重排。
+// final_map_disable=2/3：不按记录归位，而是把参与分队的玩家完全随机重排，
+// 并按"两队平均"划分（人数奇数时长队多 1 人）。
 //   模式 2：只在切换到"新章节"时打乱（同战役内换关、同图重开、c6↔c7 与 c9↔c14 混图链内换图都不打乱）
 //   模式 3：除同一张图重开外，任何换关都打乱（同战役内换关、c6↔c7 / c9↔c14 混图链内换图、跨战役、三方图换图）
 void PrepareShuffleMode()
@@ -1375,8 +1654,8 @@ void PrepareShuffleMode()
 		return;
 
 	/* 模式 2 只认"换到新章节"；模式 3 放宽到"同一战役内换小关也打乱"。
-	   两道闸门只差这一条判定，其余流程（BuildShuffleTargets 的人数规模、旁观者保持旁观、
-	   公告、native/forward）完全复用，不另写一套。 */
+	   两道闸门只差这一条判定，其余流程（BuildShuffleTargets 的随机与平均分配、
+	   旁观者保持旁观、公告、native/forward）完全复用，不另写一套。 */
 	bool bAllow = (g_iCvarFinalMapDisable == 2) ? IsNewChapterSwitch() : IsSmallLevelShuffleAllowed();
 	if (!bAllow)
 		return;
@@ -1403,8 +1682,8 @@ bool IsSmallLevelShuffleAllowed()
 	return true;
 }
 
-// 以记录表为基准：旁观者继续旁观；非旁观玩家按记录时的生还者/特感人数规模
-// 重新随机分配，而不是回到各自的原始队伍位置。
+// 以记录表为基准：旁观者继续旁观；非旁观玩家全部重新随机分配，并按"两队平均"划分
+// （人数为奇数时长队多 1 人），而不是回到各自记录时的队伍位置。
 void BuildShuffleTargets()
 {
 	char aAuths[MAXPLAYERS + 1][MAX_AUTHID_LENGTH];
@@ -1454,17 +1733,34 @@ void BuildShuffleTargets()
 		strcopy(aAuths[j], MAX_AUTHID_LENGTH, sTemp);
 	}
 
-	// 记录时有多少生还者，打乱后就保留多少个生还者名额，其余为特感
-	int iSurvivorCount = 0;
-
-	snapshot = g_hTeamRecords.Snapshot();
-	for (int i = 0; i < snapshot.Length; i++)
+	/* 生还者名额：算法由 l4d2_fix_team_shuffle_shuffle_balance 选择
+	     1 = 两队平均（12v12 默认）：(总数 + 1) / 2，再用生还者上限夹住
+	         20 人 -> 10 生还 / 10 特感；19 人 -> 10/9（奇数时长队多 1 人）
+	     0 = 沿用"记录时有多少生还者"（4v4 建议）：上一关 4 生还 4 特感，打乱后仍 4/4；
+	         4v4 旧版不按上限夹人数（4v4 无多人插件名额） */
+	int iSurvivorCount;
+	if (g_cvShuffleBalance.BoolValue)
 	{
-		snapshot.GetKey(i, sAuth, sizeof(sAuth));
-		if (g_hTeamRecords.GetValue(sAuth, iTeam) && iTeam == TEAM_SURVIVOR)
-			iSurvivorCount++;
+		iSurvivorCount = (iTotal + 1) / 2;
+
+		int iSurvivorLimit = GetRestoreTeamLimit(TEAM_SURVIVOR);
+		if (iSurvivorLimit > 0 && iSurvivorCount > iSurvivorLimit)
+			iSurvivorCount = iSurvivorLimit;
 	}
-	delete snapshot;
+	else
+	{
+		StringMapSnapshot recordSnapshot = g_hTeamRecords.Snapshot();
+		iSurvivorCount = 0;
+
+		for (int i = 0; i < recordSnapshot.Length; i++)
+		{
+			recordSnapshot.GetKey(i, sAuth, sizeof(sAuth));
+			if (g_hTeamRecords.GetValue(sAuth, iTeam) && iTeam == TEAM_SURVIVOR)
+				iSurvivorCount++;
+		}
+
+		delete recordSnapshot;
+	}
 
 	// 生还者名额不能超过参与打乱的人数
 	if (iSurvivorCount > iTotal)
@@ -1481,15 +1777,15 @@ void BuildShuffleTargets()
 	g_iShuffleSurvivors = iSurvivorCount;
 	CreateTimer(5.0, Timer_AnnounceShuffle, _, TIMER_FLAG_NO_MAPCHANGE);
 
-	LogMessage("[队伍修正] %s，随机分队：%d 人，生还者名额 %d（final_map_disable=%d）",
-		g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", iTotal, iSurvivorCount, g_iCvarFinalMapDisable);
+	LogMessage("[队伍修正] %s，随机分队：%d 人平均分配，生还者 %d / 特感 %d（final_map_disable=%d）",
+		g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", iTotal, iSurvivorCount, iTotal - iSurvivorCount, g_iCvarFinalMapDisable);
 
 	// 独立日志：这次打乱给每个玩家分配的目标队伍（此时玩家多半还没进游戏，只有 SteamID）
 	if (g_bCvarLog)
 	{
 		FixLog("===== 随机分队（%s，final_map_disable=%d）=====",
 			g_bShuffleSmallLevel ? "换小关卡" : "切换新章节", g_iCvarFinalMapDisable);
-		FixLog("[打乱] 参与 %d 人，生还者名额 %d 个，特感名额 %d 个",
+		FixLog("[打乱] 参与 %d 人，按两队平均分配：生还者名额 %d 个，特感名额 %d 个",
 			iTotal, iSurvivorCount, iTotal - iSurvivorCount);
 
 		for (int i = 0; i < iTotal; i++)
@@ -1521,8 +1817,18 @@ public Action Timer_AnnounceShuffle(Handle timer)
 		return Plugin_Stop;
 
 	/* 模式 3 是"换小关卡就打乱"，文案要和模式 2 的"切换新章节"区分开，
-	   玩家一眼能看出这次是过关换图导致的重新分队 */
-	if (g_bShuffleSmallLevel)
+	   玩家一眼能看出这次是过关换图导致的重新分队。
+	   平均分配（shuffle_balance=1）时把两边人数一起报出来，方便确认确实平均；
+	   按记录人数还原（4v4）时只报生还者数 —— 与 2.2.6 文案一致。 */
+	bool bBalanced = g_cvShuffleBalance.BoolValue;
+
+	if (bBalanced && g_bShuffleSmallLevel)
+		PrintToChatAll("[队伍修正] 本关换图，%d 人随机重新分队（生还者 %d / 特感 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors, g_iShuffleTotal - g_iShuffleSurvivors);
+	else if (bBalanced)
+		PrintToChatAll("[队伍修正] 已切换到新章节，%d 人随机重新分队（生还者 %d / 特感 %d）",
+			g_iShuffleTotal, g_iShuffleSurvivors, g_iShuffleTotal - g_iShuffleSurvivors);
+	else if (g_bShuffleSmallLevel)
 		PrintToChatAll("[队伍修正] 本关换图，%d 人随机重新分队（生还者 %d）",
 			g_iShuffleTotal, g_iShuffleSurvivors);
 	else
@@ -1647,7 +1953,7 @@ void DropOfflineTeams()
 // ========== 解锁 ==========
 
 // 该队伍是否还有空位（含 Bot 占位）：直接 ChangeClientTeam 前必须先确认，
-// 否则会绕过引擎人数限制，把 4v4 硬塞成 5v4
+// 否则会绕过引擎人数限制把人数撑破
 bool HasFreeTeamSlot(int team)
 {
 	ConVar limit = FindConVar(team == TEAM_SURVIVOR ? "survivor_limit" : "z_max_player_zombies");
@@ -1666,12 +1972,12 @@ bool HasFreeTeamSlot(int team)
 
 /* 解锁前的一致性复查：逐人核对"当前队伍 vs 冻结目标"。
    作用有两个：
-   1) 把"修复不对"变成可读的日志（谁、期望哪队、实际哪队、是否已放弃）；
+   1) 把"修复不对"变成可读的日志（谁、期望哪队、实际哪队）；
    2) 对还没走对、但人还在服务器里的玩家再做最后一次直接转移（不再依赖 Bot 名额），
       尽量在解锁前把队伍补齐，而不是把错误状态留给下一回合。 */
 void AuditRestoreTargets(const char[] reason)
 {
-	// 没有冻结目标就没有"期望队伍"，无从复查（例如记录被清空后的空跑）
+	// 没有冻结目标就没有"期望队伍"，无从复查
 	if (!g_bTargetsFrozen)
 		return;
 
@@ -1704,8 +2010,6 @@ void AuditRestoreTargets(const char[] reason)
 
 		iMismatch++;
 
-		// 最后一次直接转移：旁观/特感目标用 ChangeClientTeam，生还者目标优先直接换，
-		// 失败再退回原来的"找 Bot 接管"路径
 		g_bJoinTeamUsed[client] = true;
 
 		bool bMoved = false;
@@ -1713,6 +2017,10 @@ void AuditRestoreTargets(const char[] reason)
 		{
 			ChangeClientTeam(client, TEAM_SPECTATOR);
 			bMoved = true;
+
+			// 12v12 追加提示：复查阶段被强制改回旁观同样要说明原因与后续（4v4 无此提示）
+			if (!g_cvSpectateNotice.BoolValue && GetClientTeam(client) == TEAM_SPECTATOR)
+				PrintToChat(client, "\x04[队伍修正]\x01 分队结束复查：本次分队里你的位置是旁观，先把你放回旁观；解锁后可以自行选队。");
 		}
 		else if (targetTeam == TEAM_INFECTED)
 		{
@@ -1721,7 +2029,7 @@ void AuditRestoreTargets(const char[] reason)
 		else if (targetTeam == TEAM_SURVIVOR)
 		{
 			// 先走正常路径（接管空闲 Bot，不会多占一个名额）；
-			// 只有在生还者确有空格时才允许直接换队，避免在 4v4 里硬塞第 5 个生还者
+			// 只有在生还者确有空格时才允许直接换队，避免把人数上限撑破
 			bMoved = TurnClientToSurvivors(client, false);
 
 			if (!bMoved && HasFreeTeamSlot(TEAM_SURVIVOR))
@@ -1773,10 +2081,18 @@ void ForceToUnlock(const char[] reason = "完成")
 	Call_Finish();
 
 	ClearVars();
+
+	/* 锁队已解除 = 本次分队完成：把被请到旁观的那批人延迟放回队伍。
+	   必须在 ClearVars 之后调度（ClearVars 会清 client 标志），
+	   也必须在解锁之后才动队伍 —— 锁队期间改队会和归位逻辑互相踩。 */
+	ScheduleAutoJoin();
 }
 
 void AbortProcess(bool fireForward, const char[] reason = "提前结束")
 {
+	// 中止 = 本次分队作废：待入队名单一并清掉，不残留到下一个回合
+	ClearAutoJoin();
+
 	if (!g_bTeamLock)
 	{
 		ClearVars();
@@ -1826,6 +2142,14 @@ void CancelProcessTimers()
 {
 	// 一律"先把槽位置空，再关句柄"：句柄万一已失效（换图销毁），
 	// 抛错也只是一条，不会把死句柄留在全局变量里反复报错
+	Handle freezeTimer = g_hFreezeTimer;
+	g_hFreezeTimer = INVALID_HANDLE;
+	delete freezeTimer;
+
+	Handle startTimer = g_hStartTimer;
+	g_hStartTimer = INVALID_HANDLE;
+	delete startTimer;
+
 	Handle checkTimer = g_hCheckTimer;
 	g_hCheckTimer = INVALID_HANDLE;
 	if (checkTimer != INVALID_HANDLE)
@@ -1845,8 +2169,251 @@ void ResetClientFlags()
 		g_bChecked[client] = false;
 		g_iFailureCount[client] = 0;
 		g_bJoinTeamUsed[client] = false;
+		g_fNoAuthSince[client] = 0.0;
 		g_iNoAuthTicks[client] = 0;
 	}
+}
+
+// ========== 分队结束后自动平均入队（被请到旁观的那批人） ==========
+
+/* 记录一个"被插件请到旁观、分队结束后要自动放回队伍"的玩家。
+   有 SteamID 用 SteamID（断线重连也能对上），拿不到 SteamID 时退回 userid。 */
+void AddAutoJoinCandidate(int client)
+{
+	// 自动入队总开关关闭（4v4 建议 0）：不记名单，只把玩家请到旁观让他自己选队
+	if (!g_cvAutoJoin.BoolValue)
+		return;
+
+	if (client <= 0 || client > MaxClients || g_hAutoJoin == null)
+		return;
+
+	char sKey[MAX_AUTHID_LENGTH + 8];
+	char sAuth[MAX_AUTHID_LENGTH];
+	if (GetClientAuthId(client, AuthId_Steam2, sAuth, sizeof(sAuth)))
+		strcopy(sKey, sizeof(sKey), sAuth);
+	else
+		FormatEx(sKey, sizeof(sKey), "uid:%d", GetClientUserId(client));
+
+	g_hAutoJoin.SetValue(sKey, true);
+}
+
+// 清空待入队名单并取消尚未触发的入队计时器
+// （换图 / 重新记录 / 中止 / 关闭总开关时调用，避免状态跨回合残留）
+void ClearAutoJoin()
+{
+	Handle autoJoinTimer = g_hAutoJoinTimer;
+	g_hAutoJoinTimer = INVALID_HANDLE;
+	if (autoJoinTimer != INVALID_HANDLE)
+		KillTimer(autoJoinTimer);
+
+	if (g_hAutoJoin != null)
+		g_hAutoJoin.Clear();
+
+	g_iAutoJoinRetry = 0;
+}
+
+// 解锁之后调用：名单非空就延迟 1 秒入队
+// （留出时间给引擎落位、也给 superversus 的 autofill 先跑，入队前还会再核对一次队伍）
+void ScheduleAutoJoin()
+{
+	if (!g_cvAutoJoin.BoolValue || g_hAutoJoin == null || g_hAutoJoin.Size <= 0)
+		return;
+
+	Handle previousTimer = g_hAutoJoinTimer;
+	g_hAutoJoinTimer = INVALID_HANDLE;
+	if (previousTimer != INVALID_HANDLE)
+		KillTimer(previousTimer);
+
+	g_iAutoJoinRetry = 0;
+	g_hAutoJoinTimer = CreateTimer(g_cvAutoJoinDelay.FloatValue, Timer_AutoJoin, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// 待入队钥匙 -> 客户端；不在服务器 / 已断线 / 是 Bot 时返回 0
+int ResolveAutoJoinClient(const char[] sKey)
+{
+	int client;
+
+	if (strncmp(sKey, "uid:", 4) == 0)
+	{
+		// 手写解析，避免依赖字符串切片：跳过 "uid:" 前缀后按十进制读
+		int iPos = 4;
+		int iUserId = 0;
+		while (sKey[iPos] >= '0' && sKey[iPos] <= '9')
+		{
+			iUserId = iUserId * 10 + (sKey[iPos] - '0');
+			iPos++;
+		}
+
+		client = GetClientOfUserId(iUserId);
+	}
+	else
+	{
+		client = FindClientBySteamId(sKey);
+	}
+
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
+		return 0;
+
+	return client;
+}
+
+/* 平均分配：当前两队真人数量少的那边优先；数量相同则随机；
+   同时尊重名额上限（生还者 survivor_limit / l4d_survivor_limit，
+   特感 z_max_player_zombies / l4d_infected_limit），别把人数撑破。
+   返回 TEAM_NONE 表示两队都没有名额。 */
+int PickAverageJoinTeam()
+{
+	int iSurvivors = CountRestoreTeamPlayers(TEAM_SURVIVOR);
+	int iInfected = CountRestoreTeamPlayers(TEAM_INFECTED);
+
+	int iSurvivorLimit = GetRestoreTeamLimit(TEAM_SURVIVOR);
+	int iInfectedLimit = GetRestoreTeamLimit(TEAM_INFECTED);
+
+	bool bSurvivorRoom = (iSurvivorLimit > 0 && iSurvivors < iSurvivorLimit);
+	bool bInfectedRoom = (iInfectedLimit > 0 && iInfected < iInfectedLimit);
+
+	if (bSurvivorRoom && bInfectedRoom)
+	{
+		if (iSurvivors != iInfected)
+			return (iSurvivors < iInfected) ? TEAM_SURVIVOR : TEAM_INFECTED;
+
+		// 人数相同：随机挑一边（这就是"随机分队"的随机来源）
+		return (GetRandomInt(0, 1) == 0) ? TEAM_SURVIVOR : TEAM_INFECTED;
+	}
+
+	if (bSurvivorRoom)
+		return TEAM_SURVIVOR;
+
+	if (bInfectedRoom)
+		return TEAM_INFECTED;
+
+	return TEAM_NONE;
+}
+
+// 解锁后把一名玩家放进指定队伍：优先走既有的"接管 Bot / 尊重名额"路径
+bool JoinTeamAfterShuffle(int client, int team)
+{
+	// 正挂机托管着生还者 Bot 的玩家：先接管下来（他本来就占着生还者名额，
+	// 直接 L4D_SetHumanSpec 另找一个 Bot 会和现有托管关系打架）
+	bool bIdle = IsClientIdle(client);
+
+	g_bJoinTeamUsed[client] = true;
+
+	bool bMoved;
+	if (team == TEAM_SURVIVOR)
+	{
+		bMoved = TurnClientToSurvivors(client, bIdle);
+
+		// 没有可用 Bot、但生还者确有空格时，直接换队把名额补上
+		if (!bMoved && HasFreeTeamSlot(TEAM_SURVIVOR))
+		{
+			ChangeClientTeam(client, TEAM_SURVIVOR);
+			bMoved = (GetClientTeam(client) == TEAM_SURVIVOR);
+		}
+	}
+	else
+	{
+		bMoved = TurnClientToInfected(client);
+	}
+
+	g_bJoinTeamUsed[client] = false;
+
+	return bMoved && GetClientTeam(client) == team;
+}
+
+/* 解锁后延迟 1 秒执行一次：
+   把本次分队里被插件请到旁观的"不在记录表"玩家，按两队平均放回队伍。
+   - 已经自己回到队伍 / 已被 superversus autofill 拉进队伍的：跳过（不重复处理）
+   - 已断线 / 仍在 team 0 / 不在游戏内：跳过
+   - 两队都满员：跳过并写日志（不撑破名额）
+   执行完（无论成功多少次）立即清空名单，不会重复处理同一人。 */
+public Action Timer_AutoJoin(Handle timer)
+{
+	g_hAutoJoinTimer = INVALID_HANDLE;
+
+	if (g_hAutoJoin == null || g_hAutoJoin.Size <= 0)
+		return Plugin_Stop;
+
+	if (!g_cvAutoJoin.BoolValue || !g_bCvarEnabled || !L4D_IsVersusMode())
+	{
+		ClearAutoJoin();
+		return Plugin_Stop;
+	}
+
+	// 解锁瞬间又被重新锁队（管理员手动 sm_fixteams_start 等）：等这一轮结束再来，最多 3 次
+	if (IsRestoreLocked())
+	{
+		if (g_iAutoJoinRetry < g_cvAutoJoinRetry.IntValue)
+		{
+			g_iAutoJoinRetry++;
+			g_hAutoJoinTimer = CreateTimer(g_cvAutoJoinDelay.FloatValue, Timer_AutoJoin, _, TIMER_FLAG_NO_MAPCHANGE);
+			return Plugin_Stop;
+		}
+
+		FixLog("[入队] 队伍仍在锁定中，放弃本次自动入队（%d 人）", g_hAutoJoin.Size);
+		ClearAutoJoin();
+		return Plugin_Stop;
+	}
+
+	StringMapSnapshot snapshot = g_hAutoJoin.Snapshot();
+	char sKey[MAX_AUTHID_LENGTH + 8];
+	int iJoined = 0;
+	int iSkipped = 0;
+
+	for (int i = 0; i < snapshot.Length; i++)
+	{
+		snapshot.GetKey(i, sKey, sizeof(sKey));
+
+		int client = ResolveAutoJoinClient(sKey);
+		if (client == 0)
+		{
+			iSkipped++;
+			FixLog("[入队] %s 已不在服务器，跳过", sKey);
+			continue;
+		}
+
+		// 入队前重新读一次队伍：已经回到队伍（含 superversus autofill 帮他选队）就不动他
+		if (GetClientTeam(client) != TEAM_SPECTATOR)
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：跳过（已在队伍中，不再重复分配）");
+			continue;
+		}
+
+		/* 这里不再查记录表：解锁时 ClearVars 已经把记录表清空，查了也永远是空。
+		   也就是说"锁队期间拿不到 SteamID、解锁后才拿到授权"的玩家，会按
+		   "不在记录中"处理并被平均放回队伍——这正是他被挪到旁观的原因，
+		   比让他继续留在旁观更符合玩家预期。 */
+		int team = PickAverageJoinTeam();
+		if (team == TEAM_NONE)
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：跳过（生还者/特感名额都已满）");
+			continue;
+		}
+
+		if (!JoinTeamAfterShuffle(client, team))
+		{
+			iSkipped++;
+			FixLogClient(client, "入队：转移失败，保持旁观（等玩家自行选队）");
+			continue;
+		}
+
+		iJoined++;
+
+		char sLabel[16];
+		GetTeamLabel(team, sLabel, sizeof(sLabel));
+		PrintToChat(client, "\x04[队伍修正]\x01 分队完成，已把你随机放入%s队。", sLabel);
+		FixLogClient(client, "入队：分队完成，随机放入%s（当前生还者 %d / 特感 %d）",
+			sLabel, CountRestoreTeamPlayers(TEAM_SURVIVOR), CountRestoreTeamPlayers(TEAM_INFECTED));
+	}
+
+	delete snapshot;
+
+	FixLog("[入队] 分队后自动入队：成功 %d 人，跳过 %d 人", iJoined, iSkipped);
+	ClearAutoJoin();
+
+	return Plugin_Stop;
 }
 
 // ========== 锁队 / 投票拦截 ==========
@@ -1857,7 +2424,7 @@ public Action Command_JoinTeam(int client, const char[] command, int argc)
 		return Plugin_Continue;
 
 	// 锁队期间拦截换队；插件自己执行转移时通过 g_bJoinTeamUsed 临时放行
-	if (g_bTeamLock && !g_bJoinTeamUsed[client])
+	if (IsRestoreLocked() && !g_bJoinTeamUsed[client])
 		return Plugin_Handled;
 
 	return Plugin_Continue;
@@ -1869,7 +2436,7 @@ public Action Command_Vote(int client, const char[] command, int argc)
 	if (client == 0)
 		return Plugin_Continue;
 
-	if (!g_bTeamLock)
+	if (!IsRestoreLocked())
 		return Plugin_Continue;
 
 	// 非旁观玩家收到提示；旁观玩家直接拦截
@@ -1889,7 +2456,7 @@ public Action Command_FixTeamsKeep(int client, int args)
 		return Plugin_Handled;
 	}
 
-	KeepTeams();
+	KeepTeams(false);
 	ReplyToCommand(client, "[队伍修正] 已记录当前玩家队伍（%d 人），可执行 sm_fixteams_start 启动还原", g_iPendingCount);
 	return Plugin_Handled;
 }
@@ -1897,9 +2464,13 @@ public Action Command_FixTeamsKeep(int client, int args)
 public Action Command_FixTeamsStart(int client, int args)
 {
 	if (StartProcess())
+	{
 		ReplyToCommand(client, "[队伍修正] 已启动队伍还原并锁定换队");
+	}
 	else
+	{
 		ReplyToCommand(client, "[队伍修正] 启动失败：请先执行 sm_fixteams_keep 记录队伍");
+	}
 
 	return Plugin_Handled;
 }
@@ -1920,153 +2491,32 @@ public void OnRoundIsLive()
 
 // ========== 辅助转移函数 ==========
 
-// ========== 名额感知与腾位（4v4 与 12v12 的实质差异都在这一段） ==========
-
-/* 是否处于"多人插件管槽位"的环境（12v12 的 SuperVersus 会声明
-   l4d_survivor_limit / l4d_infected_limit）。
-   4v4 没有这两个 cvar ⇒ 下面所有名额判断全部跳过，行为与旧版完全一致。 */
-bool SuperVersusSlotMode()
+int GetRestoreTeamLimit(int team)
 {
-	return FindConVar("l4d_survivor_limit") != null
-		|| FindConVar("l4d_infected_limit") != null;
-}
-
-// 某队真实人数上限：引擎值；多人插件另有限制时取较小值
-int RestoreTeamLimit(int team)
-{
-	int limit;
+	int limit = g_iZMaxPlayerZombies;
 	if (team == TEAM_SURVIVOR)
 	{
 		ConVar engineLimit = FindConVar("survivor_limit");
-		limit = (engineLimit != null) ? engineLimit.IntValue : 4;
+		limit = engineLimit != null ? engineLimit.IntValue : 0;
 	}
-	else
-	{
-		limit = g_iZMaxPlayerZombies;
-	}
-
 	ConVar multiLimit = FindConVar(team == TEAM_SURVIVOR ? "l4d_survivor_limit" : "l4d_infected_limit");
-	if (multiLimit != null && multiLimit.IntValue > 0 && multiLimit.IntValue < limit)
+	if (multiLimit != null && multiLimit.IntValue < limit)
 		limit = multiLimit.IntValue;
-
 	return limit;
 }
 
-// 占"真人名额"的人数：真人 + 正被挂机托管的生还者 Bot（纯 AI Bot 不算）
-int CountRestoreTeamHumans(int team)
+int CountRestoreTeamPlayers(int team, bool includeBots = false)
 {
-	int count = 0;
+	int count;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (!IsClientInGame(i) || GetClientTeam(i) != team)
 			continue;
-
-		if (IsFakeClient(i) && !(team == TEAM_SURVIVOR && HasIdlePlayer(i)))
+		if (!includeBots && IsFakeClient(i) && !(team == TEAM_SURVIVOR && HasIdlePlayer(i)))
 			continue;
-
 		count++;
 	}
 	return count;
-}
-
-// 队伍里所有客户端（含 AI Bot），用来判断"AI 是否把槽位占满"
-int CountTeamAllClients(int team)
-{
-	int count = 0;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && GetClientTeam(i) == team)
-			count++;
-	}
-	return count;
-}
-
-bool HasRoomForTeam(int team)
-{
-	if (!SuperVersusSlotMode())
-		return true; // 4v4 不做名额拦截，沿用旧逻辑
-
-	int limit = RestoreTeamLimit(team);
-	return limit > 0 && CountRestoreTeamHumans(team) < limit;
-}
-
-// 找一个可以踢掉腾位的 AI 特感（普通 SI，Tank 不动）
-int FindKickableInfectedBot()
-{
-	for (int bot = MaxClients; bot >= 1; bot--)
-	{
-		if (!IsClientInGame(bot) || !IsFakeClient(bot) || IsClientInKickQueue(bot)
-			|| GetClientTeam(bot) != TEAM_INFECTED)
-			continue;
-
-		int zclass = GetEntProp(bot, Prop_Send, "m_zombieClass");
-
-		// 1..6 是普通特感；8 是 Tank
-		if (zclass >= 1 && zclass <= 6)
-			return bot;
-	}
-	return 0;
-}
-
-/* 满员死锁的破局：目标队伍满员（没有空位、也没有 Bot 可接管）时，
-   先把一个"本来就该离开这支队伍"的待修复玩家挪到旁观腾出名额，
-   他的个人计时器随后会把他放到自己的目标队。没有这一步，
-   12v12 满员打乱时双方都满、谁也进不去，只能干等超时。 */
-bool TryEvictFromTeam(int targetTeam, int excludeClient, int preferTeam)
-{
-	if (g_iEvictBudget <= 0)
-		return false;
-
-	char sAuth[MAX_AUTHID_LENGTH];
-	int iTarget;
-
-	// 两轮：先找"目标正好是发起方当前所在队"的真交换对手，再退而求其次
-	for (int iPass = 0; iPass < 2; iPass++)
-	{
-		for (int other = 1; other <= MaxClients; other++)
-		{
-			if (other == excludeClient || !IsClientInGame(other) || IsFakeClient(other))
-				continue;
-
-			if (GetClientTeam(other) != targetTeam)
-				continue;
-
-			if (!GetClientAuthId(other, AuthId_Steam2, sAuth, sizeof(sAuth)))
-				continue;
-
-			// 只动"还没归位"的记录玩家；已归位的人不能被我们拽走
-			if (!g_hPendingRecords.ContainsKey(sAuth))
-				continue;
-
-			if (!ResolveTargetTeam(sAuth, iTarget) || iTarget == targetTeam)
-				continue;
-
-			if (iPass == 0 && iTarget != preferTeam)
-				continue;
-
-			g_bJoinTeamUsed[other] = true;
-			ChangeClientTeam(other, TEAM_SPECTATOR);
-			g_bJoinTeamUsed[other] = false;
-			g_iEvictBudget--;
-
-			// 被腾位的人必须保证还有人把他放回目标队：
-			// 他的计时器可能早已因重试耗尽而停掉，这里重开一个
-			StartClientRestore(other);
-
-			if (g_bCvarLog)
-			{
-				char sTeam[16], sHisTarget[16];
-				GetTeamLabel(targetTeam, sTeam, sizeof(sTeam));
-				GetTeamLabel(iTarget, sHisTarget, sizeof(sHisTarget));
-
-				FixLogClient(other, "修复：%s 满员，先让出到旁观腾位（他自己应去 %s）",
-					sTeam, sHisTarget);
-			}
-			return true;
-		}
-	}
-
-	return false;
 }
 
 // 客户端当前是否拿得到 SteamID（拿不到 = 非 Steam 客户端 / 授权还没完成，
@@ -2119,8 +2569,14 @@ bool MakeRoomByEvictingNoAuth(int team, int excludeClient)
 	g_bJoinTeamUsed[intruder] = false;
 	g_iEvictBudget--;
 
-	// 玩家视角的提示：被让出名额同样要说明原因
-	PrintToChat(intruder, "\x04[队伍修正]\x01 队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；解锁后可以自行选队。");
+	// 玩家视角的提示：被让出名额同样要说明原因（文案随 spectate_notice 切换）
+	PrintSpectateNotice(intruder,
+		"队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；分队完成后会自动把你随机放进人少的一队。",
+		"队伍名额已满，且读不到你的 SteamID 无法核对记录，先把你放到旁观；解锁后可以自行选队。");
+
+	// 同样记入待入队名单（拿不到 SteamID，按 userid 记）
+	if (GetClientTeam(intruder) == TEAM_SPECTATOR)
+		AddAutoJoinCandidate(intruder);
 
 	if (g_bCvarLog)
 	{
@@ -2135,19 +2591,30 @@ bool MakeRoomByEvictingNoAuth(int team, int excludeClient)
 
 bool TurnClientToSurvivors(int client, bool isIdle)
 {
+	// coop_branch=0（12v12 默认）非对抗模式直接失败；=1（4v4 建议）保留合作/生存/写实分支
+	if (!L4D_IsVersusMode() && !g_cvCoopBranch.BoolValue)
+		return false;
+
 	if (isIdle)
 	{
 		L4D_TakeOverBot(client);
 		return true;
 	}
 
-	// 12v12（多人插件）下先确认生还者还有真人名额：
-	// 满员时硬抢会把人塞成第 13 个，或者直接失败、打乱后续交换
-	if (!HasRoomForTeam(TEAM_SURVIVOR))
+	// 名额判断：slot_check=1（12v12 默认）无条件生效；=0 时只在多人插件环境生效
+	if (UseTeamLimits())
 	{
-		// 满员：先看名额是不是被"拿不到 SteamID"的玩家占着（见 MakeRoomByEvictingNoAuth）
-		if (!MakeRoomByEvictingNoAuth(TEAM_SURVIVOR, client) || !HasRoomForTeam(TEAM_SURVIVOR))
-			return false;
+		// 与多人插件一致：托管身体也占用真人名额，额外 AI 不能变成第 13 个位置。
+		int limit = GetRestoreTeamLimit(TEAM_SURVIVOR);
+		if (limit <= 0 || CountRestoreTeamPlayers(TEAM_SURVIVOR) >= limit)
+		{
+			// 满员：先看名额是不是被"拿不到 SteamID"的玩家占着（见 MakeRoomByEvictingNoAuth）
+			if (!MakeRoomByEvictingNoAuth(TEAM_SURVIVOR, client))
+				return false;
+
+			if (CountRestoreTeamPlayers(TEAM_SURVIVOR) >= limit)
+				return false;
+		}
 	}
 
 	int bot = FindBotToTakeOver(true);
@@ -2158,33 +2625,132 @@ bool TurnClientToSurvivors(int client, bool isIdle)
 	if (bot == -1)
 		return false;
 
-	if (L4D_IsVersusMode())
+	if (!L4D_IsVersusMode())
 	{
-		// 对抗模式：直接设置人类观察者并接管
-		L4D_SetHumanSpec(bot, client);
-		L4D_TakeOverBot(client);
+		/* 合作/生存/写实（coop_branch=1，2.2.6 原样行为）：特感先转旁观；
+		   Bot 活着就只设托管 + m_iObserverMode=5，等下一次个人计时器完成接管。 */
+		if (GetClientTeam(client) == TEAM_INFECTED)
+			ChangeClientTeam(client, TEAM_SPECTATOR);
+
+		if (IsPlayerAlive(bot))
+		{
+			L4D_SetHumanSpec(bot, client);
+			SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
+		}
+		else
+		{
+			L4D_SetHumanSpec(bot, client);
+			L4D_TakeOverBot(client);
+		}
+
 		return true;
 	}
 
-	// 合作/生存/写实：特感先转旁观
-	if (GetClientTeam(client) == TEAM_INFECTED)
-		ChangeClientTeam(client, TEAM_SPECTATOR);
+	// 对抗模式：直接设置人类观察者并接管，绕过原生四人入队路径。
+	L4D_SetHumanSpec(bot, client);
 
-	if (IsPlayerAlive(bot))
+	/* takeover_rollback=1（12v12 默认）：接管失败要回滚 —— SetHumanSpec 已经把 bot 的
+	   m_humanSpectatorUserID 指到这个玩家，不清理引擎会把他判定成闲置（挂机托管）。
+	   =0（4v4 建议）：不检查返回值，一律按成功处理（2.2.6 原样行为）。 */
+	if (!L4D_TakeOverBot(client))
 	{
-		// Bot 活着：先设为观察者并设置 m_iObserverMode=5，
-		// 下一次一秒计时器发现玩家处于空闲托管状态后接管入队
-		L4D_SetHumanSpec(bot, client);
-		SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
-	}
-	else
-	{
-		// Bot 死亡：设置观察者后直接接管
-		L4D_SetHumanSpec(bot, client);
-		L4D_TakeOverBot(client);
+		if (!g_cvTakeoverRollback.BoolValue)
+			return true;
+
+		ClearIdleLink(bot, client);
+		return false;
 	}
 
 	return true;
+}
+
+// 清掉"bot 被 client 托管"的挂机链接（m_humanSpectatorUserID）。不写日志。
+// 只在链接确实指向该 client 时才写，避免误清别人正在用的托管。
+void ClearIdleLink(int bot, int client)
+{
+	if (bot <= 0 || bot > MaxClients || !IsClientInGame(bot))
+		return;
+
+	if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
+		return;
+
+	if (GetClientOfUserId(GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID")) != client)
+		return;
+
+	SetEntProp(bot, Prop_Send, "m_humanSpectatorUserID", 0);
+}
+
+// ========== 腾位：满员死锁破局 ==========
+
+/* 目标队伍满员（没有空位、也没有 Bot 可接管）时，
+   先把一个"本来就该离开这支队伍"的待修复玩家挪到旁观腾出名额，
+   他的个人计时器随后会把他放到自己的目标队。没有这一步，
+   满员打乱时双方都满、谁也进不去，只能干等超时。 */
+bool TryEvictFromTeam(int targetTeam, int excludeClient, int preferTeam)
+{
+	if (g_iEvictBudget <= 0)
+		return false;
+
+	char sAuth[MAX_AUTHID_LENGTH];
+	int iTarget;
+
+	// 两轮：先找"目标正好是发起方当前所在队"的真交换对手，再退而求其次
+	for (int iPass = 0; iPass < 2; iPass++)
+	{
+		for (int other = 1; other <= MaxClients; other++)
+		{
+			if (other == excludeClient || !IsClientInGame(other) || IsFakeClient(other))
+				continue;
+
+			if (GetClientTeam(other) != targetTeam)
+				continue;
+
+			if (!GetClientAuthId(other, AuthId_Steam2, sAuth, sizeof(sAuth)))
+				continue;
+
+			// 只动"还没归位"的记录玩家；已归位的人不能被我们拽走
+			if (!g_hPendingRecords.ContainsKey(sAuth))
+				continue;
+
+			if (!ResolveTargetTeam(sAuth, iTarget) || iTarget == targetTeam)
+				continue;
+
+			if (iPass == 0 && iTarget != preferTeam)
+				continue;
+
+			g_bJoinTeamUsed[other] = true;
+			ChangeClientTeam(other, TEAM_SPECTATOR);
+			g_bJoinTeamUsed[other] = false;
+			g_iEvictBudget--;
+
+			// 12v12 追加提示：被临时让出名额的人要知道"为什么"和"之后会被放回哪一边"（4v4 无此提示）
+			if (!g_cvSpectateNotice.BoolValue && GetClientTeam(other) == TEAM_SPECTATOR)
+			{
+				char sTargetLabel[16];
+				GetTeamLabel(iTarget, sTargetLabel, sizeof(sTargetLabel));
+
+				PrintToChat(other, "\x04[队伍修正]\x01 队伍名额已满，先把你让到旁观腾出位置；随后会自动把你放回%s队。",
+					sTargetLabel);
+			}
+
+			// 被腾位的人必须保证还有人把他放回目标队：
+			// 他的计时器可能早已因重试耗尽而停掉，这里重开一个
+			StartClientRestore(other);
+
+			if (g_bCvarLog)
+			{
+				char sTeam[16], sHisTarget[16];
+				GetTeamLabel(targetTeam, sTeam, sizeof(sTeam));
+				GetTeamLabel(iTarget, sHisTarget, sizeof(sHisTarget));
+
+				FixLogClient(other, "修复：%s 满员，先让出到旁观腾位（他自己应去 %s）",
+					sTeam, sHisTarget);
+			}
+			return true;
+		}
+	}
+
+	return false;
 }
 
 bool TurnClientToInfected(int client)
@@ -2193,47 +2759,57 @@ bool TurnClientToInfected(int client)
 	if (!L4D_IsVersusMode())
 		return false;
 
-	int maxZombies = g_iZMaxPlayerZombies;
+	/* 上限来源：slot_check=1（12v12 默认）取 min(引擎值, 多人插件值)；
+	   =0（4v4 建议）只用引擎值 z_max_player_zombies。 */
+	int maxZombies = UseTeamLimits() ? GetRestoreTeamLimit(TEAM_INFECTED) : g_iZMaxPlayerZombies;
 	if (maxZombies <= 0)
 		return false;
 
-	int humanInfected = 0;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && !IsFakeClient(i) && GetClientTeam(i) == TEAM_INFECTED)
-			humanInfected++;
-	}
-
-	// 12v12：特感槽位常被 AI 特感占满（l4d_versus_si_more 会补到上限），
-	// 必须先踢 AI 腾位，否则人类永远进不去。Tank 不动。
-	if (SuperVersusSlotMode())
-	{
-		int limit = RestoreTeamLimit(TEAM_INFECTED);
-
-		while (limit > 0 && CountTeamAllClients(TEAM_INFECTED) >= limit && g_iEvictBudget > 0)
-		{
-			int candidate = FindKickableInfectedBot();
-			if (candidate == 0)
-				break;
-
-			ChangeClientTeam(candidate, TEAM_SPECTATOR);
-			KickClient(candidate, "Making room for restored infected player");
-			g_iEvictBudget--;
-
-			if (g_bCvarLog)
-				FixLog("[修复] 特感名额被 AI 占满，踢掉一个 AI 特感腾位");
-		}
-	}
-
 	// 特感名额已满：先看名额是不是被"拿不到 SteamID"的玩家占着，
 	// 清不走再返回，交给重试或超时
-	if (maxZombies - humanInfected <= 0)
+	if (CountRestoreTeamPlayers(TEAM_INFECTED) >= maxZombies)
 	{
-		if (!MakeRoomByEvictingNoAuth(TEAM_INFECTED, client)
-			|| CountRestoreTeamHumans(TEAM_INFECTED) >= maxZombies)
+		if (!MakeRoomByEvictingNoAuth(TEAM_INFECTED, client))
+			return false;
+
+		if (CountRestoreTeamPlayers(TEAM_INFECTED) >= maxZombies)
 			return false;
 	}
 
+	/* 名额被 AI 特感占满时踢 AI 腾位（普通 SI，Tank 不动）：
+	     kick_ai=1（12v12 默认）：无条件踢，与 SuperVersus 的 MakeInfectedRoom 一致；
+	     kick_ai=0（4v4 建议）：只有"名额判断生效"（多人插件环境）时才踢，4v4 下不踢。 */
+	if (g_cvKickAi.BoolValue || UseTeamLimits())
+	{
+		while (CountRestoreTeamPlayers(TEAM_INFECTED, true) >= maxZombies)
+		{
+			int candidate;
+			for (int bot = MaxClients; bot >= 1; bot--)
+			{
+				if (!IsClientInGame(bot) || !IsFakeClient(bot) || IsClientInKickQueue(bot)
+					|| GetClientTeam(bot) != TEAM_INFECTED)
+					continue;
+				int zclass = GetEntProp(bot, Prop_Send, "m_zombieClass");
+				if (zclass >= 1 && zclass <= 6)
+				{
+					candidate = bot;
+					break;
+				}
+			}
+			if (candidate == 0)
+				return false;
+			ChangeClientTeam(candidate, TEAM_SPECTATOR);
+			KickClient(candidate, "Making room for restored infected player");
+		}
+	}
+
+	// 先解除托管（idle_check=1，12v12 默认），避免把关联 Bot 遗留为被占用的生还者名额。
+	if (g_cvIdleCheck.BoolValue && IsClientIdle(client))
+	{
+		L4D_TakeOverBot(client);
+		if (GetClientTeam(client) != TEAM_SURVIVOR)
+			return false;
+	}
 	ChangeClientTeam(client, TEAM_INFECTED);
 	return true;
 }
@@ -2245,11 +2821,8 @@ int FindBotToTakeOver(bool aliveOnly)
 
 	for (int bot = 1; bot <= MaxClients; bot++)
 	{
-		if (!IsClientInGame(bot) || !IsFakeClient(bot) || GetClientTeam(bot) != TEAM_SURVIVOR)
-			continue;
-
-		// 正在被踢（腾位/回收）的 Bot 不能拿来接管
-		if (IsClientInKickQueue(bot))
+		if (!IsClientInGame(bot) || !IsFakeClient(bot) || IsClientInKickQueue(bot)
+			|| GetClientTeam(bot) != TEAM_SURVIVOR)
 			continue;
 
 		// 已有人挂机托管的 Bot 不可用
@@ -2278,10 +2851,18 @@ bool HasIdlePlayer(int bot)
 	if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
 		return false;
 
-	return GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID") > 0;
+	int userId = GetEntProp(bot, Prop_Send, "m_humanSpectatorUserID");
+
+	// idle_check=0（4v4 建议）：旧判定 —— userid 非 0 就算托管（会把残留/别的槽位误判成托管）
+	if (!g_cvIdleCheck.BoolValue)
+		return userId > 0;
+
+	int owner = GetClientOfUserId(userId);
+	return owner > 0 && IsClientInGame(owner) && !IsFakeClient(owner)
+		&& GetClientTeam(owner) == TEAM_SPECTATOR;
 }
 
-// 玩家是否正在挂机托管某个存活的生还者 Bot
+// 托管归属不因身体死亡而丢失；死亡状态只影响后续接管操作。
 bool IsClientIdle(int client)
 {
 	if (!IsClientInGame(client) || GetClientTeam(client) != TEAM_SPECTATOR)
@@ -2291,8 +2872,12 @@ bool IsClientIdle(int client)
 
 	for (int bot = 1; bot <= MaxClients; bot++)
 	{
-		if (!IsClientInGame(bot) || !IsFakeClient(bot) || !IsPlayerAlive(bot)
+		if (!IsClientInGame(bot) || !IsFakeClient(bot)
 			|| GetClientTeam(bot) != TEAM_SURVIVOR)
+			continue;
+
+		// idle_check=0（4v4 建议）：旧判定还要求身体存活；托管关系其实不因死亡丢失
+		if (!g_cvIdleCheck.BoolValue && !IsPlayerAlive(bot))
 			continue;
 
 		if (!HasEntProp(bot, Prop_Send, "m_humanSpectatorUserID"))
@@ -2389,7 +2974,7 @@ void GetFixModeLabel(char[] buffer, int maxlen)
 // 修复开始时写一段表头：地图、人数、换边标志、模式
 void LogFixStart()
 {
-	// 自动换图（0.5 秒计时器）与管理员/Native 启动两条路径都可能调用，只写一次
+	// 自动换图与管理员/Native 启动两条路径都可能调用，只写一次
 	if (!g_bCvarLog || g_bFixStartLogged)
 		return;
 

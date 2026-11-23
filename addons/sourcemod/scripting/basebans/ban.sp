@@ -79,11 +79,18 @@ void PrepareBan(int client, int target, int time, const char[] reason)
 
 	if (reason[0] == '\0')
 	{
-		BanClient(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
+		// 装了 l4d2_banned(数据库封禁)时走它的 native, 封禁写进数据库; 否则回退原版本地封禁.
+		if(g_bLibraries)
+			BanPlayers(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
+		else
+			BanClient(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
 	}
 	else
 	{
-		BanClient(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
+		if(g_bLibraries)
+			BanPlayers(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
+		else
+			BanClient(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
 	}
 }
 

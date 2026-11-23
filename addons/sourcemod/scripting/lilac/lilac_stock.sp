@@ -507,6 +507,20 @@ bool lilac_ban_active(int cheat)
 	return true;
 }
 
+/* 数据库封禁（豆瓣酱 l4d2_banned）：装了就把封禁交给它的 BanPlayers 写进共享库；
+ * 没装（或库没注册）就退回 SourceMod 原版 BanClient，行为与官方 LILAC 一致。 */
+void lilac_ban_client_db(int client, int time, int flags, const char[] reason, any source = 0)
+{
+#if defined _Evill4d2_banned
+	if (LibraryExists("l4d2_banned")) {
+		BanPlayers(client, time, flags, reason, reason, "lilac", source);
+		return;
+	}
+#endif
+
+	BanClient(client, time, flags, reason, reason, "lilac", source);
+}
+
 void lilac_ban_client(int client, int cheat)
 {
 	char reason[128];
@@ -566,7 +580,7 @@ void lilac_ban_client(int client, int cheat)
 		SBBanPlayer(0, client, get_ban_length(cheat), reason);
 	}
 	default: {
-		BanClient(client, get_ban_length(cheat), BANFLAG_AUTO, reason, reason, "lilac", 0);
+		lilac_ban_client_db(client, get_ban_length(cheat), BANFLAG_AUTO, reason);
 	}
 	}
 

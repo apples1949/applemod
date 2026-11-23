@@ -197,6 +197,52 @@
  *     - 未改动：免疫判定、守护名额分配、发光、自动起身逻辑一律不动；
  *       提示仍然只发给"玩家操控的特感"（IsWarnTarget），AI 特感不刷屏。
  *
+ *   1.7.0 修复（玩家反馈"人机被牛控住/撞倒后突然无敌、一直被控、不再受伤、卡住不动，
+ *   直到真人接管这个 bot 才恢复"）：
+ *     根因不在"血量/名额"，而在**"免疫控制"的实现方式**与**免伤的执行时机**：
+ *
+ *     ① 1.2.3 起 L4D2_OnPummelVictim 直接 Plugin_Handled。Left4DHooks 官方注释
+ *        （include/left4dhooks.inc:2770-2784）写明：被拦的是
+ *        CTerrorPlayer::QueuePummelVictim，"blocking pummel 时生还者会卡在牛身上
+ *        （最后会被传送一下）、AI 牛也不能动，见 left4dhooks_test.sp 的解法"。
+ *        队列留下了、收尾的 OnPummelEnded 永远不会跑 —— 这就是"卡住不动"。
+ *     ② 1.2.2 起 L4D2_OnSlammedSurvivor 也直接 Plugin_Handled。这个 forward 拦的是
+ *        CTerrorPlayer::OnSlammedSurvivor **本体**（left4dhooks.inc:2723-2738：撞墙，
+ *        或首次捶打），而这个函数自己就是"结束扛人 / 把人放开 / 判定致残"的收尾。
+ *        拦掉之后牛与生还者的关联状态停在半途 —— 这是"撞倒后卡住"。
+ *     ③ 上面两种半截状态**不一定体现在受害者侧的五个 netprop 上**
+ *        （m_pummelAttacker / m_carryAttacker 等可能已经是 -1），于是 0.1s 线程里的
+ *        ReleaseControl 什么都找不到，也解不掉 —— "一直被控、解控无效"。
+ *     ④ 与此同时这个人已经被送进守护：m_takedamage=0 + SDKHook_OnTakeDamage 一律 Handled，
+ *        伤害/死亡/引擎的收尾全部被掐断 —— "突然无敌、不再承受伤害"。
+ *        ④+③ 合在一起就是"被控 + 无敌 + 不解控"的永久卡死；只有真人接管
+ *        （IsFakeClient 变 false → ShouldGuard 失效 → LeaveGuard 还回 m_takedamage）
+ *        引擎才把后半段流程走完 —— 与玩家描述完全吻合。
+ *     ⑤ 放大器：1.2.0 的"保命"是在 SDKHook_OnTakeDamage **内部**同步调 EnterGuard
+ *        （写血量 + 写 m_takedamage + 调 ReleaseControl 的 SDKCall）。这正是牛撞墙/捶打
+ *        的伤害结算路径：在引擎的伤害流程中间改它的状态，引擎返回后会用自己的收尾覆盖，
+ *        于是出现"免伤了但没解开"的半截状态。
+ *
+ *     修复（守住设计意图，只拆死锁）：
+ *       a. 不再前拦牛的"捶打 / 撞墙"：放行引擎（引擎自己的收尾照常跑），
+ *          下一帧用官方结束接口 L4D2_Charger_EndPummel / EndCarry 干净地结束这次控制
+ *          （见 L4D2_OnPummelVictim / L4D2_OnSlammedSurvivor / Frame_ApplyPending）。
+ *          撞墙那条把 bDeadlyCharge / bWallSlam 改 false：不附带 DMG_PARALYZE 致残、
+ *          不压墙，伤害由守护本身挡住。
+ *       b. 进守护前必须先"解控并**确认**解控成功"（TryEnterGuard）：解控发生在
+ *          m_takedamage 还是原值的时候；解控失败就本次不进守护（保持可受伤），下一轮再试。
+ *       c. 守护中一旦发现仍被控（MaintainGuard / Hook_OnTakeDamage），先解控；
+ *          解控仍然失败就**立刻 LeaveGuard**，把 m_takedamage 与血量锁一起还回去 ——
+ *          绝不允许"被控 + 无敌 + 不解控"存在超过一个保护周期（默认 0.1s）。
+ *          判定用 IsUnderControl()：五个受害者侧 netprop + L4D2_GetSpecialInfectedDominatingMe
+ *          交叉校验（后者是引擎自己的"谁在压制我"判定，能看到 netprop 没写全的中间态）。
+ *       d. 不再在 OnTakeDamage 里同步进守护：只吃伤害 + 写 g_bPendingGuard，
+ *          下一帧由 Frame_ApplyPending 复核名额/控制/血量后再 EnterGuard。
+ *       e. m_takedamage 的恢复做成幂等（RestoreGuardState + g_bDamageZeroed），
+ *          并补齐所有出口：死亡 / 解控 / 真人接管（bot_player_replace）/
+ *          回合结束（round_end）/ 换图（OnMapStart）/ 插件卸载（OnPluginEnd）。
+ *       f. 被控中一律不做"保命"、不吃"起身保护窗口"的伤害：免伤与"被控"互斥。
+ *
  * 安全设计（重要，改动前请先读）：
  *   - 守护状态只对"存活且未倒地、未挂边、未掉边坠落"的 bot 生效。倒地后守护会自动关闭，
  *     避免"倒地 + 免伤 + 不能流血死亡"造成永久卡关；倒地由自动起身兜底
@@ -213,6 +259,14 @@
  *     避免污染其它插件的发光效果。
  *   - 1.6.0 起本插件**不写** m_flLaggedMovementValue（人机移速交给引擎/其它插件），
  *     所以没有任何移速状态需要在退出/卸载时还原。
+ *   - 1.7.0 铁律（改动前务必守住）：**"被控"与"无敌"互斥**。
+ *     任何时刻都不允许出现"被特感控制 + m_takedamage=0（或伤害被 Handled）+ 解控没成功"
+ *     的组合 —— 那就是玩家反馈的"无敌卡死"。因此：
+ *       · 进守护前先解控并确认成功（TryEnterGuard），失败本次不进守护；
+ *       · 守护中检测到被控就解控，解不掉立刻 LeaveGuard；
+ *       · 不给牛的"捶打/撞墙"做前置拦截（拦了会把引擎的收尾一起拦掉，见 1.7.0 根因① ②），
+ *         改成放行 + 下一帧用官方结束接口收尾。
+ *     如果要给本插件加新的"免控"手段，先确认它不会跳过引擎自己的收尾函数。
  * ============================================================================
  */
 
@@ -233,7 +287,7 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
-#define PLUGIN_VERSION		"1.6.1"
+#define PLUGIN_VERSION		"1.7.0"
 
 // 1.4.0：起身提示的全局节流（秒）。次数不设上限时如果每救一次就刷一条，12v12 会刷屏。
 #define REVIVE_NOTIFY_COOLDOWN	3.0
@@ -339,11 +393,24 @@ bool g_bHasEndSaferoom;
 bool g_bEndSaferoomChecked;
 bool g_bNtvLastCheckpointWarned;	// "native 不可用"的控制台提示只打一次
 
+// 1.7.0：控制状态判定 + "被控时绝不给无敌"相关的运行期状态
+//   g_bNtvDominating    L4D2_GetSpecialInfectedDominatingMe 是否可用（inc 里是 MarkNativeAsOptional）
+//   g_bPendingGuard     OnTakeDamage 里只记标志，真正的 EnterGuard 放到下一帧（Frame_ApplyPending）
+//   g_iPendingAttacker  与 g_bPendingGuard 配套：本次"保命"的攻击者，下一帧补提示用
+//   g_bPendingRelease   下一帧要"复核解控结果"的目标（牛的捶打/撞墙不再前拦之后用）
+//   g_bDamageZeroed     我们是否真的把这具身体的 m_takedamage 置 0 过 —— 幂等恢复的依据
+//                       （恢复只在真的动过时才写，OnPluginEnd / 换图 / 回合结束反复调都安全）
+bool g_bNtvDominating;
+bool g_bPendingGuard[MAXPLAYERS + 1];
+int	 g_iPendingAttacker[MAXPLAYERS + 1];
+bool g_bPendingRelease[MAXPLAYERS + 1];
+bool g_bDamageZeroed[MAXPLAYERS + 1];
+
 public Plugin myinfo =
 {
 	name        = "L4D2 Bot Low HP Guard (12v12)",
 	author      = "apples1949",
-	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动起身（默认不设每回合上限，轮询所有生还者状态并在倒地/挂边时立刻起身）；1.2.0 追加守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌；1.5.0 跳过有真人主控的空闲 bot 身体（旁观/掉线托管不再白拿起身与守护）、起身血量默认 1 点；1.6.0 取消修改人机移速（不再写 m_flLaggedMovementValue）、起身提示不再显示倒地次数；1.6.1 修复「有时守护中的人机不提示」：提示节流改为按「攻击者 × 目标人机」成对计时，并补上强制解控时的提示",
+	description = "非玩家操控的生还者总血量<=阈值时闪白色轮廓（可闪烁）/免疫伤害/免疫特感控制/被控即解控，并支持自动起身（默认不设每回合上限，轮询所有生还者状态并在倒地/挂边时立刻起身）；1.2.0 追加守护数量阶梯；1.3.0 追加玩家特感攻击守护中的人机时的投票失败提示音+三渠道无敌提示（1.3.2 起节流默认 1 秒）；1.3.3 追加守护中禁止吃药/打包/打针（需 Actions 扩展）；1.3.4 计算在场未倒地生还者时排除终点安全屋内的生还者；1.4.0 修复挂边/掉边坠落被守护导致卡原地无敌；1.5.0 跳过有真人主控的空闲 bot 身体（旁观/掉线托管不再白拿起身与守护）、起身血量默认 1 点；1.6.0 取消修改人机移速（不再写 m_flLaggedMovementValue）、起身提示不再显示倒地次数；1.6.1 修复「有时守护中的人机不提示」：提示节流改为按「攻击者 × 目标人机」成对计时，并补上强制解控时的提示；1.7.0 修复「人机被牛控住/撞倒后无敌卡死」：不再前拦牛的捶打/撞墙（改为下一帧用官方结束接口收尾）、进守护前先解控并确认成功、守护中被控即解控（解不掉立刻撤守护）、不在 OnTakeDamage 里同步进守护、m_takedamage 恢复补齐死亡/回合结束/换图/真人接管/卸载全部出口",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -532,6 +599,16 @@ public void OnPluginStart()
 	// 1.3.3：玩家离开、身体被 bot 接管时，打断"继承"过来的自动吃药/打针
 	HookEvent("player_bot_replace", Event_PlayerBotReplace, EventHookMode_Post);
 
+	// 1.7.0：守护态的"其它出口"也必须还原 m_takedamage，否则会留下永久 god mode。
+	//   ① 回合结束：下一回合引擎复用同一个 player 实体，留着 m_takedamage=0 就是无敌上场；
+	//   ② 死亡：守护中断（死亡不走 LeaveGuard 的常规路径时兜住）；
+	//   ③ bot_player_replace（真人接管了这具 bot 身体）：接管瞬间就撤守护，
+	//      不必等 0.1s 轮询 —— 这也正是玩家反馈里"接管之后才恢复"的那一瞬间，
+	//      现在提前到接管的同时完成，且不会再出现"接管前 0.1s 还是无敌"的窗口。
+	HookEvent("round_end", Event_RoundEnd, EventHookMode_PostNoCopy);
+	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Post);
+	HookEvent("bot_player_replace", Event_BotPlayerReplace, EventHookMode_Post);
+
 	// 晚加载：已经连进来的客户端也要补挂伤害钩子
 	for (int i = 1; i <= MaxClients; i++)
 	{
@@ -593,7 +670,18 @@ public void OnMapStart()
 
 	for (int i = 0; i <= MaxClients; i++)
 	{
+		// 1.7.0：先把实体上写过的状态（m_takedamage + 发光）还回去，再清标志。
+		//   旧写法只把 g_bGuarded 清零：换图/换关时如果引擎沿用同一个 player 实体，
+		//   被置 0 的 m_takedamage 就没人还了 —— 人机带着永久 god mode 上场。
+		//   RestoreGuardState 是幂等的（只有真的动过才写属性），重复调没有副作用。
+		if (i > 0)
+			RestoreGuardState(i);
+
 		g_bGuarded[i] = false;
+		g_bDamageZeroed[i] = false;
+		g_bPendingGuard[i] = false;
+		g_iPendingAttacker[i] = 0;
+		g_bPendingRelease[i] = false;
 		g_fTempStash[i] = 0.0;
 		ResetWarnLast(i);
 		// 1.4.0：轮询式救起的计划全部作废
@@ -620,25 +708,11 @@ public void OnPluginEnd()
 		g_hProtectTimer = null;
 	}
 
-	// 卸载时把轮廓恢复成进入守护前的样子，避免残留
+	// 1.7.0：卸载时把 m_takedamage 与四个发光 netprop 全部还原（RestoreGuardState 幂等：
+	//   只有真的动过才写）。旧写法只看 g_bGuarded —— 万一标志已经被别处清掉、而实体上
+	//   还留着 m_takedamage=0，就会留下永久 god mode（g_bDamageZeroed 就是为这种情况留的）。
 	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && g_bGuarded[i])
-		{
-			SetEntProp(i, Prop_Send, "m_iGlowType", g_iOrigGlowType[i]);
-			SetEntProp(i, Prop_Send, "m_glowColorOverride", g_iOrigGlowColor[i]);
-			SetEntProp(i, Prop_Send, "m_nGlowRange", g_iOrigGlowRange[i]);
-			SetEntProp(i, Prop_Send, "m_nGlowRangeMin", g_iOrigGlowRangeMin[i]);
-
-			// 1.2.2：卸载时也必须把引擎层受击状态恢复，否则会留下永久 god mode
-			SetEntProp(i, Prop_Data, "m_takedamage", g_iOrigTakeDamage[i] > 0 ? g_iOrigTakeDamage[i] : 2, 1);
-
-			if (g_cvGlowFlash.BoolValue)
-				SetEntProp(i, Prop_Send, "m_bFlashing", 0, 1);
-
-			g_bGuarded[i] = false;
-		}
-	}
+		RestoreGuardState(i);
 
 	// 1.6.0：本插件不再写 m_flLaggedMovementValue，卸载时没有移速要还原
 }
@@ -655,6 +729,11 @@ public void OnClientPutInServer(int client)
 	g_bReviveCounted[client] = false;
 	// 1.5.0：起身保护窗口跟着客户端一起重置
 	g_fReviveProtectUntil[client] = 0.0;
+	// 1.7.0：延迟进守护 / 待解控 / "动过 m_takedamage" 的标记
+	g_bPendingGuard[client] = false;
+	g_iPendingAttacker[client] = 0;
+	g_bPendingRelease[client] = false;
+	g_bDamageZeroed[client] = false;
 
 	// 每个客户端都要挂伤害钩子（r ygive 同款做法：进服即挂）
 	SDKHook(client, SDKHook_OnTakeDamage, Hook_OnTakeDamage);
@@ -662,9 +741,17 @@ public void OnClientPutInServer(int client)
 
 public void OnClientDisconnect(int client)
 {
+	// 1.7.0：客户端要走了，实体随之销毁，不需要（也不该）再对正在断线的实体写 m_takedamage；
+	//   这里只清内部状态，保证槽位被复用时不会带着上一个人的守护标记。
+	//   （实体级的恢复由 LeaveGuard / 回合结束 / 换图 / 卸载覆盖。）
 	g_bGuarded[client] = false;
+	g_bDamageZeroed[client] = false;
+	g_bPendingGuard[client] = false;
+	g_iPendingAttacker[client] = 0;
+	g_bPendingRelease[client] = false;
 	g_bGlowProps[client] = false;
 	g_fTempStash[client] = 0.0;
+	g_iGuardHealth[client] = 0;
 	g_iReviveLeft[client] = 0;
 	ResetWarnLast(client);
 	g_fReviveAt[client] = 0.0;
@@ -745,13 +832,18 @@ void StartProtectTimer()
    新出现的失效情形是"身体已经有真人主控"（IsIdleBody）：玩家倒地后自己切旁观 / 掉线，
    身体交给 bot 顶着，此时给免伤就是让玩家旁观一下白拿保护；0.1s 的粒度保证
    "玩家一切旁观，无敌在 0.1 秒内就撤掉"，不会留一个无敌的空闲身体在场上。
-   用的是与 Timer_Tick 同一个 ShouldGuard，两条线程口径不会打架。 */
+   用的是与 Timer_Tick 同一个 ShouldGuard，两条线程口径不会打架。
+
+   1.7.0：上面的 ①~⑤ 全部收敛进 MaintainGuard()，并新增一条最高优先级的"被控自愈"：
+   守护中只要还检测到被控（IsUnderControl），就先解控；解控失败**立刻撤守护**。
+   旧顺序（先硬保险、再 ShouldGuard、最后才解控）会漏掉"被控"的人 ——
+   他可能先被别的条件踢出守护，于是"解控"这一步根本没执行，人还是被控着，
+   而免伤位/发光可能已经写回去了，出现"被控 + 半截守护"的错位状态。 */
 public Action Timer_Protect(Handle timer)
 {
 	if (!g_cvEnabled.BoolValue)
 		return Plugin_Continue;
 
-	bool bBlockControl = g_cvBlockControl.BoolValue;
 	bool bInvincible   = g_cvInvincible.BoolValue;
 
 	for (int i = 1; i <= MaxClients; i++)
@@ -759,30 +851,12 @@ public Action Timer_Protect(Handle timer)
 		if (!g_bGuarded[i])
 			continue;
 
-		// 1.4.0 ③：硬保险。注意顺序：先判断要不要退出守护，再谈解控/回血。
-		if (!IsClientInGame(i) || !IsPlayerAlive(i) || IsIncapacitated(i) || IsOnLedge(i))
-		{
-			LeaveGuard(i);
-			continue;
-		}
-
-		// 1.5.0 ⑤：用 ShouldGuard 再做一道 0.1s 级的复核（1.4.0 只在 0.9s 的 Timer_Tick 里查）。
-		//   新增的失效情形有两个，都是"身体已经有真人主控，不该再白给无敌"：
-		//     ① 空闲身体：玩家倒地后自己切旁观 / 掉线，身体交给 bot 顶着（IsIdleBody）；
-		//     ② 玩家已经重新加入并接管（IsFakeClient 变 false，ShouldGuard 里直接排除）。
-		//   顺手也能把"血量回升到阈值以上"的守护在 0.1s 内撤掉，与 Timer_Tick 的判定完全一致，
-		//   不会出现两条口径打架。
-		if (!ShouldGuard(i))
-		{
-			LeaveGuard(i);
-			continue;
-		}
-
-		if (bBlockControl)
-			NotifyGuardBlocked(ReleaseControl(i), i);
-
-		if (bInvincible && g_iGuardHealth[i] > 0 && GetClientHealth(i) < g_iGuardHealth[i])
-			SetEntityHealth(i, g_iGuardHealth[i]);
+		// 1.7.0：整套复核收敛到 MaintainGuard（与 Timer_Tick 完全同口径）：
+		//   硬保险（死亡/倒地/挂边/坠落） → 被控自愈（解控，解不掉就撤守护）
+		//   → ShouldGuard 复核（空闲身体 / 真人接管 / 血量回升）→ 虚血冻结 + 实血回锁。
+		//   旧写法在这里先查硬保险、再查 ShouldGuard、最后才解控 —— 被控的人如果先被
+		//   前面的条件踢出守护，"解控"这一步就被跳过了（1.7.0 卡死的关键路径）。
+		MaintainGuard(i, bInvincible);
 	}
 
 	// 1.4.0 ④：轮询所有生还者状态，倒地/挂边的 bot 立刻救起
@@ -818,17 +892,23 @@ public Action Timer_Tick(Handle timer)
 		g_iGuardAllowed = ComputeAllowedGuards();
 	}
 
-	// 第一步：先释放"已经不该守护"的人（死亡 / 倒地 / 被真人接管 / 血量回升 / 总开关关闭）
+	// 第一步：先复核"已经不该守护"的人（死亡 / 倒地 / 挂边 / 被控且解不掉 / 被真人接管 /
+	// 血量回升 / 总开关关闭）。
+	// 1.7.0：与 0.1s 的保护线程共用同一个 MaintainGuard —— 口径只有一份，不会出现
+	// "0.1s 线程撤了守护、0.9s 线程又把它加回来"或者反过来的错位。
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (!IsClientInGame(i))
 		{
 			g_bGuarded[i] = false;
+			g_bDamageZeroed[i] = false;
+			g_bPendingGuard[i] = false;
+			g_bPendingRelease[i] = false;
 			continue;
 		}
 
-		if (g_bGuarded[i] && !ShouldGuard(i))
-			LeaveGuard(i);
+		if (g_bGuarded[i])
+			MaintainGuard(i, g_cvInvincible.BoolValue);
 	}
 
 	// 第二步：按名额重新分配（已守护优先保留，其余按 总血量升序 -> 索引升序）
@@ -836,21 +916,8 @@ public Action Timer_Tick(Handle timer)
 
 	g_iGuardCount = CountGuarded();
 
-	// 第三步：守护中的每个 bot 做维护 —— 虚血冻结 + 已被控则立即解控
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsClientInGame(i) || !g_bGuarded[i])
-			continue;
-
-		// 虚血冻结：引擎会按时间自然扣减 healthBuffer，
-		// 这里按节奏把它写回守护开始时的值（L4D_SetTempHealth 同时刷新 m_healthBufferTime）
-		if (g_fTempStash[i] > 0.0 && L4D_GetTempHealth(i) < g_fTempStash[i])
-			L4D_SetTempHealth(i, g_fTempStash[i]);
-
-		// 已被控住的立即解控（"被控时血量掉到阈值及以下就取消控制"）
-		if (g_cvBlockControl.BoolValue)
-			NotifyGuardBlocked(ReleaseControl(i), i);
-	}
+	// 第三步（1.7.0）：维护动作已经全部并入 MaintainGuard（第一步），这里不再单独处理，
+	// 否则同一 tick 会把"虚血冻结 / 解控"各做两遍。
 
 	// 第四步：1.6.0 起不再有移速那一步（插件不写 m_flLaggedMovementValue）
 
@@ -1076,6 +1143,11 @@ void RefreshEndSaferoomState()
 	// OnPluginStart 那一刻查不到，等它注册完成后这里就能拿到。
 	g_bNtvLastCheckpoint = (GetFeatureStatus(FeatureType_Native, "L4D_IsInLastCheckpoint") == FeatureStatus_Available);
 
+	// 1.7.0：同一个道理 —— L4D2_GetSpecialInfectedDominatingMe（inc 里 MarkNativeAsOptional）
+	// 也要按回合复核，IsUnderControl() 用它做"被控"的交叉校验。缺失时只是少一层兜底，
+	// 五个受害者侧 netprop 的判定照常工作，不影响 1.7.0 的铁律（解控失败就撤守护）。
+	g_bNtvDominating = (GetFeatureStatus(FeatureType_Native, "L4D2_GetSpecialInfectedDominatingMe") == FeatureStatus_Available);
+
 	if (!g_bNtvLastCheckpoint)
 	{
 		// 只有真的要用"排除"功能时才提示；cvar=0 的服不该看到这条噪音
@@ -1224,7 +1296,12 @@ void UpdateGuardSet(int iAllowed)
 		if (g_bGuarded[iClient])
 			continue;
 
-		EnterGuard(iClient);
+		// 1.7.0：统一走 TryEnterGuard —— 先解控、确认解控成功，才真正上免伤。
+		//   解控失败（引擎侧还卡着人）就不占名额：名额留给后面还有机会的候选，
+		//   这具身体保持可受伤，引擎才能把被控流程走完（绝不出现"被控 + 无敌"）。
+		if (!TryEnterGuard(iClient))
+			continue;
+
 		iSlots--;
 	}
 }
@@ -1490,6 +1567,12 @@ bool ShouldGuard(int client, bool bIgnoreIdleBody = false)
 	if (IsOnLedge(client))
 		return false;
 
+	// 1.7.0：**"是否被控"不在这里判**（故意的）。
+	//   原因：进守护的流程需要"先解控 → 确认解控成功 → 再免伤"，如果在这里直接排除被控的人，
+	//   就没机会把已经被控的低血 bot 解救出来（设计意图是"被控即解控"）。
+	//   控制相关的口径统一在 TryEnterGuard()（进守护前）与 MaintainGuard()（守护中）里执行，
+	//   两条都会在"解控失败"时拒绝/撤销免伤。见文件头 1.7.0 铁律。
+
 	// 1.5.0（需求1）：有真人主控的空闲身体（玩家倒地后自己切旁观 / 掉线托管）不给守护。
 	//   理由与自动起身相同：替它免伤 = 让玩家"旁观 -> 再加入"白拿一段无敌。
 	//   玩家重新加入并接管后 IsFakeClient 变 false，上面那道判断已经先排除了，
@@ -1532,27 +1615,44 @@ void EnterGuard(int client)
 	// 1.2.2：引擎层免伤。只用 SDKHook_OnTakeDamage 拦截挡不住所有路径
 	// （玩家反馈"无敌状态下 charger 概率造成伤害/概率控中"），这里同时把
 	// m_takedamage 置 0（rygive 的 god mode 同款写法），让引擎自己就不接伤害。
+	// 1.7.0：置 0 前先记下"原值 + 我们动过"（g_bDamageZeroed），恢复因此可以做成幂等：
+	//   只有真的动过才写回，死亡/回合结束/换图/卸载反复调用都不会把 2 写花。
 	g_iOrigTakeDamage[client] = GetEntProp(client, Prop_Data, "m_takedamage", 1);
+	g_bDamageZeroed[client] = true;
 	SetEntProp(client, Prop_Data, "m_takedamage", 0, 1);
 
 	if (g_cvGlow.BoolValue)
 		ApplyGlow(client, true);
 
-	// 进入守护的瞬间若正被控制，立即解控
-	// 1.2.0：名额已经由 UpdateGuardSet / OnTakeDamage 判定过，这里不再看旧的数量开关
-	if (g_cvBlockControl.BoolValue)
-	{
-		// 1.6.1：进守护时若正被控制，解控的同时把"守护中"提示发给控制者。
-		//   以前这里是静默解控：特感玩家眼看技能生效又被凭空解开，却没有任何提示。
-		NotifyGuardBlocked(ReleaseControl(client), client);
-	}
+	// 1.7.0：**进守护前**的解控已经挪到 TryEnterGuard 里（而且必须在 m_takedamage 置 0
+	//   之前做，见 TryEnterGuard 注释）。这里不再解控，也不再同步调 ReleaseControl ——
+	//   在"刚置完免伤位"的瞬间去调引擎的解控接口，正是 1.6.1 及以前"免伤了但没解开"的成因之一。
 }
 
 void LeaveGuard(int client)
 {
+	RestoreGuardState(client);
+}
+
+// 1.7.0：退出守护的唯一实现（LeaveGuard 是它的别名）。幂等 + 覆盖所有出口。
+void RestoreGuardState(int client)
+{
+	if (client <= 0 || client > MaxClients)
+		return;
+
+	bool bTouched = g_bGuarded[client] || g_bDamageZeroed[client];
+
 	g_bGuarded[client] = false;
+	g_bDamageZeroed[client] = false;
 	g_fTempStash[client] = 0.0;
 	g_iGuardHealth[client] = 0;
+	g_bPendingGuard[client] = false;
+	g_iPendingAttacker[client] = 0;
+	g_bPendingRelease[client] = false;
+
+	// 没动过就不写属性 —— 这样死亡 / 回合结束 / 换图 / 卸载里反复调都不会有副作用
+	if (!bTouched)
+		return;
 
 	if (!IsClientInGame(client))
 		return;
@@ -1573,6 +1673,207 @@ void LeaveGuard(int client)
 
 	if (g_cvGlowFlash.BoolValue)
 		SetEntProp(client, Prop_Send, "m_bFlashing", 0, 1);
+}
+
+// 1.7.0：把所有客户端的守护态还回去（回合结束 / 换图 / 卸载用）
+void RestoreAllGuards()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		RestoreGuardState(i);
+}
+
+// ============================================================================
+// 1.7.0："被控 + 无敌 + 不解控"的彻底封堵
+//
+// 三个函数的分工：
+//   IsUnderControl()  —— 这具身体此刻是不是还被特感控制着（含"引擎侧还挂着、受害者侧
+//                        netprop 已经清了"的中间态）；
+//   TryEnterGuard()   —— 进守护的唯一入口：必须先解控并**确认**解控成功，才允许免伤；
+//   MaintainGuard()   —— 守护中的每轮复核（0.1s 保护线程 / 0.9s 状态线程共用）：
+//                        被控 → 解控 → 还解不掉就立刻撤守护。
+// ============================================================================
+
+// 该生还者此刻是否被特感控制（舌头 / 扑击 / 骑乘 / 扛走 / 捶打，含引擎侧中间态）
+bool IsUnderControl(int victim)
+{
+	if (victim <= 0 || victim > MaxClients || !IsClientInGame(victim))
+		return false;
+
+	if (GetEntPropEnt(victim, Prop_Send, "m_tongueOwner") > 0)
+		return true;
+
+	if (GetEntPropEnt(victim, Prop_Send, "m_pounceAttacker") > 0)
+		return true;
+
+	if (GetEntPropEnt(victim, Prop_Send, "m_jockeyAttacker") > 0)
+		return true;
+
+	if (GetEntPropEnt(victim, Prop_Send, "m_carryAttacker") > 0)
+		return true;
+
+	if (GetEntPropEnt(victim, Prop_Send, "m_pummelAttacker") > 0)
+		return true;
+
+	// 交叉校验：L4D2_GetSpecialInfectedDominatingMe 是引擎自己的"谁在压制我"判定
+	// （left4dhooks.inc:3918-3926，@return -1 = 没有被特感压制，inc 里是 MarkNativeAsOptional）。
+	// 它能看到一部分"受害者侧 netprop 没写全 / 牛侧还挂着人"的中间态，
+	// 正好用来兜住上面五个属性的盲区。只对活人调用（对尸体问引擎没有意义）。
+	if (g_bNtvDominating && IsPlayerAlive(victim) && L4D2_GetSpecialInfectedDominatingMe(victim) > 0)
+		return true;
+
+	return false;
+}
+
+// 1.7.0：进守护的唯一入口（旧代码直接调 EnterGuard 的地方全部改走这里）。
+//   顺序很关键：**先解控、且确认解控成功，再上免伤**。
+//   解控必须在 m_takedamage 还是原值的时候做 —— 引擎是在"可受伤的身体"上走松开流程的，
+//   先置 0 再解控（1.6.1 及以前 EnterGuard 的写法）会出现"免伤生效了、控制没解开"。
+//   解控失败（引擎拒绝 / 刚松开又被抓住 / 引擎侧卡着）→ 本次不进守护，
+//   让这具身体保持可受伤，引擎才能把自己的流程走完；下一轮（0.9s / 下一帧）再试。
+bool TryEnterGuard(int client)
+{
+	if (client <= 0 || client > MaxClients)
+		return false;
+
+	if (g_bGuarded[client])
+		return true;
+
+	if (!IsClientInGame(client) || !IsPlayerAlive(client))
+		return false;
+
+	if (IsUnderControl(client))
+	{
+		// 免控开关关掉时同样不允许"被控 + 无敌"（这是 1.7.0 的铁律，与开关无关）
+		if (!g_cvBlockControl.BoolValue)
+			return false;
+
+		// 1.6.1：被守护强行解掉的控制也要提示控制者，别静默
+		NotifyGuardBlocked(ReleaseControl(client), client);
+
+		if (IsUnderControl(client))
+			return false;
+	}
+
+	EnterGuard(client);
+	return true;
+}
+
+// 1.7.0：守护中的每轮复核。Timer_Protect（0.1s）与 Timer_Tick（0.9s）都走这一个口径。
+//   顺序：硬保险（死亡/倒地/挂边/坠落） → 被控自愈 → 该不该继续守护 → 虚血冻结 + 实血回锁。
+//   "被控自愈"必须排在"该不该继续守护"之前：否则会因为 ShouldGuard 的其它条件先退出，
+//   把"解控"这一步跳过去。
+void MaintainGuard(int client, bool bInvincible)
+{
+	// ① 1.4.0 硬保险：守护中的人一旦倒地 / 挂边 / 掉边坠落 / 死亡，立刻退出守护。
+	//    （倒地 + 免伤 + 不能流血 = 永久卡关；挂边坠落时 m_takedamage=0 会冻住死亡流程。）
+	if (!IsClientInGame(client) || !IsPlayerAlive(client) || IsIncapacitated(client) || IsOnLedge(client))
+	{
+		LeaveGuard(client);
+		return;
+	}
+
+	// ② 1.7.0 自愈：守护中但被控 —— 先解控；解不掉就立刻撤守护（还回 m_takedamage）。
+	//    这是"被控 + 无敌 + 不解控"的最终闸门：任何新出现的控制类型都会在这里被处理，
+	//    不需要为每一种特感再补一个前置 forward。
+	if (IsUnderControl(client))
+	{
+		if (g_cvBlockControl.BoolValue)
+			NotifyGuardBlocked(ReleaseControl(client), client);
+
+		if (IsUnderControl(client))
+		{
+			LeaveGuard(client);
+			return;
+		}
+	}
+
+	// ③ 该不该继续守护（ShouldGuard 已含：存活 / 未倒地 / 未挂边 / 非空闲身体 / 血量 <= 阈值）
+	if (!ShouldGuard(client))
+	{
+		LeaveGuard(client);
+		return;
+	}
+
+	// ④ 虚血冻结（引擎会按时间扣 healthBuffer，这里写回进入守护时的值）
+	if (g_fTempStash[client] > 0.0 && L4D_GetTempHealth(client) < g_fTempStash[client])
+		L4D_SetTempHealth(client, g_fTempStash[client]);
+
+	// ⑤ 实血回锁（挡住 spitter 酸液这类不经过 OnTakeDamage 的掉血）
+	if (bInvincible && g_iGuardHealth[client] > 0 && GetClientHealth(client) < g_iGuardHealth[client])
+		SetEntityHealth(client, g_iGuardHealth[client]);
+}
+
+// 1.7.0：把"保命"与"补解控"从 OnTakeDamage / 前置 forward 里挪到下一帧执行。
+//   在伤害回调里同步写 health / m_takedamage / 调解控的 SDKCall，等于在引擎的伤害流程
+//   中间改它的状态：引擎返回后还会用自己的收尾覆盖回去，于是出现"免伤了但没解开"的半截状态
+//   （1.6.1 及以前"被牛控住后无敌卡死"的放大器）。
+//   现在只在回调里吃掉伤害 + 记标志，下一帧状态稳定后再复核名额 / 控制 / 血量。
+public void Frame_ApplyPending()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		// ① 补解控：牛的捶打 / 撞墙放行之后，确认人真的被松开了；没松开就撤守护
+		if (g_bPendingRelease[i])
+		{
+			g_bPendingRelease[i] = false;
+
+			if (g_bGuarded[i] && IsClientInGame(i) && IsUnderControl(i))
+			{
+				if (g_cvBlockControl.BoolValue)
+					NotifyGuardBlocked(ReleaseControl(i), i);
+
+				if (IsUnderControl(i))
+					LeaveGuard(i);
+			}
+		}
+
+		// ② 延迟进守护（"保命"）
+		if (!g_bPendingGuard[i])
+			continue;
+
+		g_bPendingGuard[i] = false;
+
+		int iAttacker = g_iPendingAttacker[i];
+		g_iPendingAttacker[i] = 0;
+
+		if (!g_cvEnabled.BoolValue || !g_cvInvincible.BoolValue)
+			continue;
+
+		if (g_bGuarded[i])
+			continue;
+
+		if (!IsGuardTarget(i) || IsIncapacitated(i) || IsOnLedge(i))
+			continue;
+
+		// 被控中一律不做保命（免伤与"被控"互斥）；这次伤害已经吃掉，但不再补血
+		if (IsUnderControl(i))
+			continue;
+
+		// 名额现算（不用上一 tick 的缓存）
+		g_iAiSurvivors = CountAiSurvivors();
+		g_iDownCount = CountDownedSurvivors();
+		g_iGuardAllowed = ComputeAllowedGuards();
+
+		if (CountGuarded() >= g_iGuardAllowed)
+			continue;
+
+		// 真的能进守护才把血量补回阈值、虚血清 0（否则等于白送血量）
+		int iHealth = g_cvHealth.IntValue;
+
+		if (iHealth < 1)
+			iHealth = 1;
+
+		L4D_SetTempHealth(i, 0.0);
+		SetEntityHealth(i, iHealth);
+
+		if (!TryEnterGuard(i))
+			continue;
+
+		g_iGuardCount = CountGuarded();
+
+		// 1.3.0：这一击被"保命"吃掉并当场进入守护，同样提示攻击的玩家特感
+		NotifyGuardBlocked(iAttacker, i);
+	}
 }
 
 // ============================================================================
@@ -1670,6 +1971,23 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 			return Plugin_Continue;
 		}
 
+		// 1.7.0：**守护中却被控** —— 这是玩家反馈"突然无敌却一直被控、卡住不动"的组合。
+		//   先尝试解控（官方的 End* 接口，尽量保住守护）；
+		//   一旦解不掉就立刻撤守护并放行这次伤害 —— 宁可少给一次无敌，也不能让引擎流程停住。
+		//   以前这里既不解控也不撤守护，只是把伤害吃掉，于是"免伤位 + 被控"能一直挂着，
+		//   直到真人接管才恢复。
+		if (IsUnderControl(victim))
+		{
+			if (g_cvBlockControl.BoolValue)
+				NotifyGuardBlocked(ReleaseControl(victim), victim);
+
+			if (IsUnderControl(victim))
+			{
+				LeaveGuard(victim);
+				return Plugin_Continue;
+			}
+		}
+
 		// 1.3.0：告诉攻击的玩家特感"这只人机是无敌的"（提示音 + 三渠道文字，带 1 秒节流）
 		NotifyGuardBlocked(attacker, victim);
 
@@ -1691,6 +2009,8 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 		&& g_fReviveProtectUntil[victim] > 0.0 && GetGameTime() < g_fReviveProtectUntil[victim]
 		&& damage > 0.0 && IsGuardTarget(victim)
 		&& !IsIncapacitated(victim) && !IsOnLedge(victim)
+		// 1.7.0：被控中不挡（免伤与"被控"互斥 —— 这 1 秒的窗口同样不能给"被控 + 无敌"）
+		&& !IsUnderControl(victim)
 		&& damage >= float(GetTotalHealth(victim)))
 	{
 		damage = 0.0;
@@ -1724,6 +2044,16 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	if (damage < float(iTotal))
 		return Plugin_Continue;
 
+	// 1.7.0：**被控中一律不做"保命"**。
+	//   "在被人抓住的同一刻把他变成无敌"就是玩家反馈的"被牛控住后突然无敌、一直被控"：
+	//   伤害被吃掉 → 引擎的控制/死亡流程推不动 → 人卡在原地。
+	//   这里直接放行这次伤害（引擎照常结算），等他被松开、控制结束了，
+	//   下一轮 ShouldGuard / 下一帧的保命判断自然会重新评估。
+	//   注意位置：故意放在"是否致命"之后 —— 绝大多数伤害会在上面那道便宜判断里返回，
+	//   只有"会当场打倒他"的伤害才值得做 IsUnderControl 的 5 个 netprop + 1 次 SDKCall。
+	if (IsUnderControl(victim))
+		return Plugin_Continue;
+
 	// 名额判定：现算一遍（不等下一 tick），当前守护人数 < 可守护数才保命。
 	// 不在名额内的 bot 不做保命，照常掉血 / 倒地（否则全队 bot 永远打不死）。
 	// 顺手刷新状态缓存，让 sm_botguard_status 立刻能看到最新数字
@@ -1736,22 +2066,18 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 	if (CountGuarded() >= iAllowed)
 		return Plugin_Continue;
 
-	// 吃伤害 -> 虚血清 0 -> 实血设为阈值（默认 10）-> 立即进入守护状态
+	// 1.7.0：**不在伤害回调里同步进守护**。
+	//   1.2.0 的老写法在这里直接 L4D_SetTempHealth + SetEntityHealth + EnterGuard：
+	//   EnterGuard 会写 m_takedamage=0 并调 ReleaseControl（引擎 SDKCall），而此刻我们正
+	//   在引擎的伤害结算流程中间 —— 引擎返回后还会用自己的收尾把状态覆盖回去，于是留下
+	//   "免伤了、但控制没解开"的半截状态（牛撞墙/捶打的伤害正好走这条路径）。
+	//   现在只吃掉这次伤害 + 记下标志，真正的进守护 / 补血 / 名额复核放到下一帧
+	//   （Frame_ApplyPending）：那一帧引擎的收尾已经跑完，状态是稳定的。
 	damage = 0.0;
 
-	L4D_SetTempHealth(victim, 0.0);
-
-	int iHealth = g_cvHealth.IntValue;
-	if (iHealth < 1)
-		iHealth = 1;
-
-	SetEntityHealth(victim, iHealth);
-
-	EnterGuard(victim);
-	g_iGuardCount = CountGuarded();
-
-	// 1.3.0：这一击被"保命"吃掉并当场进入守护，同样提示攻击的玩家特感
-	NotifyGuardBlocked(attacker, victim);
+	g_bPendingGuard[victim] = true;
+	g_iPendingAttacker[victim] = attacker;
+	RequestFrame(Frame_ApplyPending);
 
 	return Plugin_Handled;
 }
@@ -1767,6 +2093,12 @@ public Action Hook_OnTakeDamage(int victim, int &attacker, int &inflictor, float
 //   "已经在控 / 刚进守护时被强制解控"这条路完全静默：低血人机在轮到守护之前被扑住、
 //   拖走，下一轮进入守护时由这里解开，特感玩家毫无反馈。
 //   调用点用返回值补发同一条提示，节流仍然生效，不会刷屏。
+//
+// 1.7.0：增加"从特感侧反查"的兜底（见函数末尾）。旧实现只读受害者侧的五个 netprop，
+//   而"牛撞墙/捶打被前置 forward 拦掉"之后引擎的收尾没跑时会留下
+//   "只有牛侧还挂着人、受害者侧已经是 -1"的中间态 —— 那时这里什么也找不到，
+//   调用方以为"已经解控了"，实际人还卡在牛身上。现在用
+//   L4D2_GetSpecialInfectedDominatingMe + 特感侧 m_*Victim 反查补一次官方 End*。
 int ReleaseControl(int victim)
 {
 	int attacker;
@@ -1815,6 +2147,35 @@ int ReleaseControl(int victim)
 
 		if (iController == 0)
 			iController = attacker;
+	}
+
+	// 1.7.0：受害者侧五个 netprop 全空、但引擎认为"还被压制着"时的兜底。
+	//   典型情形（玩家反馈的"被牛控住却解不掉"）：牛撞墙/捶打被前置 forward 拦掉之后，
+	//   引擎的收尾没跑，生还者侧的 m_pummelAttacker / m_carryAttacker 已经是 -1，
+	//   只有牛侧（m_carryVictim / m_pummelVictim）还挂着人 —— 上面五次判断全部落空，
+	//   于是"解控"看起来调用了、其实什么都没做。
+	//   这里用引擎自己的判定（L4D2_GetSpecialInfectedDominatingMe）找回控制者，
+	//   再从特感侧反查控制类型，补一次官方 End* 调用。
+	if (iController == 0 && g_bNtvDominating)
+	{
+		int iSI = L4D2_GetSpecialInfectedDominatingMe(victim);
+
+		if (iSI > 0 && iSI <= MaxClients)
+		{
+			if (GetEntPropEnt(iSI, Prop_Send, "m_tongueVictim") == victim)
+				L4D_Smoker_ReleaseVictim(victim, iSI);
+			else if (GetEntPropEnt(iSI, Prop_Send, "m_pounceVictim") == victim)
+				L4D_Hunter_ReleaseVictim(victim, iSI);
+			else if (GetEntPropEnt(iSI, Prop_Send, "m_jockeyVictim") == victim)
+				L4D2_Jockey_EndRide(victim, iSI);
+			else if (GetEntPropEnt(iSI, Prop_Send, "m_carryVictim") == victim)
+				L4D2_Charger_EndCarry(victim, iSI);
+			else if (GetEntPropEnt(iSI, Prop_Send, "m_pummelVictim") == victim)
+				L4D2_Charger_EndPummel(victim, iSI);
+
+			if (iController == 0)
+				iController = iSI;
+		}
 	}
 
 	return iController;
@@ -1868,29 +2229,66 @@ public Action L4D2_OnStartCarryingVictim(int victim, int attacker)
 	return Plugin_Continue;
 }
 
-// 牛捶打（charger pummel）：1.2.3 新增。left4dhooks 有前置 forward（注意参数顺序是 attacker, victim），
-// 拦下来比"被捶打后再 EndPummel"干净 —— 玩家反馈守护中的 bot 仍会被牛捶打/拖走就是这个缺口
+// 牛捶打（charger pummel）：1.2.3 新增。left4dhooks 有前置 forward（注意参数顺序是 attacker, victim）。
+//
+// 1.7.0 修复（玩家反馈"人机被牛控住后突然无敌、一直被控、不再受伤、卡住不动"）：
+//   这里以前直接 Plugin_Handled。Left4DHooks 官方注释写得很清楚
+//   （include/left4dhooks.inc:2770-2784）：
+//     "Called when CTerrorPlayer::QueuePummelVictim is invoked …
+//      Note: when blocking pummel the Survivor will be stuck inside the Charger
+//      (eventually teleporting them) and AI chargers cannot move. See the above demo for a solution"
+//   也就是：被拦的是"排队捶打"，队列留下了、收尾的 OnPummelEnded 永远不会跑 ——
+//   生还者卡在牛身上、AI 牛也不能动；同时生还者侧的 m_pummelAttacker 可能根本没被写，
+//   ReleaseControl 也就查不到、解不掉。叠加"守护中 = 免伤"就是"被控 + 无敌 + 不解控"永久卡死。
+//   （官方给的解法就在 left4dhooks_test.sp:6856-6900：拦完之后自己 SetParent + Teleport 把人拽出来，
+//     再复位动画。本插件不打算复刻这套引擎行为。）
+//
+//   现在的做法：**放行引擎**，让引擎照常进入捶打；下一帧用官方结束接口
+//   L4D2_Charger_EndPummel 干净地结束这次捶打（Frame_ApplyPending 里还会复核"是否真的解开了"，
+//   没解开就撤守护）。人机仍然是"免控"的（0.1s 内必被结束），但不再有任何卡死路径。
 public Action L4D2_OnPummelVictim(int attacker, int victim)
 {
-	if (BlockControlOn(victim))
-	{
-		NotifyGuardBlocked(attacker, victim);
-		return Plugin_Handled;
-	}
+	if (!BlockControlOn(victim))
+		return Plugin_Continue;
+
+	NotifyGuardBlocked(attacker, victim);
+
+	// 下一帧收尾：解控 + 复核（见 Frame_ApplyPending）
+	g_bPendingRelease[victim] = true;
+	RequestFrame(Frame_ApplyPending);
 
 	return Plugin_Continue;
 }
 
-// 牛把人撞到墙上（会造成倒地/致残伤害）：守护中的生还者直接吃掉这次撞墙
+// 牛把人撞到墙上（会造成倒地/致残伤害）
+//
+// 1.7.0 修复：这里以前也是直接 Plugin_Handled。这个 forward 拦的是
+//   CTerrorPlayer::OnSlammedSurvivor **本体**（include/left4dhooks.inc:2723-2738：
+//   "Called when a Survivor is slammed into a wall by a Charger, or on the first pummel
+//    if bWallSlam is 0"，参数说明里 bDeadlyCharge "adds DMG_PARALYZE to the damage flags
+//   to incap the victim. Changing this can incap the victim"）。
+//   而这个函数自己就是"结束扛人 / 把人放开 / 判定致残"的收尾 —— 拦掉它，牛与生还者的
+//   关联状态就停在半途（这正是"牛撞倒后卡住"的另一条路径）。
+//
+//   现在改为：放行引擎，只把两个"会致残/贴墙"的参数改掉：
+//     bDeadlyCharge = false → 不附带 DMG_PARALYZE，不会把守护中的 bot 直接打成倒地；
+//     bWallSlam     = false → 换一个不压墙的动画（官方注释：changing this can play a different animation）。
+//   伤害本身由守护挡住（m_takedamage=0 + Hook_OnTakeDamage），不需要拦 forward。
+//   撞完之后下一帧再复核一次"人是不是真的被松开了"。
 public Action L4D2_OnSlammedSurvivor(int victim, int attacker, bool &bWallSlam, bool &bDeadlyCharge)
 {
-	if (BlockControlOn(victim))
-	{
-		NotifyGuardBlocked(attacker, victim);
-		return Plugin_Handled;
-	}
+	if (!BlockControlOn(victim))
+		return Plugin_Continue;
 
-	return Plugin_Continue;
+	NotifyGuardBlocked(attacker, victim);
+
+	bWallSlam = false;
+	bDeadlyCharge = false;
+
+	g_bPendingRelease[victim] = true;
+	RequestFrame(Frame_ApplyPending);
+
+	return Plugin_Changed;
 }
 
 bool BlockControlOn(int victim)
@@ -1946,6 +2344,36 @@ public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 	// 1.3.4：本回合重新判定「终点安全屋」的运行期条件
 	// （native 可用性 + 本图有没有 info_changelevel；救援关会自动识别成"没有"）。
 	RefreshEndSaferoomState();
+}
+
+// 1.7.0：回合结束 —— 把所有守护态还回去（m_takedamage + 发光）。
+//   下一回合引擎会复用同一个 player 实体，留着 m_takedamage=0 就是"无敌上场"。
+public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+{
+	RestoreAllGuards();
+}
+
+// 1.7.0：死亡 —— 兜底撤守护（正常路径下死亡前已经由 MaintainGuard 撤过，
+//   但玩家被"秒杀/剧本死亡"时可能跳过常规判定）。
+public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int victim = GetClientOfUserId(event.GetInt("userid"));
+
+	if (victim > 0 && victim <= MaxClients)
+		LeaveGuard(victim);
+}
+
+// 1.7.0：bot_player_replace = 真人接管了这具 bot 身体（IsFakeClient 由 true 变 false）。
+//   玩家反馈的"直到真人接管这个 bot 才恢复"就发生在这一刻：接管前它是"被控 + 无敌"，
+//   接管后 ShouldGuard 失效、守护被撤、m_takedamage 还回去，引擎才把卡住的流程走完。
+//   现在改成"接管的同时"就撤守护（不等 0.1s 轮询），既没有那 0.1 秒的无敌窗口，
+//   也不会出现"接管的人发现自己动不了"的观感。
+public void Event_BotPlayerReplace(Event event, const char[] name, bool dontBroadcast)
+{
+	int bot = GetClientOfUserId(event.GetInt("bot"));
+
+	if (bot > 0 && bot <= MaxClients)
+		LeaveGuard(bot);
 }
 
 // 1.4.0：轮询所有生还者状态，把"倒地 / 挂边"的 bot 救起来。
@@ -2604,7 +3032,7 @@ public Action Cmd_Status(int client, int args)
 			IntToString(g_iReviveLeft[i], sLeft, sizeof(sLeft));
 
 		ReplyToCommand(client,
-			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d idle=%d | 实血=%d 虚血=%.1f 总血=%d | 守护=%d(免伤位=%d) 本回合剩余起身=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
+			"\x04[BotGuard]\x01 #%d %s 接管=%d bot=%d alive=%d incap=%d hang=%d fall=%d idle=%d ctrl=%d | 实血=%d 虚血=%.1f 总血=%d | 守护=%d(免伤位=%d) 本回合剩余起身=%s | glow type=%d color=%d range=%d rangeMin=%d flash=%d | 属性存在=%d",
 			i, sName,
 			IsFakeClient(i) ? 0 : 1,
 			IsFakeClient(i) ? 1 : 0,
@@ -2613,6 +3041,10 @@ public Action Cmd_Status(int client, int args)
 			IsHangingFromLedge(i) ? 1 : 0,
 			IsFallingFromLedge(i) ? 1 : 0,
 			IsIdleBody(i) ? 1 : 0,
+			// 1.7.0：ctrl=1 表示"此刻被特感控制"。守护中若出现 ctrl=1 又免伤位=0，
+			//   说明自愈已经生效（撤守护/解控）；两者同时为 1 是绝对不该出现的组合，
+			//   现场看到就应该立刻看日志（见 docs/bot_guard_pin_fix.md 的验证方法）。
+			IsUnderControl(i) ? 1 : 0,
 			GetClientHealth(i),
 			L4D_GetTempHealth(i),
 			GetTotalHealth(i),

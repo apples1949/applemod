@@ -316,6 +316,37 @@
  *      原版地点表一起读取，那两张表被关掉（l4d2_cptele_preset 0 /
  *      l4d2_cptele_legacy 0）时名单也不生效；超过 8 条只写一条 error 不刷屏。
  *
+ *  1.3.3 修复「生还者还没进集合点，集合点机关就被提前触发 / 人被卡在集合点」
+ *        （2026-11-23）：
+ *    - 现象（用户回报）：人还没到齐，电梯按钮 / 升降台开关这类集合点机关就被
+ *      提前打开，导致一大批生还者被卡在集合点。
+ *    - 根因一（主因，1.3.0 起就有、被 1.3.1 的坐标修复「解锁」）：提前结束
+ *      倒计时的判据是 IsCheckpointGatherComplete() 的
+ *      CountSeenSurvivors() >= total ——「本次倒计时期间**都到过**」，不是
+ *      「此刻都在里面」。cfg 下发 l4d2_cptele_checkpoint_percent 50
+ *      => 6/12 人就起 30 秒倒计时，中途 12 个人先后路过集合点半径就满足了
+ *      「都到过」，于是 FinishCheckpointGathered() 立刻调 OpenAreaMechanism()
+ *      把按钮按下去 —— 这时往往还有一半人在外面。1.3.0 及以前这些按钮类条目
+ *      的区域中心全塌在地图原点（父实体局部坐标 bug），到达人数恒为 0，这条
+ *      路径根本走不到，所以「上一版没问题」；1.3.1/1.3.2 把中心修好之后立刻暴露。
+ *    - 根因二：FinishCountdown() 的传送按 g_cvSkipSeen 跳过「到过」的人，
+ *      紧接着无条件 OpenAreaMechanism()。机关一动作（电梯上行 / 升降台离开），
+ *      这些被刻意留在外面的人就再也进不来。
+ *    - 根因三：倒计时期间玩家自己抢先按下机关（func_button 的 OnPressed）
+ *      插件完全不介入，机关先动、人还在外面；倒计时结束后插件还会再按一次。
+ *    - 做法：
+ *      ① IsCheckpointGatherComplete() 的判据换成「存活生还者**此刻**都在区域内」；
+ *      ② OpenAreaMechanism() 在按按钮之前复核「区域外存活人数」，还有人在外面
+ *         就只 unlock 不 use（玩家仍可自己按），并留一条 error 日志；
+ *      ③ 传送口径：本区域是「插件按按钮」型机关时，倒计时结束的补传无视
+ *         g_cvSkipSeen，先把所有人拉进来再谈开机关（抽成
+ *         TeleportStragglersToArea()）；
+ *      ④ 玩家抢按：OnPressed 命中当前倒计时区域自己的按钮时，立刻终止倒计时、
+ *         把外面的人补传进来、并放弃插件自己那一次按键（
+ *         PlayerPressedActiveMechanism()），本回合该区域不再起倒计时。
+ *    - 边界：机关只在「比例达标 + 本区域倒计时跑完 + 全员此刻在区域内」后由插件
+ *      触发一次；安全屋 / 救援点（非按钮机关）路径完全不变；不改任何 cfg。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -329,7 +360,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.3.2"
+#define PLUGIN_VERSION      "1.3.3"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -1822,6 +1853,15 @@ int LoadLegacyAreas(int &iCheckpoints)
 
 public void OnButtonPressedOutput(const char[] output, int caller, int activator, float delay)
 {
+	// 1.3.3：倒计时期间玩家抢先按下了集合点自己的机关 —— 机关已经动作，
+	// 立刻把外面的人补传进来并放弃插件自己那一次按键。
+	// 放在 cvar 守卫之前：即使 l4d2_cptele_mechanism_unlocked 0（本服如此），
+	// 这条「防卡人」的保护也必须生效。
+	if (PlayerPressedActiveMechanism(caller))
+	{
+		return;
+	}
+
 	if (!g_cvMechanismUnlocked.BoolValue)
 	{
 		return;
@@ -2421,10 +2461,16 @@ public Action Timer_Countdown(Handle timer)
 /**
  * 1.3.0：中途集合点是不是已经「全员集合完毕」。
  *
- * 判定口径 = 本次倒计时期间「所有**当前存活**的生还者都已经到过该集合点」
- * （g_bSeen 由 MarkSeenInArea 每秒累积，"到过" 包含此刻已离开、继续往前走的人）。
- * 全员到过 ⇒ FinishCountdown 里按 g_cvSkipSeen 会跳过所有人 ⇒ moved 必然为 0
- * ⇒ 倒计时剩下那几十秒纯属空转，这正是 c5m2 用户报的现象。
+ * 判定口径 = 本次倒计时期间「所有**当前存活**的生还者此刻都在该区域**内**」。
+ *
+ * 1.3.3 修正（1.3.0~1.3.2 用的是 CountSeenSurvivors() >= total，即「本次倒计时
+ * 期间都**到过**」）：g_bSeen 记的是**历史上**到过的人，倒计时第 5 秒走过集合点
+ * 半径、然后跑到前面去的人也算。cfg 下发 l4d2_cptele_checkpoint_percent 50
+ * => 6/12 人就起 30 秒倒计时，中途 12 个人先后路过一次就满足「都到过」，
+ * FinishCheckpointGathered() 立刻 OpenAreaMechanism() 把电梯/机关按下去 ——
+ * 这时往往还有一半人在外面，机关一动作他们就被卡死在集合点。
+ * 「到过」只能当「不需要传送」的判据（g_cvSkipSeen），不能当「机关可以开了」
+ * 的判据：本函数现在要求那一刻真实在场，机关因此不可能抢在到齐之前动作。
  *
  * 三条硬约束，缺一不可：
  *   1) 只对 AREA_CHECKPOINT 生效。安全屋 / 救援点必须保持 1.2.9 的「走满再结算」：
@@ -2462,7 +2508,10 @@ bool IsCheckpointGatherComplete(int index, int type)
 		return false;
 	}
 
-	return CountSeenSurvivors() >= total;
+	// 1.3.3：必须是「此刻全员都在区域内」，不是「本次倒计时期间都到过」。
+	// 只有这样才能保证 FinishCheckpointGathered -> OpenAreaMechanism 按下机关时
+	// 没有人在外面被卡住。
+	return CountArrivedSurvivors(index) >= total;
 }
 
 /**
@@ -2556,56 +2605,18 @@ void FinishCountdown(int index)
 
 	int type = g_iAreaType[index];
 
+	// 1.3.3：本区域的机关是不是「插件按下按钮」那种（电梯 / 升降台）。
+	// 这种机关一动作，留在区域外的生还者就再也进不来了，所以传送口径要更严：
+	// 必须把所有人拉进来再谈开机关，g_cvSkipSeen 的「到过就不再拉回来」在这里让位。
+	bool bButtonMech = HasButtonMechanism(index, type);
+
 	float vDest[3];
 	bool bHasDest = GetAreaDestination(index, vDest);
 	int moved = 0;
 
 	if (bHasDest)
 	{
-		bool bFixedDest = g_bAreaDest[index];
-
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			if (!IsAliveSurvivor(i))
-			{
-				continue;
-			}
-
-			if (IsClientInArea(i, index))
-			{
-				continue;
-			}
-
-			// 本次倒计时期间已经到过集合点的人：视为已集合完毕，
-			// 不再把人从前方传送回来（这就是「集合完就往前走」的修复点）
-			// 1.2.5：安全屋 / 救援点例外 —— 那边要的是"此刻人在屋里"，
-			// 进过又跑出去的掉队者必须被传回来，否则关门时引擎逐个 IsTouching
-			// 会发现"还有人在外面"而中止过关（玩家只能自己再开关一次门）。
-			if (!IsSafeAreaType(type) && g_cvSkipSeen.BoolValue && g_bSeen[i])
-			{
-				continue;
-			}
-
-			// 固定传送点要「每人一份抖动」：12v12 最多 11 个掉队的
-			// 同时落地，全挤在一个坐标上会互相挤出去 / 卡进几何体。
-			float vClientDest[3];
-
-			CopyVec(vDest, vClientDest);
-
-			if (bFixedDest)
-			{
-				vClientDest[0] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
-				vClientDest[1] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
-			}
-
-			TeleportSurvivor(i, vClientDest);
-
-			// 1.2.8：这一次进入是插件传送造成的，不算玩家自己「走进来」，
-			// 登记成已在区域内，避免倒计时结束提示之后再多播一条进入提示。
-			SuppressEnterNoticeForTeleport(index, i);
-
-			moved++;
-		}
+		moved = TeleportStragglersToArea(index, vDest, !bButtonMech);
 	}
 
 	// ---- 开机关 ---------------------------------------------------------
@@ -2693,6 +2704,199 @@ void FinishCountdown(int index)
 	}
 }
 
+// ===========================================================================
+//  1.3.3：机关前置条件 / 补传 / 玩家抢按接管
+// ===========================================================================
+
+/**
+ * 1.3.3：本区域是不是「由插件按下按钮」来开机关的集合点。
+ *
+ * 只有这种区域才需要「按下之前必须全员到齐」的额外约束：按钮一按，电梯 / 升降台
+ * 立刻动作，外面的人再也进不来。坐标型区域（c6m3）和触发体积型（c5m2）的
+ * OpenAreaMechanism() 本来就是空操作，不存在卡人的问题。
+ *
+ * @param index 区域索引
+ * @param type  区域类型
+ * @return true = 中途集合点 + 实体是按钮类
+ */
+bool HasButtonMechanism(int index, int type)
+{
+	if (type != AREA_CHECKPOINT)
+	{
+		return false;
+	}
+
+	int entity = GetAreaEntity(index);
+
+	if (entity == -1)
+	{
+		return false;
+	}
+
+	char sClass[64];
+
+	return GetEntityClassname(entity, sClass, sizeof(sClass)) && IsButtonClass(sClass);
+}
+
+/**
+ * 1.3.3：此刻还有多少名存活生还者不在该区域内。
+ * 用于「机关能不能按」的判定（> 0 就不能按）。
+ */
+int CountSurvivorsOutside(int index)
+{
+	int count = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsAliveSurvivor(i) && !IsClientInArea(i, index))
+		{
+			count++;
+		}
+	}
+
+	return count;
+}
+
+/**
+ * 1.3.3：把仍在区域外的存活生还者传送到 vDest。
+ *
+ * 从 FinishCountdown() 里抽出来，让两条路径共用同一套落点 / 抖动 / 提示抑制逻辑：
+ *   · FinishCountdown()            —— 倒计时正常走满；
+ *   · PlayerPressedActiveMechanism() —— 倒计时期间玩家抢先按下了机关。
+ *
+ * @param index        区域索引
+ * @param vDest        落点（调用方已用 GetAreaDestination 拿到）
+ * @param bRespectSeen true = 尊重 g_cvSkipSeen（本次倒计时期间「到过」的人不拉回来）
+ * @return 实际传送人数
+ */
+int TeleportStragglersToArea(int index, const float vDest[3], bool bRespectSeen)
+{
+	// 本次倒计时期间已经到过集合点的人：视为已集合完毕，
+	// 不再把人从前方传送回来（这就是「集合完就往前走」的修复点）
+	// 1.2.5：安全屋 / 救援点例外 —— 那边要的是"此刻人在屋里"，
+	// 进过又跑出去的掉队者必须被传回来，否则关门时引擎逐个 IsTouching
+	// 会发现"还有人在外面"而中止过关（玩家只能自己再开关一次门）。
+	bool bSkipSeen = bRespectSeen && !IsSafeAreaType(g_iAreaType[index]) && g_cvSkipSeen.BoolValue;
+
+	// 固定传送点要「每人一份抖动」：12v12 最多 11 个掉队的
+	// 同时落地，全挤在一个坐标上会互相挤出去 / 卡进几何体。
+	bool bFixedDest = g_bAreaDest[index];
+	int moved = 0;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsAliveSurvivor(i) || IsClientInArea(i, index))
+		{
+			continue;
+		}
+
+		if (bSkipSeen && g_bSeen[i])
+		{
+			continue;
+		}
+
+		float vClientDest[3];
+
+		CopyVec(vDest, vClientDest);
+
+		if (bFixedDest)
+		{
+			vClientDest[0] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
+			vClientDest[1] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
+		}
+
+		TeleportSurvivor(i, vClientDest);
+
+		// 1.2.8：这一次进入是插件传送造成的，不算玩家自己「走进来」，
+		// 登记成已在区域内，避免倒计时结束提示之后再多播一条进入提示。
+		SuppressEnterNoticeForTeleport(index, i);
+
+		moved++;
+	}
+
+	return moved;
+}
+
+/**
+ * 1.3.3：倒计时期间玩家抢先按下了集合点自己的机关按钮。
+ *
+ * 这是「机关已动作、人还在外面」最直接的来源：引擎不等插件，按钮一按，电梯 /
+ * 升降台立刻就动了，倒计时结束后插件再按一次也补不回来。
+ * 处理方式（需求给的两个选项里取后者）：
+ *   1) 终止本区域倒计时，并且**不再**由插件补按机关 —— 机关已经动作，
+ *      重复按下只会让电梯再来一次 / 状态错乱；
+ *   2) 立刻把仍在区域外的存活生还者传送到集合点，并且**无视 g_cvSkipSeen**
+ *      （「到过又离开」的人留在原地就是被卡死）；
+ *   3) g_bAreaFired = true，本回合不再为该区域起倒计时（放弃后续触发）。
+ *
+ * 只在「本区域正在倒计时」时接管：比例没到之前谁按地图上的按钮都不算，
+ * 否则一个先到的生还者按一下电梯按钮就会把全队传过来。
+ *
+ * @param caller 被按下的 func_button 实体索引
+ * @return true = 已接管（调用方不要再走机关登记）
+ */
+bool PlayerPressedActiveMechanism(int caller)
+{
+	if (!g_cvEnable.BoolValue || !g_bCountingDown)
+	{
+		return false;
+	}
+
+	if (g_iActiveArea < 0 || g_iActiveArea >= g_iAreaCount)
+	{
+		return false;
+	}
+
+	int index = g_iActiveArea;
+
+	if (GetAreaEntity(index) != caller)
+	{
+		return false;
+	}
+
+	int type = g_iAreaType[index];
+
+	g_bCountingDown = false;
+	g_iSecondsLeft = 0;
+	g_iActiveArea = -1;
+	g_bAreaFired[index] = true;
+
+	// 倒计时一结束，进入提示立刻恢复播报：先按此刻真实在场情况同步一次。
+	SyncEnterNoticePresence(index);
+
+	float vDest[3];
+	int moved = 0;
+
+	if (GetAreaDestination(index, vDest))
+	{
+		moved = TeleportStragglersToArea(index, vDest, false);
+	}
+
+	char sName[32];
+	GetAreaTypeName(type, sName, sizeof(sName));
+
+	if (g_cvChat.BoolValue)
+	{
+		if (moved > 0)
+		{
+			PrintToChatAll("\x05[集合点]\x01 机关已被提前按下，已把 %d 名生还者传送到%s，本次不再自动开机关。",
+				moved, sName);
+		}
+		else
+		{
+			PrintToChatAll("\x05[集合点]\x01 机关已被提前按下，本次不再自动开机关。");
+		}
+	}
+
+	if (g_cvVerbose.BoolValue)
+	{
+		PrintToServer("[cptele] 区域 #%d 倒计时期间机关被玩家按下：终止倒计时并补传 %d 人 (type=%d source=%d 仍在外面=%d)",
+			index, moved, type, g_iAreaSource[index], CountSurvivorsOutside(index));
+	}
+
+	return true;
+}
+
 /**
  * 「无人需要传送」的收尾播报：倒计时自然走满时全员都在区域内 / 全员都到过。
  *
@@ -2777,7 +2981,33 @@ void OpenAreaMechanism(int index, int type)
 
 		if (GetEntityClassname(entity, sClass, sizeof(sClass)) && IsButtonClass(sClass))
 		{
+			// 1.3.3：机关（电梯按钮 / 升降台开关）一按就动作，按下那一刻还站在
+			// 外面的生还者就再也进不来了 —— 用户报的「机关提前触发、一堆人被卡在
+			// 集合点」正是这条路。所以按下之前必须确认此刻**全员**都在区域内。
+			//
+			// unlock 无论如何都发：被 spawnflags 锁住的按钮只有解锁后玩家才能按，
+			// 「不自动按」不等于「让人按不了」，后者才会真的把队伍卡死。
 			AcceptEntityInput(entity, "unlock");
+
+			int outside = CountSurvivorsOutside(index);
+
+			if (outside > 0)
+			{
+				char sTypeName[32];
+				GetAreaTypeName(type, sTypeName, sizeof(sTypeName));
+
+				LogError("[cptele] 区域 #%d (%s) 仍有 %d 名存活生还者在区域外，已解锁但不自动按下机关",
+					index, sTypeName, outside);
+
+				if (g_cvChat.BoolValue)
+				{
+					PrintToChatAll("\x05[集合点]\x01 还有 %d 名生还者未到%s，本次不自动开启机关（可手动按下按钮）。",
+						outside, sTypeName);
+				}
+
+				return;
+			}
+
 			AcceptEntityInput(entity, "use");
 		}
 	}

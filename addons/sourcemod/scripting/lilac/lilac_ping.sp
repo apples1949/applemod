@@ -77,7 +77,7 @@ public Action timer_check_ping(Handle timer)
 			ping, icvar[CVAR_MAX_PING]);
 
 		/* Ban the client for three minutes to avoid instant reconnects. */
-		BanClient(i, 3, BANFLAG_AUTHID, reason, reason, "lilac", 0);
+		lilac_ban_client_db(i, 3, BANFLAG_AUTHID, reason);
 	}
 
 	toggle = !toggle;

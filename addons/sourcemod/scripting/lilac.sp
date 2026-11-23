@@ -31,6 +31,7 @@
 #undef REQUIRE_PLUGIN /* ... */
 #undef REQUIRE_EXTENSIONS
 #tryinclude <ripext> /* Optional, only used by the Discord webhook. */
+#tryinclude <l4d2_banned> /* Optional, only used to route Lilac bans into the shared ban database. */
 #define REQUIRE_PLUGIN
 #define REQUIRE_EXTENSIONS
 

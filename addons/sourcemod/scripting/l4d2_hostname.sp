@@ -31,7 +31,7 @@
 #define WILDCARD_IP		"*"	//通配IP,给同一端口的所有服务器设置同一个服名.
 #define UNSET_IP		"0.0.0.0"	//识别不到IP时使用的值.
 #define STATUS_SIZE		2048	//status输出的缓冲区大小.
-#define DETECT_TRIES	6	//识别IP的最多尝试次数.
+#define DETECT_TRIES	4	//识别IP的最多尝试次数(status兜底,失败只写普通日志)
 #define DETECT_INTERVAL	3.0	//识别IP的重试间隔(秒).
 
 ConVar g_hHostName, g_hCfgName, g_hHostPort, g_hHostIP, g_hHostIpInt, g_hHostPublicAdr, g_hKeyIP, g_hEngineMode;
@@ -53,6 +53,7 @@ bool g_bEngineAdrFailed;			//签名/数据准备是否已经失败过(失败过�
 bool g_bIPDetected;					//status是否已经给出可用IP.
 bool g_bDetectRunning;				//识别定时器是否在运行.
 int g_iDetectTries;					//已经尝试识别的次数.
+int g_iEmptyOutputCount;			//status没有输出(引擎不给捕获)的次数,两次就提前放弃,不必等满4次.
 
 public Plugin myinfo = 
 {
@@ -709,6 +710,7 @@ void StartDetectTimer()
 
 	g_bDetectRunning = true;
 	g_iDetectTries = 0;
+	g_iEmptyOutputCount = 0;
 
 	CreateTimer(DETECT_INTERVAL, Timer_DetectIP, _, TIMER_REPEAT);
 }
@@ -726,14 +728,46 @@ public Action Timer_DetectIP(Handle timer)
 		return Plugin_Stop;
 	}
 
-	if(g_iDetectTries >= DETECT_TRIES)//重试次数用完.
+	//重试次数用完,或者status连续两次完全没有输出(重试也不会变好).
+	if(g_iDetectTries >= DETECT_TRIES || g_iEmptyOutputCount >= 2)
 	{
 		g_bDetectRunning = false;
-		LogError("用status收集IP失败了%d次,配置键先用(%s).", g_iDetectTries, g_sServerKey);
+		ReportDetectGaveUp();
 		return Plugin_Stop;
 	}
 
 	return Plugin_Continue;
+}
+
+// ----------------------------------------------------------------------------
+//  2026-11-23 修复：这条以前是 LogError("用status收集IP失败了6次,配置键先用(0.0.0.0:27015).")
+//
+//  为什么不该是 error：
+//   · 拿不到公网地址并不影响服务器运行，插件会自动退回到绑定地址/0.0.0.0 并继续用 default 配置键；
+//   · 容器/NAT/`sv_lan 1`/SDR 匿名 这几种部署里，引擎本来就没有公网地址，
+//     重试多少次都不会成功，日志却每张图刷一条 errors。
+//
+//  现在：改成一条普通日志，并写清楚「试了几次、为什么失败、怎么手动指定」，然后彻底停止重试。
+// ----------------------------------------------------------------------------
+void ReportDetectGaveUp()
+{
+	char sReason[128];
+	char sIP[64];
+
+	GetKeyIP(sIP, sizeof(sIP));
+
+	if(g_iEmptyOutputCount > 0)
+		FormatEx(sReason, sizeof(sReason), "status 没有返回任何输出(引擎不给插件捕获)");
+	else if(g_hHostPort == null)
+		FormatEx(sReason, sizeof(sReason), "status 里没有可用的 udp/ip 地址,且 hostport 变量不存在");
+	else
+		FormatEx(sReason, sizeof(sReason), "status 里没有可用的 udp/ip 地址(容器/NAT/sv_lan=1 时属正常)");
+
+	LogMessage("用status收集IP失败(%d次,%s),配置键先用(%s),已停止重试;如需识别本服,请设置 l4d2_hostname_ip 手动指定IP(本条不是错误).",
+			g_iDetectTries, sReason, g_sServerKey);
+
+	if(IsValidIP(sIP) && !StrEqual(sIP, UNSET_IP))
+		LogMessage("当前实际使用的识别地址是(%s).", sIP);
 }
 
 //执行status并解析,拿到IP后按新的配置键重新读服名.
@@ -745,6 +779,18 @@ bool DetectServerIP()
 	strcopy(sOldKey, sizeof(sOldKey), g_sServerKey);
 
 	ServerCommandEx(sOutput, sizeof(sOutput), "status");//执行status并把输出收进缓冲区.
+
+	TrimString(sOutput);
+
+	if(sOutput[0] == '\0')//有的引擎/环境不给插件捕获status输出,再试也一样.
+	{
+		g_iEmptyOutputCount++;
+
+		if(g_iEmptyOutputCount == 1)
+			LogMessage("status 没有返回任何输出(引擎没有把控制台输出交给插件),跳过status,改用绑定地址兜底.");
+
+		return false;
+	}
 
 	if(!ParseStatus(sOutput))
 		return false;
@@ -762,18 +808,24 @@ bool DetectServerIP()
 	return true;
 }
 
-//解析status输出里的"udp/ip"行:udp/ip  : 0.0.0.0:24085 [ public 180.188.24.113:24085 ]
+// ----------------------------------------------------------------------------
+//  解析status里的 "udp/ip" 行。
+//
+//  2026-11-23 修复（原来是「按固定 token 下标取第2个单词 + 从第3个往后找 public」）：
+//   · 行首可能有空白/制表符，`udp/ip` 与 `:` 之间空格数量在不同引擎/不同 L4D2 版本里不一样，
+//     甚至没有空格（"udp/ip: 0.0.0.0:27015"），固定下标一错就整行解析失败；
+//   · public 段可能写成 "[ public x ]"、" [public x]"、"[ public n/a ]"、"[ public same ]"，
+//     也可能是 IPv6（"[ public [2001:db8::1]:27015 ]"）；
+//   · 同一份输出里可能有多行/多段，必须按行定位而不是全串 StrContains。
+//
+//  现在：按行扫描 → 找到以 udp/ip 开头的行（大小写不敏感，忽略行首空白）
+//        → 跳过 ":" 之类的独立标点取本地绑定地址
+//        → 在该行里找 "public" 标记（允许 [] 紧贴），取它后面第一个不是 n/a/same/unknown 的地址。
+//  解析失败只写普通日志，交给上层的绑定地址兜底，不再报 error。
+// ----------------------------------------------------------------------------
 bool ParseStatus(const char[] sOutput)
 {
-	int iPos = StrContains(sOutput, "udp/ip");
-
-	if(iPos == -1)
-	{
-		LogMessage("status输出里没有udp/ip信息.");
-		return false;
-	}
-
-	char sLine[256];
+	char sLine[512];
 	char sToken[64];
 	char sLocal[64];
 	char sPublic[64];
@@ -781,27 +833,88 @@ bool ParseStatus(const char[] sOutput)
 	char sPort[16];
 	bool bFound = false;
 
-	CopyFrom(sOutput, iPos, sLine, sizeof(sLine));//先复制,再截断到行尾.
-	CutLine(sLine);
-
 	sLocal[0] = '\0';
 	sPublic[0] = '\0';
 
-	if(GetLineToken(sLine, 2, sToken, sizeof(sToken)) && !StrEqual(sToken, "["))//第2个单词是本地绑定地址.
-		strcopy(sLocal, sizeof(sLocal), sToken);
+	//按行扫描，找到 udp/ip 行。
+	int iPos = 0;
+	bool bFoundLine = false;
+	char sUdpLine[512];
+	sUdpLine[0] = '\0';
 
-	for(int i = 3; i < 8; i++)//往后找"public"后面那个单词.
+	while(CopyStatusLine(sOutput, iPos, sLine, sizeof(sLine)))
 	{
-		if(!GetLineToken(sLine, i, sToken, sizeof(sToken)))
-			break;
+		char sTrimmed[512];
+		strcopy(sTrimmed, sizeof(sTrimmed), sLine);
+		TrimString(sTrimmed);
 
-		if(StrEqual(sToken, "public", false))
+		if(sTrimmed[0] == '\0')
+			continue;
+
+		//行首单词必须是 udp/ip（可能带冒号）。
+		if(StrContains(sTrimmed, "udp/ip", false) == 0)
 		{
-			if(GetLineToken(sLine, i + 1, sToken, sizeof(sToken)) && !StrEqual(sToken, "]"))
-				strcopy(sPublic, sizeof(sPublic), sToken);
-
+			strcopy(sUdpLine, sizeof(sUdpLine), sTrimmed);
+			bFoundLine = true;
 			break;
 		}
+	}
+
+	if(!bFoundLine)
+	{
+		LogMessage("status输出里没有udp/ip信息(status格式可能不同).");
+		return false;
+	}
+
+	//本地绑定地址: udp/ip 后面第一个既不是冒号也不是括号的单词。
+	int iCount = GetLineTokenCount(sUdpLine);
+
+	for(int i = 1; i < iCount; i++)
+	{
+		if(!GetLineToken(sUdpLine, i, sToken, sizeof(sToken)))
+			break;
+
+		if(StrEqual(sToken, ":") || StrEqual(sToken, "["))
+			continue;
+
+		strcopy(sLocal, sizeof(sLocal), sToken);
+		break;
+	}
+
+	//公网地址: 找 public 标记后面的地址（public 可能紧贴 '[' ）。
+	for(int i = 1; i < iCount; i++)
+	{
+		if(!GetLineToken(sUdpLine, i, sToken, sizeof(sToken)))
+			break;
+
+		char sMark[64];
+		strcopy(sMark, sizeof(sMark), sToken);
+		StripAddressJunk(sMark);
+
+		if(!StrEqual(sMark, "public", false))
+			continue;
+
+		for(int j = i + 1; j < iCount && j <= i + 3; j++)
+		{
+			if(!GetLineToken(sUdpLine, j, sToken, sizeof(sToken)))
+				break;
+
+			char sCandidate[64];
+			strcopy(sCandidate, sizeof(sCandidate), sToken);
+			StripAddressJunk(sCandidate);
+
+			if(sCandidate[0] == '\0'
+				|| StrEqual(sCandidate, "n/a", false)
+				|| StrEqual(sCandidate, "na", false)
+				|| StrEqual(sCandidate, "same", false)
+				|| StrEqual(sCandidate, "unknown", false))
+				continue;
+
+			strcopy(sPublic, sizeof(sPublic), sToken);
+			break;
+		}
+
+		break;
 	}
 
 	LogMessage("status信息:本地(%s),公网(%s).", sLocal, sPublic);
@@ -831,6 +944,57 @@ bool ParseStatus(const char[] sOutput)
 		bFound = IsValidIP(g_sLocalIP);
 
 	return bFound;
+}
+
+//从sOutput的iPos位置复制一行到sLine(不含换行符),成功返回true,到结尾返回false.
+stock bool CopyStatusLine(const char[] sOutput, int &iPos, char[] sLine, int maxlen)
+{
+	int iLen = 0;
+
+	if(sOutput[iPos] == '\0')
+		return false;
+
+	while(sOutput[iPos] != '\0' && sOutput[iPos] != '\n' && sOutput[iPos] != '\r')
+	{
+		if(iLen < maxlen - 1)
+		{
+			sLine[iLen] = sOutput[iPos];
+			iLen++;
+		}
+
+		iPos++;
+	}
+
+	sLine[iLen] = '\0';
+
+	//吃掉行尾的 \r\n / \n / \r
+	while(sOutput[iPos] == '\r' || sOutput[iPos] == '\n')
+		iPos++;
+
+	return true;
+}
+
+//统计一行里用空格/制表符分开了多少个单词.
+stock int GetLineTokenCount(const char[] sLine)
+{
+	int i = 0;
+	int iCount = 0;
+	bool bInToken = false;
+
+	while(sLine[i] != '\0')
+	{
+		if(sLine[i] == ' ' || sLine[i] == '\t')
+			bInToken = false;
+		else if(!bInToken)
+		{
+			bInToken = true;
+			iCount++;
+		}
+
+		i++;
+	}
+
+	return iCount;
 }
 
 //拼接"IP:端口",IPv6地址用[]包起来.

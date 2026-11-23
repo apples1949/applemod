@@ -34,8 +34,10 @@
 #pragma semicolon 1
 
 #include <sourcemod>
-#undef REQUIRE_PLUGIN
-#include <adminmenu>
+#undef REQUIRE_PLUGIN	//标记为可选开始.
+#include <adminmenu>	//管理员菜单
+#include <l4d2_banned>	//数据库封禁玩家(豆瓣酱 v2.7.5, 可选依赖: 未加载时回退原版 BanClient).
+#define REQUIRE_PLUGIN	//标记为可选结束.
 
 #pragma newdecls required
 
@@ -47,6 +49,8 @@ public Plugin myinfo =
 	version = SOURCEMOD_VERSION,
 	url = "http://www.sourcemod.net/"
 };
+
+bool g_bLibraries;
 
 TopMenu hTopMenu;
 
@@ -88,6 +92,24 @@ public void OnPluginStart()
 	{
 		OnAdminMenuReady(topmenu);
 	}
+}
+
+//所有插件加载完成后执行一次(延迟加载插件也会执行一次).
+public void OnAllPluginsLoaded()   
+{
+	g_bLibraries = LibraryExists("l4d2_banned");
+}
+//库被加载时.
+public void OnLibraryAdded(const char[] name) 
+{
+	if (strcmp(name, "l4d2_banned") == 0)
+		g_bLibraries = true;
+}
+//库被卸载时.
+public void OnLibraryRemoved(const char[] name) 
+{
+	if (strcmp(name, "l4d2_banned") == 0)
+		g_bLibraries = false;
 }
 
 public void OnConfigsExecuted()

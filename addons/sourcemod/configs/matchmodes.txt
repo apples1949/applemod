@@ -10,6 +10,10 @@
 		{
 			"name" "Applemod 12v12"
 		}
+		"applemod8v8allcharger"
+		{
+			"name" "Applemod 8v8 all charger"
+		}
 	}
 	"ZoneMod Configs"
 	{

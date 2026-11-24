@@ -360,7 +360,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.3.3"
+#define PLUGIN_VERSION      "1.3.5"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -376,6 +376,7 @@
 #define CANCEL_COOLDOWN     10.0        // 倒计时被取消后，该区域的冷静期
 #define INFECTED_CLEAR_RADIUS 300.0     // 清理传送点周围特感的半径
 #define DEST_JITTER         32.0        // 固定传送点附近的散开抖动（HU）
+#define ANCHOR_MAX_DIST     160.0       // 半径类区域：只有离中心这么近的队友才算"已经在集合点"，可当传送锚点
 
 #define PRESET_DEFAULT_FILE "l4d2_cptele_presets.cfg"   // 预设文件名（相对 configs/）
 #define LEGACY_DEFAULT_FILE "l4d2_cptele_legacy.cfg"    // 原版地点表文件名（相对 configs/，1.3.1 起从代码搬到 cfg）
@@ -439,6 +440,7 @@ ConVar g_cvTime;                // 安全屋 / 救援点 倒计时
 ConVar g_cvCpPercent;           // 中途集合点 到齐比例
 ConVar g_cvCpTime;              // 中途集合点 倒计时
 ConVar g_cvCpFinishAllSeen;     // 1.3.0：中途集合点全员到过即结束倒计时
+ConVar g_cvCpTeleportAll;       // 1.3.4：中途集合点倒计时结束时把全员传送到位
 ConVar g_cvResetOnLeave;
 ConVar g_cvSkipSeen;
 ConVar g_cvSound;
@@ -639,6 +641,14 @@ public void OnPluginStart()
 	// 只影响中途集合点（AREA_CHECKPOINT）；安全屋 / 救援点仍是「走满再结算」。
 	g_cvCpFinishAllSeen = CreateConVar("l4d2_cptele_checkpoint_finish_all_seen", "1",
 		"[中途集合点] 1=本次倒计时期间所有当前存活的生还者都到过该集合点（判定口径同 l4d2_cptele_skip_seen）时，立刻结束倒计时并开机关，不再空转到 0 之后再播「无需传送」。仅在 l4d2_cptele_skip_seen 1 时生效。0=回到旧行为（集合完毕也把倒计时走满）。安全屋/救援点不受本开关影响",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.3.4（玩家反馈）：中途集合点倒计时结束时，半径判定（l4d2_cptele_mech_radius）
+	// 会把"离机关几百单位"的队友也算成已在集合点 → 只传送 2 个人、其它人原地卡着。
+	// 1=集合点结算时把**全体存活生还者**都传送到落点（已经真正站在落点上的也只是被抖动几十单位）；
+	// 0=只传送判定为"在区域外"的人（旧行为）。安全屋/救援点不受本开关影响。
+	g_cvCpTeleportAll = CreateConVar("l4d2_cptele_checkpoint_teleport_all", "1",
+		"[中途集合点] 1=倒计时结束时把全体存活生还者都传送到落点（解决半径判定把远处队友误判为已到、只传少数人的问题）；0=只传判定在区域外的人。安全屋/救援点不受影响",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// ---- 检测来源 ---------------------------------------------------------
@@ -2543,6 +2553,17 @@ void FinishCheckpointGathered(int index, int type)
 
 	SyncEnterNoticePresence(index);
 
+	/* 1.3.4：半径判定（l4d2_cptele_mech_radius）会把离机关几百单位的队友也算成
+	 * "已在集合点"，于是这里会在人还没真到齐时就开机关。开启全员传送时，先把
+	 * 所有人都拉到落点，再开机关。 */
+	if (type == AREA_CHECKPOINT && g_cvCpTeleportAll.BoolValue)
+	{
+		float vDest[3];
+
+		if (GetCheckpointPoint(index, vDest))
+			TeleportStragglersToArea(index, vDest, false, true);
+	}
+
 	OpenAreaMechanism(index, type);
 
 	char sMsg[192];
@@ -2611,12 +2632,14 @@ void FinishCountdown(int index)
 	bool bButtonMech = HasButtonMechanism(index, type);
 
 	float vDest[3];
-	bool bHasDest = GetAreaDestination(index, vDest);
+	bool bForceAll = (type == AREA_CHECKPOINT && g_cvCpTeleportAll.BoolValue);
+	bool bHasDest = bForceAll ? GetCheckpointPoint(index, vDest) : GetAreaDestination(index, vDest);
 	int moved = 0;
 
 	if (bHasDest)
 	{
-		moved = TeleportStragglersToArea(index, vDest, !bButtonMech);
+		/* 全员传送：不管谁在哪、到过没到过，一律传到集合点落点，然后才开机关。 */
+		moved = TeleportStragglersToArea(index, vDest, bForceAll ? false : !bButtonMech, bForceAll);
 	}
 
 	// ---- 开机关 ---------------------------------------------------------
@@ -2769,7 +2792,7 @@ int CountSurvivorsOutside(int index)
  * @param bRespectSeen true = 尊重 g_cvSkipSeen（本次倒计时期间「到过」的人不拉回来）
  * @return 实际传送人数
  */
-int TeleportStragglersToArea(int index, const float vDest[3], bool bRespectSeen)
+int TeleportStragglersToArea(int index, const float vDest[3], bool bRespectSeen, bool bForceAll = false)
 {
 	// 本次倒计时期间已经到过集合点的人：视为已集合完毕，
 	// 不再把人从前方传送回来（这就是「集合完就往前走」的修复点）
@@ -2785,12 +2808,18 @@ int TeleportStragglersToArea(int index, const float vDest[3], bool bRespectSeen)
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (!IsAliveSurvivor(i) || IsClientInArea(i, index))
+		if (!IsAliveSurvivor(i))
 		{
 			continue;
 		}
 
-		if (bSkipSeen && g_bSeen[i])
+		/* bForceAll：不管判定结果，全员都拉到落点（集合点专用） */
+		if (!bForceAll && IsClientInArea(i, index))
+		{
+			continue;
+		}
+
+		if (!bForceAll && bSkipSeen && g_bSeen[i])
 		{
 			continue;
 		}
@@ -2799,8 +2828,9 @@ int TeleportStragglersToArea(int index, const float vDest[3], bool bRespectSeen)
 
 		CopyVec(vDest, vClientDest);
 
-		if (bFixedDest)
+		if (bFixedDest || bForceAll)
 		{
+			/* 全员传送时落点是同一个 nav 点，必须给每个人散开，否则 12 个人叠一起 */
 			vClientDest[0] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
 			vClientDest[1] += GetRandomFloat(-DEST_JITTER, DEST_JITTER);
 		}
@@ -4211,6 +4241,52 @@ bool IsClientInArea(int client, int index)
 //  传送
 // ===========================================================================
 
+/**
+ * 1.3.5（玩家反馈"别整那么复杂"）：集合点全员传送的落点。
+ * 只用「预设固定点 → 区域中心/机关位置 → 最近 nav 点」，**完全不看队友站在哪**
+ * （队友可能只是落在 600 半径边缘，拿他当锚点就会把别人传到半路）。
+ */
+bool GetCheckpointPoint(int index, float vDest[3])
+{
+	if (g_bAreaDest[index])
+	{
+		CopyVec(g_vAreaDest[index], vDest);
+
+		return true;
+	}
+
+	float vOrigin[3];
+
+	if (g_bAreaCoord[index] || g_bAreaRadius[index])
+		GetAreaCenter(index, vOrigin);
+	else
+	{
+		int entity = GetAreaEntity(index);
+
+		if (entity == -1)
+			return false;
+
+		GetEntityCenter(entity, vOrigin);
+	}
+
+	if (g_bNtvNav)
+	{
+		int nav = view_as<int>(L4D_GetNearestNavArea(vOrigin, 1000.0, true));
+
+		if (nav)
+		{
+			L4D_FindRandomSpot(nav, vDest);
+
+			if (vDest[0] != 0.0 || vDest[1] != 0.0 || vDest[2] != 0.0)
+				return true;
+		}
+	}
+
+	CopyVec(vOrigin, vDest);
+
+	return true;
+}
+
 bool GetAreaDestination(int index, float vDest[3])
 {
 	// ---- 0) 预设 / 原版内置表给的固定传送点（最准，优先） ----------------
@@ -4224,13 +4300,34 @@ bool GetAreaDestination(int index, float vDest[3])
 
 	int candidates[MAXPLAYERS];
 	int count = 0;
+	bool bRadiusArea = g_bAreaRadius[index];
+	float vAreaCenter[3];
+
+	if (bRadiusArea)
+		GetAreaCenter(index, vAreaCenter);
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (IsAliveSurvivor(i) && IsClientInArea(i, index))
+		if (!IsAliveSurvivor(i) || !IsClientInArea(i, index))
 		{
-			candidates[count++] = i;
+			continue;
 		}
+
+		/* 1.3.4：半径类区域的"在区域内"可能离机关几百单位，拿这种人当锚点会把
+		 * 其他人传到半路上（玩家反馈的"传送不到位"）。只认贴着中心的人。 */
+		if (bRadiusArea)
+		{
+			float vClientOrigin[3];
+
+			GetClientAbsOrigin(i, vClientOrigin);
+
+			if (GetVectorDistance(vClientOrigin, vAreaCenter) > ANCHOR_MAX_DIST)
+			{
+				continue;
+			}
+		}
+
+		candidates[count++] = i;
 	}
 
 	// ---- 1) 已经站在区域内的生还者位置（最可靠） -------------------------

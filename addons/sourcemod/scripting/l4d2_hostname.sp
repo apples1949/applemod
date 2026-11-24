@@ -1245,6 +1245,13 @@ void GetDisplayCfgName(char[] sCfgName, int maxlen)
 //大小写不敏感关键词映射, 命中返回true并写入显示名.
 bool ApplyCfgNameMapping(const char[] source, char[] buffer, int maxlen)
 {
+	//全牛盛宴: 8v8 全 charger 配置(目录名 applemod8v8allcharger / l4d_ready_cfg_name 里有 allcharger),
+	//必须先于下面 "applemod" 规则判, 否则会被吃成"进阶包抗".
+	if(StrContains(source, "allcharger", false) != -1)
+	{
+		strcopy(buffer, maxlen, "全牛盛宴");
+		return true;
+	}
 	//applemod 的 12v12 子配置必须先判, 否则会被下面的 "applemod" 规则吃掉显示成"进阶包抗".
 	//匹配来源同时覆盖两种: confogl 配置文件夹名 "applemod12v12" 与 l4d_ready_cfg_name 里的 "... 12v12".
 	if(StrContains(source, "12v12", false) != -1)

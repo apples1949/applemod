@@ -360,7 +360,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.3.5"
+#define PLUGIN_VERSION      "1.3.7"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -441,6 +441,7 @@ ConVar g_cvCpPercent;           // 中途集合点 到齐比例
 ConVar g_cvCpTime;              // 中途集合点 倒计时
 ConVar g_cvCpFinishAllSeen;     // 1.3.0：中途集合点全员到过即结束倒计时
 ConVar g_cvCpTeleportAll;       // 1.3.4：中途集合点倒计时结束时把全员传送到位
+ConVar g_cvPauseWhenEmpty;      // 1.3.6：集合点里没人时暂停倒计时
 ConVar g_cvResetOnLeave;
 ConVar g_cvSkipSeen;
 ConVar g_cvSound;
@@ -474,6 +475,10 @@ bool  g_bAreaCoord[MAX_AREAS];      // 纯坐标区域，不依赖实体
 bool  g_bAreaRadius[MAX_AREAS];     // 用距离判定（否则用 L4D_IsTouchingTrigger）
 float g_vAreaPos[MAX_AREAS][3];     // 距离判定的中心点
 float g_fAreaRadius[MAX_AREAS];     // 距离判定的半径（<=0 用 l4d2_cptele_mech_radius）
+bool  g_bAreaBox[MAX_AREAS];        // 1.3.7：用 2D 方框判定（square 写法），优先于半径
+float g_vAreaBox[MAX_AREAS][4];     // xmin, xmax, ymin, ymax
+float g_fAreaZMin[MAX_AREAS];       // 方框模式的 z 下限（可选）
+float g_fAreaZMax[MAX_AREAS];       // 方框模式的 z 上限（可选）
 bool  g_bAreaDest[MAX_AREAS];       // 是否带固定传送点
 float g_vAreaDest[MAX_AREAS][3];    // 固定传送点
 float g_fAreaCooldown[MAX_AREAS];
@@ -649,6 +654,13 @@ public void OnPluginStart()
 	// 0=只传送判定为"在区域外"的人（旧行为）。安全屋/救援点不受本开关影响。
 	g_cvCpTeleportAll = CreateConVar("l4d2_cptele_checkpoint_teleport_all", "1",
 		"[中途集合点] 1=倒计时结束时把全体存活生还者都传送到落点（解决半径判定把远处队友误判为已到、只传少数人的问题）；0=只传判定在区域外的人。安全屋/救援点不受影响",
+		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.3.6（玩家反馈 c4m2）：集合点里一个生还者都没有时暂停倒计时。
+	// 否则会对着空电梯倒计时，到点后没有"区域内的队友"可当落点，
+	// 只能传送到区域中心/nav 点 → 容易落到电梯井外摔死。
+	g_cvPauseWhenEmpty = CreateConVar("l4d2_cptele_pause_when_empty", "1",
+		"[中途集合点] 1=倒计时期间集合点内没有任何存活生还者时暂停倒计时（保留剩余秒数），等人进去后自动继续；0=不暂停（旧行为）",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	// ---- 检测来源 ---------------------------------------------------------
@@ -1143,6 +1155,56 @@ void DetectAreas()
 }
 
 /**
+ * 1.3.7：把区域的判定方式切换成 2D 方框（square）。
+ * 坐标可以直接抄 spit_block_square 那一行的四个数，顺序随意（会自动排序）。
+ * zmin/zmax 可选：给了就只在那个高度区间内算"在区域内"（电梯上下两层不会互相误判）。
+ *
+ * @return true = 设置成功
+ */
+bool SetAreaBox(int index, float x1, float y1, float x2, float y2, bool bHasZ, float zmin, float zmax)
+{
+	if (index < 0 || index >= g_iAreaCount)
+	{
+		return false;
+	}
+
+	g_vAreaBox[index][0] = (x1 < x2) ? x1 : x2;
+	g_vAreaBox[index][1] = (x1 < x2) ? x2 : x1;
+	g_vAreaBox[index][2] = (y1 < y2) ? y1 : y2;
+	g_vAreaBox[index][3] = (y1 < y2) ? y2 : y1;
+
+	if (g_vAreaBox[index][1] - g_vAreaBox[index][0] < 8.0
+		|| g_vAreaBox[index][3] - g_vAreaBox[index][2] < 8.0)
+	{
+		if (g_cvVerbose.BoolValue)
+		{
+			PrintToServer("[cptele] 区域 #%d 的 square 太小（<8 HU），忽略该写法，退回半径判定", index);
+		}
+
+		g_vAreaBox[index][0] = g_vAreaBox[index][1] = 0.0;
+		g_vAreaBox[index][2] = g_vAreaBox[index][3] = 0.0;
+		g_bAreaBox[index] = false;
+
+		return false;
+	}
+
+	if (bHasZ)
+	{
+		g_fAreaZMin[index] = (zmin < zmax) ? zmin : zmax;
+		g_fAreaZMax[index] = (zmin < zmax) ? zmax : zmin;
+	}
+	else
+	{
+		g_fAreaZMin[index] = -100000.0;
+		g_fAreaZMax[index] = 100000.0;
+	}
+
+	g_bAreaBox[index] = true;
+
+	return true;
+}
+
+/**
  * 登记一个区域。
  *
  * @param entity    区域实体；<=0 表示「纯坐标区域」（预设里只写了 origin/radius）
@@ -1197,7 +1259,16 @@ int AddArea(int entity, int type, int source, const float vPos[3],
 	g_bAreaFired[index] = false;
 	g_bAreaCoord[index] = bCoord;
 	g_bAreaDest[index] = bHasDest;
+	g_bAreaBox[index] = false;
+	g_fAreaZMin[index] = -100000.0;
+	g_fAreaZMax[index] = 100000.0;
 	g_fAreaCooldown[index] = 0.0;
+
+	for (int j = 0; j < 4; j++)
+	{
+		g_vAreaBox[index][j] = 0.0;
+	}
+
 	g_fAreaRadius[index] = (fRadius > 0.0) ? fRadius : 0.0;   // <=0 表示用全局默认半径
 
 	for (int j = 0; j < 3; j++)
@@ -1451,6 +1522,36 @@ int LoadConfigSlot(KeyValues kv, const char[] sMap, const char[] sSlot, int sour
 
 	int iResult = (type == AREA_CHECKPOINT) ? PRESET_SLOT_CHECKPOINT : PRESET_SLOT_OTHER;
 
+	// 1.3.7：方框写法（直接抄 spit_block_square 的四个数），比半径精确得多
+	char sSquare[128];
+	float vBox[4];
+	bool bHasBox = false;
+
+	kv.GetString("square", sSquare, sizeof(sSquare), "");
+
+	if (sSquare[0] != '\0')
+	{
+		if (ParseSquare(sSquare, vBox))
+			bHasBox = true;
+		else if (g_cvVerbose.BoolValue)
+			PrintToServer("[cptele] 预设 %s/%s 的 square \"%s\" 解析失败，退回半径判定", sMap, sSlot, sSquare);
+	}
+
+	bool bHasZ = false;
+	float fZMin = 0.0;
+	float fZMax = 0.0;
+	char sZBuf[64];
+
+	kv.GetString("zmin", sZBuf, sizeof(sZBuf), "");
+
+	if (sZBuf[0] != '\0' && ParseFloatToken(sZBuf, fZMin))
+	{
+		kv.GetString("zmax", sZBuf, sizeof(sZBuf), "");
+
+		if (sZBuf[0] != '\0' && ParseFloatToken(sZBuf, fZMax))
+			bHasZ = true;
+	}
+
 	// 半径：预设没写就用全局默认
 	float fRadius = kv.GetFloat("radius", 0.0);
 
@@ -1494,7 +1595,12 @@ int LoadConfigSlot(KeyValues kv, const char[] sMap, const char[] sSlot, int sour
 			return PRESET_SLOT_NONE;
 		}
 
-		if (AddArea(0, type, source, vPos, fRadius, vDest, bHasDest) == -1)
+		int iNewIndex = AddArea(0, type, source, vPos, fRadius, vDest, bHasDest);
+
+		if (iNewIndex != -1 && bHasBox)
+			SetAreaBox(iNewIndex, vBox[0], vBox[1], vBox[2], vBox[3], bHasZ, fZMin, fZMax);
+
+		if (iNewIndex == -1)
 		{
 			if (g_cvVerbose.BoolValue)
 			{
@@ -1532,7 +1638,12 @@ int LoadConfigSlot(KeyValues kv, const char[] sMap, const char[] sSlot, int sour
 		return PRESET_SLOT_NONE;
 	}
 
-	if (AddArea(entity, type, source, NULL_VECTOR, fRadius, vDest, bHasDest) == -1)
+	int iEntityIndex = AddArea(entity, type, source, NULL_VECTOR, fRadius, vDest, bHasDest);
+
+	if (iEntityIndex != -1 && bHasBox)
+		SetAreaBox(iEntityIndex, vBox[0], vBox[1], vBox[2], vBox[3], bHasZ, fZMin, fZMax);
+
+	if (iEntityIndex == -1)
 	{
 		if (g_cvVerbose.BoolValue)
 		{
@@ -2431,6 +2542,18 @@ public Action Timer_Countdown(Handle timer)
 			g_hCountdown = null;
 			return Plugin_Stop;
 		}
+	}
+
+	// 1.3.6：中途集合点里没人 → 暂停倒计时（不递减），等人进去再继续
+	if (type == AREA_CHECKPOINT && g_cvPauseWhenEmpty.BoolValue
+		&& CountArrivedSurvivors(index) <= 0)
+	{
+		char sPauseName[32];
+
+		GetAreaTypeName(type, sPauseName, sizeof(sPauseName));
+		PrintHintTextToAll("%s暂时没有生还者到场，倒计时已暂停（剩余 %d 秒）", sPauseName, g_iSecondsLeft);
+
+		return Plugin_Continue;
 	}
 
 	// 先递减再判断，保证总时长精确等于该类型的倒计时 cvar，
@@ -4208,6 +4331,21 @@ int AreaRequiredCount(int type, int total)
 
 bool IsClientInArea(int client, int index)
 {
+	/* 1.3.7：方框判定（预设里写 square）—— 与 spit_block_square 用同一套坐标，
+	 * 判定"人是否真的站在电梯轿厢/平台上"，比 600 半径准得多。 */
+	if (g_bAreaBox[index])
+	{
+		float vClient[3];
+
+		GetClientAbsOrigin(client, vClient);
+
+		if (vClient[2] < g_fAreaZMin[index] || vClient[2] > g_fAreaZMax[index])
+			return false;
+
+		return (vClient[0] >= g_vAreaBox[index][0] && vClient[0] <= g_vAreaBox[index][1]
+		     && vClient[1] >= g_vAreaBox[index][2] && vClient[1] <= g_vAreaBox[index][3]);
+	}
+
 	if (g_bAreaRadius[index])
 	{
 		float vClient[3];
@@ -4242,12 +4380,76 @@ bool IsClientInArea(int client, int index)
 // ===========================================================================
 
 /**
- * 1.3.5（玩家反馈"别整那么复杂"）：集合点全员传送的落点。
- * 只用「预设固定点 → 区域中心/机关位置 → 最近 nav 点」，**完全不看队友站在哪**
- * （队友可能只是落在 600 半径边缘，拿他当锚点就会把别人传到半路）。
+ * 1.3.6：取一个"确实站在集合点里"的生还者坐标当传送锚点。
+ * 只在人真的落在区域内时有效 —— 半径类区域要求离中心 ANCHOR_MAX_DIST 以内，
+ * 避免把 600 半径边缘的人当锚点（那就是"传送到集合点外面"的根因）。
+ *
+ * @return true = 拿到锚点（vDest 已写入，附带 ±24 抖动）
+ */
+bool GetSurvivorAnchor(int index, float vDest[3], bool bStrict = true)
+{
+	int candidates[MAXPLAYERS];
+	int count = 0;
+	float vCenter[3];
+	bool bRadius = g_bAreaRadius[index];
+
+	if (bRadius)
+		GetAreaCenter(index, vCenter);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsAliveSurvivor(i) || !IsClientInArea(i, index))
+			continue;
+
+		if (bRadius && bStrict)
+		{
+			float vOrigin[3];
+
+			GetClientAbsOrigin(i, vOrigin);
+
+			if (GetVectorDistance(vOrigin, vCenter) > ANCHOR_MAX_DIST)
+				continue;
+		}
+
+		/* 挂边 / 倒地的人不能当锚点：传过去也是半空中 */
+		if (GetEntProp(i, Prop_Send, "m_isIncapacitated", 1) != 0
+			|| GetEntProp(i, Prop_Send, "m_isHangingFromLedge", 1) != 0)
+			continue;
+
+		candidates[count++] = i;
+	}
+
+	if (count <= 0)
+		return false;
+
+	int pick = candidates[GetRandomInt(0, count - 1)];
+
+	GetClientAbsOrigin(pick, vDest);
+	vDest[0] += GetRandomFloat(-24.0, 24.0);
+	vDest[1] += GetRandomFloat(-24.0, 24.0);
+
+	return true;
+}
+
+/**
+ * 1.3.6：集合点全员传送的落点。
+ * 优先「此刻确实在集合点里的队友位置」（1.3.6 起两档：先 160 HU 内严格锚点，
+ * 退一步用区域内任意队友），拿不到才用预设固定点，最后才是区域中心/nav 点。
  */
 bool GetCheckpointPoint(int index, float vDest[3])
 {
+	/* 1.3.6（玩家反馈 c4m2 摔死）：优先落到"此刻确实在集合点里的生还者身上"，
+	 * 找不到人再用预设固定点，最后才用区域中心/nav 点。这样传送目标永远是
+	 * 人站得住的地方，不会把轿厢外的人丢到电梯井/悬崖下面。 */
+	if (GetSurvivorAnchor(index, vDest, true))
+		return true;
+
+	/* 第二档：集合点判定半径（如 c4m2 的 700）内没有"贴着中心"的人，
+	 * 就退一步用任意一个在区域内的队友位置 —— 仍然是"有人站的地方"，
+	 * 总比拿预设点/区域中心当落点安全（预设点可能在电梯井外）。 */
+	if (GetSurvivorAnchor(index, vDest, false))
+		return true;
+
 	if (g_bAreaDest[index])
 	{
 		CopyVec(g_vAreaDest[index], vDest);
@@ -4257,7 +4459,7 @@ bool GetCheckpointPoint(int index, float vDest[3])
 
 	float vOrigin[3];
 
-	if (g_bAreaCoord[index] || g_bAreaRadius[index])
+	if (g_bAreaCoord[index] || g_bAreaRadius[index] || g_bAreaBox[index])
 		GetAreaCenter(index, vOrigin);
 	else
 	{
@@ -4346,7 +4548,7 @@ bool GetAreaDestination(int index, float vDest[3])
 	// ---- 2) 区域原点 -> 最近 nav area 的随机点 ---------------------------
 	float vOrigin[3];
 
-	if (g_bAreaCoord[index] || g_bAreaRadius[index])
+	if (g_bAreaCoord[index] || g_bAreaRadius[index] || g_bAreaBox[index])
 	{
 		/* 1.3.1：半径类区域（按钮 / 坐标）走实时中心，电梯移动后落点才不会
 		 * 还是回合开始时的位置；纯坐标区域没有实体，GetAreaCenter 会用快照。 */
@@ -4520,10 +4722,17 @@ public Action Cmd_Status(int client, int args)
 		float vCenter[3];
 		GetAreaCenter(i, vCenter);
 
-		ReplyToCommand(client, "  #%d %s/%s ent=%d 距离判定=%d 中心=%.0f %.0f %.0f 已到达=%d 已触发=%d",
-			i, sType, sSrc, GetAreaEntity(i), g_bAreaRadius[i],
+		ReplyToCommand(client, "  #%d %s/%s ent=%d 距离判定=%d 方框判定=%d 中心=%.0f %.0f %.0f 已到达=%d 已触发=%d",
+			i, sType, sSrc, GetAreaEntity(i), g_bAreaRadius[i], g_bAreaBox[i],
 			vCenter[0], vCenter[1], vCenter[2],
 			CountArrivedSurvivors(i), g_bAreaFired[i]);
+
+		if (g_bAreaBox[i])
+		{
+			ReplyToCommand(client, "      方框 x[%.0f..%.0f] y[%.0f..%.0f] z[%.0f..%.0f]",
+				g_vAreaBox[i][0], g_vAreaBox[i][1], g_vAreaBox[i][2], g_vAreaBox[i][3],
+				g_fAreaZMin[i], g_fAreaZMax[i]);
+		}
 	}
 
 	if (g_bCountingDown)
@@ -4723,6 +4932,37 @@ stock bool NextNumberToken(const char[] sBuf, int &iPos, float &fValue)
 /**
  * 解析 "x y z"（也接受 "x,y,z"）。
  */
+/**
+ * 1.3.7：解析 "x1 y1 x2 y2"（spit_block_square 那四个数，顺序随意）。
+ */
+stock bool ParseSquare(const char[] sValue, float vOut[4])
+{
+	int iPos = 0;
+
+	for (int i = 0; i < 4; i++)
+	{
+		if (!NextNumberToken(sValue, iPos, vOut[i]))
+			return false;
+	}
+
+	return true;
+}
+
+stock bool ParseFloatToken(const char[] sValue, float &fOut)
+{
+	char sTrim[64];
+
+	strcopy(sTrim, sizeof(sTrim), sValue);
+	TrimString(sTrim);
+
+	if (sTrim[0] == '\0' || (sTrim[0] != '-' && sTrim[0] != '+' && (sTrim[0] < '0' || sTrim[0] > '9')))
+		return false;
+
+	fOut = StringToFloat(sTrim);
+
+	return true;
+}
+
 stock bool ParseVec(const char[] sValue, float vOut[3])
 {
 	int iPos = 0;
@@ -4931,6 +5171,15 @@ stock void GetEntityCenter(int entity, float vCenter[3])
  */
 stock void GetAreaCenter(int index, float vCenter[3])
 {
+	if (g_bAreaBox[index])
+	{
+		vCenter[0] = (g_vAreaBox[index][0] + g_vAreaBox[index][1]) * 0.5;
+		vCenter[1] = (g_vAreaBox[index][2] + g_vAreaBox[index][3]) * 0.5;
+		vCenter[2] = (g_fAreaZMin[index] + g_fAreaZMax[index]) * 0.5;
+
+		return;
+	}
+
 	if (!g_bAreaCoord[index])
 	{
 		int entity = GetAreaEntity(index);

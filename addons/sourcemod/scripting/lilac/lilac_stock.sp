@@ -507,16 +507,40 @@ bool lilac_ban_active(int cheat)
 	return true;
 }
 
-/* 数据库封禁（豆瓣酱 l4d2_banned）：装了就把封禁交给它的 BanPlayers 写进共享库；
- * 没装（或库没注册）就退回 SourceMod 原版 BanClient，行为与官方 LILAC 一致。 */
-void lilac_ban_client_db(int client, int time, int flags, const char[] reason, any source = 0)
+/* 豆瓣酱 l4d2_banned（共享数据库封禁）是否真的可用：
+ * 库已注册 + BanPlayers native 可用（l4d2_banned.smx 真的加载成功且没 SetFailState）。 */
+bool lilac_db_ban_ready()
 {
 #if defined _Evill4d2_banned
-	if (LibraryExists("l4d2_banned")) {
+	return LibraryExists("l4d2_banned")
+		&& NATIVE_EXISTS("BanPlayers");
+#else
+	return false;
+#endif
+}
+
+/* 数据库封禁（豆瓣酱 l4d2_banned）：装了就把封禁交给它的 BanPlayers 写进共享库；
+ * 没装（或库没注册）就退回 SourceMod 原版 BanClient，行为与官方 LILAC 一致。
+ * 注意：退回时必须留一条服务器日志，否则线上只能看到"封禁生效但库里没有"。 */
+void lilac_ban_client_db(int client, int time, int flags, const char[] reason, any source = 0)
+{
+	if (lilac_db_ban_ready())
+	{
+#if defined _Evill4d2_banned
+		PrintToServer("[lilac] ban via l4d2_banned db: %N (%d min, reason: %s)",
+			client, time, reason);
 		BanPlayers(client, time, flags, reason, reason, "lilac", source);
 		return;
-	}
 #endif
+	}
+
+	/* 只在第一次退回时告警，避免刷屏。 */
+	static bool warned_db_missing = false;
+	if (!warned_db_missing)
+	{
+		warned_db_missing = true;
+		LogError("[lilac] l4d2_banned 库或 BanPlayers native 不可用，封禁将退回 BanClient（只写 banned_user.cfg，不进数据库）。");
+	}
 
 	BanClient(client, time, flags, reason, reason, "lilac", source);
 }
@@ -580,6 +604,8 @@ void lilac_ban_client(int client, int cheat)
 		SBBanPlayer(0, client, get_ban_length(cheat), reason);
 	}
 	default: {
+		/* BAN_BACKEND_L4D2BANNED 与 BAN_BACKEND_BASEBANS 都走这里；
+		 * helper 内部再判一次库/native，能进库就进库，否则才退回 BanClient。 */
 		lilac_ban_client_db(client, get_ban_length(cheat), BANFLAG_AUTO, reason);
 	}
 	}
@@ -587,9 +613,12 @@ void lilac_ban_client(int client, int cheat)
 	CreateTimer(5.0, timer_kick, userid);
 }
 
-/* Which plugin bans go through, in priority order: MaterialAdmin,
- * SourceBans++, SourceBans (old), and lastly BaseBans. Also used by
- * lilac_ban_status, so what it reports is what actually happens. */
+/* Which plugin bans go through. 实际优先级：
+ *   MaterialAdmin → SourceBans++ → SourceBans(old)   （仅当管理员显式打开对应 cvar）
+ *   → l4d2_banned（豆瓣酱共享库，只要可用就默认走它）
+ *   → BaseBans（本地 banned_user.cfg 兜底）
+ * 也就是说：SB/MA 的 cvar 是 0（默认）时，l4d2_banned 在就一定进库，不会被截走。
+ * 也被 lilac_ban_status 使用，所以它报告的就是实际会发生的。 */
 int lilac_get_ban_backend()
 {
 	if (icvar[CVAR_MA] && NATIVE_EXISTS("MABanPlayer"))
@@ -602,6 +631,9 @@ int lilac_get_ban_backend()
 		if (NATIVE_EXISTS("SBBanPlayer"))
 			return BAN_BACKEND_SOURCEBANS;
 	}
+
+	if (lilac_db_ban_ready())
+		return BAN_BACKEND_L4D2BANNED;
 
 	return BAN_BACKEND_BASEBANS;
 }

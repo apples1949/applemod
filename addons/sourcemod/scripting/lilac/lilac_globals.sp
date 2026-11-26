@@ -350,6 +350,9 @@ int   playerinfo_burst_cur[MAXPLAYERS + 1];
 #define BAN_BACKEND_SOURCEBANS     1
 #define BAN_BACKEND_SOURCEBANSPP   2
 #define BAN_BACKEND_MATERIALADMIN  3
+/* 豆瓣酱 l4d2_banned 的共享数据库（BanPlayers）。只要它在，默认就走这条，
+ * 除非管理员显式打开 lilac_materialadmin / lilac_sourcebans。 */
+#define BAN_BACKEND_L4D2BANNED     4
 
 native Function IRC_MsgFlaggedChannels(const char[] flag, const char[] format, any ...);
 native Function MABanPlayer(int iClient, int iTarget, int iType, int iTime, char[] sReason);

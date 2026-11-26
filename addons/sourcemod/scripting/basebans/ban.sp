@@ -81,16 +81,28 @@ void PrepareBan(int client, int target, int time, const char[] reason)
 	{
 		// 装了 l4d2_banned(数据库封禁)时走它的 native, 封禁写进数据库; 否则回退原版本地封禁.
 		if(g_bLibraries)
+		{
 			BanPlayers(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟) -> l4d2_banned 数据库", target, time);
+		}
 		else
+		{
 			BanClient(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟) -> 本地 banned_user.cfg（l4d2_banned 未就绪）", target, time);
+		}
 	}
 	else
 	{
 		if(g_bLibraries)
+		{
 			BanPlayers(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s) -> l4d2_banned 数据库", target, time, reason);
+		}
 		else
+		{
 			BanClient(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s) -> 本地 banned_user.cfg（l4d2_banned 未就绪）", target, time, reason);
+		}
 	}
 }
 
@@ -292,7 +304,7 @@ public Action Command_Ban(int client, int args)
 		}
 		else
 		{
-			ReplyToCommand(client, "[SM] Usage: sm_ban <#userid|name> <minutes|0> [reason]");
+			ReplyBoth(client, "[SM] Usage: sm_ban <#userid|name> <minutes|0> [reason]");
 		}
 		
 		return Plugin_Handled;

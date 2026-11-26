@@ -347,6 +347,50 @@
  *    - 边界：机关只在「比例达标 + 本区域倒计时跑完 + 全员此刻在区域内」后由插件
  *      触发一次；安全屋 / 救援点（非按钮机关）路径完全不变；不改任何 cfg。
  *
+ *  1.3.8 修复「c1m1_hotel 人还没走到电梯集合点，倒计时就开始了」（2026-11-26）：
+ *    - 现象（用户回报，历史上出现过多次）：Dead Center 1 的电梯集合点，生还者
+ *      还在电梯厅外面的走廊/上层平台上捡枪、打架，屏幕上就已经开始
+ *      「30 秒后传送未到集合点的生还者」。
+ *    - 根因（数据）：c1m1 的中途集合点来自**原版地点表**
+ *      （l4d2_cptele_legacy.cfg 的 c1m1_hotel / cp_elevator），槽位只写了
+ *      classname + targetname，没写 radius → 判定半径退化成
+ *      l4d2_cptele_mech_radius 600。而 elevator_button 是挂在 func_elevator
+ *      轿厢上的壁挂面板，1.3.1 的父实体坐标修正算出的世界中心是
+ *      (2244.3, 5723.2, 2503.4)（轿厢顶部站位层的西南角）。
+ *      600 半径的三维球体不认墙也不认楼层，把下面这些「还没到电梯」的位置全
+ *      圈了进来（数值由 BSP 实体与 applemod12v12 的 stripper 配置反查）：
+ *        (1920,5394,2475) 电梯前房间的武器位  → 463 HU
+ *        (2155,5367,2487) 电梯前房间的枪位    → 368 HU
+ *        (2357,5644,2630) 电梯井旁上层窗台    → 188 HU
+ *      12 人局 l4d2_cptele_checkpoint_percent 50 => 只要 6 人在这片区域里
+ *      （捡枪/等电梯时的常态），倒计时就起；接着 1.3.4 的
+ *      l4d2_cptele_checkpoint_teleport_all 会把整队拉进轿厢并按按钮，
+ *      电梯提前下行 —— 玩家感受到的就是「还没走到就开始了」。
+ *    - 已排除的方向（逐条核实过，不是本次根因）：
+ *      · OnUseLocked 动态登记：c1m1 由原版地点表提供集合点 => g_bSiteAuthority
+ *        为真 => RegisterMechanism 直接 return，动态登记根本没发生；
+ *        而且 elevator_button 的解锁来自地图自己的 *27 entireteam 触发体积，
+ *        玩家在别处按不动它。
+ *      · 区域中心塌到原点：1.3.1 已修好父实体世界坐标，本图中心就是轿厢面板
+ *        （不是 0,0,0）。
+ *      · 安全屋/救援点误登记：c1m1 只有一个 info_changelevel，是底面真正的
+ *        关底安全屋 (1840..2288, 4288..4656, z 1184..1312)；救援区只在终局图登记。
+ *      · 人数口径：need = ceil(50% × 当前存活生还者数)，12 人 = 6 人，代码正确；
+ *        它只是把上面那个过大的判定球放大成「6 人就够」。
+ *    - 做法一（数据，主修）：预设表与原版地点表里的 c1m1_hotel 都改成
+ *      **轿厢精确方框**：square = 轿厢 brush *41 的世界脚印
+ *      (2064..2272, 5713..5912) 四周各放 4 HU + zmin/zmax 2450/2600（等于顶层的轿厢站位层）。
+ *      只有真正站进轿厢的人才算「已到达」，电梯厅外面的走廊、上层窗台都不再计数。
+ *      dest 沿用原条目 2171 5810 2529（轿车内地板）。
+ *    - 做法二（代码，通用兜底）：新增 l4d2_cptele_checkpoint_core_radius（默认 200）：
+ *      **半径判定**的中途集合点起倒计时前，必须至少有 1 名存活生还者在这个
+ *      「核心半径」内（真的贴着机关），否则本 tick 不起倒计时。方框 / 触发体积
+ *      类区域本来就是精确体积，不受影响。0 = 关闭该门槛（回到 1.3.7 行为）。
+ *      这样别的图（c1m4 / c3m1 / c8m4 这类只有按钮、没写方框的条目）也不会
+ *      再被「隔着一堵墙的房间里的 6 个人」触发。
+ *    - 边界：c1m1 的轿厢会下行到 z≈1216，方框固定在上层站位层，电梯开走后区域
+ *      自然变空（本回合已触发，不会再起倒计时）；pause_when_empty 不变。
+ *
  *  API 运行期依赖：left4dhooks 的若干 native 在 include 里是
  *  MarkNativeAsOptional，因此 OnAllPluginsLoaded 里用 GetFeatureStatus
  *  逐个复核，关键 native 缺失时自动关掉功能并写日志，而不是崩服。
@@ -360,7 +404,7 @@
 #include <sdktools>
 #include <left4dhooks>
 
-#define PLUGIN_VERSION      "1.3.7"
+#define PLUGIN_VERSION      "1.3.8"
 
 #define SOUND_COUNTDOWN     "buttons/blip1.wav"
 
@@ -442,6 +486,7 @@ ConVar g_cvCpTime;              // 中途集合点 倒计时
 ConVar g_cvCpFinishAllSeen;     // 1.3.0：中途集合点全员到过即结束倒计时
 ConVar g_cvCpTeleportAll;       // 1.3.4：中途集合点倒计时结束时把全员传送到位
 ConVar g_cvPauseWhenEmpty;      // 1.3.6：集合点里没人时暂停倒计时
+ConVar g_cvCpCoreRadius;        // 1.3.8：半径类集合点起倒计时前，至少 1 人必须在这个核心半径内
 ConVar g_cvResetOnLeave;
 ConVar g_cvSkipSeen;
 ConVar g_cvSound;
@@ -662,6 +707,15 @@ public void OnPluginStart()
 	g_cvPauseWhenEmpty = CreateConVar("l4d2_cptele_pause_when_empty", "1",
 		"[中途集合点] 1=倒计时期间集合点内没有任何存活生还者时暂停倒计时（保留剩余秒数），等人进去后自动继续；0=不暂停（旧行为）",
 		FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	// 1.3.8（玩家反馈 c1m1）：半径判定（l4d2_cptele_mech_radius）不认墙也不认楼层，
+	// 写 600 就会把集合点外面一整片走廊/上层平台都算成「已到场」，12 人局 50% 只要
+	// 6 人正好在那片区域（捡枪、路过、打架）就起倒计时。这里加一道硬门槛：
+	// 必须至少有 1 名存活生还者真的在机关身边（核心半径内），否则不起倒计时。
+	// 方框（square）/ 触发体积类区域本来就是精确体积，不受这条影响。
+	g_cvCpCoreRadius = CreateConVar("l4d2_cptele_checkpoint_core_radius", "200.0",
+		"[中途集合点] 半径判定的集合点在起倒计时前，至少要有一名存活生还者离判定中心这么近（HU，三维距离）才算「真的到过机关旁边」，否则不起倒计时。预设里用 square 方框或触发体积判定的区域不受影响。0=关闭该门槛",
+		FCVAR_NOTIFY, true, 0.0, true, 2000.0);
 
 	// ---- 检测来源 ---------------------------------------------------------
 	g_cvPreset = CreateConVar("l4d2_cptele_preset", "1",
@@ -2149,6 +2203,26 @@ public Action Timer_Monitor(Handle timer)
 
 		if (reached >= need)
 		{
+			/* 1.3.8（玩家反馈 c1m1「人还没走到电梯集合点倒计时就开始了」）：
+			 * 比例达标还不够 —— 半径判定的集合点会因为半径写成 600 而把整片
+			 * 电梯厅外面的走廊/上层平台都圈进来（不认墙、不认楼层），12 人局
+			 * 只要 6 人正好路过那片区域就起倒计时。
+			 * 这里再要求「至少 1 名存活生还者真的在机关身边」（核心半径内），
+			 * 才允许起倒计时。方框 / 触发体积类区域判定本身就是精确体积，
+			 * 不需要这道门槛（g_bAreaBox / !g_bAreaRadius）。
+			 * 门槛只作用于「起倒计时那一刻」，倒计时期间的暂停逻辑
+			 * （l4d2_cptele_pause_when_empty）与结算逻辑完全不变。 */
+			if (!HasCoreSurvivor(i))
+			{
+				if (g_cvVerbose.BoolValue)
+				{
+					PrintToServer("[cptele] 区域 #%d 比例已达标（%d/%d 需要 %d），但核心半径 %.0f 内没有生还者，暂不起倒计时",
+						i, reached, total, need, g_cvCpCoreRadius.FloatValue);
+				}
+
+				continue;
+			}
+
 			StartCountdown(i, reached, total);
 			break;
 		}
@@ -4329,6 +4403,81 @@ int AreaRequiredCount(int type, int total)
 	return need;
 }
 
+/**
+ * 1.3.8：半径判定的中途集合点，是否已有生还者「真的贴着机关」。
+ *
+ * 存在的理由（玩家反馈 c1m1「人还没走到电梯集合点，倒计时就开始了」）：
+ *   半径判定用的是三维球体，不认墙、不认楼层。c1m1 的原版地点表条目只写了
+ *   func_button + targetname，没写 radius，于是退化成 l4d2_cptele_mech_radius
+ *   600 —— 一个以轿厢内壁面板为中心、半径 600 的球，把电梯厅外面的走廊、
+ *   电梯前放枪的房间、电梯井旁的上层窗台全圈了进来。12 人局 50% 只要 6 人
+ *   正好在那片区域（捡枪、等电梯、打架时的常态）比例就达标，倒计时于是
+ *   在谁都没进轿厢的时候就开始跑；接着 1.3.4 的全员传送会把整队拉进轿厢
+ *   并按按钮，电梯提前下行。
+ *
+ * 本函数给出最后一道门槛：比例达标之后，还必须有至少 1 名存活生还者
+ * 落在「核心半径」（l4d2_cptele_checkpoint_core_radius，默认 200 HU）内。
+ *   · 方框区域（g_bAreaBox）：方框本身已经精确，直接放行；
+ *   · 触发体积区域（!g_bAreaRadius）：L4D_IsTouchingTrigger 本来就精确，放行；
+ *   · 纯半径区域：要求有人真的贴着判定中心，否则本 tick 不起倒计时。
+ *
+ * @param index 区域索引（调用方已校验范围）
+ * @return true = 可以起倒计时
+ */
+bool HasCoreSurvivor(int index)
+{
+	// 只约束「中途集合点」：安全屋 / 救援点的 1.2.5 / 1.2.9 语义一个字都不动
+	if (g_iAreaType[index] != AREA_CHECKPOINT)
+	{
+		return true;
+	}
+
+	// 方框 / 触发体积类判定本身就是精确体积，不需要这道门槛
+	if (g_bAreaBox[index] || !g_bAreaRadius[index])
+	{
+		return true;
+	}
+
+	// 0 = 关闭该门槛（回到 1.3.7 的行为）
+	float fCore = g_cvCpCoreRadius.FloatValue;
+
+	if (fCore <= 0.0)
+	{
+		return true;
+	}
+
+	/* 核心半径不允许超过判定半径本身太多（写错了也不至于把整片区域都算核心） */
+	float fArea = g_fAreaRadius[index] > 0.0 ? g_fAreaRadius[index] : g_cvMechRadius.FloatValue;
+
+	if (fCore > fArea)
+	{
+		fCore = fArea;
+	}
+
+	float vCenter[3];
+
+	GetAreaCenter(index, vCenter);
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsAliveSurvivor(i))
+		{
+			continue;
+		}
+
+		float vClient[3];
+
+		GetClientAbsOrigin(i, vClient);
+
+		if (GetVectorDistance(vClient, vCenter) <= fCore)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 bool IsClientInArea(int client, int index)
 {
 	/* 1.3.7：方框判定（预设里写 square）—— 与 spit_block_square 用同一套坐标，
@@ -4732,6 +4881,18 @@ public Action Cmd_Status(int client, int args)
 			ReplyToCommand(client, "      方框 x[%.0f..%.0f] y[%.0f..%.0f] z[%.0f..%.0f]",
 				g_vAreaBox[i][0], g_vAreaBox[i][1], g_vAreaBox[i][2], g_vAreaBox[i][3],
 				g_fAreaZMin[i], g_fAreaZMax[i]);
+		}
+
+		/* 1.3.8：半径类集合点起倒计时还要过一道「核心半径内必须有人」的门槛。
+		 * 比例达标但倒计时不起时，看这一行就能判断是不是被这道门槛挡住
+		 * （这也是 c1m1「还没走到电梯就起倒计时」的修复点）。 */
+		if (g_bAreaRadius[i] && !g_bAreaBox[i])
+		{
+			bool bCore = HasCoreSurvivor(i);
+
+			ReplyToCommand(client, "      核心半径 %.0f 内有人=%d（%s）",
+				g_cvCpCoreRadius.FloatValue, bCore ? 1 : 0,
+				bCore ? "允许起倒计时" : "比例达标也不起倒计时");
 		}
 	}
 

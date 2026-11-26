@@ -54,6 +54,33 @@ bool g_bLibraries;
 
 TopMenu hTopMenu;
 
+/* ======================================================================
+ *  rcon / 服务器控制台回显助手
+ *  client == 0（rcon、服务器控制台）时 ReplyToCommand 只会写服务器控制台，
+ *  而 rcon 命令又在跑完后立刻回收，很多情况下被吞掉；这里在 client == 0 时
+ *  显式 PrintToServer，保证 rcon 一定看得到结果。
+ * ==================================================================== */
+stock void ReplyBoth(int client, const char[] format, any ...)
+{
+	char buffer[512];
+
+	/* 先定翻译目标，%t 按 client 或服务器语言展开（client == 0 → LANG_SERVER）。 */
+	if (client > 0 && client <= MaxClients)
+		SetGlobalTransTarget(client);
+	else
+		SetGlobalTransTarget(LANG_SERVER);
+
+	VFormat(buffer, sizeof(buffer), format, 3);
+
+	if (client > 0 && client <= MaxClients && IsClientInGame(client))
+	{
+		ReplyToCommand(client, "%s", buffer);
+		return;
+	}
+
+	PrintToServer("%s", buffer);
+}
+
 enum struct PlayerInfo {
 	int banTarget;
 	int banTargetUserId;
@@ -178,7 +205,7 @@ public Action Command_BanIp(int client, int args)
 {
 	if (args < 2)
 	{
-		ReplyToCommand(client, "[SM] Usage: sm_banip <ip|#userid|name> <time> [reason]");
+		ReplyBoth(client, "[SM] Usage: sm_banip <ip|#userid|name> <time> [reason]");
 		return Plugin_Handled;
 	}
 
@@ -201,7 +228,7 @@ public Action Command_BanIp(int client, int args)
 
 	if (StrEqual(arg, "0"))
 	{
-		ReplyToCommand(client, "[SM] %t", "Cannot ban that IP");
+		ReplyBoth(client, "[SM] %t", "Cannot ban that IP");
 		return Plugin_Handled;
 	}
 	
@@ -246,7 +273,7 @@ public Action Command_BanIp(int client, int args)
 	
 	if (hit_client == -1 && !has_rcon)
 	{
-		ReplyToCommand(client, "[SM] %t", "No Access");
+		ReplyBoth(client, "[SM] %t", "No Access");
 		return Plugin_Handled;
 	}
 
@@ -260,7 +287,7 @@ public Action Command_BanIp(int client, int args)
 			  arg, 
 			  Arguments[len]);
 				
-	ReplyToCommand(client, "[SM] %t", "Ban added");
+	ReplyBoth(client, "[SM] %t", "Ban added");
 	
 	BanIdentity(arg, 
 				minutes, 
@@ -281,7 +308,7 @@ public Action Command_AddBan(int client, int args)
 {
 	if (args < 2)
 	{
-		ReplyToCommand(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
+		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
 		return Plugin_Handled;
 	}
 
@@ -296,7 +323,7 @@ public Action Command_AddBan(int client, int args)
 	/* Get time */
 	if ((len = BreakString(arg_string, time, sizeof(time))) == -1)
 	{
-		ReplyToCommand(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
+		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
 		return Plugin_Handled;
 	}	
 	total_len += len;
@@ -321,14 +348,14 @@ public Action Command_AddBan(int client, int args)
 	
 	if (!idValid)
 	{
-		ReplyToCommand(client, "[SM] %t", "Invalid SteamID specified");
+		ReplyBoth(client, "[SM] %t", "Invalid SteamID specified");
 		return Plugin_Handled;
 	}
 
 	AdminId tid = FindAdminByIdentity("steam", authid);
 	if (client && !CanAdminTarget(GetUserAdmin(client), tid))
 	{
-		ReplyToCommand(client, "[SM] %t", "No Access");
+		ReplyBoth(client, "[SM] %t", "No Access");
 		return Plugin_Handled;
 	}
 
@@ -348,7 +375,11 @@ public Action Command_AddBan(int client, int args)
 				"sm_addban", 
 				client);
 
-	ReplyToCommand(client, "[SM] %t", "Ban added");
+	/* sm_addban 一律走 BanIdentity —— l4d2_banned 的 OnBanIdentity 无条件写库，
+	 * 所以这里不需要 g_bLibraries 判断；但要有服务器日志，rcon 才能确认真的入库。 */
+	PrintToServer("[basebans] sm_addban: %s (%d 分钟) -> BanIdentity（l4d2_banned 会写库）", authid, minutes);
+
+	ReplyBoth(client, "[SM] %t", "Ban added");
 
 	return Plugin_Handled;
 }
@@ -357,7 +388,7 @@ public Action Command_Unban(int client, int args)
 {
 	if (args < 1)
 	{
-		ReplyToCommand(client, "[SM] Usage: sm_unban <steamid|ip>");
+		ReplyBoth(client, "[SM] Usage: sm_unban <steamid|ip>");
 		return Plugin_Handled;
 	}
 
@@ -379,7 +410,11 @@ public Action Command_Unban(int client, int args)
 	LogAction(client, -1, "\"%L\" removed ban (filter \"%s\")", client, arg);
 	RemoveBan(arg, ban_flags, "sm_unban", client);
 
-	ReplyToCommand(client, "[SM] %t", "Removed bans matching", arg);
+	/* RemoveBan 带非空 command，所以 l4d2_banned 的 OnRemoveBan 会被触发并 SQL_Delete。
+	 * 这里补一条服务器日志：rcon 下能直接看到"库里删了没"在 l4d2_banned 的日志里对得上。 */
+	PrintToServer("[basebans] sm_unban: %s -> RemoveBan（l4d2_banned 会删库记录）", arg);
+
+	ReplyBoth(client, "[SM] %t", "Removed bans matching", arg);
 
 	return Plugin_Handled;
 }
@@ -388,17 +423,17 @@ public Action Command_AbortBan(int client, int args)
 {
 	if(!CheckCommandAccess(client, "sm_ban", ADMFLAG_BAN))
 	{
-		ReplyToCommand(client, "[SM] %t", "No Access");
+		ReplyBoth(client, "[SM] %t", "No Access");
 		return Plugin_Handled;
 	}
 	if(playerinfo[client].isWaitingForChatReason)
 	{
 		playerinfo[client].isWaitingForChatReason = false;
-		ReplyToCommand(client, "[SM] %t", "AbortBan applied successfully");
+		ReplyBoth(client, "[SM] %t", "AbortBan applied successfully");
 	}
 	else
 	{
-		ReplyToCommand(client, "[SM] %t", "AbortBan not waiting for custom reason");
+		ReplyBoth(client, "[SM] %t", "AbortBan not waiting for custom reason");
 	}
 	
 	return Plugin_Handled;

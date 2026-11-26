@@ -118,6 +118,23 @@ ArrayList g_hBanFileLines = null;
 Handle g_hBanFileTimer = null;
 int g_iBanFileIndex = 0;
 
+/* 统一的"回显给谁"助手：client > 0 走原版 ReplyToCommand（聊天/控制台各按回复源），
+ * client == 0（rcon / 服务器控制台）一律额外 PrintToServer。
+ * 只靠 ReplyToCommand 时，rcon 执行带 %t 的翻译串、或客户端索引非法时会静默丢弃。 */
+stock void ReplyBoth(int client, const char[] format, any ...)
+{
+	char buffer[512];
+	VFormat(buffer, sizeof(buffer), format, 3);
+
+	if (client > 0 && client <= MaxClients && IsClientInGame(client))
+	{
+		ReplyToCommand(client, "%s", buffer);
+		return;
+	}
+
+	PrintToServer("%s", buffer);
+}
+
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) 
 {
 	CreateNatives();
@@ -156,6 +173,8 @@ public Plugin myinfo =
 public void OnPluginStart() 
 {
 	RegAdminCmd("sm_banlist", Command_BanList, ADMFLAG_GENERIC, "封禁列表(管理员).");
+	RegAdminCmd("sm_bandb", Command_BanDb, ADMFLAG_ROOT, "数据库封禁自检: 连接/类型/库名/条数/表结构/rcon 可见.");
+	RegAdminCmd("sm_bandb_check", Command_BanDb, ADMFLAG_ROOT, "同 sm_bandb.");
 	
 	BuildPath(Path_SM, g_skvPath, sizeof(g_skvPath), "configs/l4d2_banned.cfg");
 	IsReadFileValues();
@@ -178,7 +197,233 @@ public void OnPluginStart()
 //封禁列表.
 public Action Command_BanList(int client, int args)
 {
+	/* rcon / 服务器控制台（client == 0）下菜单无法显示，改成把列表打到服务器控制台。 */
+	if (client <= 0)
+	{
+		PrintBanListToServer();
+		return Plugin_Handled;
+	}
+
 	OpenBanListMenu(client, 0, false);
+	return Plugin_Handled;
+}
+
+/* sm_banlist 的 rcon 版本：按 timestamp 倒序列出前 100 条。 */
+void PrintBanListToServer()
+{
+	if (g_dbSQL == null)
+	{
+		PrintToServer("[l4d2_banned] 数据库未连接，无法读取封禁列表（用 sm_bandb 看连接状态）。");
+		return;
+	}
+
+	/* 先查总数再查列表：不在同一个连接上同时开着两个未取完的结果集
+	 * （MySQL 驱动下 CALL/多结果集必须先处理完才能发下一条）。 */
+	int iNow = GetTime();
+	int iTotal = -1;
+
+	DBResultSet rsCount = SQL_Query(g_dbSQL, "SELECT COUNT(*) FROM l4d2_banned;");
+	if (rsCount != null && rsCount.FetchRow())
+		iTotal = rsCount.FetchInt(0);
+	delete rsCount;
+
+	DBResultSet rs = SQL_Query(g_dbSQL, "SELECT SteamID, banreason, bantime, timestamp FROM l4d2_banned ORDER BY timestamp DESC LIMIT 100;");
+	if (rs == null)
+	{
+		char error[1024];
+		SQL_GetError(g_dbSQL, error, sizeof(error));
+		PrintToServer("[l4d2_banned] 查询封禁列表失败: %s", error);
+		return;
+	}
+
+	int iFetched = rs.RowCount;
+	int iShown = 0, iActive = 0;
+
+	PrintToServer("[l4d2_banned] ===== 封禁列表（本页 %d 条，库内共 %d 条）=====",
+		iFetched, (iTotal >= 0) ? iTotal : iFetched);
+
+	while (rs.FetchRow())
+	{
+		char sAuth[64], sReason[128];
+		rs.FetchString(0, sAuth, sizeof(sAuth));
+		rs.FetchString(1, sReason, sizeof(sReason));
+		int iBanTime = rs.FetchInt(2);
+		int iStamp = rs.FetchInt(3);
+
+		bool bActive = (iBanTime <= 0) || (iBanTime * 60 + iStamp > iNow);
+		if (bActive)
+			iActive++;
+
+		if (iBanTime <= 0)
+			PrintToServer("  %s | 永久 | 封禁于 %s | %s", sAuth, GetDateTime(iStamp), sReason);
+		else
+			PrintToServer("  %s | %d 分钟 | 封禁于 %s | 解封 %s | %s",
+				sAuth, iBanTime, GetDateTime(iStamp),
+				GetDateTime(iStamp + iBanTime * 60), sReason);
+
+		if (++iShown >= 100)
+			break;
+	}
+	delete rs;
+
+	PrintToServer("[l4d2_banned] ===== 其中仍生效 %d 条 =====", iActive);
+}
+
+/* ======================================================================
+ *  sm_bandb / sm_bandb_check —— 数据库可用性自检
+ *  连接状态、驱动类型、库名、连接耗时、总条数、最近一条、表结构、
+ *  断线重连状态与待上传暂存条数。rcon 下同样可见（全部 PrintToServer）。
+ * ==================================================================== */
+public Action Command_BanDb(int client, int args)
+{
+	char sDriver[32] = "未连接", sProduct[32] = "-", sDbName[128] = "-";
+	float fConnectCost = 0.0;
+	bool bTableOK = true;
+	int iTotal = -1, iLastStamp = 0;
+	char sLastAuth[64] = "", sLastReason[128] = "";
+
+	ReplyBoth(client, "[l4d2_banned] ===== 数据库自检 =====");
+	ReplyBoth(client, "[l4d2_banned] 配置类型(configs/l4d2_banned.cfg): %s", g_bDatabaseType ? "MySQL" : "SQLite");
+	ReplyBoth(client, "[l4d2_banned] 连接状态: %s", (g_dbSQL != null) ? "已连接" : "未连接");
+	ReplyBoth(client, "[l4d2_banned] 断线重连: %s；待上传暂存: %d 条", (g_hReconnectTimer != null) ? "进行中（每 30 秒重试）" : "未启用", (g_hPendingBans != null) ? g_hPendingBans.Size : 0);
+
+	if (g_dbSQL == null)
+	{
+		ReplyBoth(client, "[l4d2_banned] 当前无连接，接着尝试一次连接（最多 5 秒）...");
+
+		char error[1024];
+		float fStart = GetEngineTime();
+		Database db = IniSQLiteTry(error, sizeof(error));
+		fConnectCost = GetEngineTime() - fStart;
+
+		if (db == null)
+		{
+			ReplyBoth(client, "[l4d2_banned] 连接失败（耗时 %.3f 秒）：%s", fConnectCost, error);
+			ReplyBoth(client, "[l4d2_banned] ===== 自检结束（不健康）=====");
+			return Plugin_Handled;
+		}
+
+		g_dbSQL = db;
+		ReplyBoth(client, "[l4d2_banned] 连接成功（耗时 %.3f 秒），已恢复全局连接。", fConnectCost);
+		FlushPendingBans();
+	}
+	else
+	{
+		/* 已有连接：发一条轻量查询测一下往返耗时，确认连接没半死。 */
+		float fStart = GetEngineTime();
+		DBResultSet rs = SQL_Query(g_dbSQL, "SELECT 1;");
+		fConnectCost = GetEngineTime() - fStart;
+
+		if (rs != null)
+		{
+			delete rs;
+			ReplyBoth(client, "[l4d2_banned] 连接存活（往返耗时 %.3f 秒）。", fConnectCost);
+		}
+		else
+		{
+			char error[1024];
+			SQL_GetError(g_dbSQL, error, sizeof(error));
+			ReplyBoth(client, "[l4d2_banned] 连接已失效：%s（下次查询起走暂存/重连）", error);
+		}
+	}
+
+	/* 驱动类型 / 库名（不打印账号密码）。 */
+	DBDriver driver = g_dbSQL.Driver;
+	if (driver != null)
+	{
+		driver.GetIdentifier(sDriver, sizeof(sDriver));
+		driver.GetProduct(sProduct, sizeof(sProduct));
+	}
+
+	if (g_bDatabaseType)
+	{
+		/* MySQL：库名从 databases.cfg 的 default 节取。 */
+		char sCfgPath[PLATFORM_MAX_PATH];
+		GetDbConfigPath(sCfgPath, sizeof(sCfgPath));
+
+		KeyValues kv = new KeyValues("Databases");
+		if (kv.ImportFromFile(sCfgPath))
+		{
+			if (kv.JumpToKey("default"))
+				kv.GetString("database", sDbName, sizeof(sDbName), "(未填写)");
+		}
+		delete kv;
+	}
+	else
+	{
+		strcopy(sDbName, sizeof(sDbName), "l4d2_banned.sq3 (data/sqlite)");
+	}
+
+	ReplyBoth(client, "[l4d2_banned] 驱动: %s (%s)；库: %s", sProduct, sDriver, sDbName);
+
+	/* 表结构 + 总条数 + 最近一条。 */
+	DBResultSet rs = SQL_Query(g_dbSQL, "SELECT COUNT(*) AS c FROM l4d2_banned;");
+	if (rs != null && rs.FetchRow())
+	{
+		iTotal = rs.FetchInt(0);
+	}
+	else
+	{
+		char error[1024];
+		SQL_GetError(g_dbSQL, error, sizeof(error));
+		bTableOK = false;
+		ReplyBoth(client, "[l4d2_banned] 表 l4d2_banned 不可用：%s", error);
+	}
+	delete rs;
+
+	if (iTotal >= 0)
+	{
+		ReplyBoth(client, "[l4d2_banned] 总条数: %d", iTotal);
+
+		rs = SQL_Query(g_dbSQL, "SELECT SteamID, banreason, bantime, timestamp FROM l4d2_banned ORDER BY timestamp DESC LIMIT 1;");
+		if (rs != null && rs.FetchRow())
+		{
+			rs.FetchString(0, sLastAuth, sizeof(sLastAuth));
+			rs.FetchString(1, sLastReason, sizeof(sLastReason));
+			iLastStamp = rs.FetchInt(3);
+			ReplyBoth(client, "[l4d2_banned] 最近一条: %s | %s | 时长 %d 分钟 | %s",
+				sLastAuth, sLastReason, rs.FetchInt(2), GetDateTime(iLastStamp));
+		}
+		else
+		{
+			ReplyBoth(client, "[l4d2_banned] 最近一条: （表为空）");
+		}
+		delete rs;
+
+		/* 表结构核对：SteamID / banreason / bantime / timestamp 四个字段都得在。 */
+		rs = SQL_Query(g_dbSQL, "SELECT SteamID, banreason, bantime, timestamp FROM l4d2_banned LIMIT 0;");
+		if (rs == null)
+		{
+			bTableOK = false;
+			char error[1024];
+			SQL_GetError(g_dbSQL, error, sizeof(error));
+			ReplyBoth(client, "[l4d2_banned] 表结构不匹配：%s", error);
+		}
+		else
+		{
+			char sWant[4][16];
+			strcopy(sWant[0], sizeof(sWant[]), "SteamID");
+			strcopy(sWant[1], sizeof(sWant[]), "banreason");
+			strcopy(sWant[2], sizeof(sWant[]), "bantime");
+			strcopy(sWant[3], sizeof(sWant[]), "timestamp");
+
+			for (int i = 0; i < 4; i++)
+			{
+				int field;
+				if (!rs.FieldNameToNum(sWant[i], field))
+				{
+					bTableOK = false;
+					ReplyBoth(client, "[l4d2_banned] 表结构缺少字段: %s", sWant[i]);
+				}
+			}
+			delete rs;
+		}
+
+		ReplyBoth(client, "[l4d2_banned] 表结构: %s（SteamID/banreason/bantime/timestamp）", bTableOK ? "匹配" : "不匹配");
+	}
+
+	ReplyBoth(client, "[l4d2_banned] ===== 自检结束（%s）=====", (g_dbSQL != null && bTableOK) ? "健康" : "异常");
+
 	return Plugin_Handled;
 }
 public void OnLibraryRemoved(const char[] name)
@@ -528,31 +773,55 @@ public void OnMapEnd()
 
 void IniSQLite() 
 {	
+	/* 已经有连接（例如 sm_bandb 手动连上过）就不再重复建连，免得把好连接换成坏连接。 */
+	if (g_dbSQL != null)
+		return;
+
 	char error[1024];
-	if(g_bDatabaseType == false)
+	Database db = IniSQLiteTry(error, sizeof(error));
+
+	if (db == null)
 	{
-		if (!(g_dbSQL = SQLite_UseDatabase("l4d2_banned", error, sizeof error)))//创建指定名称的数据库.
+		if (g_bDatabaseType == false)
 			SetFailState("Could not connect to the database \"l4d2_banned\" at the following error:\n%s", error);
 
-		SQL_FastQuery(g_dbSQL, "CREATE TABLE IF NOT EXISTS l4d2_banned\
+		/* MySQL 连不上就重试，绝不卸载插件：否则这段时间的封禁会静默丢失。 */
+		PrintToServer("[l4d2_banned] 数据库连接失败: %s（%.0f 秒后重试；期间封禁在本服执行并暂存，连上后自动上传）", error, RECONNECT_INTERVAL);
+		StartReconnectTimer();
+		return;
+	}
+
+	g_dbSQL = db;
+}
+
+/* 只负责"连一次、必要时建表"，成功返回 Database，失败返回 null（不 SetFailState）。
+ * sm_bandb 用它做按需连接，IniSQLite 用它做启动连接。 */
+Database IniSQLiteTry(char[] error, int maxlength)
+{
+	Database db;
+
+	if (g_bDatabaseType == false)
+	{
+		db = SQLite_UseDatabase("l4d2_banned", error, maxlength);//创建指定名称的数据库.
+		if (db == null)
+			return null;
+
+		SQL_FastQuery(db, "CREATE TABLE IF NOT EXISTS l4d2_banned\
 		(\
 		SteamID NVARCHAR(32) NOT NULL DEFAULT '', \
 		banreason NVARCHAR(32) NOT NULL DEFAULT '', \
 		bantime INT NOT NULL DEFAULT 0, \
 		timestamp INT NOT NULL DEFAULT 0);\
 		");
-	}
-	else
-	{
-		g_dbSQL = SQL_DefConnect(error, sizeof error, true);
-		if (!g_dbSQL) {
-			/* 连不上就重试，绝不卸载插件：否则这段时间的封禁会静默丢失。 */
-			PrintToServer("[l4d2_banned] 数据库连接失败: %s（%.0f 秒后重试；期间封禁在本服执行并暂存，连上后自动上传）", error, RECONNECT_INTERVAL);
-			StartReconnectTimer();
-			return;
-		}
 
-		SQL_FastQuery(g_dbSQL, "CREATE TABLE `l4d2_banned`  (\
+		return db;
+	}
+
+	db = SQL_DefConnect(error, maxlength, true);
+	if (db == null)
+		return null;
+
+	SQL_FastQuery(db, "CREATE TABLE IF NOT EXISTS `l4d2_banned`  (\
 								`SteamID` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,\
 								`banreason` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,\
 								`bantime` int NOT NULL,\
@@ -560,15 +829,20 @@ void IniSQLite()
 								PRIMARY KEY (`SteamID`) USING BTREE\
 								) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = DYNAMIC;");
 
-		if (!SQL_SetCharset(g_dbSQL, "utf8mb4")) {
-			SQL_GetError(g_dbSQL, error, sizeof error);
-			PrintToServer("[l4d2_banned] 无法更改为utf8mb4字符集: %s（%.0f 秒后重试）", error, RECONNECT_INTERVAL);
-			g_dbSQL.Close();
-			g_dbSQL = null;
-			StartReconnectTimer();
-			return;
-		}
+	if (!SQL_SetCharset(db, "utf8mb4"))
+	{
+		SQL_GetError(db, error, maxlength);
+		db.Close();
+		return null;
 	}
+
+	return db;
+}
+
+/* databases.cfg 的绝对路径，只用于 sm_bandb 打印库名（不打印账号密码）。 */
+stock void GetDbConfigPath(char[] path, int maxlength)
+{
+	BuildPath(Path_SM, path, maxlength, "configs/databases.cfg");
 }
 //读取所有玩家数据.
 stock void SQL_LoadAll() 
@@ -771,18 +1045,40 @@ stock int GetClientAuthIndex(const char[] auth)
 //删除指定的玩家数据.
 stock void SQL_Delete(const char[] auth) 
 {
+	if (g_dbSQL == null)
+	{
+		/* 断线期间 sm_unban 不能静默吞掉：明确告诉管理员这次没删库。 */
+		PrintToServer("[l4d2_banned] 数据库未连接，无法删除库记录: %s（本地封禁仍会移除）", auth);
+		return;
+	}
+
 	char query[1024];
 	FormatEx(query, sizeof query, "DELETE FROM l4d2_banned WHERE SteamID = '%s';", auth);
-	g_dbSQL.Query(SQL_CallbackDelOld, query);
+	DataPack hPack = new DataPack();
+	hPack.WriteString(auth);
+	g_dbSQL.Query(SQL_CallbackDelOld, query, hPack);
 }
 //删除数据回调.
 void SQL_CallbackDelOld(Database db, DBResultSet results, const char[] error, any data) 
 {
+	char auth[128];
+	DataPack hPack = view_as<DataPack>(data);
+	if (hPack != null)
+	{
+		hPack.Reset();
+		hPack.ReadString(auth, sizeof(auth));
+		delete hPack;
+	}
+
 	if (!db || !results) 
 	{
-		LogError(error);
+		PrintToServer("[l4d2_banned] 删除库记录失败: %s（%s）", auth, error);
+		LogError("[l4d2_banned] 删除库记录失败: %s（%s）", auth, error);
 		return;
 	}
+
+	/* AffectedRows == 0 是"库里本来就没这条"，也要说清楚，避免误以为删成功。 */
+	PrintToServer("[l4d2_banned] 已删除库记录: %s（影响 %d 行）", auth, results.AffectedRows);
 }
 //更新玩家数据.
 stock void SQL_Save(int time, int iNowTime, char[] auth, char[] reason) 

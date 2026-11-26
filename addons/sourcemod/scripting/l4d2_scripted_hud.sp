@@ -35,6 +35,15 @@ public Plugin myinfo =
 #define HUD2                          1
 #define HUD_TICKER                    6
 
+// hud1 队伍显示模式 (l4d2_scripted_hud_hud1_team_mode)
+//   0 = 原样: 全场同一份 hud1, 且人数行只在 survivor_limit>=12 时出现(12v12/4v4 行为完全不变)
+//   1 = 两队分列: hud1 的人数行拆成"生还者行 / 感染者行"两行, 8v8 这类 survivor_limit<12 的
+//       多人配置也能看到两队人数; 生还者/感染者/旁观者看到的内容一致(各自关心的一行都在)。
+//       不用引擎的 HUD_FLAG_TEAM_* 位做过队伍过滤: 那两个 flag 命中任一队时旁观者会被一起挡掉,
+//       而本模式的旁观位(min 24 / max 30)需要看 hud1 的进度信息。
+#define HUD1_TEAM_MODE_OFF            0
+#define HUD1_TEAM_MODE_SPLIT          1
+
 // 「多人配置」门槛：survivor_limit 达到这个值才算多人局（12v12=12，原版/4v4=4）。
 // 人数行、!jg/!sur/!inf 指令提示只在这种配置下显示。
 // 1.6.1 起 HUD2 的时间写法也用它分流：多人配置只显示 时:分:秒，4v4 及以下显示完整日期时间。
@@ -153,6 +162,9 @@ static Handle g_hFunFactDeferTimer;                             // 修复提示�
 // 趣文诊断日志开关(sm_funfact_debug, 与 playstats 共用同一个 cvar; 谁先加载谁创建).
 static ConVar g_hCvarFunFactDebug;
 
+// hud1 队伍显示模式(l4d2_scripted_hud_hud1_team_mode): 0=原样, 1=两队分列.
+static ConVar g_hCvarHud1TeamMode;
+
 // 按需更新缓存: 内容/标志没变化时跳过 GameRules_SetProp*.
 static bool   g_bHUDDirty = true;
 static char   g_sHUD_LastTextArray[2][256];
@@ -197,6 +209,15 @@ public void OnPluginStart()
     }
 
     RegConsoleCmd("sm_hud", CommandSwitchHud, "管理员全局开启或关闭HUD显示.");
+
+    // hud1 队伍显示模式: 默认 0 = 原样(全场同一份 hud1), 12v12/4v4 等配置行为完全不变;
+    // 8v8 全牛盛宴在 applemod8v8allcharger.cfg 里置 1(两队分列).
+    g_hCvarHud1TeamMode = CreateConVar(
+        "l4d2_scripted_hud_hud1_team_mode",
+        "0",
+        "hud1 队伍显示模式: 0=原样(全场同一份 hud1, 人数行只在 survivor_limit>=12 时显示, 默认), 1=两队分列(生还者行/感染者行分两行, 所有观察者都看到两队, 8v8 等<12 的多人配置也用).",
+        FCVAR_NOTIFY, true, 0.0, true, 1.0);
+    g_hCvarHud1TeamMode.AddChangeHook(ConVar_Hud1TeamModeChanged);
 
     // 按需更新: 这些事件发生后立即检查HUD内容是否有变化.
     HookEvent("round_start",  Event_HUDRefresh, EventHookMode_PostNoCopy);
@@ -281,6 +302,15 @@ public void OnClientPutInServer(int client)
 public void OnClientDisconnect_Post(int client)
 {
     UpdateHUD(); //此时代客户端已真正移除, 人数计算才是正确的.
+}
+
+// ====================================================================================================
+// hud1 队伍显示模式变更: 立刻按新模式重算并发包(confogl_setcvars / RCON 热改都走这里).
+// ====================================================================================================
+public void ConVar_Hud1TeamModeChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    g_bHUDDirty = true;
+    UpdateHUD();
 }
 
 // ====================================================================================================
@@ -1076,7 +1106,7 @@ void GetHUD1_Text(char[] output, int size)
             Format(output, size, "%s    女巫: [ 固定 ]", output);
     }
 
-    // 第二行：队伍人数概览 —— **只在多人（12v12 等 survivor_limit>=12）配置下显示**。
+    // 第二行：队伍人数概览 —— **只在多人配置下显示**（默认要求 survivor_limit>=12，见 IsMultiplayerMode）。
     // 4 人配置（applemod 4v4）不显示人数行：那里是原版 4v4 语义，
     // 人数、l4d_superversus 的 !jg/!sur/!inf 这些都不存在，打出来只会误导。
     // 取数口径见 GetHUDRoundCounts() / GetTeamLimit() 的注释。
@@ -1085,7 +1115,39 @@ void GetHUD1_Text(char[] output, int size)
     // l4d_superversus 的别名（l4d_survivor_limit / l4d_infected_limit）。
     // 顺序不能反：superversus 的 cvar 默认就是 12，而且插件被卸载后 cvar 仍可能
     // 保留上一次的值 —— 先读它会导致 4v4 的 applemod 配置里 HUD 显示 /12。
-    if (IsMultiplayerMode())
+    //
+    // 队伍显示模式（l4d2_scripted_hud_hud1_team_mode）：
+    //   0 = 原样：一行把所有队伍串起来，且只在本插件认定的"多人配置"（>=12）下出现。
+    //   1 = 两队分列（8v8 用）：拆成"生还者行 / 感染者行"两行，并且只要两队任一有真人就显示。
+    //       8v8 的 survivor_limit=8 < 12，走原样模式会整行消失，所以分列模式自带启用条件。
+    //
+    // 为什么不做成"每个观察者只看到自己队伍那行"：脚本 HUD 的文本是 GameRules 网络属性
+    // (m_szScriptedHUDStringSet)，**全服同一份**，逐客户端不同的内容需要 SendProxy 扩展，
+    // 本服没有装；而引擎的 HUD_FLAG_TEAM_SURVIVORS / HUD_FLAG_TEAM_INFECTED 是整槽位过滤，
+    // 命中某队后旁观者会被一起挡掉 —— 本模式有旁观位（min 24 / max 30）且需要看进度信息。
+    // 所以用"分列"：两队各一行，任何观察者（含旁观/解说）都能一眼读到两队人数。
+    //
+    // 行数固定 3 行（进度行 + 生还者行 + 感染者行），高度 0.078，不越过 y=0.08 的修复队伍提示。
+    int iTeamMode = (g_hCvarHud1TeamMode != null) ? g_hCvarHud1TeamMode.IntValue : HUD1_TEAM_MODE_OFF;
+    if (iTeamMode == HUD1_TEAM_MODE_SPLIT)
+    {
+        int survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount;
+        GetHUDRoundCounts(survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount);
+
+        // 两队都没真人（开图前/换图瞬间/全空服）：不打两行空表。
+        if (survivorPlayers > 0 || infectedCount > 0)
+        {
+            int survivorLimit = GetTeamLimit("survivor_limit", "l4d_survivor_limit");
+            int infectedLimit = GetTeamLimit("z_max_player_zombies", "l4d_infected_limit");
+
+            // 生还者行：存活/未倒地/真人玩家/上限（含 bot，理由同上）。
+            // 感染者行：真人玩家/上限，末尾接旁观者人数 —— 旁观者不必独占一行，省一行高度。
+            Format(output, size, "%s\n生还者：%d/%d/%d/%d\n感染者：%d/%d    旁观者：%d",
+                output, survivorsAlive, survivorsUp, survivorPlayers, survivorLimit,
+                infectedCount, infectedLimit, spectatorCount);
+        }
+    }
+    else if (IsMultiplayerMode())
     {
         int survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount;
         GetHUDRoundCounts(survivorsAlive, survivorsUp, survivorPlayers, infectedCount, spectatorCount);

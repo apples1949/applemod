@@ -369,7 +369,7 @@ static void print_current_bhop_settings()
 
 public Action lilac_ban_status(int args)
 {
-    char tmp[24];
+    char tmp[128];
 
     PrintToServer("====[Little Anti-Cheat %s - Ban Status]====", PLUGIN_VERSION);
     PrintToServer("Checking ban plugins and third party plugins:");
@@ -403,10 +403,17 @@ public Action lilac_ban_status(int args)
     PrintToServer("SourceIRC:");
     PrintToServer("\tNative Exists: %s", ((NATIVE_EXISTS("IRC_MsgFlaggedChannels")) ? "Yes" : "No"));
     PrintToServer("\tConVar: lilac_sourceirc = %d", icvar[CVAR_SOURCEIRC]);
+
+    PrintToServer("l4d2_banned (豆瓣酱共享数据库):");
+    PrintToServer("\tLibrary: %s", ((LibraryExists("l4d2_banned")) ? "Yes" : "No"));
+    PrintToServer("\tNative BanPlayers: %s", ((NATIVE_EXISTS("BanPlayers")) ? "Yes" : "No"));
+    PrintToServer("\tReady: %s", (lilac_db_ban_ready() ? "Yes" : "No"));
+
     if (icvar[CVAR_SOURCEIRC] && NATIVE_EXISTS("IRC_MsgFlaggedChannels"))
         IRC_MsgFlaggedChannels("lilac", "[LILAC] is active and logging to SourceIRC!");
 
     switch (lilac_get_ban_backend()) {
+    case BAN_BACKEND_L4D2BANNED: { strcopy(tmp, sizeof(tmp), "l4d2_banned (MySQL/SQLite 共享库)"); }
     case BAN_BACKEND_BASEBANS: { strcopy(tmp, sizeof(tmp), "BaseBans"); }
     case BAN_BACKEND_SOURCEBANS: { strcopy(tmp, sizeof(tmp), "SourceBans (Old)"); }
     case BAN_BACKEND_SOURCEBANSPP: { strcopy(tmp, sizeof(tmp), "SourceBans++"); }

@@ -1,0 +1,121 @@
+"Games"
+{
+	"left4dead2"
+	{
+		/*
+		 * witch_target_override 1.11.0 —— 引擎内联补丁用 gamedata
+		 * 合并自 LuxLuma/Left-4-fix：
+		 *   witch_target_patch 1.4          （Witch_Target_patch.sp / witch_target_patch.txt）
+		 *   witch_prevent_target_loss 1.1.1 （witch_prevent_target_loss.sp / .txt）
+		 *
+		 * 只需要 left4dead2 一段：引擎补丁只在 L4D2 上启用（L4D1 的函数布局/offset 不同，未验证）。
+		 *
+		 * 验证用的二进制（2026-11-27）：
+		 *   Windows server.dll  9130800 字节（Left 4 Dead 2/left4dead2/bin/server.dll，2025-11-25）
+		 *                       sha256 = 见 私人文件/docs/witch_target_override_合并评估.md
+		 *   Linux   server_srv.so 19254175 字节（linux/left4dead2/bin/server_srv.so，2025-11-25）
+		 *
+		 * 各签名的命中 RVA 与 offset 落在哪条 0x74/0x75 条件短跳上，逐条写在
+		 * 私人文件/docs/witch_target_override_合并评估.md 的结论表里。
+		 */
+		"Addresses"
+		{
+			"WitchAttack::GetVictim"
+			{
+				"signature"	"WitchAttack::GetVictim"
+			}
+			"WitchAttack::OnStart"
+			{
+				"signature"	"WitchAttack::OnStart"
+			}
+			"WitchAttack::OnAnimationEvent"
+			{
+				"signature"	"WitchAttack::OnAnimationEvent"
+			}
+			"WitchAttack::Update"
+			{
+				"signature"	"WitchAttack::Update"
+			}
+			"WitchAttack::OnMoveToFailure"
+			{
+				"signature"	"WitchAttack::OnMoveToFailure"
+			}
+		}
+		"Offsets"
+		{
+			/* 命中点是 cmp eax,8 之后的 jcc：
+			 *   Windows: 8B 41 38 83 F8 08 75 2E  →  +6 是 0x75(jne)
+			 *   Linux  : 83 F8 08 74 12           →  +12 是 0x74(je)
+			 * 两种极性都是为了"固定走 +0x34 那个带序列号校验的 CBaseHandle 分支"。 */
+			"WitchAttack::GetVictim"
+			{
+				"linux"		"12"	// 0x00A2C87C  0x74 -> 0xEB
+				"windows"	"6"		// 0x0041E2E6  0x75 -> 0x90 0x90
+			}
+			/* Linux 上 OnStart / OnAnimationEvent / Update 是 **call** GetVictim（未内联），
+			 * 只补 GetVictim 一个点即可覆盖，所以这三个只给 windows offset
+			 * （与上游 witch_target_patch.txt 一致）。 */
+			"WitchAttack::OnStart"
+			{
+				"windows"	"76"	// 0x0041E3EC  0x75 -> 0x90 0x90
+			}
+			"WitchAttack::OnAnimationEvent"
+			{
+				"windows"	"17"	// 0x0041E651  0x75 -> 0x90 0x90
+			}
+			"WitchAttack::Update"
+			{
+				"windows"	"60"	// 0x0041EC1C  0x75 -> 0x90 0x90
+			}
+			/* OnMoveToFailure(MoveToFailureType) 的 switch 头：
+			 *   sub eax,0 / je   → +9  (windows) / +19 (linux)  都是 0x74
+			 *   sub eax,2 / jne  → +14 (windows) / +24 (linux)  都是 0x75
+			 * 两处相隔 5 字节，中间 3 字节（83 E8 02）不动，互不覆盖。 */
+			"WitchAttack::OnMoveToFailure_1"
+			{
+				"linux"		"19"	// 0x00A2D363  0x74 -> 0x90 0x90
+				"windows"	"9"		// 0x0041EAF9  0x74 -> 0x90 0x90
+			}
+			"WitchAttack::OnMoveToFailure_2"
+			{
+				"linux"		"24"	// 0x00A2D368  0x75 -> 0xEB
+				"windows"	"14"	// 0x0041EAFE  0x75 -> 0xEB
+			}
+		}
+		"Signatures"
+		{
+			"WitchAttack::GetVictim"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK11WitchAttack9GetVictimEv"
+				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\x75\x2A\x8B\x2A\x2A\x83\x2A\x2A\x74\x2A\x8B\x15\x2A\x2A\x2A\x2A\x8B\x2A\x81\xE1\x2A\x2A\x2A\x2A\x03\x2A\x8D\x2A\x2A\x2A\x85\x2A\x74\x2A\xC1\x2A\x2A\x39\x2A\x2A\x75\x2A\x8B\x2A\xC3"
+				/* ? ? ? ? ? ? 75 ? 8B ? ? 83 ? ? 74 ? 8B 15 ? ? ? ? 8B ? 81 E1 ? ? ? ? 03 ? 8D ? ? ? 85 ? 74 ? C1 ? ? 39 ? ? 75 ? 8B ? C3 */
+			}
+			"WitchAttack::OnStart"
+			{
+				"library"	"server"
+				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\x8B\x15\x2A\x2A\x2A\x2A\x53\x56\x57\x8B\x2A\x2A\x8B\x87"
+				/* ? ? ? ? ? ? 8B 15 ? ? ? ? 53 56 57 8B ? ? 8B 87 */
+			}
+			"WitchAttack::OnAnimationEvent"
+			{
+				"library"	"server"
+				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\x83\x2A\x2A\x75\x2A\x8B\x2A\x2A\x83\x2A\x2A\x75\x2A\x8B\x2A\x2A\x83"
+				/* ? ? ? ? ? ? 83 ? ? 75 ? 8B ? ? 83 ? ? 75 ? 8B ? ? 83 */
+			}
+			"WitchAttack::Update"
+			{
+				"library"	"server"
+				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\x53\x56\x57\x8B\x2A\x2A\x8B\x87\x2A\x2A\x2A\x2A\x8B\x90\x2A\x2A\x2A\x2A\x81"
+				/* ? ? ? ? ? ? 53 56 57 8B ? ? 8B 87 ? ? ? ? 8B 90 ? ? ? ? 81 */
+			}
+			"WitchAttack::OnMoveToFailure"
+			{
+				"library"	"server"
+				"linux"		"@_ZN11WitchAttack15OnMoveToFailureEP8InfectedPK4Path17MoveToFailureType"
+				"windows"	"\x55\x8B\xEC\x8B\x45\x14\x83\xE8\x00"
+				/* 55 8B EC 8B 45 14 83 E8 00 */
+			}
+		}
+	}
+}

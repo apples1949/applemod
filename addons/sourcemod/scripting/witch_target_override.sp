@@ -1,3 +1,26 @@
+// 1.11.0 合并记录（接入 LuxLuma/Left-4-fix 的两个引擎内联补丁）：
+//  1) 把上游 witch_target_patch 1.4 与 witch_prevent_target_loss 1.1.1 的补丁逻辑
+//     并进本插件，产出一个插件 + 一份 gamedata（gamedata/witch_target_override.txt，
+//     left4dead2 段同时给 Windows / Linux）。
+//  2) witch_target_patch 的那 4 个点（GetVictim / OnStart / OnAnimationEvent / Update）
+//     改的是"引擎在哪儿取她的受害者"：WitchAttack 把受害者同时存在两处 ——
+//     +0x34 的 CBaseHandle（带序列号，SetVictim() 写入）和 +0x38 的幸存者角色号；
+//     原版 GetVictim 在角色号 != 8 时走 CTerrorPlayer::GetPlayerByCharacter(角色号)，
+//     12v12 里同一角色会有好几个玩家 ⇒ 返回的是"第一个该角色的玩家"，也就是错的人。
+//     补丁把那处条件跳转改成"永远走句柄分支"，取回的就是她真正记着的实体。
+//  3) witch_prevent_target_loss 的 2 个点（OnMoveToFailure 里的两个跳转）让寻路失败
+//     不再上报（不再返回 "Attacker out of reach" / "Attack path failed while we're on fire"），
+//     女巫不会因为一次走不过去就放弃目标。
+//  4) 两个补丁组各用一个 ConVar 控制（_engine_patch / _prevent_loss），改 ConVar 即时
+//     应用或还原；OnPluginEnd 把每个补丁点写回原始字节。
+//  5) 与既有逻辑的关系（详见 私人文件/docs/witch_target_override_合并评估.md）：
+//     - 引擎补丁只改"读目标"的路径，不改"写目标"的路径；本插件的目标接力靠一记
+//       0 伤害 DMG_BURN 让引擎自己调用 SetVictim() 写 +0x34/+0x38 ⇒ 换目标照旧生效，
+//       而且换完之后取回来的一定是那个玩家本体（不再被角色号查到别人身上）。
+//     - OnMoveToFailure 补丁让引擎不再主动丢目标，和 keep_aggro 的"接力"是同一方向的
+//       两层保险，不互相抵消；但引擎自己给不出"放弃"之后，追不到的人会一直被追，
+//       这是它唯一的代价（见文档"默认值取舍"）。
+//
 // 1.10.1 修复记录（玩家反馈"女巫身上出现燃烧效果"）：
 //  1) 根因：换目标用的是"对女巫本身发一记 0 伤害 DMG_BURN"来骗引擎把 target 记成攻击者，
 //     而引擎不看伤害值、只看伤害类型 —— 这一记假命中会真的把她点燃（m_bIsBurning=1、
@@ -59,7 +82,20 @@
 
 #pragma semicolon 1
 #pragma newdecls required
-#define PLUGIN_VERSION "1.10.1"
+#define PLUGIN_VERSION "1.11.0"
+// 1.11.0：引擎内联补丁用的 gamedata（addons/sourcemod/gamedata/witch_target_override.txt）
+#define WITCH_ENGINE_GAMEDATA "witch_target_override"
+// 补丁点编号（顺序只是为了数组下标，含义见下方 g_sEnginePatchName）
+enum
+{
+	WITCH_PATCH_GETVICTIM = 0,
+	WITCH_PATCH_ONSTART,
+	WITCH_PATCH_ONANIMATIONEVENT,
+	WITCH_PATCH_UPDATE,
+	WITCH_PATCH_MOVE_FAILURE_1,
+	WITCH_PATCH_MOVE_FAILURE_2,
+	WITCH_PATCH_MAX
+}
 // 1.10.1：假命中后持续灭火的时长（秒）。引擎的火苗实体经常晚一两帧才建出来，
 // 只清一帧会漏 —— 这里留一个短窗口，由 ThinkWitch 每帧兜（见 ClearWitchFire）。
 #define FAKE_BURN_CLEAR_TIME 0.25
@@ -124,6 +160,18 @@ ConVar g_hCvarKeepAggro, g_hCvarSkipIncapped, g_hCvarRetargetDelay;
 bool g_bKeepAggro, g_bSkipIncapped;
 float g_fRetargetDelay;
 
+// 1.11.0 新增 ConVar：引擎内联补丁（合并自 LuxLuma/Left-4-fix 的
+// witch_target_patch 1.4 与 witch_prevent_target_loss 1.1.1）
+ConVar g_hCvarEnginePatch, g_hCvarPreventLoss;
+
+// 1.11.0：引擎补丁运行时状态。每个补丁点保存"原始 2 字节"，OnPluginEnd 逐字节写回。
+Handle  g_hEngineGamedata = null;
+Address g_aPatchAddr[WITCH_PATCH_MAX];
+int     g_iPatchOffset[WITCH_PATCH_MAX];
+int     g_iPatchOrig[WITCH_PATCH_MAX][2];
+bool    g_bPatchApplied[WITCH_PATCH_MAX];
+bool    g_bEnginePatchReady;   // gamedata 已载入并解析过
+
 int Enemy[MAXENTITY+1];
 float ActionTime[MAXENTITY+1], EnemyTime[MAXENTITY+1], StuckTime[MAXENTITY+1], PauseTime[MAXENTITY+1], LastTime[MAXENTITY+1], 
     TargetDir[MAXENTITY+1][3], LastPos[MAXENTITY+1][3], LastSetPos[MAXENTITY+1][3];
@@ -162,6 +210,13 @@ public void OnPluginStart()
 	g_hCvarSkipIncapped = CreateConVar("witch_target_override_skip_incapped", "1", "1=换目标时跳过已倒地/挂边的生还者(12v12 倒地仍算存活, 不跳过会围着倒地的人转), 0=允许把倒地者当目标(旧行为)", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvarRetargetDelay = CreateConVar("witch_target_override_retarget_delay", "0.6", "两次换目标之间的最小间隔(秒), 防止同一帧重复补伤害 [0.1, 5.0]", FCVAR_NOTIFY, true, 0.1, true, 5.0);
 
+	// 1.11.0 新增：引擎内联补丁（合并自 LuxLuma/Left-4-fix 的 witch_target_patch 1.4
+	// 与 witch_prevent_target_loss 1.1.1）。默认两个都开：本插件存在的意义就是"让女巫咬住
+	// 正确的那个人"，这两个引擎补丁修的是同一件事的引擎侧根因。
+	// 关掉任何一个都会即时把对应补丁点的原始字节写回去，不需要换图或重启。
+	g_hCvarEnginePatch = CreateConVar("witch_target_override_engine_patch", "1", "1=打引擎补丁: 女巫取目标时永远用她自己记着的实体句柄(修同角色多人时锁定错人), 0=不打并还原原始字节", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvarPreventLoss = CreateConVar("witch_target_override_prevent_loss", "1", "1=打引擎补丁: 女巫寻路失败时不再上报失败(不会因为走不过去就丢目标), 0=不打并还原原始字节", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	z_witch_burn_time = FindConVar("z_witch_burn_time");
 
 	GetCvars();
@@ -178,7 +233,15 @@ public void OnPluginStart()
 	g_hCvarKeepAggro.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarSkipIncapped.AddChangeHook(ConVarChanged_Cvars);
 	g_hCvarRetargetDelay.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarEnginePatch.AddChangeHook(ConVarChanged_Cvars);
+	g_hCvarPreventLoss.AddChangeHook(ConVarChanged_Cvars);
 	z_witch_burn_time.AddChangeHook(ConVarChanged_Cvars);
+
+
+	// 1.11.0：引擎内联补丁。先解析 gamedata（拿地址+offset），再按 ConVar 决定打不打。
+	// 任何一步失败都只记录日志并降级（插件其余功能照常），不会 SetFailState 崩服。
+	LoadEngineGamedata();
+	ApplyEnginePatches();
 
 	#if DEBUG
 		RegConsoleCmd("sm_test", sm_insult);
@@ -199,7 +262,16 @@ public void OnPluginStart()
 
 public void OnPluginEnd()
 {
+	// 1.11.0：卸载前先把引擎补丁点的原始字节写回去（顺序在别的清理之前，
+	// 免得下面的清理回调里再碰到被补丁改过的引擎代码）。
+	RestoreEnginePatches();
 	ResetTimer();
+
+	if (g_hEngineGamedata != null)
+	{
+		delete g_hEngineGamedata;
+		g_hEngineGamedata = null;
+	}
 }
 
 public void OnMapEnd()
@@ -218,6 +290,13 @@ public void OnConfigsExecuted()
 public void ConVarChanged_Cvars(ConVar convar, const char[] oldValue, const char[] newValue)
 {
 	GetCvars();
+
+	// 1.11.0：只有这两个开关变化才需要碰引擎字节（ApplyEnginePatches 本身也是幂等的），
+	// 其它 ConVar（含别的插件会改的 z_witch_burn_time）变化时不去重复写补丁点。
+	if (convar == g_hCvarEnginePatch || convar == g_hCvarPreventLoss)
+	{
+		ApplyEnginePatches();
+	}
 }
 
 void GetCvars()
@@ -1357,4 +1436,286 @@ public void Frame_KillEntNextFrame()
 			AcceptEntityInput(ent, "Kill");
 	}
 	g_iKillPendingCount = 0;
+}
+// ===========================================================================
+//  1.11.0：引擎内联补丁（合并自 LuxLuma/Left-4-fix 的两个插件）
+//
+//  为什么改字节而不是 SDKHook / netprop：
+//    WitchAttack（DT_Witch 的行为类）把"我恨谁"同时存在两处：
+//      +0x34  CBaseHandle           —— SetVictim() 写入，带序列号校验，取回来是**那个实体**
+//      +0x38  SurvivorCharacterType —— 0..7 角色号，8 表示"没有"
+//    原版 GetVictim()：
+//        eax = [this+0x38]
+//        cmp eax, 8
+//        j(n)e -> 走"角色号模式"：CTerrorPlayer::GetPlayerByCharacter(角色号)
+//        ...      走"句柄模式"：校验 +0x34 的 CBaseHandle 序列号后取实体
+//    12v12 同一个角色可以有多个玩家，GetPlayerByCharacter 只返回其中第一个 ⇒
+//    她锁的对象和该追的人不是同一个（"女巫锁定错人"）。把这一处条件跳转固定成
+//    "永远走句柄分支"，取回的就一定是她自己记着的实体。
+//    DT_Witch 上没有可写的 target 字段、Left4DHooks 也没有 witch target native，
+//    所以这条路是唯一能在引擎层修根因的办法（本插件的 0 伤害换目标也是同一思路：
+//    都是让引擎自己去 SetVictim）。
+//
+//  补丁点（全部来自 gamedata/witch_target_override.txt）：
+//    WitchAttack::GetVictim          +6  (win) / +12 (linux)  跳转极性 0x75 / 0x74
+//    WitchAttack::OnStart            +76 (win)                0x75
+//    WitchAttack::OnAnimationEvent   +17 (win)                0x75
+//    WitchAttack::Update             +60 (win)                0x75
+//    WitchAttack::OnMoveToFailure_1  +9  (win) / +19 (linux)  0x74
+//    WitchAttack::OnMoveToFailure_2  +14 (win) / +24 (linux)  0x75
+//    Linux 上 OnStart / OnAnimationEvent / Update 都是 **call** GetVictim（编译器没有
+//    内联），只补 GetVictim 一个点即可覆盖，所以这三个点只有 windows offset。
+//
+//  两条铁律：
+//    1) 读原字节 → 校验是不是预期的 0x74/0x75 → 才写；不是就 LogError 跳过
+//       （二进制更新过 / 被别的插件改过），绝不盲写。
+//    2) 每个点都记住原始 2 字节，OnPluginEnd 或 ConVar 关掉时原样写回。
+// ===========================================================================
+
+// 每个补丁点的 gamedata key（既是 Addresses 段的名字，也是 Offsets 段的名字）
+// 注意 OnMoveToFailure 的两个点：Addresses 段共用一个 key，Offsets 段分成 _1/_2。
+static const char g_sEnginePatchName[WITCH_PATCH_MAX][] =
+{
+	"WitchAttack::GetVictim",
+	"WitchAttack::OnStart",
+	"WitchAttack::OnAnimationEvent",
+	"WitchAttack::Update",
+	"WitchAttack::OnMoveToFailure_1",
+	"WitchAttack::OnMoveToFailure_2"
+};
+
+// 该点属于哪一组开关：true = _engine_patch（取目标组），false = _prevent_loss（寻路失败组）
+static const bool g_bEnginePatchGroup[WITCH_PATCH_MAX] =
+{
+	true, true, true, true, false, false
+};
+
+// 载入 gamedata 并解析出每个补丁点的基址 + offset。
+// 任一步失败只 LogError（插件其余功能继续跑），绝不 SetFailState。
+void LoadEngineGamedata()
+{
+	g_bEnginePatchReady = false;
+
+	// 引擎补丁只在 L4D2 上验证过（gamedata 里也只写了 left4dead2 段）
+	if (!L4D2Version)
+	{
+		PrintToServer("[witch_target_override] 引擎补丁仅支持 L4D2，当前为 L4D1，已跳过。");
+		return;
+	}
+
+	g_hEngineGamedata = LoadGameConfigFile(WITCH_ENGINE_GAMEDATA);
+	if (g_hEngineGamedata == null)
+	{
+		LogError("[witch_target_override] 载入 gamedata \"%s.txt\" 失败，引擎补丁不启用（插件其余功能照常）。", WITCH_ENGINE_GAMEDATA);
+		return;
+	}
+
+	Address addrs[WITCH_PATCH_MAX];
+	int     offs[WITCH_PATCH_MAX];
+
+	// 顺序：先取 offset（哪几个点在这个平台上有），再去取地址。
+	// 这样在没有该点的平台上（Linux 的 OnStart/OnAnimationEvent/Update）连签名都不会去查，
+	// 不会在日志里留下无意义的 "signature not found"。
+	offs[WITCH_PATCH_GETVICTIM]        = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::GetVictim");
+	offs[WITCH_PATCH_ONSTART]          = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::OnStart");
+	offs[WITCH_PATCH_ONANIMATIONEVENT] = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::OnAnimationEvent");
+	offs[WITCH_PATCH_UPDATE]           = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::Update");
+	offs[WITCH_PATCH_MOVE_FAILURE_1]   = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::OnMoveToFailure_1");
+	offs[WITCH_PATCH_MOVE_FAILURE_2]   = GameConfGetOffset(g_hEngineGamedata, "WitchAttack::OnMoveToFailure_2");
+
+	// OnMoveToFailure 的两个 offset 共用同一个 Addresses 项，只查一次
+	Address addrMoveFail = Address_Null;
+	if (offs[WITCH_PATCH_MOVE_FAILURE_1] >= 0 || offs[WITCH_PATCH_MOVE_FAILURE_2] >= 0)
+		addrMoveFail = GameConfGetAddress(g_hEngineGamedata, "WitchAttack::OnMoveToFailure");
+
+	addrs[WITCH_PATCH_GETVICTIM]        = (offs[WITCH_PATCH_GETVICTIM]        >= 0) ? GameConfGetAddress(g_hEngineGamedata, "WitchAttack::GetVictim")        : Address_Null;
+	addrs[WITCH_PATCH_ONSTART]          = (offs[WITCH_PATCH_ONSTART]          >= 0) ? GameConfGetAddress(g_hEngineGamedata, "WitchAttack::OnStart")          : Address_Null;
+	addrs[WITCH_PATCH_ONANIMATIONEVENT] = (offs[WITCH_PATCH_ONANIMATIONEVENT] >= 0) ? GameConfGetAddress(g_hEngineGamedata, "WitchAttack::OnAnimationEvent") : Address_Null;
+	addrs[WITCH_PATCH_UPDATE]           = (offs[WITCH_PATCH_UPDATE]           >= 0) ? GameConfGetAddress(g_hEngineGamedata, "WitchAttack::Update")           : Address_Null;
+	addrs[WITCH_PATCH_MOVE_FAILURE_1]   = addrMoveFail;
+	addrs[WITCH_PATCH_MOVE_FAILURE_2]   = addrMoveFail;
+
+	for (int i = 0; i < WITCH_PATCH_MAX; i++)
+	{
+		g_iPatchOrig[i][0] = -1;
+		g_iPatchOrig[i][1] = -1;
+		g_bPatchApplied[i] = false;
+
+		g_aPatchAddr[i]   = addrs[i];
+		g_iPatchOffset[i] = offs[i];
+
+		// offset 缺项 = 这个平台本来就没有这个补丁点（Linux 的 OnStart/OnAnimationEvent/
+		// Update 就是），属正常，静默跳过。
+		if (g_iPatchOffset[i] < 0)
+		{
+			g_aPatchAddr[i]   = Address_Null;
+			g_iPatchOffset[i] = -1;
+			continue;
+		}
+
+		// 有 offset 却没有地址 = 签名没命中当前二进制 → 这才是真的有问题，必须报出来。
+		if (g_aPatchAddr[i] == Address_Null)
+		{
+			LogError("[witch_target_override] 签名 \"%s\" 未命中当前 server 二进制，该补丁点跳过（其余补丁点照常）。",
+				g_sEnginePatchName[i]);
+			g_iPatchOffset[i] = -1;
+		}
+	}
+
+	g_bEnginePatchReady = true;
+}
+
+// 按 ConVar 决定每个补丁点打不打：开着没打的补上，关着已打的还原。
+// 幂等：已在目标状态的点不动，所以任何 ConVar 变化都能安全调用。
+void ApplyEnginePatches()
+{
+	if (!g_bEnginePatchReady)
+		return;
+
+	// ConVar 还没建（OnPluginStart 早期）时不动作
+	if (g_hCvarEnginePatch == null || g_hCvarPreventLoss == null)
+		return;
+
+	bool bWantGetVictimGroup = g_hCvarEnginePatch.BoolValue;
+	bool bWantPreventGroup   = g_hCvarPreventLoss.BoolValue;
+
+	for (int i = 0; i < WITCH_PATCH_MAX; i++)
+	{
+		bool bWant = g_bEnginePatchGroup[i] ? bWantGetVictimGroup : bWantPreventGroup;
+
+		if (bWant)
+			PatchOne(i);
+		else
+			RestoreOne(i);
+	}
+}
+
+// 还原全部补丁点（卸载时无条件调用，不看 ConVar）
+void RestoreEnginePatches()
+{
+	for (int i = 0; i < WITCH_PATCH_MAX; i++)
+		RestoreOne(i);
+
+	g_bEnginePatchReady = false;
+}
+
+// 打一个补丁点：读原 2 字节 → 校验极性 → 写。
+// 校验不过就 LogError 并留原样，绝不盲写。
+void PatchOne(int idx)
+{
+	if (g_bPatchApplied[idx])
+		return;   // 已经打过了
+
+	if (g_aPatchAddr[idx] == Address_Null || g_iPatchOffset[idx] < 0)
+		return;   // 该平台/该二进制上没有这个点，静默跳过
+
+	Address patch = g_aPatchAddr[idx] + view_as<Address>(g_iPatchOffset[idx]);
+
+	int b0 = LoadFromAddress(patch, NumberType_Int8);
+	int b1 = LoadFromAddress(patch + view_as<Address>(1), NumberType_Int8);
+
+	if (b0 != 0x74 && b0 != 0x75)
+	{
+		// 不是条件短跳 ⇒ 这个 offset 在当前二进制上已经不对了（游戏更新 / 别的插件
+		// 改过这里 / gamedata 与实际版本不匹配）。绝不盲写。
+		LogError("[witch_target_override] \"%s\" offset=%d 处原字节为 0x%02X（期望 0x74/0x75），该补丁点跳过，请核对 gamedata。",
+			g_sEnginePatchName[idx], g_iPatchOffset[idx], b0);
+		return;
+	}
+
+	// 留档原始 2 字节（还原时逐字节写回；只改写 1 字节时第二字节原样保留）
+	g_iPatchOrig[idx][0] = b0;
+	g_iPatchOrig[idx][1] = b1;
+
+	// 改写规则（与上游插件逐字节一致）：
+	//  0x74(jz/je)  + rel8  → 0x90 0x90   抹掉这个条件跳（无条件顺序执行）
+	//                         或 0xEB      改成无条件短跳（跳到 je 原目标）
+	//  0x75(jnz/jne) + rel8 → 0x90 0x90   抹掉这个条件跳
+	//                         或 0xEB      改成无条件短跳（保留原 rel8 = 跳原目标）
+	switch (idx)
+	{
+		case WITCH_PATCH_GETVICTIM:
+		{
+			// Windows 是 jnz -> 角色号模式（0x75），抹掉即永远走句柄分支。
+			// Linux 是 jz -> 句柄分支（0x74），改成 EB 即永远跳到句柄分支。
+			if (b0 == 0x75)
+			{
+				StoreToAddress(patch, 0x90, NumberType_Int8);
+				StoreToAddress(patch + view_as<Address>(1), 0x90, NumberType_Int8);
+			}
+			else
+			{
+				StoreToAddress(patch, 0xEB, NumberType_Int8);   // 第二字节 rel8 保留
+			}
+		}
+		case WITCH_PATCH_ONSTART,
+		     WITCH_PATCH_ONANIMATIONEVENT,
+		     WITCH_PATCH_UPDATE:
+		{
+			// 这三个点只有 Windows（Linux 是 call GetVictim），上游只处理 0x75
+			if (b0 != 0x75)
+			{
+				LogError("[witch_target_override] \"%s\" 处跳转极性为 0x%02X（期望 0x75），该补丁点跳过。",
+					g_sEnginePatchName[idx], b0);
+				g_iPatchOrig[idx][0] = -1;
+				return;
+			}
+			StoreToAddress(patch, 0x90, NumberType_Int8);
+			StoreToAddress(patch + view_as<Address>(1), 0x90, NumberType_Int8);
+		}
+		case WITCH_PATCH_MOVE_FAILURE_1:
+		{
+			// Windows/Linux 这里都是 0x74(je)：MoveToFailureType==0 时跳到
+			// 0x41EB2D / 0xA2D3E0 那条"上报失败"的分支（返回 "Attacker out of reach" /
+			// "Attack path failed while we're on fire"）。抹掉它 = type 0 不再上报。
+			if (b0 == 0x74)
+			{
+				StoreToAddress(patch, 0x90, NumberType_Int8);
+				StoreToAddress(patch + view_as<Address>(1), 0x90, NumberType_Int8);
+			}
+			else
+			{
+				StoreToAddress(patch, 0xEB, NumberType_Int8);   // 第二字节 rel8 保留，跳原目标
+			}
+		}
+		case WITCH_PATCH_MOVE_FAILURE_2:
+		{
+			// 0x75(jne)：「MoveToFailureType != 2 就跳到 0x41EB0B / 0xA2D3B9」那个
+			// 恒返回 {0,0,0,1}（无动作）的出口。改成 EB = 无条件跳过去，于是
+			// 任何 type 都不再走失败上报 / type 2 处理，OnMoveToFailure 变成空操作。
+			if (b0 != 0x75)
+			{
+				LogError("[witch_target_override] \"%s\" 处跳转极性为 0x%02X（期望 0x75），该补丁点跳过。",
+					g_sEnginePatchName[idx], b0);
+				g_iPatchOrig[idx][0] = -1;
+				return;
+			}
+			StoreToAddress(patch, 0xEB, NumberType_Int8);   // 第二字节 rel8 保留，跳原目标
+		}
+	}
+
+	g_bPatchApplied[idx] = true;
+	PrintToServer("[witch_target_override] 引擎补丁已应用 '%s' (offset=%d, 0x%02X 0x%02X -> 已改写)",
+		g_sEnginePatchName[idx], g_iPatchOffset[idx], b0, b1);
+}
+
+// 还原一个补丁点：把留档的原始 2 字节逐字节写回。
+// 只在确实打过补丁且地址仍有效时动作。
+void RestoreOne(int idx)
+{
+	if (!g_bPatchApplied[idx])
+		return;
+
+	if (g_aPatchAddr[idx] == Address_Null || g_iPatchOffset[idx] < 0 || g_iPatchOrig[idx][0] < 0)
+	{
+		g_bPatchApplied[idx] = false;
+		return;
+	}
+
+	Address patch = g_aPatchAddr[idx] + view_as<Address>(g_iPatchOffset[idx]);
+	StoreToAddress(patch, g_iPatchOrig[idx][0], NumberType_Int8);
+	StoreToAddress(patch + view_as<Address>(1), g_iPatchOrig[idx][1], NumberType_Int8);
+
+	g_bPatchApplied[idx] = false;
+	PrintToServer("[witch_target_override] 引擎补丁已还原 '%s' (offset=%d)", g_sEnginePatchName[idx], g_iPatchOffset[idx]);
 }

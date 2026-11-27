@@ -25,7 +25,7 @@ native void SpecHud_TankHudDisable(int client);
 // *********************************************************************************
 // CONSTANTS
 // *********************************************************************************
-#define PLUGIN_VERSION "2.6.1-12v12"
+#define PLUGIN_VERSION "2.6.2-12v12"
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define TEAM_SPECTATOR	               1
 #define TEAM_SURVIVOR	               2
@@ -2426,7 +2426,11 @@ bool AnySurvivorLeftSafeArea()
 //        （OnClientPostAdminCheck）→ 自动打开面板（sm_sihud_auto_open=1，默认）。
 //        玩家自己 !sihud 关过则本回合不再自动开（换回合/换图/转生还者后复位）。
 //     D. 坦克刷出 / 被接管（tank_spawn、以及 1 秒轮询发现"同一只坦克换了控制者"）：
-//          · 关掉**所有玩家**的坦克HUD（tankhud 由 spechud_appledmod 画，走 SpecHud_TankHudDisable）；
+//          ★2.6.2（需求）：**sihud 已经关着的玩家整段跳过** —— 既不关他的 tankhud，也不强开面板、
+//            不替他自动打开（判定 = 面板此刻没开，见 SiHud_PanelIsClosed）。
+//            以前是无条件关掉所有人的 tankhud 再强开 2 秒面板，会把"本来就把面板关掉的人"
+//            每次刷坦克都弹一次、还顺手关掉他的坦克HUD，两条都不符合他的选择。
+//          · 关掉**sihud 开着的玩家**的坦克HUD（tankhud 由 spechud_appledmod 画，走 SpecHud_TankHudDisable）；
 //          · 除坦克玩家外的其它玩家：同一时刻起连续 2 秒强制显示本面板；
 //          · 坦克玩家：sm_sihud_tank_delay=6（2.6.0 默认 = 克面板显示总时间 5 秒 + 1 秒）→
 //            先让他看完自己的克面板（坦克面板），6 秒到点再关掉它并把面板交给他（面板里的坦克行
@@ -2672,6 +2676,11 @@ public Action Timer_SiHudTankRestore(Handle timer, int userid)
 	int client = GetClientOfUserId(userid);
 	if (!client) return Plugin_Stop;
 
+	/* 2.6.2（需求）：这个玩家的 sihud 本来就是关着的 → tankhud 也不要再动。
+	   （正常情况下这种玩家压根不会进这个 timer —— SiHud_OnTankEvent 发现面板关着就不建 timer；
+	     这里再挡一次，覆盖"延迟期间他自己把面板关掉"的情况。） */
+	if (SiHud_PanelIsClosed(client)) return Plugin_Stop;
+
 	// 需求：坦克玩家接管坦克后过 N 秒才关掉他的 tankhud（这 N 秒他先看自己的坦克血量）
 	if (IsClientInGame(client)) SiHud_DisableTankHud(client);
 
@@ -2698,6 +2707,17 @@ void SiHud_TankHandoverPanel(int client)
 	if (!SiHud_IsTankClient(client)) return;						// 坦克已经没了（死亡 / 换人）：不接管
 	if (SiHud_IsTankLocked(client)) return;							// 还在 tankhud 让位窗口里
 	if (!SiHud_CanSeePanel(client)) return;							// 已转生还者 / 已离线：不接管
+
+	/* 2.6.2（需求）：他的 sihud 本来关着 → **不替他打开**（也不动 tankhud）。
+	   既然没关他的 tankhud，他就不会"什么 HUD 都没有"，不需要再补开面板。
+	   标记成 DONE 只是别让 1 秒轮询每秒重试一次；之后他自己 !sihud 打开仍照常生效。 */
+	if (SiHud_PanelIsClosed(client))
+	{
+		g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
+		if (SiHudDebug != null && SiHudDebug.BoolValue)
+			LogMessage("[SV sihud] client=%d 坦克让位结束，但他 sihud 本来关着：不替他打开、tankhud 也未关闭。", client);
+		return;
+	}
 
 	g_iSiHudTankPanel[client] = SIHUD_TANKPANEL_DONE;
 	if (g_bSiHudOn[client])											// 他本来开着：直接重画一拍
@@ -3106,8 +3126,12 @@ void SiHud_ResetTankSegment(int tank)
 
 // ------------------------------------------------------------------------
 // 坦克事件（刷出 / 接管）统一入口
+//   0) ★2.6.2（需求）：**sihud 已经处于关闭状态**的玩家，两个都不动 ——
+//      不关他的 tankhud、不强开 sihud 面板、也不替他自动打开（判定见 SiHud_PanelIsClosed）。
+//      理由：tankhud 与 sihud 是同一套信息的两个面（本面板里已经有坦克行），
+//      玩家既然把面板关了，就不该再被弹面板；此时顺手关掉他的坦克HUD 等于两头都拿走。
+//      只有 sihud 开着的玩家才继续走下面 1)~4) 的「关 tankhud + 强开 2 秒」；
 //   1) 除坦克玩家外的所有玩家：立刻关掉 tankhud（需求第 2 条）；
-//   2) 除坦克玩家外的所有玩家：连续 2 秒强制显示面板（需求第 3 条）；
 //   3) 坦克玩家：克面板先留着（sm_sihud_tank_delay，默认 6 秒 = 克面板 5 秒 + 1 秒，让他看自己的坦克血量），
 //      到点由 Timer_SiHudTankRestore 关掉；这 6 秒里面板让位（g_fSiHudTankLockUntil），
 //      但那 2 秒强制显示对他同样生效（需求第 4 条）。
@@ -3122,20 +3146,22 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 
 	bool bHuman = SiHud_IsHumanTank(tank);
 
-	// 1) 关掉所有玩家的 tankhud（有真人坦克玩家时他除外：他延迟 delay 秒才关）
-	if (bHuman)
+	/* 2.6.2（需求）：坦克刷出 / 接管时，对**sihud 已经关着**的玩家两个都不动 ——
+	   既不关他的 tankhud，也不强开 sihud 面板（也不替他自动打开）。
+	   理由：tankhud 与 sihud 是一套东西的两面（面板里已经有坦克行），
+	   把面板关了的人本来就不想被弹面板；这时再顺手关掉他的坦克HUD 等于两头都拿走。
+	   —— 只有 sihud 开着的玩家才走原来的「关 tankhud + 强开 2 秒」流程。 */
+
+	// 1) 关掉 tankhud（有真人坦克玩家时他除外：他延迟 delay 秒才关）
+	bool bTankPanelClosed = (bHuman && SiHud_PanelIsClosed(tank));
+	int iSkippedClosed = 0;		// 2.6.2：因为 sihud 本来关着而整段跳过的人数（调试日志用）
+
+	for (int client = 1; client <= MaxClients; client++)
 	{
-		for (int client = 1; client <= MaxClients; client++)
-		{
-			if (!IsClientInGame(client) || IsFakeClient(client)) continue;
-			if (client == tank) continue;
-			SiHud_DisableTankHud(client);
-		}
-	}
-	else
-	{
-		// AI 坦克：没有"扮演坦克的玩家"，所有人一起关
-		SiHud_DisableTankHudAll();
+		if (!IsClientInGame(client) || IsFakeClient(client)) continue;
+		if (bHuman && client == tank) continue;
+		if (SiHud_PanelIsClosed(client)) { iSkippedClosed++; continue; }	// 2.6.2：sihud 关着 → tankhud 也不碰
+		SiHud_DisableTankHud(client);
 	}
 
 	// 2) 坦克玩家（2.6.0 重写：保证他任何时刻都有 HUD）
@@ -3144,7 +3170,8 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 	//      那 7 秒里他既没有 tankhud 也没有面板 = 用户反馈的"坦克玩家什么 HUD 都看不到"；
 	//    · 有 tankhud 且 tank_delay>0：先让他看完自己的克面板（默认 6 秒 = 克面板 5 秒 + 1 秒，
 	//      面板让位），到点关 tankhud 并把面板交棒。
-	if (bHuman)
+	//    · 2.6.2：他的 sihud 本来就关着 → 整段跳过（tankhud 留着，面板不弹也不接管）。
+	if (bHuman && !bTankPanelClosed)
 	{
 		g_bSiHudSent[tank] = false;
 		int iHandoverDelay = (SiHud_SpecHudReady() && delay > 0) ? delay : 0;
@@ -3168,17 +3195,19 @@ void SiHud_OnTankEvent(int tank, bool bTakeover)
 	{
 		if (!SiHud_CanSeePanel(client)) continue;
 		if (bHuman && client == tank) continue;
+		if (SiHud_PanelIsClosed(client)) continue;		// 2.6.2：sihud 关着 → 不弹面板
 		SiHud_ForceShowStart(client, SIHUD_FORCE_SECONDS);
 	}
-	// 4) 坦克玩家本人：同样强制显示 2 秒（让位窗口里也生效）
-	if (bHuman) SiHud_ForceShowStart(tank, SIHUD_FORCE_SECONDS);
+	// 4) 坦克玩家本人：同样强制显示 2 秒（让位窗口里也生效）；sihud 关着则不弹
+	if (bHuman && !bTankPanelClosed) SiHud_ForceShowStart(tank, SIHUD_FORCE_SECONDS);
 
 	// 立刻画一拍（强制窗口的 timer 下一拍会接着画）
 	SiHud_DrawFrame(true);
 
 	if (SiHudDebug != null && SiHudDebug.BoolValue)
-		LogMessage("[SV sihud] 坦克%s：tank=%d（%s，%d 控），坦克玩家 tankhud 延迟 %d 秒关，其它玩家强制显示 %.1f 秒。",
-			bTakeover ? "接管" : "刷出", tank, bHuman ? "真人" : "AI", g_iSiHudTankControl, delay, SIHUD_FORCE_SECONDS);
+		LogMessage("[SV sihud] 坦克%s：tank=%d（%s，%d 控），坦克玩家 tankhud 延迟 %d 秒关，其它玩家强制显示 %.1f 秒；sihud 本来关着而跳过 %d 人（坦克玩家%s）。",
+			bTakeover ? "接管" : "刷出", tank, bHuman ? "真人" : "AI", g_iSiHudTankControl, delay, SIHUD_FORCE_SECONDS,
+			iSkippedClosed, (bTankPanelClosed ? "也跳过" : "照常处理"));
 }
 
 // 关掉某名玩家的 tankhud（"坦克HUD" 由 spechud_appledmod 画；该插件不在时什么也不做）
@@ -3187,13 +3216,6 @@ void SiHud_DisableTankHud(int client)
 	if (client <= 0 || client > MaxClients) return;
 	if (!SiHud_SpecHudReady()) return;
 	SpecHud_TankHudDisable(client);
-}
-
-// 一次关掉所有玩家的 tankhud（AI 坦克，没有"扮演坦克的玩家"时用）
-void SiHud_DisableTankHudAll()
-{
-	if (!SiHud_SpecHudReady()) return;
-	SpecHud_TankHudDisable(0);
 }
 
 // spechud_appledmod 的关闭接口在不在：缓存的是 OnConfigsExecuted 那一刻的探测结果，
@@ -3218,6 +3240,20 @@ bool SiHud_CanSeePanel(int client)
 	if (client <= 0 || client > MaxClients) return false;
 	if (!IsClientInGame(client) || IsFakeClient(client)) return false;
 	return GetClientTeam(client) != TEAM_SURVIVOR;
+}
+
+// 2.6.2（需求）：玩家此刻的 sihud 是不是**已经处于关闭状态**。
+//   判定只看**开关状态** g_bSiHudOn（!sihud 打开的 / 进感染者自动打开的才算"开着"）：
+//      · 玩家自己用 !sihud 关掉过 → 关；
+//      · 从来没用过 !sihud 的旁观者/中途进服者 → 也是关（面板本来就没显示）。
+//   为什么不把"强制显示窗口"算成开着：那种 2 秒窗口是**临时画面**、不是玩家选择。
+//   若把它算成开着，会出现"窗口里被关 tankhud → 2 秒后面板消失、tankhud 也没了"的两头落空，
+//   正是本次要修的体验问题。所以窗口里的玩家照样按"关"处理：不动 sihud、也不动 tankhud。
+//   用途：坦克刷出 / 接管时，对这种玩家**既不碰 sihud、也不碰他的 tankhud**。
+bool SiHud_PanelIsClosed(int client)
+{
+	if (client <= 0 || client > MaxClients) return true;
+	return !g_bSiHudOn[client];
 }
 
 bool SiHud_IsForced(int client, float now)

@@ -36,7 +36,7 @@
 #include <sourcemod>
 #undef REQUIRE_PLUGIN	//标记为可选开始.
 #include <adminmenu>	//管理员菜单
-#include <l4d2_banned>	//数据库封禁玩家(豆瓣酱 v2.7.5, 可选依赖: 未加载时回退原版 BanClient).
+#include <l4d2_banned>	//数据库封禁玩家(豆瓣酱 v2.8.0: 库内 SteamID 为 17 位 SteamID64; 可选依赖: 未加载时回退原版 BanClient).
 #define REQUIRE_PLUGIN	//标记为可选结束.
 
 #pragma newdecls required
@@ -52,6 +52,22 @@ public Plugin myinfo =
 
 bool g_bLibraries;
 
+/* 17 位纯十进制 = SteamID64。库里 SteamID 列存的就是它；
+ * sm_unban 也必须先认这个，否则 17 位数字会被误当成 IP 去删。 */
+stock bool IsSteamID64String(const char[] s)
+{
+	if (strlen(s) != 17)
+		return false;
+
+	for (int i = 0; i < 17; i++)
+	{
+		if (s[i] < '0' || s[i] > '9')
+			return false;
+	}
+
+	return true;
+}
+
 TopMenu hTopMenu;
 
 /* ======================================================================
@@ -60,6 +76,17 @@ TopMenu hTopMenu;
  *  而 rcon 命令又在跑完后立刻回收，很多情况下被吞掉；这里在 client == 0 时
  *  显式 PrintToServer，保证 rcon 一定看得到结果。
  * ==================================================================== */
+/* 写库是异步的：l4d2_banned 会在查询回调里回一行 [库✓]/[库✗]。
+ * 这里先告诉执行命令的人"结果马上单独报"，避免把原版那句无条件 "Ban added"
+ * 误当成"数据库已经写进去了"（rcon 下 client == 0，不需要多这一行）。 */
+stock void ReplyDbPending(int client)
+{
+	if (client <= 0 || client > MaxClients || !IsClientInGame(client))
+		return;
+
+	ReplyToCommand(client, "[SM] 数据库操作已提交，写入结果稍后单独回报（看 [l4d2_banned] 那一行）。");
+}
+
 stock void ReplyBoth(int client, const char[] format, any ...)
 {
 	char buffer[512];
@@ -288,6 +315,10 @@ public Action Command_BanIp(int client, int args)
 			  Arguments[len]);
 				
 	ReplyBoth(client, "[SM] %t", "Ban added");
+
+	/* 真正写库是异步的（l4d2_banned 的 OnBanIdentity → 查询 → INSERT），
+	 * 这一句先告诉管理员"结果马上单独报"，避免原版那句无条件 "Ban added" 被误当成"库已写入"。 */
+	ReplyDbPending(client);
 	
 	BanIdentity(arg, 
 				minutes, 
@@ -308,7 +339,7 @@ public Action Command_AddBan(int client, int args)
 {
 	if (args < 2)
 	{
-		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
+		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid64|steamid> [reason]");
 		return Plugin_Handled;
 	}
 
@@ -323,7 +354,7 @@ public Action Command_AddBan(int client, int args)
 	/* Get time */
 	if ((len = BreakString(arg_string, time, sizeof(time))) == -1)
 	{
-		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid> [reason]");
+		ReplyBoth(client, "[SM] Usage: sm_addban <time> <steamid64|steamid> [reason]");
 		return Plugin_Handled;
 	}	
 	total_len += len;
@@ -339,11 +370,15 @@ public Action Command_AddBan(int client, int args)
 		arg_string[0] = '\0';
 	}
 
-	/* Verify steamid */
+	/* Verify steamid: 17 位 SteamID64 / STEAM_X:Y:Z / [U:1:x] 三种写法都收。
+	 * l4d2_banned 库里 SteamID 列存的是 17 位 SteamID64，直接给 64 位最省事；
+	 * 给老格式也照样能用（插件会换算成 64 位入库）。 */
 	bool idValid = false;
 	if (!strncmp(authid, "STEAM_", 6) && authid[7] == ':')
 		idValid = true;
 	else if (!strncmp(authid, "[U:", 3))
+		idValid = true;
+	else if (IsSteamID64String(authid))
 		idValid = true;
 	
 	if (!idValid)
@@ -380,6 +415,7 @@ public Action Command_AddBan(int client, int args)
 	PrintToServer("[basebans] sm_addban: %s (%d 分钟) -> BanIdentity（l4d2_banned 会写库）", authid, minutes);
 
 	ReplyBoth(client, "[SM] %t", "Ban added");
+	ReplyDbPending(client);
 
 	return Plugin_Handled;
 }
@@ -388,7 +424,7 @@ public Action Command_Unban(int client, int args)
 {
 	if (args < 1)
 	{
-		ReplyBoth(client, "[SM] Usage: sm_unban <steamid|ip>");
+		ReplyBoth(client, "[SM] Usage: sm_unban <steamid64|steamid|ip>");
 		return Plugin_Handled;
 	}
 
@@ -397,8 +433,13 @@ public Action Command_Unban(int client, int args)
 
 	ReplaceString(arg, sizeof(arg), "\"", "");	
 
+	/* 17 位纯数字 = SteamID64，必须先判成 AUTHID；否则会被当成 IP 去删，库里那条永远删不掉。 */
 	int ban_flags;
-	if (IsCharNumeric(arg[0]))
+	if (IsSteamID64String(arg))
+	{
+		ban_flags |= BANFLAG_AUTHID;
+	}
+	else if (IsCharNumeric(arg[0]))
 	{
 		ban_flags |= BANFLAG_IP;
 	}
@@ -415,6 +456,7 @@ public Action Command_Unban(int client, int args)
 	PrintToServer("[basebans] sm_unban: %s -> RemoveBan（l4d2_banned 会删库记录）", arg);
 
 	ReplyBoth(client, "[SM] %t", "Removed bans matching", arg);
+	ReplyDbPending(client);
 
 	return Plugin_Handled;
 }

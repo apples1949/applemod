@@ -75,33 +75,51 @@ void PrepareBan(int client, int target, int time, const char[] reason)
 		}
 	}
 
-	LogAction(client, target, "\"%L\" banned \"%L\" (minutes \"%d\") (reason \"%s\")", client, target, time, reason);
+	/* 走数据库(l4d2_banned)的封禁，身份必须是 17 位 SteamID64 —— 库里 SteamID 列存的就是它。
+	 * 取不到 64 位(无 Steam/未认证)就没法按 SteamID 入库，只能退回本地封禁，
+	 * 本地 banned_user.cfg 写的是引擎原生格式 STEAM_X:Y:Z / IP，**不会**变成 64 位。 */
+	char sSteam64[32];
+	bool bHasSteam64 = GetClientAuthId(target, AuthId_SteamID64, sSteam64, sizeof(sSteam64));
+	bool bUseDb = g_bLibraries && bHasSteam64;
+
+	if (bUseDb)
+		LogAction(client, target, "\"%L\" banned \"%L\" (minutes \"%d\") (steamid64 \"%s\") (reason \"%s\")", client, target, time, sSteam64, reason);
+	else
+		LogAction(client, target, "\"%L\" banned \"%L\" (minutes \"%d\") (reason \"%s\")", client, target, time, reason);
+
+	if (!bUseDb)
+	{
+		if (g_bLibraries)
+			PrintToServer("[basebans] %N 取不到 17 位 SteamID64，无法按 SteamID 入库：改走本地封禁(banned_user.cfg, 引擎格式 STEAM_X:Y:Z/IP)", target);
+	}
 
 	if (reason[0] == '\0')
 	{
-		// 装了 l4d2_banned(数据库封禁)时走它的 native, 封禁写进数据库; 否则回退原版本地封禁.
-		if(g_bLibraries)
+		// 装了 l4d2_banned(数据库封禁)且能取到 SteamID64 时走它的 native, 封禁写进数据库; 否则回退原版本地封禁.
+		if(bUseDb)
 		{
+			/* flags 保持官方的 BANFLAG_AUTO（玩家有 Steam 身份时引擎本来就走身份封禁，不会退化成 IP）；
+			 * 真正入库的 ID 由 l4d2_banned 的 OnBanClient 用 AuthId_SteamID64 取，跟这里的 flags 无关。 */
 			BanPlayers(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
-			PrintToServer("[basebans] sm_ban: %N (%d 分钟) -> l4d2_banned 数据库", target, time);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟, SteamID64=%s) -> l4d2_banned 数据库", target, time, sSteam64);
 		}
 		else
 		{
 			BanClient(target, time, BANFLAG_AUTO, "Banned", "Banned", "sm_ban", client);
-			PrintToServer("[basebans] sm_ban: %N (%d 分钟) -> 本地 banned_user.cfg（l4d2_banned 未就绪）", target, time);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟) -> 本地 banned_user.cfg（引擎格式 STEAM_X:Y:Z/IP）", target, time);
 		}
 	}
 	else
 	{
-		if(g_bLibraries)
+		if(bUseDb)
 		{
 			BanPlayers(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
-			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s) -> l4d2_banned 数据库", target, time, reason);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s, SteamID64=%s) -> l4d2_banned 数据库", target, time, reason, sSteam64);
 		}
 		else
 		{
 			BanClient(target, time, BANFLAG_AUTO, reason, reason, "sm_ban", client);
-			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s) -> 本地 banned_user.cfg（l4d2_banned 未就绪）", target, time, reason);
+			PrintToServer("[basebans] sm_ban: %N (%d 分钟, %s) -> 本地 banned_user.cfg（引擎格式 STEAM_X:Y:Z/IP）", target, time, reason);
 		}
 	}
 }
